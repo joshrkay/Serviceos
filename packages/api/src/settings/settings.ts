@@ -13,6 +13,7 @@ export interface TenantSettings {
   nextInvoiceNumber: number;
   defaultPaymentTermDays: number;
   terminologyPreferences?: Record<string, string>;
+  activeVerticalPacks?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -27,6 +28,7 @@ export interface CreateSettingsInput {
   invoicePrefix?: string;
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
+  activeVerticalPacks?: string[];
 }
 
 export interface UpdateSettingsInput {
@@ -38,6 +40,7 @@ export interface UpdateSettingsInput {
   invoicePrefix?: string;
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
+  activeVerticalPacks?: string[];
 }
 
 export interface SettingsRepository {
@@ -95,6 +98,7 @@ export async function createSettings(
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: input.defaultPaymentTermDays ?? 30,
     terminologyPreferences: input.terminologyPreferences,
+    activeVerticalPacks: input.activeVerticalPacks,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -135,6 +139,40 @@ export async function getNextInvoiceNumber(
   if (!settings) throw new Error('Tenant settings not found');
   const num = await repository.incrementInvoiceNumber(tenantId);
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
+}
+
+export function validateTerminologyPreferences(
+  preferences: Record<string, string>,
+  validKeys?: string[]
+): string[] {
+  const errors: string[] = [];
+  if (!preferences || typeof preferences !== 'object') {
+    errors.push('terminologyPreferences must be an object');
+    return errors;
+  }
+  for (const [key, value] of Object.entries(preferences)) {
+    if (!key || key.trim().length === 0) {
+      errors.push('terminologyPreferences key must not be empty');
+    }
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      errors.push(`terminologyPreferences value for "${key}" must be a non-empty string`);
+    }
+    if (validKeys && !validKeys.includes(key)) {
+      errors.push(`terminologyPreferences key "${key}" is not a recognized term for the active vertical`);
+    }
+  }
+  return errors;
+}
+
+export async function updateTerminologyPreferences(
+  tenantId: string,
+  preferences: Record<string, string>,
+  repository: SettingsRepository
+): Promise<TenantSettings | null> {
+  return repository.update(tenantId, {
+    terminologyPreferences: preferences,
+    updatedAt: new Date(),
+  });
 }
 
 export class InMemorySettingsRepository implements SettingsRepository {

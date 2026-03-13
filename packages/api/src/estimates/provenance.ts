@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 
-export type EstimateSourceType = 'manual' | 'ai_generated' | 'ai_revised' | 'template' | 'cloned';
+export type EstimateSourceType = 'manual' | 'ai_generated' | 'ai_revised' | 'template' | 'cloned' | 'vertical_template';
 
 export interface EstimateProvenance {
   id: string;
@@ -12,6 +12,8 @@ export interface EstimateProvenance {
   creatorRole: string;
   aiRunId?: string;
   conversationId?: string;
+  templateId?: string;
+  verticalType?: string;
   metadata?: Record<string, unknown>;
   createdAt: Date;
 }
@@ -25,6 +27,8 @@ export interface CreateProvenanceInput {
   creatorRole: string;
   aiRunId?: string;
   conversationId?: string;
+  templateId?: string;
+  verticalType?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -40,7 +44,7 @@ export function validateProvenanceInput(input: CreateProvenanceInput): string[] 
   if (!input.estimateId) errors.push('estimateId is required');
   if (!input.sourceType) {
     errors.push('sourceType is required');
-  } else if (!['manual', 'ai_generated', 'ai_revised', 'template', 'cloned'].includes(input.sourceType)) {
+  } else if (!['manual', 'ai_generated', 'ai_revised', 'template', 'cloned', 'vertical_template'].includes(input.sourceType)) {
     errors.push('Invalid sourceType');
   }
   if (!input.creatorId) errors.push('creatorId is required');
@@ -62,6 +66,8 @@ export async function createProvenance(
     creatorRole: input.creatorRole,
     aiRunId: input.aiRunId,
     conversationId: input.conversationId,
+    templateId: input.templateId,
+    verticalType: input.verticalType,
     metadata: input.metadata,
     createdAt: new Date(),
   };
