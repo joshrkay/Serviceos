@@ -88,3 +88,104 @@ export const createDiffAnalysisSchema = z.object({
   fromRevisionId: z.string().uuid(),
   toRevisionId: z.string().uuid(),
 });
+
+// Phase 1 — Core Business Entity Contracts
+
+export const createCustomerSchema = z.object({
+  firstName: z.string().max(100).default(''),
+  lastName: z.string().max(100).default(''),
+  companyName: z.string().max(255).optional(),
+  primaryPhone: z.string().optional(),
+  secondaryPhone: z.string().optional(),
+  email: z.string().email().optional(),
+  preferredChannel: z.enum(['phone', 'email', 'sms', 'none']).default('none'),
+  smsConsent: z.boolean().default(false),
+  communicationNotes: z.string().optional(),
+});
+
+export const createServiceLocationSchema = z.object({
+  customerId: z.string().min(1),
+  label: z.string().optional(),
+  street1: z.string().min(1),
+  street2: z.string().optional(),
+  city: z.string().min(1),
+  state: z.string().min(1),
+  postalCode: z.string().min(1),
+  country: z.string().default('US'),
+  accessNotes: z.string().optional(),
+  isPrimary: z.boolean().default(false),
+});
+
+export const createJobSchema = z.object({
+  customerId: z.string().min(1),
+  locationId: z.string().min(1),
+  summary: z.string().min(1).max(500),
+  problemDescription: z.string().optional(),
+  priority: z.enum(['low', 'normal', 'high', 'urgent']).default('normal'),
+});
+
+export const createAppointmentSchema = z.object({
+  jobId: z.string().min(1),
+  scheduledStart: z.string().datetime(),
+  scheduledEnd: z.string().datetime(),
+  arrivalWindowStart: z.string().datetime().optional(),
+  arrivalWindowEnd: z.string().datetime().optional(),
+  timezone: z.string().min(1),
+  notes: z.string().optional(),
+});
+
+export const lineItemSchema = z.object({
+  id: z.string(),
+  description: z.string().min(1),
+  category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
+  quantity: z.number().nonnegative(),
+  unitPriceCents: z.number().int().nonnegative(),
+  totalCents: z.number().int(),
+  sortOrder: z.number().int(),
+  taxable: z.boolean().default(true),
+});
+
+export const createEstimateSchema = z.object({
+  jobId: z.string().min(1),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().nonnegative().default(0),
+  taxRateBps: z.number().int().nonnegative().max(10000).default(0),
+  validUntil: z.string().datetime().optional(),
+  customerMessage: z.string().optional(),
+  internalNotes: z.string().optional(),
+});
+
+export const createInvoiceSchema = z.object({
+  jobId: z.string().min(1),
+  estimateId: z.string().optional(),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().nonnegative().default(0),
+  taxRateBps: z.number().int().nonnegative().max(10000).default(0),
+  customerMessage: z.string().optional(),
+});
+
+export const recordPaymentSchema = z.object({
+  invoiceId: z.string().min(1),
+  amountCents: z.number().int().positive(),
+  method: z.enum(['cash', 'check', 'credit_card', 'bank_transfer', 'other']),
+  providerReference: z.string().optional(),
+  note: z.string().optional(),
+});
+
+export const createNoteSchema = z.object({
+  entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
+  entityId: z.string().min(1),
+  content: z.string().min(1),
+  isPinned: z.boolean().default(false),
+});
+
+export const updateSettingsSchema = z.object({
+  businessName: z.string().min(1).optional(),
+  businessPhone: z.string().optional(),
+  businessEmail: z.string().email().optional(),
+  timezone: z.string().optional(),
+  estimatePrefix: z.string().min(1).optional(),
+  invoicePrefix: z.string().min(1).optional(),
+  defaultPaymentTermDays: z.number().int().nonnegative().optional(),
+  terminologyPreferences: z.record(z.string()).optional(),
+});
