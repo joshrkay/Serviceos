@@ -1,0 +1,16 @@
+{
+  "name": "@serviceos/web",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "typescript": "^5.4.0"
+  }
+}
