@@ -7,6 +7,7 @@ import {
   validateInvoiceInput,
   recalculateBalance,
   calculateDueDate,
+  isValidInvoiceTransition,
   InMemoryInvoiceRepository,
 } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
@@ -168,7 +169,6 @@ describe('P1-012 — Invoice numbering + due dates + statuses', () => {
   });
 
   it('validation — paid and void are terminal', () => {
-    const { isValidInvoiceTransition } = require('../../src/invoices/invoice');
     expect(isValidInvoiceTransition('paid', 'open')).toBe(false);
     expect(isValidInvoiceTransition('void', 'open')).toBe(false);
   });
