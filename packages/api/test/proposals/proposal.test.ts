@@ -4,6 +4,7 @@ import {
   InMemoryProposalRepository,
   CreateProposalInput,
 } from '../../src/proposals/proposal';
+import { ConflictError } from '../../src/shared/errors';
 
 describe('P2-001 — Proposal entity and core schema', () => {
   const validInput: CreateProposalInput = {
@@ -123,21 +124,16 @@ describe('P2-001 — Proposal entity and core schema', () => {
     expect(patched).toBeNull();
   });
 
-  it('idempotency — duplicate key handled', async () => {
+  it('idempotency — duplicate key within tenant throws ConflictError', async () => {
     const repo = new InMemoryProposalRepository();
     const proposal1 = createProposal(validInput);
     const proposal2 = createProposal({ ...validInput, summary: 'Different summary' });
 
     await repo.create(proposal1);
-    await repo.create(proposal2);
+    await expect(repo.create(proposal2)).rejects.toThrow(ConflictError);
 
     const all = await repo.findByTenant('tenant-1');
-    expect(all).toHaveLength(2);
-
-    const found1 = await repo.findById('tenant-1', proposal1.id);
-    const found2 = await repo.findById('tenant-1', proposal2.id);
-    expect(found1!.summary).toBe('Create new customer John Doe from voice call');
-    expect(found2!.summary).toBe('Different summary');
+    expect(all).toHaveLength(1);
   });
 
   it('mock provider test — repository stores and retrieves', async () => {
@@ -166,6 +162,34 @@ describe('P2-001 — Proposal entity and core schema', () => {
     const patched = await repo.update('tenant-1', proposal.id, { summary: 'Updated summary' });
     expect(patched!.summary).toBe('Updated summary');
     expect(patched!.updatedAt.getTime()).toBeGreaterThanOrEqual(proposal.updatedAt.getTime());
+  });
+
+  it('validation — duplicate idempotency key within tenant throws ConflictError', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal1 = createProposal({ ...validInput, idempotencyKey: 'key-1' });
+    await repo.create(proposal1);
+
+    const proposal2 = createProposal({ ...validInput, idempotencyKey: 'key-1' });
+    await expect(repo.create(proposal2)).rejects.toThrow(ConflictError);
+  });
+
+  it('validation — same idempotency key in different tenants is allowed', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal1 = createProposal({ ...validInput, tenantId: 'tenant-1', idempotencyKey: 'key-1' });
+    await repo.create(proposal1);
+
+    const proposal2 = createProposal({ ...validInput, tenantId: 'tenant-2', idempotencyKey: 'key-1' });
+    await expect(repo.create(proposal2)).resolves.toBeDefined();
+  });
+
+  it('validation — null idempotency keys do not conflict', async () => {
+    const repo = new InMemoryProposalRepository();
+    const { idempotencyKey: _1, ...inputWithoutKey } = validInput;
+    const proposal1 = createProposal(inputWithoutKey as CreateProposalInput);
+    await repo.create(proposal1);
+
+    const proposal2 = createProposal(inputWithoutKey as CreateProposalInput);
+    await expect(repo.create(proposal2)).resolves.toBeDefined();
   });
 
   it('malformed AI output handled gracefully — invalid payload shape', () => {
