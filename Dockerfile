@@ -5,7 +5,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/api/package.json packages/api/
 COPY packages/web/package.json packages/web/
-COPY infra/package.json infra/
 RUN npm ci --ignore-scripts
 
 # Build API
@@ -26,7 +25,6 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY packages/api/package.json packages/api/
-COPY infra/package.json infra/
 COPY packages/web/package.json packages/web/
 RUN npm ci --omit=dev --ignore-scripts
 COPY --from=api-build /app/packages/api/dist packages/api/dist
@@ -34,7 +32,7 @@ COPY --from=api-build /app/packages/api/package.json packages/api/
 EXPOSE 3000
 CMD ["node", "packages/api/dist/src/index.js"]
 
-# Web static files (served by Railway's static hosting or a simple server)
+# Web static files (served by Railway's static hosting or nginx)
 FROM nginx:alpine AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf

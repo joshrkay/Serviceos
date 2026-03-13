@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import {
   InvoiceTaskHandler,
   tryParseInvoiceJson,
@@ -9,7 +10,7 @@ import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 
 function createMockGateway(responseContent: string): LLMGateway {
   return {
-    complete: jest.fn().mockResolvedValue({
+    complete: vi.fn().mockResolvedValue({
       content: responseContent,
       model: 'test-model',
       provider: 'test-provider',
@@ -69,7 +70,7 @@ describe('P5-003A — Invoice draft generation from work context', () => {
       await handler.handle(baseContext);
 
       expect(gateway.complete).toHaveBeenCalledTimes(1);
-      const call = (gateway.complete as jest.Mock).mock.calls[0][0];
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(call.taskType).toBe('draft_invoice');
       expect(call.responseFormat).toBe('json');
       expect(call.messages[0].role).toBe('system');
@@ -173,7 +174,7 @@ describe('P5-003A — Invoice draft generation from work context', () => {
 
       await handler.handle(context);
 
-      const call = (gateway.complete as jest.Mock).mock.calls[0][0];
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(call.messages[1].content).toContain('Context entities');
       expect(call.messages[1].content).toContain('John Doe');
     });
