@@ -60,6 +60,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'files:view',
     'ai:run',
     'reports:view',
+    'proposals:approve',
     'proposals:view',
   ],
   technician: [

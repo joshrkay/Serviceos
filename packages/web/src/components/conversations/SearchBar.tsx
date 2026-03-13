@@ -25,7 +25,7 @@ export function SearchBar({ onSearch, placeholder = 'Search conversations...' }:
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const value = e.target.value;
       setQuery(value);
-      // Trigger search on clear
+      // Trigger search on clear. TODO: Add debounce when connected to an API.
       if (!value.trim()) {
         onSearch('');
       }

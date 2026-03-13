@@ -46,6 +46,19 @@ export interface VoiceRecording {
 
 export type Role = 'owner' | 'dispatcher' | 'technician';
 
+export type Permission = 'proposals:approve' | 'proposals:view' | 'conversations:view' | 'conversations:create' | 'conversations:manage';
+
+const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
+  owner: ['proposals:approve', 'proposals:view', 'conversations:view', 'conversations:create', 'conversations:manage'],
+  dispatcher: ['proposals:approve', 'proposals:view', 'conversations:view', 'conversations:create', 'conversations:manage'],
+  technician: ['proposals:view', 'conversations:view', 'conversations:create'],
+};
+
+export function hasPermission(role: Role, permission: Permission): boolean {
+  const permissions = ROLE_PERMISSIONS[role];
+  return permissions ? permissions.includes(permission) : false;
+}
+
 export type ProposalStatus = 'pending' | 'approved' | 'rejected';
 
 export interface Proposal {

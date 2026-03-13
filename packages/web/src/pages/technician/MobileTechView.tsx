@@ -37,6 +37,7 @@ export function MobileTechView({
 }: MobileTechViewProps) {
   const [voiceState, setVoiceState] = useState<RecordingState>('idle');
   const [duration, setDuration] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
 
   const selectedJob = assignedJobs.find((j) => j.id === selectedJobId);
 
@@ -90,7 +91,7 @@ export function MobileTechView({
               onUpload={async () => {
                 setVoiceState('uploading');
                 try {
-                  await onUploadRecording(selectedJob.id, new Blob());
+                  await onUploadRecording(selectedJob.id, recordedBlob);
                   setVoiceState('transcribing');
                 } catch {
                   setVoiceState('stopped');

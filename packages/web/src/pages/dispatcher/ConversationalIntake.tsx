@@ -32,6 +32,7 @@ export function ConversationalIntake({
 }: ConversationalIntakeProps) {
   const [voiceState, setVoiceState] = useState<RecordingState>('idle');
   const [duration, setDuration] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
   const [showVoice, setShowVoice] = useState(false);
 
   const handleSend = useCallback(
@@ -92,7 +93,7 @@ export function ConversationalIntake({
             onUpload={async () => {
               setVoiceState('uploading');
               try {
-                await onUploadVoice(new Blob());
+                await onUploadVoice(recordedBlob);
                 setVoiceState('transcribing');
               } catch {
                 setVoiceState('stopped');

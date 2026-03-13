@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { OperationState, OperationInfo } from '../../types/conversation';
 
 export interface OperationStatusProps {
@@ -44,12 +44,18 @@ interface RetryButtonProps {
 
 export function RetryButton({ operationId, onRetry }: RetryButtonProps) {
   const [retrying, setRetrying] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   const handleRetry = useCallback(() => {
     setRetrying(true);
     onRetry(operationId);
-    // Reset after a short delay to allow re-retry
-    setTimeout(() => setRetrying(false), 2000);
+    timerRef.current = setTimeout(() => setRetrying(false), 2000);
   }, [operationId, onRetry]);
 
   return (

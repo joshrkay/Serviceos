@@ -44,7 +44,7 @@ export const createConversationSchema = z.object({
 
 export const createMessageSchema = z.object({
   conversationId: z.string().uuid(),
-  messageType: z.enum(['text', 'transcript', 'system_event', 'note']),
+  messageType: z.enum(['text', 'transcript', 'system_event', 'note', 'clarification', 'proposal']),
   content: z.string().optional(),
   fileId: z.string().uuid().optional(),
   source: z.string().optional(),
@@ -87,4 +87,24 @@ export const createDiffAnalysisSchema = z.object({
   documentId: z.string().min(1),
   fromRevisionId: z.string().uuid(),
   toRevisionId: z.string().uuid(),
+});
+
+export const triggerEvaluationSchema = z.object({
+  workflowType: z.string().min(1),
+  hasTranscript: z.boolean(),
+  hasExistingProposal: z.boolean(),
+  userRole: z.string().min(1),
+});
+
+export const estimateLinkInputSchema = z.object({
+  conversationId: z.string().uuid(),
+  messageId: z.string().uuid().optional(),
+  proposalRevisionId: z.string().uuid(),
+  estimateId: z.string().uuid(),
+});
+
+export const conversationAccessSchema = z.object({
+  userId: z.string().min(1),
+  role: z.enum(['owner', 'dispatcher', 'technician']),
+  tenantId: z.string().min(1),
 });

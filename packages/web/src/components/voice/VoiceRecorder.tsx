@@ -4,6 +4,7 @@ import { RecordingState } from './useVoiceRecorder';
 export interface VoiceRecorderProps {
   state: RecordingState;
   duration: number;
+  recordedBlob?: Blob;
   onStart: () => void;
   onStop: () => void;
   onCancel: () => void;
@@ -29,7 +30,7 @@ export function VoiceRecorder({
   return (
     <div className="voice-recorder" data-testid="voice-recorder" data-state={state}>
       {state === 'idle' && (
-        <button className="voice-record-btn" data-testid="record-button" onClick={onStart}>
+        <button className="voice-record-btn" data-testid="record-button" onClick={onStart} aria-label="Start recording">
           Record
         </button>
       )}
@@ -39,10 +40,10 @@ export function VoiceRecorder({
           <span className="voice-duration" data-testid="recording-duration">
             {formatDuration(duration)}
           </span>
-          <button className="voice-stop-btn" data-testid="stop-button" onClick={onStop}>
+          <button className="voice-stop-btn" data-testid="stop-button" onClick={onStop} aria-label="Stop recording">
             Stop
           </button>
-          <button className="voice-cancel-btn" data-testid="cancel-button" onClick={onCancel}>
+          <button className="voice-cancel-btn" data-testid="cancel-button" onClick={onCancel} aria-label="Cancel recording">
             Cancel
           </button>
         </>
@@ -53,13 +54,13 @@ export function VoiceRecorder({
           <span className="voice-duration" data-testid="recording-duration">
             {formatDuration(duration)}
           </span>
-          <button className="voice-upload-btn" data-testid="upload-button" onClick={onUpload}>
+          <button className="voice-upload-btn" data-testid="upload-button" onClick={onUpload} aria-label="Upload recording">
             Upload
           </button>
-          <button className="voice-rerecord-btn" data-testid="rerecord-button" onClick={onReRecord}>
+          <button className="voice-rerecord-btn" data-testid="rerecord-button" onClick={onReRecord} aria-label="Re-record">
             Re-record
           </button>
-          <button className="voice-cancel-btn" data-testid="cancel-button" onClick={onCancel}>
+          <button className="voice-cancel-btn" data-testid="cancel-button" onClick={onCancel} aria-label="Cancel recording">
             Cancel
           </button>
         </>
