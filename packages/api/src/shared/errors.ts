@@ -57,30 +57,6 @@ export function toErrorResponse(err: unknown): { statusCode: number; body: Recor
     };
   }
 
-  // Zod validation errors
-  if (err != null && typeof err === 'object' && 'issues' in err && Array.isArray((err as { issues: unknown[] }).issues)) {
-    const zodErr = err as { issues: Array<{ path: (string | number)[]; message: string }> };
-    return {
-      statusCode: 400,
-      body: {
-        error: 'VALIDATION_ERROR',
-        message: 'Request validation failed',
-        details: { issues: zodErr.issues.map(i => ({ path: i.path, message: i.message })) },
-      },
-    };
-  }
-
-  // Business-logic validation errors thrown as plain Error
-  if (err instanceof Error && err.message.startsWith('Validation failed')) {
-    return {
-      statusCode: 400,
-      body: {
-        error: 'VALIDATION_ERROR',
-        message: err.message,
-      },
-    };
-  }
-
   return {
     statusCode: 500,
     body: {
