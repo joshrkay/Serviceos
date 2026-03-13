@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Message, TranscriptionStatus, Proposal } from '../../types/conversation';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { TranscriptMessage } from '../../components/voice/TranscriptMessage';
-import { RecordingState } from '../../components/voice/useVoiceRecorder';
+import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 
 export interface AssignedJob {
   id: string;
@@ -77,7 +77,7 @@ export function MobileTechView({
               onStop={() => recorder.stop()}
               onCancel={() => recorder.cancel()}
               onReRecord={() => recorder.reRecord()}
-              onUpload={() => recorder.upload(async (blob) => {
+              onUpload={() => recorder.upload(async (blob: Blob) => {
                 await onUploadRecording(selectedJob.id, blob);
               })}
             />

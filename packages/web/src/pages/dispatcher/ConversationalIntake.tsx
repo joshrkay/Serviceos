@@ -3,7 +3,7 @@ import { Message, Proposal } from '../../types/conversation';
 import { ConversationThread } from '../conversations/ConversationThread';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { ProposalCard } from '../../components/conversations/ProposalCard';
-import { RecordingState } from '../../components/voice/useVoiceRecorder';
+import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 
 export interface ConversationalIntakeProps {
   conversationId?: string;
