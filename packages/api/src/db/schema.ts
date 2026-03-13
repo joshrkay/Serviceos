@@ -628,6 +628,12 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_health_provider ON provider_health(provider_name);
     CREATE INDEX IF NOT EXISTS idx_health_recorded ON provider_health(recorded_at);
   `,
+
+  '018_fix_idempotency_unique': `
+    DROP INDEX IF EXISTS idx_proposals_idempotency;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_idempotency
+      ON proposals(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+  `,
 };
 
 export function getMigrationSQL(): string {
