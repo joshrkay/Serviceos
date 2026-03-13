@@ -24,7 +24,7 @@ export function createDatabaseConfig(env: string): DatabaseConfig {
     dev: {
       host: process.env.DB_HOST || 'localhost',
       port: parseInt(process.env.DB_PORT || '5432', 10),
-      database: 'serviceos_dev',
+      database: process.env.DB_NAME || 'serviceos_dev',
       user: process.env.DB_USER || 'serviceos',
       password: process.env.DB_PASSWORD || '',
       ssl: false,
