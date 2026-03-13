@@ -1,0 +1,17 @@
+{
+  "name": "serviceos",
+  "version": "0.0.1",
+  "private": true,
+  "workspaces": [
+    "infra",
+    "packages/api"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "lint": "npm run lint --workspaces"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

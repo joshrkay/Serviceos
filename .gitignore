@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts
+!jest.config.ts
+.env
+.env.*
+!.env.example
+cdk.out/
+*.tsbuildinfo
+coverage/
