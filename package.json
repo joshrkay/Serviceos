@@ -1,0 +1,38 @@
+{
+  "name": "ai-service-os",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/api",
+    "packages/web",
+    "packages/shared"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:api": "vitest run --project api",
+    "test:web": "vitest run --project web",
+    "test:integration": "vitest run --project api -- --grep integration",
+    "test:coverage": "vitest run --coverage",
+    "migrate:up": "npm run migrate:up --workspace=packages/api",
+    "migrate:down": "npm run migrate:down --workspace=packages/api",
+    "migrate:create": "npm run migrate:create --workspace=packages/api",
+    "seed": "npm run seed --workspace=packages/api",
+    "seed:clean": "npm run seed:clean --workspace=packages/api",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.1.0",
+    "@vitest/coverage-v8": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
