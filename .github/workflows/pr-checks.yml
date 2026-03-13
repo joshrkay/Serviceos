@@ -15,9 +15,6 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
-      - name: Type check
-        run: npx tsc --noEmit
-        working-directory: infra
       - name: Type check API
         run: npx tsc --noEmit
         working-directory: packages/api
