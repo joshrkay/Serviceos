@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { Role, hasPermission } from '../auth/rbac';
+import { Role, hasPermission, isValidRole } from '../auth/rbac';
 import { Conversation } from './conversation-service';
 
 export interface ConversationAccessContext {
@@ -81,6 +81,11 @@ export function requireConversationAccess(
     const conversationId = req.params.conversationId;
     if (!conversationId) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'conversationId is required' });
+      return;
+    }
+
+    if (!isValidRole(req.auth.role)) {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'Invalid role' });
       return;
     }
 

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Message, TranscriptionStatus, Proposal } from '../../types/conversation';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { TranscriptMessage } from '../../components/voice/TranscriptMessage';
-import { RecordingState } from '../../components/voice/useVoiceRecorder';
+import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 
 export interface AssignedJob {
   id: string;
@@ -35,9 +35,7 @@ export function MobileTechView({
   messages = [],
   onRetryTranscription,
 }: MobileTechViewProps) {
-  const [voiceState, setVoiceState] = useState<RecordingState>('idle');
-  const [duration, setDuration] = useState(0);
-  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
+  const recorder = useVoiceRecorder();
 
   const selectedJob = assignedJobs.find((j) => j.id === selectedJobId);
 
@@ -73,30 +71,15 @@ export function MobileTechView({
 
           <div className="mobile-voice-section" data-testid="mobile-voice-section">
             <VoiceRecorder
-              state={voiceState}
-              duration={duration}
-              onStart={() => {
-                setVoiceState('recording');
-                setDuration(0);
-              }}
-              onStop={() => setVoiceState('stopped')}
-              onCancel={() => {
-                setVoiceState('idle');
-                setDuration(0);
-              }}
-              onReRecord={() => {
-                setVoiceState('idle');
-                setDuration(0);
-              }}
-              onUpload={async () => {
-                setVoiceState('uploading');
-                try {
-                  await onUploadRecording(selectedJob.id, recordedBlob);
-                  setVoiceState('transcribing');
-                } catch {
-                  setVoiceState('stopped');
-                }
-              }}
+              state={recorder.state}
+              duration={recorder.duration}
+              onStart={() => recorder.start()}
+              onStop={() => recorder.stop()}
+              onCancel={() => recorder.cancel()}
+              onReRecord={() => recorder.reRecord()}
+              onUpload={() => recorder.upload(async (blob: Blob) => {
+                await onUploadRecording(selectedJob.id, blob);
+              })}
             />
           </div>
 
