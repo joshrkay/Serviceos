@@ -3,13 +3,15 @@ import { ListPage, Column } from '../../components/ListPage';
 import { useListQuery } from '../../hooks/useListQuery';
 import { FilterConfig } from '../../components/FilterBar';
 
-interface Job {
+interface Appointment {
   id: string;
-  jobNumber: string;
-  summary: string;
+  jobId: string;
   status: string;
-  priority: string;
-  customerId: string;
+  scheduledStart: string;
+  scheduledEnd: string;
+  arrivalWindowStart?: string;
+  arrivalWindowEnd?: string;
+  technicianName?: string;
 }
 
 const filters: FilterConfig[] = [
@@ -17,35 +19,35 @@ const filters: FilterConfig[] = [
     key: 'status',
     label: 'Status',
     options: [
-      { label: 'New', value: 'new' },
       { label: 'Scheduled', value: 'scheduled' },
+      { label: 'Confirmed', value: 'confirmed' },
       { label: 'In Progress', value: 'in_progress' },
       { label: 'Completed', value: 'completed' },
       { label: 'Canceled', value: 'canceled' },
     ],
   },
-  {
-    key: 'priority',
-    label: 'Priority',
-    options: [
-      { label: 'Low', value: 'low' },
-      { label: 'Normal', value: 'normal' },
-      { label: 'High', value: 'high' },
-      { label: 'Emergency', value: 'emergency' },
-    ],
-  },
 ];
 
-export function JobList() {
+function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
+
+function formatArrivalWindow(start?: string, end?: string): string {
+  if (!start || !end) return '-';
+  return `${new Date(start).toLocaleTimeString()} - ${new Date(end).toLocaleTimeString()}`;
+}
+
+export function AppointmentList() {
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({});
   const { data, total, page, pageSize, isLoading, error, refetch, setPage, setSearch, setFilters } =
-    useListQuery<Job>('/api/jobs');
+    useListQuery<Appointment>('/api/appointments');
 
-  const columns: Column<Job>[] = [
-    { key: 'number', header: 'Job #', render: (j) => j.jobNumber },
-    { key: 'summary', header: 'Summary', render: (j) => j.summary },
-    { key: 'status', header: 'Status', render: (j) => j.status },
-    { key: 'priority', header: 'Priority', render: (j) => j.priority },
+  const columns: Column<Appointment>[] = [
+    { key: 'date', header: 'Scheduled', render: (a) => formatDateTime(a.scheduledStart) },
+    { key: 'job', header: 'Job', render: (a) => a.jobId },
+    { key: 'technician', header: 'Technician', render: (a) => a.technicianName || '-' },
+    { key: 'status', header: 'Status', render: (a) => a.status },
+    { key: 'arrival', header: 'Arrival Window', render: (a) => formatArrivalWindow(a.arrivalWindowStart, a.arrivalWindowEnd) },
   ];
 
   const handleFilterChange = (key: string, value: string) => {
@@ -65,8 +67,8 @@ export function JobList() {
   };
 
   return (
-    <ListPage<Job>
-      title="Jobs"
+    <ListPage<Appointment>
+      title="Appointments"
       columns={columns}
       data={data}
       total={total}
@@ -74,17 +76,17 @@ export function JobList() {
       pageSize={pageSize}
       isLoading={isLoading}
       error={error}
-      searchPlaceholder="Search jobs..."
+      searchPlaceholder="Search appointments..."
       filters={filters}
       activeFilters={activeFilters}
       onFilterChange={handleFilterChange}
       onClearFilters={handleClearFilters}
-      emptyTitle="No jobs yet"
-      createLabel="New Job"
+      emptyTitle="No appointments yet"
+      emptyDescription="Schedule an appointment from a job to get started."
       onSearch={setSearch}
       onPageChange={setPage}
       onRetry={refetch}
-      getRowKey={(j) => j.id}
+      getRowKey={(a) => a.id}
     />
   );
 }
