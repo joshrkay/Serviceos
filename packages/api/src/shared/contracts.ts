@@ -44,7 +44,7 @@ export const createConversationSchema = z.object({
 
 export const createMessageSchema = z.object({
   conversationId: z.string().uuid(),
-  messageType: z.enum(['text', 'transcript', 'system_event', 'note']),
+  messageType: z.enum(['text', 'transcript', 'system_event', 'note', 'clarification', 'proposal']),
   content: z.string().optional(),
   fileId: z.string().uuid().optional(),
   source: z.string().optional(),
@@ -89,17 +89,41 @@ export const createDiffAnalysisSchema = z.object({
   toRevisionId: z.string().uuid(),
 });
 
-// Phase 1 — Core Business Entity Contracts
+export const triggerEvaluationSchema = z.object({
+  workflowType: z.string().min(1),
+  hasTranscript: z.boolean(),
+  hasExistingProposal: z.boolean(),
+  userRole: z.string().min(1),
+});
+
+export const estimateLinkInputSchema = z.object({
+  conversationId: z.string().uuid(),
+  messageId: z.string().uuid().optional(),
+  proposalRevisionId: z.string().uuid(),
+  estimateId: z.string().uuid(),
+});
+
+
+const lineItemSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(1),
+  category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
+  quantity: z.number().nonnegative(),
+  unitPriceCents: z.number().int().nonnegative(),
+  totalCents: z.number().int().nonnegative(),
+  sortOrder: z.number().int(),
+  taxable: z.boolean(),
+});
 
 export const createCustomerSchema = z.object({
-  firstName: z.string().max(100).default(''),
-  lastName: z.string().max(100).default(''),
-  companyName: z.string().max(255).optional(),
-  primaryPhone: z.string().optional(),
-  secondaryPhone: z.string().optional(),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  companyName: z.string().min(1).optional(),
+  primaryPhone: z.string().min(1).optional(),
+  secondaryPhone: z.string().min(1).optional(),
   email: z.string().email().optional(),
-  preferredChannel: z.enum(['phone', 'email', 'sms', 'none']).default('none'),
-  smsConsent: z.boolean().default(false),
+  preferredChannel: z.enum(['phone', 'email', 'sms', 'none']).optional(),
+  smsConsent: z.boolean().optional(),
   communicationNotes: z.string().optional(),
 });
 
@@ -111,17 +135,48 @@ export const createServiceLocationSchema = z.object({
   city: z.string().min(1),
   state: z.string().min(1),
   postalCode: z.string().min(1),
-  country: z.string().default('US'),
+  country: z.string().min(1).optional(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
   accessNotes: z.string().optional(),
-  isPrimary: z.boolean().default(false),
+  isPrimary: z.boolean().optional(),
 });
 
 export const createJobSchema = z.object({
   customerId: z.string().min(1),
   locationId: z.string().min(1),
-  summary: z.string().min(1).max(500),
+  summary: z.string().min(1),
   problemDescription: z.string().optional(),
-  priority: z.enum(['low', 'normal', 'high', 'urgent']).default('normal'),
+  priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+});
+
+export const createEstimateSchema = z.object({
+  jobId: z.string().min(1),
+  estimateNumber: z.string().min(1),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  validUntil: z.string().datetime().optional(),
+  customerMessage: z.string().optional(),
+  internalNotes: z.string().optional(),
+});
+
+export const createInvoiceSchema = z.object({
+  jobId: z.string().min(1),
+  estimateId: z.string().optional(),
+  invoiceNumber: z.string().min(1),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  customerMessage: z.string().optional(),
+});
+
+export const recordPaymentSchema = z.object({
+  invoiceId: z.string().min(1),
+  amountCents: z.number().int().positive(),
+  method: z.enum(['cash', 'check', 'credit_card', 'bank_transfer', 'other']),
+  providerReference: z.string().optional(),
+  note: z.string().optional(),
 });
 
 export const createAppointmentSchema = z.object({
@@ -134,49 +189,11 @@ export const createAppointmentSchema = z.object({
   notes: z.string().optional(),
 });
 
-export const lineItemSchema = z.object({
-  id: z.string(),
-  description: z.string().min(1),
-  category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
-  quantity: z.number().nonnegative(),
-  unitPriceCents: z.number().int().nonnegative(),
-  totalCents: z.number().int(),
-  sortOrder: z.number().int(),
-  taxable: z.boolean().default(true),
-});
-
-export const createEstimateSchema = z.object({
-  jobId: z.string().min(1),
-  lineItems: z.array(lineItemSchema).min(1),
-  discountCents: z.number().int().nonnegative().default(0),
-  taxRateBps: z.number().int().nonnegative().max(10000).default(0),
-  validUntil: z.string().datetime().optional(),
-  customerMessage: z.string().optional(),
-  internalNotes: z.string().optional(),
-});
-
-export const createInvoiceSchema = z.object({
-  jobId: z.string().min(1),
-  estimateId: z.string().optional(),
-  lineItems: z.array(lineItemSchema).min(1),
-  discountCents: z.number().int().nonnegative().default(0),
-  taxRateBps: z.number().int().nonnegative().max(10000).default(0),
-  customerMessage: z.string().optional(),
-});
-
-export const recordPaymentSchema = z.object({
-  invoiceId: z.string().min(1),
-  amountCents: z.number().int().positive(),
-  method: z.enum(['cash', 'check', 'credit_card', 'bank_transfer', 'other']),
-  providerReference: z.string().optional(),
-  note: z.string().optional(),
-});
-
 export const createNoteSchema = z.object({
   entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
   entityId: z.string().min(1),
   content: z.string().min(1),
-  isPinned: z.boolean().default(false),
+  isPinned: z.boolean().optional(),
 });
 
 export const updateSettingsSchema = z.object({
@@ -188,4 +205,10 @@ export const updateSettingsSchema = z.object({
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),
   terminologyPreferences: z.record(z.string()).optional(),
+});
+
+export const conversationAccessSchema = z.object({
+  userId: z.string().min(1),
+  role: z.enum(['owner', 'dispatcher', 'technician']),
+  tenantId: z.string().min(1),
 });

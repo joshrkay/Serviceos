@@ -1,0 +1,38 @@
+{
+  "id": "golden-001",
+  "description": "AC repair estimate — golden proposal verified by domain expert",
+  "input": {
+    "job_summary": "AC unit not cooling - outdoor unit running, no cold air inside",
+    "equipment": "Carrier 5-ton split system, 5 years old",
+    "customer_name": "Sarah Johnson",
+    "service_history": []
+  },
+  "expected_output": {
+    "proposal_type": "draft_estimate",
+    "line_items": [
+      {
+        "description": "Diagnostic service call - AC system inspection",
+        "category": "labor",
+        "quantity": 1,
+        "unit_price_cents": 8900,
+        "taxable": true
+      },
+      {
+        "description": "Refrigerant recharge (R-410A) - up to 3 lbs",
+        "category": "material",
+        "quantity": 1,
+        "unit_price_cents": 15000,
+        "taxable": true
+      },
+      {
+        "description": "Capacitor replacement (if needed)",
+        "category": "material",
+        "quantity": 1,
+        "unit_price_cents": 12500,
+        "taxable": true
+      }
+    ],
+    "confidence_score_min": 0.7,
+    "must_include_categories": ["labor", "material"]
+  }
+}

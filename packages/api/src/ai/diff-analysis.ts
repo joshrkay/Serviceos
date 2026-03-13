@@ -67,6 +67,31 @@ export function computeDiff(
             path
           )
         );
+      } else if (Array.isArray(oldVal) && Array.isArray(newVal)) {
+        const maxLen = Math.max(oldVal.length, newVal.length);
+        for (let i = 0; i < maxLen; i++) {
+          const elemPath = `${path}[${i}]`;
+          if (i >= oldVal.length) {
+            diffs.push({ path: elemPath, type: 'added', newValue: newVal[i] });
+          } else if (i >= newVal.length) {
+            diffs.push({ path: elemPath, type: 'removed', oldValue: oldVal[i] });
+          } else if (JSON.stringify(oldVal[i]) !== JSON.stringify(newVal[i])) {
+            if (
+              oldVal[i] && typeof oldVal[i] === 'object' && !Array.isArray(oldVal[i]) &&
+              newVal[i] && typeof newVal[i] === 'object' && !Array.isArray(newVal[i])
+            ) {
+              diffs.push(
+                ...computeDiff(
+                  oldVal[i] as Record<string, unknown>,
+                  newVal[i] as Record<string, unknown>,
+                  elemPath
+                )
+              );
+            } else {
+              diffs.push({ path: elemPath, type: 'changed', oldValue: oldVal[i], newValue: newVal[i] });
+            }
+          }
+        }
       } else {
         diffs.push({ path, type: 'changed', oldValue: oldVal, newValue: newVal });
       }

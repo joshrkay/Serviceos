@@ -5,22 +5,34 @@
   "scripts": {
     "build": "tsc --noEmit",
     "start": "ts-node src/index.ts",
-    "test": "jest --passWithNoTests",
-    "lint": "tsc --noEmit"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "seed": "ts-node scripts/seed.ts",
+    "seed:clean": "ts-node scripts/seed.ts --clean",
+    "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts"
   },
   "dependencies": {
     "express": "^4.18.0",
-    "zod": "^3.22.0",
-    "uuid": "^9.0.0"
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^9.0.0",
+    "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@faker-js/faker": "^9.0.0",
+    "@testcontainers/postgresql": "^10.7.0",
     "@types/express": "^4.17.0",
-    "@types/jest": "^29.5.0",
     "@types/node": "^20.11.0",
+    "@types/supertest": "^6.0.0",
+    "@types/swagger-ui-express": "^4.1.8",
     "@types/uuid": "^9.0.0",
-    "jest": "^29.7.0",
-    "ts-jest": "^29.1.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "supertest": "^6.3.0",
+    "testcontainers": "^10.7.0",
     "ts-node": "^10.9.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
   }
 }

@@ -57,12 +57,20 @@ export function validateRejectionInput(input: RecordRejectionInput): string[] {
   return errors;
 }
 
+async function ensureNoExistingDecision(
+  repository: ApprovalRepository,
+  tenantId: string,
+  estimateId: string
+): Promise<void> {
+  const existing = await repository.findByEstimate(tenantId, estimateId);
+  if (existing) throw new Error('Approval or rejection already recorded for this estimate');
+}
+
 export async function recordApproval(
   input: RecordApprovalInput,
   repository: ApprovalRepository
 ): Promise<EstimateApproval> {
-  const existing = await repository.findByEstimate(input.tenantId, input.estimateId);
-  if (existing) throw new Error('Approval or rejection already recorded for this estimate');
+  await ensureNoExistingDecision(repository, input.tenantId, input.estimateId);
 
   const approval: EstimateApproval = {
     id: uuidv4(),
@@ -84,8 +92,7 @@ export async function recordRejection(
   input: RecordRejectionInput,
   repository: ApprovalRepository
 ): Promise<EstimateApproval> {
-  const existing = await repository.findByEstimate(input.tenantId, input.estimateId);
-  if (existing) throw new Error('Approval or rejection already recorded for this estimate');
+  await ensureNoExistingDecision(repository, input.tenantId, input.estimateId);
 
   const approval: EstimateApproval = {
     id: uuidv4(),

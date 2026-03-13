@@ -103,6 +103,25 @@ describe('P1-008 — Technician assignment model', () => {
     expect(errors).toContain('assignedBy is required');
   });
 
+  it('edge case — syncJobAssignment clears stale technician when no primary', async () => {
+    const job = await createJob(
+      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Test', createdBy: 'u-1' },
+      jobRepo
+    );
+
+    const assignment = await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo
+    );
+    await syncJobAssignment('tenant-1', job.id, 'apt-1', assignmentRepo, jobRepo);
+    expect((await jobRepo.findById('tenant-1', job.id))!.assignedTechnicianId).toBe('tech-1');
+
+    await unassignTechnician('tenant-1', assignment.id, assignmentRepo);
+    await syncJobAssignment('tenant-1', job.id, 'apt-1', assignmentRepo, jobRepo);
+    const updatedJob = await jobRepo.findById('tenant-1', job.id);
+    expect(updatedJob!.assignedTechnicianId).toBeUndefined();
+  });
+
   it('tenant isolation — cross-tenant assignment inaccessible', async () => {
     await assignTechnician(
       { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
