@@ -48,6 +48,24 @@ describe('P0-018 — Async diff-analysis worker foundation', () => {
       const diff = computeDiff({ a: 1, b: 'two' }, { a: 1, b: 'two' });
       expect(diff).toHaveLength(0);
     });
+
+    it('happy path — handles array element diffs', () => {
+      const diff = computeDiff(
+        { items: ['a', 'b', 'c'] },
+        { items: ['a', 'x', 'c', 'd'] }
+      );
+      expect(diff.some((d) => d.path === 'items[1]' && d.type === 'changed')).toBe(true);
+      expect(diff.some((d) => d.path === 'items[3]' && d.type === 'added')).toBe(true);
+    });
+
+    it('happy path — handles array element removal', () => {
+      const diff = computeDiff(
+        { tags: ['one', 'two', 'three'] },
+        { tags: ['one'] }
+      );
+      expect(diff.some((d) => d.path === 'tags[1]' && d.type === 'removed')).toBe(true);
+      expect(diff.some((d) => d.path === 'tags[2]' && d.type === 'removed')).toBe(true);
+    });
   });
 
   describe('diff analysis worker', () => {

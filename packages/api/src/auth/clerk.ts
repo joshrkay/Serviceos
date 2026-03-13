@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 
 export interface ClerkUser {
@@ -15,6 +16,7 @@ export interface AuthenticatedRequest extends Request {
     tenantId: string;
     role: string;
   };
+  authError?: string;
   clerkUser?: ClerkUser;
 }
 
@@ -38,10 +40,12 @@ export function verifyClerkSession(clerkSecretKey: string) {
         userId: payload.sub,
         sessionId: payload.sid,
         tenantId: payload.tenant_id,
-        role: payload.role || 'technician',
+        role: payload.role,
       };
       next();
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Authentication failed';
+      req.authError = message;
       next();
     }
   };
@@ -51,16 +55,35 @@ export interface ClerkTokenPayload {
   sub: string;
   sid: string;
   tenant_id: string;
-  role?: string;
+  role: string;
   exp: number;
 }
 
-export function decodeClerkToken(token: string, _secretKey: string): ClerkTokenPayload {
-  // In production, this would verify the JWT signature using Clerk's JWKS
-  // For now, this validates the token structure
+const VALID_ROLES = ['owner', 'dispatcher', 'technician'];
+
+export function decodeClerkToken(token: string, secretKey: string): ClerkTokenPayload {
   const parts = token.split('.');
   if (parts.length !== 3) {
     throw new Error('Invalid token format');
+  }
+
+  // Verify HMAC-SHA256 signature
+  const signatureInput = `${parts[0]}.${parts[1]}`;
+  const expectedSig = crypto
+    .createHmac('sha256', secretKey)
+    .update(signatureInput)
+    .digest('base64url');
+
+  const providedSig = parts[2];
+  if (expectedSig.length !== providedSig.length) {
+    throw new Error('Invalid token signature');
+  }
+  const sigValid = crypto.timingSafeEqual(
+    Buffer.from(expectedSig),
+    Buffer.from(providedSig)
+  );
+  if (!sigValid) {
+    throw new Error('Invalid token signature');
   }
 
   try {
@@ -68,8 +91,14 @@ export function decodeClerkToken(token: string, _secretKey: string): ClerkTokenP
     if (!payload.sub || !payload.sid) {
       throw new Error('Missing required token claims');
     }
-    if (payload.exp && payload.exp < Date.now() / 1000) {
+    if (!payload.exp) {
+      throw new Error('Token missing expiration claim');
+    }
+    if (payload.exp < Date.now() / 1000) {
       throw new Error('Token expired');
+    }
+    if (!payload.role || !VALID_ROLES.includes(payload.role)) {
+      throw new Error('Token missing or invalid role claim');
     }
     return payload;
   } catch (err) {
