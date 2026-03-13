@@ -1,0 +1,14 @@
+{
+  "id": "transcript-002",
+  "type": "inbound_call",
+  "duration_seconds": 210,
+  "service_type": "plumbing",
+  "transcript": "Customer: Hello, my name is Bob Martinez. I need someone to look at my water heater. It's making a loud rumbling noise and the water isn't getting as hot as it used to. Dispatcher: Hi Bob, that sounds like it could be sediment buildup. How old is the water heater? Customer: I think it's about 8 years old. It's a 50-gallon Rheem. Dispatcher: Okay, we should have that inspected. What's your address? Customer: 789 Pine Road, Portland. Can someone come this week? Dispatcher: We have an opening Thursday afternoon, between 1 and 3 PM. Customer: That works for me.",
+  "expected_entities": {
+    "customer_name": "Bob Martinez",
+    "issue": "Water heater - rumbling noise, reduced hot water temperature",
+    "equipment": "Rheem 50-gallon water heater, approximately 8 years old",
+    "address": "789 Pine Road, Portland",
+    "appointment_window": "Thursday 1-3 PM"
+  }
+}

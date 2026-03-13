@@ -91,7 +91,7 @@ describe('P2-003 — Proposal lifecycle transitions', () => {
     const proposal = makeProposal({ status: 'draft' });
     try {
       transitionProposal(proposal, 'executed', 'user-1');
-      fail('Should have thrown');
+      throw new Error('Should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(ConflictError);
       expect((err as ConflictError).message).toContain("Cannot transition proposal from 'draft' to 'executed'");

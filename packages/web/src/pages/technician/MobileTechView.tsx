@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Message, TranscriptionStatus, Proposal } from '../../types/conversation';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { TranscriptMessage } from '../../components/voice/TranscriptMessage';
-import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
+import { RecordingState } from '../../components/voice/useVoiceRecorder';
 
 export interface AssignedJob {
   id: string;

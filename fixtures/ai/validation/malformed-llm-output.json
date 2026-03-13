@@ -1,0 +1,17 @@
+{
+  "id": "malformed-001",
+  "description": "Malformed LLM output with wrong types — should fail validation gracefully",
+  "output": {
+    "proposal_type": "invalid_type",
+    "summary": 12345,
+    "confidence_score": "not_a_number",
+    "payload": "should_be_object"
+  },
+  "expected_validation_result": "fail",
+  "expected_errors": [
+    "Invalid proposal_type",
+    "summary must be a string",
+    "confidence_score must be a number",
+    "payload must be an object"
+  ]
+}

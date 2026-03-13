@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { Role, hasPermission, isValidRole } from '../auth/rbac';
+import { Role, hasPermission } from '../auth/rbac';
 import { Conversation } from './conversation-service';
 
 export interface ConversationAccessContext {
@@ -86,10 +86,14 @@ export function requireConversationAccess(
 
     if (!isValidRole(req.auth.role)) {
       res.status(403).json({ error: 'FORBIDDEN', message: 'Invalid role' });
+    let conversation: Conversation | null;
+    try {
+      conversation = await getConversation(req.auth.tenantId, conversationId);
+    } catch (err) {
+      res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to check conversation access' });
       return;
     }
 
-    const conversation = await getConversation(req.auth.tenantId, conversationId);
     if (!conversation) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
       return;
