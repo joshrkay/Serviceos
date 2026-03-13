@@ -102,6 +102,14 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
     });
   });
 
+  describe('Rounding boundary: smallest valid amount', () => {
+    it('should generate link for 1 cent amount', async () => {
+      const result = await provider.generateLink({ ...validRequest, amountCents: 1 });
+      expect(result.linkId).toBeDefined();
+      expect(result.linkUrl).toContain('https://checkout.stripe.com/pay/');
+    });
+  });
+
   describe('Idempotency: returns existing active link', () => {
     it('should return the same link on repeated calls', async () => {
       const first = await provider.generateLink(validRequest);

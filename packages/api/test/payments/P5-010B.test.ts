@@ -87,6 +87,19 @@ describe('P5-010B: Payment-link generation contract placeholder', () => {
     });
   });
 
+  describe('Rounding boundary: smallest valid amount', () => {
+    it('should accept 1 cent as valid amountCents', () => {
+      const errors = validatePaymentLinkRequest({ ...validRequest, amountCents: 1 });
+      expect(errors).toHaveLength(0);
+    });
+
+    it('should generate link for 1 cent amount', async () => {
+      const result = await provider.generateLink({ ...validRequest, amountCents: 1 });
+      expect(result.linkId).toBeDefined();
+      expect(result.linkUrl).toContain('https://');
+    });
+  });
+
   describe('Deactivate link works', () => {
     it('should deactivate an active link', async () => {
       const result = await provider.generateLink(validRequest);

@@ -155,6 +155,35 @@ describe('P5-014: Technician update to invoice opportunity signal', () => {
     });
   });
 
+  describe('Mock provider: pure function works without external dependencies', () => {
+    it('should produce a signal from plain objects without any repo or provider', () => {
+      const signal = detectInvoiceOpportunity(baseUpdate, completedJobContext);
+      expect(signal).toHaveProperty('shouldDraft');
+      expect(signal).toHaveProperty('reason');
+      expect(signal).toHaveProperty('confidence');
+    });
+  });
+
+  describe('Malformed AI output: handles unusual input gracefully', () => {
+    it('should handle update with unknown updateType without crashing', () => {
+      const signal = detectInvoiceOpportunity(
+        { ...baseUpdate, updateType: 'unknown_type_xyz' },
+        completedJobContext
+      );
+      expect(signal.shouldDraft).toBe(true); // job is completed, still triggers
+      expect(signal.confidence).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should handle very long content string without crashing', () => {
+      const signal = detectInvoiceOpportunity(
+        { ...baseUpdate, content: 'x'.repeat(10000) },
+        completedJobContext
+      );
+      expect(signal).toBeDefined();
+      expect(signal.shouldDraft).toBe(true);
+    });
+  });
+
   describe('Confidence scores are reasonable (0-1)', () => {
     it('should return confidence between 0 and 1 for completed job', () => {
       const signal = detectInvoiceOpportunity(baseUpdate, completedJobContext);

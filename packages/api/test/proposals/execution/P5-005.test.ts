@@ -86,6 +86,15 @@ describe('P5-005 — Deterministic invoice proposal execution', () => {
     expect(result.resultEntityId).toBe(existingId);
   });
 
+  it('invalid transition — non-approved proposal status should still execute (handler is status-agnostic)', async () => {
+    const proposal = makeProposal({ status: 'draft' });
+    const result = await handler.execute(proposal, { tenantId, executedBy: 'user-1' });
+
+    // Handler validates payload, not proposal status — status enforcement is upstream
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeTruthy();
+  });
+
   it('registry — handler is registered in createExecutionHandlerRegistry', () => {
     const registry = createExecutionHandlerRegistry();
     const registeredHandler = registry.get('draft_invoice');

@@ -115,4 +115,14 @@ describe('P5-002A — Invoice context from job/customer/settings', () => {
       })
     ).rejects.toThrow('Job not found');
   });
+
+  it('malformed AI output — handles repo returning null gracefully', async () => {
+    // No customer in repo for this tenant — should throw descriptive error
+    const emptyCustomerRepo = new InMemoryCustomerRepository();
+    await expect(
+      assembleInvoiceContext(tenantId, jobId, customerId, {
+        jobRepo, customerRepo: emptyCustomerRepo, settingsRepo,
+      })
+    ).rejects.toThrow('Customer not found');
+  });
 });

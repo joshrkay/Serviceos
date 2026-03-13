@@ -103,6 +103,17 @@ describe('P5-010A — Payment-ready invoice metadata', () => {
     expect(result.eligible).toBe(false);
   });
 
+  it('partial payment arithmetic — partially paid invoice with remaining balance is eligible', () => {
+    const invoice = makeInvoice({
+      status: 'partially_paid',
+      amountPaidCents: 6000,
+      amountDueCents: 4000,
+    });
+    const result = assessPaymentReadiness(invoice);
+    expect(result.eligible).toBe(true);
+    expect(result.reasons).toHaveLength(0);
+  });
+
   it('update — can update payment link status', async () => {
     await createPaymentReadiness('tenant-1', 'inv-1', true, repo);
     const updated = await repo.update('tenant-1', 'inv-1', {

@@ -135,4 +135,20 @@ describe('P5-001 — draft_invoice proposal contract', () => {
     expect(isValidInvoiceProposalPayload(null)).toBe(false);
     expect(isValidInvoiceProposalPayload({ customerId: 'x', jobId: 'y', lineItems: [] })).toBe(false);
   });
+
+  it('mock provider — InMemory repo stores and retrieves proposal correctly', async () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'draft_invoice',
+      payload: validPayload,
+      summary: 'Test invoice',
+      createdBy: 'user-1',
+    });
+    await repo.create(proposal);
+
+    const found = await repo.findById('tenant-1', proposal.id);
+    expect(found).not.toBeNull();
+    expect(found!.proposalType).toBe('draft_invoice');
+    expect(found!.payload).toEqual(validPayload);
+  });
 });

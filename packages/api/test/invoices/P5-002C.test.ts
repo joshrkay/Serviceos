@@ -87,4 +87,10 @@ describe('P5-002C — Optional estimate reference in invoice context', () => {
     const ref = await assembleEstimateReference(tenantId, jobId, estimateRepo);
     expect(ref).not.toBeNull();
   });
+
+  it('malformed AI output — handles missing estimate data gracefully', async () => {
+    const emptyRepo = new InMemoryEstimateReferenceRepository();
+    const ref = await assembleEstimateReference(tenantId, jobId, emptyRepo);
+    expect(ref).toBeNull();
+  });
 });

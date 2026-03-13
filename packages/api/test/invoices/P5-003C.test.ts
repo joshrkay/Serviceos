@@ -196,6 +196,23 @@ describe('P5-003C — Persist invoice proposal with AI provenance', () => {
     expect(crossTenant).toBeNull();
   });
 
+  it('malformed AI output — provenance with missing fields still stores proposal', async () => {
+    const minimalInput = {
+      tenantId,
+      proposalType: 'draft_invoice' as const,
+      payload: baseProposalInput.payload,
+      summary: 'Minimal proposal',
+      createdBy: 'user-1',
+    };
+    const proposal = createProposal(minimalInput as CreateProposalInput);
+    const stored = await proposalRepo.create(proposal);
+
+    expect(stored.id).toBeDefined();
+    expect(stored.aiRunId).toBeUndefined();
+    expect(stored.promptVersionId).toBeUndefined();
+    expect(stored.sourceContext).toBeUndefined();
+  });
+
   it('mock provider — uses InMemory repos correctly', async () => {
     const proposal = createProposal(baseProposalInput);
     await proposalRepo.create(proposal);

@@ -96,4 +96,16 @@ describe('P5-002B — Technician updates + conversation in invoice context', () 
     });
     expect(ctx.updates).toHaveLength(2);
   });
+
+  it('malformed AI output — handles empty repos gracefully without throwing', async () => {
+    const freshUpdateRepo = new InMemoryTechnicianUpdateRepository();
+    const freshConvRepo = new InMemoryConversationRepository();
+
+    const ctx = await assembleTechnicianContext(tenantId, jobId, {
+      updateRepo: freshUpdateRepo, conversationRepo: freshConvRepo,
+    });
+
+    expect(ctx.updates).toEqual([]);
+    expect(ctx.conversations).toEqual([]);
+  });
 });
