@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "infra",
-    "packages/api"
+    "packages/api",
+    "packages/web"
   ],
   "scripts": {
     "build": "npm run build --workspaces",
