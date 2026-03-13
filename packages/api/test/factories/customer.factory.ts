@@ -29,7 +29,7 @@ export function buildCreateCustomerInput(overrides?: Partial<CreateCustomerInput
     firstName: faker.person.firstName(),
     lastName: faker.person.lastName(),
     companyName: faker.company.name(),
-    primaryPhone: faker.phone.number({ style: 'national' }),
+    primaryPhone: faker.phone.number('555-###-####'),
     email: faker.internet.email(),
     preferredChannel: 'phone',
     createdBy: faker.string.uuid(),
