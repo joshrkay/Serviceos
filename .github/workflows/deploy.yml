@@ -2,8 +2,6 @@ name: Deploy
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -15,30 +13,83 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - run: npx tsc --noEmit
+
+      - name: Type check API
+        run: npx tsc --noEmit
         working-directory: packages/api
-      - run: npm test
+      - name: Type check Web
+        run: npx tsc --noEmit
+        working-directory: packages/web
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test -- --reporter=verbose
+
+      - name: Integration tests
+        run: npm run test:integration
+        working-directory: packages/api
+        env:
+          TEST_DB: testcontainers
+
+      - name: Coverage check
+        run: npm run test:coverage
+
+      - name: Migration dry-run
+        run: npm run migrate:dryrun
         working-directory: packages/api
 
-  deploy-api:
+  deploy-railway-dev:
     needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: dev
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g @railway/cli
-      - run: railway up --service api --detach
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (dev)
+        run: railway up --service api --environment dev --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (dev)
+        run: railway up --service web --environment dev --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-  deploy-web:
-    needs: test
+  deploy-railway-staging:
+    needs: deploy-railway-dev
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: staging
     steps:
       - uses: actions/checkout@v4
-      - run: npm install -g @railway/cli
-      - run: railway up --service web --detach
-        working-directory: packages/web
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (staging)
+        run: railway up --service api --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (staging)
+        run: railway up --service web --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  deploy-railway-prod:
+    needs: deploy-railway-staging
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (prod)
+        run: railway up --service api --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (prod)
+        run: railway up --service web --environment production --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

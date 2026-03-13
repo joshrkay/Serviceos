@@ -5,8 +5,8 @@ import {
   validateAccessContext,
   requireConversationAccess,
   ConversationAccessContext,
-  ConversationRecord,
 } from '../../src/conversations/permissions';
+import { Conversation } from '../../src/conversations/conversation-service';
 
 describe('P3-015 — Conversation permissions and visibility rules', () => {
   const ownerContext: ConversationAccessContext = {
@@ -27,18 +27,24 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
     tenantId: 'tenant-1',
   };
 
-  const conversation: ConversationRecord = {
+  const conversation: Conversation = {
     id: 'conv-1',
     tenantId: 'tenant-1',
     createdBy: 'dispatcher-1',
     assignedUserIds: ['tech-1'],
+    status: 'open',
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
 
-  const unassignedConversation: ConversationRecord = {
+  const unassignedConversation: Conversation = {
     id: 'conv-2',
     tenantId: 'tenant-1',
     createdBy: 'dispatcher-1',
     assignedUserIds: ['tech-other'],
+    status: 'open',
+    createdAt: new Date(),
+    updatedAt: new Date(),
   };
 
   it('happy path — owner can access any conversation', () => {
@@ -88,10 +94,10 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
 
     const req = { auth: undefined, params: { conversationId: 'conv-1' } } as any;
     const res = {
-      status: jest.fn().mockReturnThis(),
-      json: jest.fn(),
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
     } as any;
-    const next = jest.fn();
+    const next = vi.fn();
 
     await middleware(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
@@ -99,10 +105,13 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
   });
 
   it('wrong tenant returns 403', () => {
-    const crossTenantConv: ConversationRecord = {
+    const crossTenantConv: Conversation = {
       id: 'conv-3',
       tenantId: 'tenant-other',
       createdBy: 'user-x',
+      status: 'open',
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
     expect(canAccessConversation(ownerContext, crossTenantConv)).toBe(false);
   });

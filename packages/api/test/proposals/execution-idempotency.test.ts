@@ -48,7 +48,7 @@ describe('P2-011 — Execution idempotency controls', () => {
     const proposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
     await repo.create(proposal);
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(proposal, executeFn);
 
     expect(result.success).toBe(true);
@@ -65,7 +65,7 @@ describe('P2-011 — Execution idempotency controls', () => {
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(newProposal, executeFn);
 
     expect(alreadyExecuted).toBe(true);
@@ -82,7 +82,7 @@ describe('P2-011 — Execution idempotency controls', () => {
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-2' });
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(newProposal, executeFn);
 
     expect(alreadyExecuted).toBe(false);
@@ -95,7 +95,7 @@ describe('P2-011 — Execution idempotency controls', () => {
     const guard = new IdempotencyGuard(repo);
     const proposal = makeApprovedProposal(); // no idempotencyKey
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(proposal, executeFn);
 
     expect(result.success).toBe(true);
@@ -112,7 +112,7 @@ describe('P2-011 — Execution idempotency controls', () => {
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-1', tenantId: 'tenant-2' });
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(newProposal, executeFn);
 
     expect(alreadyExecuted).toBe(false);
@@ -129,7 +129,7 @@ describe('P2-011 — Execution idempotency controls', () => {
 
     const retryProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     await guard.checkAndExecute(retryProposal, executeFn);
     await guard.checkAndExecute(retryProposal, executeFn);
 
@@ -146,7 +146,7 @@ describe('P2-011 — Execution idempotency controls', () => {
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
 
-    const executeFn = jest.fn().mockResolvedValue(successResult);
+    const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(newProposal, executeFn);
 
     expect(alreadyExecuted).toBe(false);

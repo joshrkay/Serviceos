@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { VoiceUpdate, validateJobContext, JobContext } from './VoiceUpdate';
 
@@ -28,11 +28,17 @@ describe('P3-008 — Technician voice update workflow', () => {
     render(<VoiceUpdate jobContext={jobContext} onUploadRecording={onUpload} />);
 
     // Start recording
-    fireEvent.click(screen.getByTestId('record-button'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('record-button'));
+    });
     // Stop recording
-    fireEvent.click(screen.getByTestId('stop-button'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('stop-button'));
+    });
     // Upload
-    fireEvent.click(screen.getByTestId('upload-button'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('upload-button'));
+    });
 
     // Wait for async upload
     await vi.waitFor(() => {

@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 
 export type ConversationStatus = 'open' | 'closed' | 'archived';
-export type MessageType = 'text' | 'transcript' | 'system_event' | 'note';
+export type MessageType = 'text' | 'transcript' | 'system_event' | 'note' | 'clarification' | 'proposal';
 
 export interface Conversation {
   id: string;
@@ -11,6 +11,7 @@ export interface Conversation {
   entityId?: string;
   status: ConversationStatus;
   createdBy: string;
+  assignedUserIds?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -70,7 +71,7 @@ export function validateCreateMessage(input: CreateMessageInput): string[] {
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.conversationId) errors.push('conversationId is required');
   if (!input.messageType) errors.push('messageType is required');
-  if (!['text', 'transcript', 'system_event', 'note'].includes(input.messageType)) {
+  if (!['text', 'transcript', 'system_event', 'note', 'clarification', 'proposal'].includes(input.messageType)) {
     errors.push('Invalid messageType');
   }
   if (!input.senderId) errors.push('senderId is required');

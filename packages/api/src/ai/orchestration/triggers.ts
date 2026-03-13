@@ -84,6 +84,14 @@ export function evaluateTrigger(input: TriggerEvaluationInput): TriggerDecision 
       };
 
     case 'semi_automatic':
+      if (input.hasExistingProposal) {
+        return {
+          shouldTrigger: false,
+          mode: 'semi_automatic',
+          requiresConfirmation: triggerConfig.requiresConfirmation,
+          reason: 'Existing proposal found',
+        };
+      }
       return {
         shouldTrigger: input.hasTranscript,
         mode: 'semi_automatic',

@@ -1,0 +1,14 @@
+{
+  "id": "transcript-001",
+  "type": "inbound_call",
+  "duration_seconds": 180,
+  "service_type": "hvac",
+  "transcript": "Customer: Hi, this is Sarah Johnson. I'm calling because my AC unit stopped cooling yesterday. Dispatcher: Hi Sarah, I'm sorry to hear that. Can you tell me what model you have? Customer: It's a Carrier, I think it's about 5 years old. The outside unit is running but no cold air inside. Dispatcher: Okay, and what's your address? Customer: 456 Oak Avenue, Springfield. Dispatcher: Got it. We can send a technician out tomorrow between 8 and 10 AM. Does that work? Customer: Yes, that would be great. Thank you.",
+  "expected_entities": {
+    "customer_name": "Sarah Johnson",
+    "issue": "AC unit not cooling - outdoor unit running, no cold air inside",
+    "equipment": "Carrier AC unit, approximately 5 years old",
+    "address": "456 Oak Avenue, Springfield",
+    "appointment_window": "Tomorrow 8-10 AM"
+  }
+}

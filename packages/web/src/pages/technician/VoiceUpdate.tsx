@@ -40,6 +40,7 @@ export function VoiceUpdate({
 }: VoiceUpdateProps) {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [duration, setDuration] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
   const [error, setError] = useState<string | null>(null);
   const [recordingId, setRecordingId] = useState<string | null>(null);
 
@@ -73,7 +74,7 @@ export function VoiceUpdate({
     if (!jobContext) return;
     setRecordingState('uploading');
     try {
-      const id = await onUploadRecording(jobContext.jobId, new Blob());
+      const id = await onUploadRecording(jobContext.jobId, recordedBlob);
       setRecordingId(id);
       setRecordingState('transcribing');
     } catch {

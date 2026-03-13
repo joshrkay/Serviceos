@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { Role, hasPermission } from '../auth/rbac';
+import { Conversation } from './conversation-service';
 
 export interface ConversationAccessContext {
   userId: string;
@@ -24,16 +25,9 @@ export function getVisibilityScope(role: Role): 'all' | 'assigned' {
   return rule?.scope ?? 'assigned';
 }
 
-export interface ConversationRecord {
-  id: string;
-  tenantId: string;
-  createdBy: string;
-  assignedUserIds?: string[];
-}
-
 export function canAccessConversation(
   context: ConversationAccessContext,
-  conversation: ConversationRecord
+  conversation: Conversation
 ): boolean {
   if (conversation.tenantId !== context.tenantId) {
     return false;
@@ -62,8 +56,8 @@ export function canAccessConversation(
 
 export function filterVisibleConversations(
   context: ConversationAccessContext,
-  conversations: ConversationRecord[]
-): ConversationRecord[] {
+  conversations: Conversation[]
+): Conversation[] {
   return conversations.filter((conv) => canAccessConversation(context, conv));
 }
 
@@ -76,7 +70,7 @@ export function validateAccessContext(context: Partial<ConversationAccessContext
 }
 
 export function requireConversationAccess(
-  getConversation: (tenantId: string, conversationId: string) => Promise<ConversationRecord | null>
+  getConversation: (tenantId: string, conversationId: string) => Promise<Conversation | null>
 ) {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     if (!req.auth) {
@@ -90,7 +84,7 @@ export function requireConversationAccess(
       return;
     }
 
-    let conversation: ConversationRecord | null;
+    let conversation: Conversation | null;
     try {
       conversation = await getConversation(req.auth.tenantId, conversationId);
     } catch (err) {
@@ -100,11 +94,6 @@ export function requireConversationAccess(
 
     if (!conversation) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
-      return;
-    }
-
-    if (conversation.tenantId !== req.auth.tenantId) {
-      res.status(403).json({ error: 'FORBIDDEN', message: 'Cross-tenant access denied' });
       return;
     }
 
