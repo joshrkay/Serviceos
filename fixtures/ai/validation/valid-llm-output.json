@@ -1,0 +1,26 @@
+{
+  "id": "valid-001",
+  "description": "Valid LLM output that should pass schema validation",
+  "output": {
+    "proposal_type": "draft_estimate",
+    "summary": "AC diagnostic and repair estimate for residential split system",
+    "explanation": "Based on the described symptoms (outdoor unit running, no cold air), this likely requires refrigerant recharge or capacitor replacement.",
+    "confidence_score": 0.82,
+    "confidence_factors": ["symptom_match", "equipment_age", "common_repair_pattern"],
+    "payload": {
+      "line_items": [
+        {
+          "description": "Diagnostic service call",
+          "category": "labor",
+          "quantity": 1,
+          "unit_price_cents": 8900,
+          "taxable": true
+        }
+      ],
+      "discount_cents": 0,
+      "tax_rate_bps": 800,
+      "customer_message": "Thank you for choosing our service. This estimate covers the diagnostic and most likely repairs."
+    }
+  },
+  "expected_validation_result": "pass"
+}

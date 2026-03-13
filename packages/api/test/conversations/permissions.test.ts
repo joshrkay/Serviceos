@@ -94,10 +94,10 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
 
     const req = { auth: undefined, params: { conversationId: 'conv-1' } } as any;
     const res = {
-      status: jest.fn().mockReturnThis(),
-      json: jest.fn(),
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
     } as any;
-    const next = jest.fn();
+    const next = vi.fn();
 
     await middleware(req, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
