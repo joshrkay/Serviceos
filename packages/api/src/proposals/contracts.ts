@@ -55,6 +55,18 @@ export const updateEstimatePayloadSchema = z.object({
   notes: z.string().optional(),
 });
 
+export const draftInvoicePayloadSchema = z.object({
+  customerId: z.string().uuid(),
+  jobId: z.string().uuid(),
+  estimateId: z.string().uuid().optional(),
+  invoiceNumber: z.string().min(1).optional(),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().min(0).optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  customerMessage: z.string().optional(),
+  internalNotes: z.string().optional(),
+});
+
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
@@ -62,6 +74,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_appointment: createAppointmentPayloadSchema,
   draft_estimate: draftEstimatePayloadSchema,
   update_estimate: updateEstimatePayloadSchema,
+  draft_invoice: draftInvoicePayloadSchema,
 };
 
 export function validateProposalPayload(
