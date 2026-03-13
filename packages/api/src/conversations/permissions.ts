@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { Role, hasPermission, isValidRole } from '../auth/rbac';
+import { Role, hasPermission } from '../auth/rbac';
 import { Conversation } from './conversation-service';
 
 export interface ConversationAccessContext {
@@ -84,7 +84,7 @@ export function requireConversationAccess(
       return;
     }
 
-    let conversation: ConversationRecord | null;
+    let conversation: Conversation | null;
     try {
       conversation = await getConversation(req.auth.tenantId, conversationId);
     } catch (err) {
@@ -92,12 +92,6 @@ export function requireConversationAccess(
       return;
     }
 
-    if (!conversation) {
-      res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
-      return;
-    }
-
-    const conversation = await getConversation(req.auth.tenantId, conversationId);
     if (!conversation) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
       return;
