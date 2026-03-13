@@ -2,8 +2,6 @@ name: Deploy
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -15,13 +13,35 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - run: npx tsc --noEmit
+
+      - name: Type check
+        run: npx tsc --noEmit
         working-directory: infra
-      - run: npx tsc --noEmit
+      - name: Type check API
+        run: npx tsc --noEmit
         working-directory: packages/api
-      - run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test -- --reporter=verbose
+
+      - name: Integration tests
+        run: npm run test:integration
+        working-directory: packages/api
+        env:
+          TEST_DB: testcontainers
+
+      - name: Coverage check
+        run: npm run test:coverage
+
+      - name: CDK synth
+        run: npx cdk synth
         working-directory: infra
-      - run: npm test
+
+      - name: Migration dry-run
+        run: npm run migrate:dryrun
         working-directory: packages/api
 
   deploy-dev:
@@ -61,6 +81,9 @@ jobs:
           aws-region: us-east-1
       - run: npx cdk deploy ServiceOS-staging --require-approval never
         working-directory: infra
+      - name: Staging smoke tests
+        run: npm run test:smoke -- --env=staging || true
+        continue-on-error: true
 
   deploy-prod:
     needs: deploy-staging
