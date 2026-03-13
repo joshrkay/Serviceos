@@ -34,6 +34,14 @@ function CollapsibleSection({ title, children, defaultOpen = true }: Collapsible
   );
 }
 
+function sanitizeDetailValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return '[complex value]';
+}
+
 const ENTITY_TYPE_LABELS: Record<string, string> = {
   customer: 'Customer',
   location: 'Location',
@@ -73,7 +81,7 @@ export function ContextPanel({ entities, conversationTitle }: ContextPanelProps)
               {Object.entries(entity.details).map(([key, value]) => (
                 <React.Fragment key={key}>
                   <dt data-testid={`context-detail-key-${key}`}>{key}</dt>
-                  <dd data-testid={`context-detail-value-${key}`}>{String(value)}</dd>
+                  <dd data-testid={`context-detail-value-${key}`}>{sanitizeDetailValue(value)}</dd>
                 </React.Fragment>
               ))}
             </dl>

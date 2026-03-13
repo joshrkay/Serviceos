@@ -6,10 +6,15 @@ export interface MessageInputProps {
   placeholder?: string;
 }
 
+export const MAX_MESSAGE_LENGTH = 5000;
+
 export function validateMessageContent(content: string): string | null {
   const trimmed = content.trim();
   if (!trimmed) {
     return 'Message cannot be empty';
+  }
+  if (trimmed.length > MAX_MESSAGE_LENGTH) {
+    return `Message exceeds maximum length of ${MAX_MESSAGE_LENGTH} characters`;
   }
   return null;
 }

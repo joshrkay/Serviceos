@@ -90,7 +90,14 @@ export function requireConversationAccess(
       return;
     }
 
-    const conversation = await getConversation(req.auth.tenantId, conversationId);
+    let conversation: ConversationRecord | null;
+    try {
+      conversation = await getConversation(req.auth.tenantId, conversationId);
+    } catch (err) {
+      res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to check conversation access' });
+      return;
+    }
+
     if (!conversation) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
       return;
