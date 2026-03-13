@@ -31,7 +31,9 @@ import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
 
 // Auth middleware
-import { verifyClerkSession } from './auth/clerk';
+import { verifyClerkSession, AuthenticatedRequest } from './auth/clerk';
+
+const DEV_MODE = !process.env.CLERK_SECRET_KEY;
 
 export function createApp() {
   const app = express();
@@ -47,8 +49,20 @@ export function createApp() {
   app.use('/', healthRouter);
 
   // Auth middleware for API routes
-  const clerkSecret = process.env.CLERK_SECRET_KEY || 'dev-secret-key';
-  app.use('/api', verifyClerkSession(clerkSecret));
+  if (DEV_MODE) {
+    console.warn('[DEV MODE] No CLERK_SECRET_KEY set — auto-injecting dev auth context on all /api routes');
+    app.use('/api', (req: AuthenticatedRequest, _res, next) => {
+      req.auth = {
+        userId: 'dev-user-001',
+        sessionId: 'dev-session',
+        tenantId: 'dev-tenant-001',
+        role: 'owner',
+      };
+      next();
+    });
+  } else {
+    app.use('/api', verifyClerkSession(process.env.CLERK_SECRET_KEY!));
+  }
 
   // Initialize in-memory repositories
   const customerRepo = new InMemoryCustomerRepository();
@@ -63,6 +77,23 @@ export function createApp() {
   const conversationRepo = new InMemoryConversationRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
+
+  // Seed dev tenant settings so estimate/invoice number generation works
+  if (DEV_MODE) {
+    settingsRepo.create({
+      id: 'dev-settings-001',
+      tenantId: 'dev-tenant-001',
+      businessName: 'Dev Company',
+      timezone: 'America/New_York',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
 
   // Mount API routes
   app.use('/api/v1/customers', createCustomerRouter(customerRepo, auditRepo));
