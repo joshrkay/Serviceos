@@ -35,7 +35,9 @@ export function MobileTechView({
   messages = [],
   onRetryTranscription,
 }: MobileTechViewProps) {
-  const voiceRecorder = useVoiceRecorder();
+  const [voiceState, setVoiceState] = useState<RecordingState>('idle');
+  const [duration, setDuration] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
 
   const selectedJob = assignedJobs.find((j) => j.id === selectedJobId);
 
@@ -71,13 +73,30 @@ export function MobileTechView({
 
           <div className="mobile-voice-section" data-testid="mobile-voice-section">
             <VoiceRecorder
-              state={voiceRecorder.state}
-              duration={voiceRecorder.duration}
-              onStart={voiceRecorder.start}
-              onStop={voiceRecorder.stop}
-              onCancel={voiceRecorder.cancel}
-              onReRecord={voiceRecorder.reRecord}
-              onUpload={() => voiceRecorder.upload((blob) => onUploadRecording(selectedJob.id, blob))}
+              state={voiceState}
+              duration={duration}
+              onStart={() => {
+                setVoiceState('recording');
+                setDuration(0);
+              }}
+              onStop={() => setVoiceState('stopped')}
+              onCancel={() => {
+                setVoiceState('idle');
+                setDuration(0);
+              }}
+              onReRecord={() => {
+                setVoiceState('idle');
+                setDuration(0);
+              }}
+              onUpload={async () => {
+                setVoiceState('uploading');
+                try {
+                  await onUploadRecording(selectedJob.id, recordedBlob);
+                  setVoiceState('transcribing');
+                } catch {
+                  setVoiceState('stopped');
+                }
+              }}
             />
           </div>
 

@@ -30,7 +30,9 @@ export function ConversationalIntake({
   onApproveProposal,
   onRejectProposal,
 }: ConversationalIntakeProps) {
-  const voiceRecorder = useVoiceRecorder();
+  const [voiceState, setVoiceState] = useState<RecordingState>('idle');
+  const [duration, setDuration] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
   const [showVoice, setShowVoice] = useState(false);
 
   const handleSend = useCallback(
@@ -76,13 +78,27 @@ export function ConversationalIntake({
       {showVoice && (
         <div className="intake-voice-section" data-testid="intake-voice-section">
           <VoiceRecorder
-            state={voiceRecorder.state}
-            duration={voiceRecorder.duration}
-            onStart={voiceRecorder.start}
-            onStop={voiceRecorder.stop}
-            onCancel={voiceRecorder.cancel}
-            onReRecord={voiceRecorder.reRecord}
-            onUpload={() => voiceRecorder.upload(onUploadVoice)}
+            state={voiceState}
+            duration={duration}
+            onStart={() => setVoiceState('recording')}
+            onStop={() => setVoiceState('stopped')}
+            onCancel={() => {
+              setVoiceState('idle');
+              setDuration(0);
+            }}
+            onReRecord={() => {
+              setVoiceState('idle');
+              setDuration(0);
+            }}
+            onUpload={async () => {
+              setVoiceState('uploading');
+              try {
+                await onUploadVoice(recordedBlob);
+                setVoiceState('transcribing');
+              } catch {
+                setVoiceState('stopped');
+              }
+            }}
           />
         </div>
       )}

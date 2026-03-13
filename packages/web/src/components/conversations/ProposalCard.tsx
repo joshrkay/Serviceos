@@ -1,5 +1,5 @@
 import React from 'react';
-import { Proposal, ProposalStatus, Role } from '../../types/conversation';
+import { Proposal, ProposalStatus, Role, hasPermission } from '../../types/conversation';
 
 export interface ProposalCardProps {
   proposal: Proposal;
@@ -16,7 +16,7 @@ const STATUS_LABELS: Record<ProposalStatus, string> = {
 };
 
 export function canApproveProposal(role: Role): boolean {
-  return role === 'owner' || role === 'dispatcher';
+  return hasPermission(role, 'proposals:approve');
 }
 
 export function ProposalCard({

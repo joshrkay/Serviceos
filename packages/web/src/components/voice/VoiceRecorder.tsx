@@ -4,6 +4,7 @@ import { RecordingState } from './useVoiceRecorder';
 export interface VoiceRecorderProps {
   state: RecordingState;
   duration: number;
+  recordedBlob?: Blob;
   onStart: () => void;
   onStop: () => void;
   onCancel: () => void;
