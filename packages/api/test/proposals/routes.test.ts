@@ -90,7 +90,14 @@ describe('P2-004 — Proposal list and detail views', () => {
   it('validation — returns 404 for missing proposal', async () => {
     const repo = makeRepo();
     await expect(
-      getProposalDetail(repo, tenantId, 'nonexistent-id', 'owner')
+      getProposalDetail(repo, tenantId, '550e8400-e29b-41d4-a716-446655440000', 'owner')
     ).rejects.toThrow(NotFoundError);
+  });
+
+  it('security — rejects invalid UUID format for proposal ID', async () => {
+    const repo = makeRepo();
+    await expect(
+      getProposalDetail(repo, tenantId, 'not-a-valid-uuid', 'owner')
+    ).rejects.toThrow(ValidationError);
   });
 });

@@ -118,4 +118,38 @@ describe('P2-014 — Clarification request workflow', () => {
     const messages = await conversationRepo.getMessages('tenant-1', conv.id);
     expect(messages).toHaveLength(2);
   });
+
+  it('security — strips sensitive keys from stored context', async () => {
+    const conv = await conversationRepo.createConversation({
+      tenantId: 'tenant-1',
+      createdBy: 'user-1',
+      title: 'Security test',
+    });
+
+    const sensitiveContext = {
+      customerId: 'cust-1',
+      apiKey: 'sk-secret-123',
+      password: 'hunter2',
+      authorizationToken: 'bearer-xyz',
+      jobId: 'job-1',
+      secretValue: 'hidden',
+    };
+
+    const result = await requestClarification(
+      conversationRepo,
+      store,
+      'tenant-1',
+      conv.id,
+      ['What is the issue?'],
+      sensitiveContext,
+      'user-1'
+    );
+
+    expect(result.originalTaskContext.customerId).toBe('cust-1');
+    expect(result.originalTaskContext.jobId).toBe('job-1');
+    expect(result.originalTaskContext.apiKey).toBeUndefined();
+    expect(result.originalTaskContext.password).toBeUndefined();
+    expect(result.originalTaskContext.authorizationToken).toBeUndefined();
+    expect(result.originalTaskContext.secretValue).toBeUndefined();
+  });
 });

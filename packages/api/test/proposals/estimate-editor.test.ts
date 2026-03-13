@@ -163,4 +163,40 @@ describe('P2-017 — Estimate proposal review + inline edit workflow', () => {
     const total = calculateEstimateTotal(proposal.payload);
     expect(total).toBe(0);
   });
+
+  it('security — update_wording rejects disallowed fields', () => {
+    const proposal = makeEstimateProposal();
+
+    expect(() =>
+      editEstimateProposal(proposal, [
+        { type: 'update_wording', field: 'id', value: 'injected-id' },
+      ])
+    ).toThrow('not allowed for update_wording');
+
+    expect(() =>
+      editEstimateProposal(proposal, [
+        { type: 'update_wording', field: 'tenantId', value: 'injected-tenant' },
+      ])
+    ).toThrow('not allowed for update_wording');
+
+    expect(() =>
+      editEstimateProposal(proposal, [
+        { type: 'update_wording', field: 'status', value: 'executed' },
+      ])
+    ).toThrow('not allowed for update_wording');
+  });
+
+  it('security — update_wording allows permitted fields', () => {
+    const proposal = makeEstimateProposal();
+
+    const { updatedProposal, editedFields } = editEstimateProposal(proposal, [
+      { type: 'update_wording', field: 'title', value: 'Updated Title' },
+      { type: 'update_wording', field: 'disclaimer', value: 'No warranty' },
+    ]);
+
+    expect(updatedProposal.payload.title).toBe('Updated Title');
+    expect(updatedProposal.payload.disclaimer).toBe('No warranty');
+    expect(editedFields).toContain('title');
+    expect(editedFields).toContain('disclaimer');
+  });
 });

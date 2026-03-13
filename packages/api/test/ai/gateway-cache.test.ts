@@ -43,7 +43,7 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
 
     const gateway = makeGateway(stub);
     const cacheStore = new InMemoryCacheStore();
-    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig());
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig(), 'tenant-1');
 
     const request = makeRequest({ taskType: 'summarize' });
 
@@ -64,7 +64,7 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
 
     const gateway = makeGateway(stub);
     const cacheStore = new InMemoryCacheStore();
-    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig());
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig(), 'tenant-1');
 
     const response = await wrapper.complete(makeRequest());
 
@@ -80,7 +80,7 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     const cacheStore = new InMemoryCacheStore();
     const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig({
       deterministicTaskTypes: ['summarize'],
-    }));
+    }), 'tenant-1');
 
     const request = makeRequest({ taskType: 'creative_writing' });
 
@@ -101,7 +101,7 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     const cacheStore = new InMemoryCacheStore();
     const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig({
       defaultTtlMs: 1,
-    }));
+    }), 'tenant-1');
 
     const request = makeRequest({ taskType: 'summarize' });
 
@@ -134,7 +134,7 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
 
     const gateway = makeGateway(stub);
     const cacheStore = new InMemoryCacheStore();
-    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig());
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig(), 'tenant-1');
 
     const request = makeRequest({ taskType: 'summarize' });
 
@@ -169,14 +169,14 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     );
 
     const cacheStore = new InMemoryCacheStore();
-    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig());
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig(), 'tenant-1');
 
     const request = makeRequest({ taskType: 'summarize' });
 
     await expect(wrapper.complete(request)).rejects.toThrow();
 
     // Verify nothing was cached
-    const key = createCacheKey(request);
+    const key = createCacheKey(request, 'tenant-1');
     const cached = await cacheStore.get(key);
     expect(cached).toBeNull();
   });

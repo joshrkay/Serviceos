@@ -1,7 +1,7 @@
 import { Proposal, ProposalRepository } from './proposal';
 import { ProposalFilter, proposalFilterSchema } from './proposal-contracts';
 import { NotFoundError, ForbiddenError } from '../shared/errors';
-import { validate } from '../shared/validation';
+import { validate, uuidSchema } from '../shared/validation';
 import { Role, hasPermission } from '../auth/rbac';
 
 export async function listProposals(
@@ -41,6 +41,8 @@ export async function getProposalDetail(
   proposalId: string,
   actorRole: Role
 ): Promise<Proposal> {
+  validate(uuidSchema, proposalId);
+
   if (!hasPermission(actorRole, 'proposals:view')) {
     throw new ForbiddenError();
   }

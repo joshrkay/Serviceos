@@ -20,7 +20,7 @@ export interface CacheConfig {
   deterministicTaskTypes: string[];
 }
 
-export function createCacheKey(request: LLMRequest, tenantId?: string): string {
+export function createCacheKey(request: LLMRequest, tenantId: string): string {
   const keyData = {
     model: request.model,
     messages: request.messages,
@@ -52,13 +52,15 @@ export class CachingGatewayWrapper {
   private readonly gateway: LLMGateway;
   private readonly cacheStore: CacheStore;
   private readonly config: CacheConfig;
+  private readonly tenantId: string;
   private hits = 0;
   private misses = 0;
 
-  constructor(gateway: LLMGateway, cacheStore: CacheStore, config: CacheConfig) {
+  constructor(gateway: LLMGateway, cacheStore: CacheStore, config: CacheConfig, tenantId: string) {
     this.gateway = gateway;
     this.cacheStore = cacheStore;
     this.config = config;
+    this.tenantId = tenantId;
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -70,7 +72,7 @@ export class CachingGatewayWrapper {
       return this.gateway.complete(request);
     }
 
-    const cacheKey = createCacheKey(request);
+    const cacheKey = createCacheKey(request, this.tenantId);
     const cached = await this.cacheStore.get(cacheKey);
 
     if (cached) {

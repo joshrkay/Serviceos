@@ -39,7 +39,7 @@ export async function rejectProposal(
   reason: string,
   details?: string
 ): Promise<Proposal> {
-  if (!hasPermission(actorRole, 'proposals:view')) {
+  if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
   }
 

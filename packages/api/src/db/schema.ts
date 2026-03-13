@@ -372,6 +372,11 @@ export function getMigrationSQL(): string {
   return Object.values(MIGRATIONS).join('\n');
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function setTenantContext(tenantId: string): string {
+  if (!UUID_REGEX.test(tenantId)) {
+    throw new Error('Invalid tenant ID format: must be a valid UUID');
+  }
   return `SET app.current_tenant_id = '${tenantId}'`;
 }

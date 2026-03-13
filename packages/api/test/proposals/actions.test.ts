@@ -55,6 +55,15 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ).rejects.toThrow(ForbiddenError);
   });
 
+  it('security — technician cannot reject proposal', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo);
+
+    await expect(
+      rejectProposal(repo, tenantId, proposal.id, actorId, 'technician', 'reason')
+    ).rejects.toThrow(ForbiddenError);
+  });
+
   it('happy path — reject with reason stored', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo);

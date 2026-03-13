@@ -2,6 +2,10 @@ import { Proposal, ProposalRepository } from './proposal';
 import { validateProposalPayload } from './contracts';
 import { ValidationError } from '../shared/errors';
 
+export const ALLOWED_WORDING_FIELDS = [
+  'title', 'description', 'summary', 'notes', 'terms', 'disclaimer', 'headerText', 'footerText',
+];
+
 export interface EstimateLineItem {
   description: string;
   quantity: number;
@@ -84,6 +88,11 @@ export function editEstimateProposal(
       case 'update_wording': {
         if (!action.field || action.value === undefined) {
           throw new ValidationError('field and value are required for update_wording');
+        }
+        if (!ALLOWED_WORDING_FIELDS.includes(action.field)) {
+          throw new ValidationError(
+            `Field '${action.field}' is not allowed for update_wording. Allowed: ${ALLOWED_WORDING_FIELDS.join(', ')}`
+          );
         }
         payload[action.field] = action.value;
         editedFields.push(action.field);

@@ -50,6 +50,16 @@ export class InMemoryClarificationStore implements ClarificationStore {
   }
 }
 
+const SENSITIVE_KEY_PATTERNS = ['password', 'secret', 'apikey', 'token', 'credential', 'authorization'];
+
+function sanitizeContext(context: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(context).filter(([key]) =>
+      !SENSITIVE_KEY_PATTERNS.some((pattern) => key.toLowerCase().includes(pattern))
+    )
+  );
+}
+
 export async function requestClarification(
   conversationRepo: ConversationRepository,
   store: ClarificationStore,
@@ -74,7 +84,7 @@ export async function requestClarification(
     conversationId,
     messageId: message.id,
     questions,
-    originalTaskContext,
+    originalTaskContext: sanitizeContext(originalTaskContext),
     status: 'pending',
     createdAt: new Date(),
   };
