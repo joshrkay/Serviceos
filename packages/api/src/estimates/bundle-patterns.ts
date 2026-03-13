@@ -116,8 +116,8 @@ export class InMemoryBundlePatternRepository implements BundlePatternRepository 
   private patterns: Map<string, BundlePattern> = new Map();
 
   async create(pattern: BundlePattern): Promise<BundlePattern> {
-    this.patterns.set(pattern.id, { ...pattern, items: [...pattern.items] });
-    return { ...pattern, items: [...pattern.items] };
+    this.patterns.set(pattern.id, { ...pattern, items: pattern.items.map(item => ({ ...item })) });
+    return { ...pattern, items: pattern.items.map(item => ({ ...item })) };
   }
 
   async findByTenant(tenantId: string): Promise<BundlePattern[]> {
