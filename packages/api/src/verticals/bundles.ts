@@ -4,6 +4,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalType } from './registry';
 import { LineItemTemplate } from '../templates/estimate-template';
+import { ValidationError } from '../shared/errors';
 
 export interface ServiceBundle {
   id: string;
@@ -62,7 +63,7 @@ export async function createBundle(
   repository: ServiceBundleRepository
 ): Promise<ServiceBundle> {
   const errors = validateBundleInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const bundle: ServiceBundle = {
     id: uuidv4(),
@@ -107,30 +108,39 @@ export function matchBundles(
     .map((m) => m.bundle);
 }
 
+function cloneBundle(b: ServiceBundle): ServiceBundle {
+  return {
+    ...b,
+    categoryIds: [...b.categoryIds],
+    lineItemTemplates: b.lineItemTemplates.map((t) => ({ ...t })),
+    triggerKeywords: [...b.triggerKeywords],
+  };
+}
+
 export class InMemoryServiceBundleRepository implements ServiceBundleRepository {
   private bundles: Map<string, ServiceBundle> = new Map();
 
   async create(bundle: ServiceBundle): Promise<ServiceBundle> {
-    this.bundles.set(bundle.id, { ...bundle });
-    return { ...bundle };
+    this.bundles.set(bundle.id, cloneBundle(bundle));
+    return cloneBundle(bundle);
   }
 
   async findById(tenantId: string, id: string): Promise<ServiceBundle | null> {
     const b = this.bundles.get(id);
     if (!b || b.tenantId !== tenantId) return null;
-    return { ...b };
+    return cloneBundle(b);
   }
 
   async findByTenant(tenantId: string): Promise<ServiceBundle[]> {
     return Array.from(this.bundles.values())
       .filter((b) => b.tenantId === tenantId)
-      .map((b) => ({ ...b }));
+      .map(cloneBundle);
   }
 
   async findByVertical(tenantId: string, verticalType: VerticalType): Promise<ServiceBundle[]> {
     return Array.from(this.bundles.values())
       .filter((b) => b.tenantId === tenantId && b.verticalType === verticalType)
-      .map((b) => ({ ...b }));
+      .map(cloneBundle);
   }
 
   async findByKeyword(tenantId: string, keyword: string): Promise<ServiceBundle[]> {
@@ -142,7 +152,7 @@ export class InMemoryServiceBundleRepository implements ServiceBundleRepository 
           b.isActive &&
           b.triggerKeywords.some((k) => k.includes(normalizedKeyword))
       )
-      .map((b) => ({ ...b }));
+      .map(cloneBundle);
   }
 
   async update(
@@ -153,15 +163,15 @@ export class InMemoryServiceBundleRepository implements ServiceBundleRepository 
     const b = this.bundles.get(id);
     if (!b || b.tenantId !== tenantId) return null;
     const updated = { ...b, ...updates, updatedAt: new Date() };
-    this.bundles.set(id, updated);
-    return { ...updated };
+    this.bundles.set(id, cloneBundle(updated));
+    return cloneBundle(updated);
   }
 
   async incrementUsage(tenantId: string, id: string): Promise<void> {
     const b = this.bundles.get(id);
     if (b && b.tenantId === tenantId) {
       b.usageCount += 1;
-      this.bundles.set(id, b);
+      this.bundles.set(id, cloneBundle(b));
     }
   }
 }

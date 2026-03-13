@@ -108,3 +108,46 @@ export const conversationAccessSchema = z.object({
   role: z.enum(['owner', 'dispatcher', 'technician']),
   tenantId: z.string().min(1),
 });
+
+// Phase 4 — Vertical Packs + Estimate Intelligence
+
+export const verticalTypeSchema = z.enum(['hvac', 'plumbing']);
+
+const lineItemTemplateSchema = z.object({
+  description: z.string().min(1),
+  category: z.enum(['labor', 'material', 'equipment', 'other']),
+  defaultQuantity: z.number().min(0),
+  defaultUnitPriceCents: z.number().int().min(0),
+  taxable: z.boolean(),
+  sortOrder: z.number().int().min(0),
+  isOptional: z.boolean(),
+});
+
+export const createTemplateSchema = z.object({
+  verticalType: verticalTypeSchema,
+  categoryId: z.string().min(1),
+  name: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  lineItemTemplates: z.array(lineItemTemplateSchema).min(1),
+  defaultDiscountCents: z.number().int().min(0).optional(),
+  defaultTaxRateBps: z.number().int().min(0).max(10000).optional(),
+  defaultCustomerMessage: z.string().max(2000).optional(),
+});
+
+export const createBundleSchema = z.object({
+  verticalType: verticalTypeSchema,
+  name: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  categoryIds: z.array(z.string().min(1)).min(1),
+  lineItemTemplates: z.array(lineItemTemplateSchema).min(1),
+  triggerKeywords: z.array(z.string().min(1)).min(1),
+});
+
+export const createWordingPreferenceSchema = z.object({
+  verticalType: verticalTypeSchema.optional(),
+  scope: z.enum(['line_item_description', 'customer_message', 'internal_note', 'estimate_header', 'estimate_footer']),
+  key: z.string().min(1).max(100),
+  preferredWording: z.string().min(1).max(500),
+  avoidWordings: z.array(z.string().min(1)).optional(),
+  context: z.string().max(500).optional(),
+});

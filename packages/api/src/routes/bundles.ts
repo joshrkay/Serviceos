@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
+import { createBundleSchema, verticalTypeSchema } from '../shared/contracts';
 import {
   ServiceBundleRepository,
   createBundle,
@@ -20,6 +21,13 @@ export function createBundleRouter(bundleRepo: ServiceBundleRepository): Router 
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const verticalType = req.query.verticalType as string | undefined;
+        if (verticalType) {
+          const parsed = verticalTypeSchema.safeParse(verticalType);
+          if (!parsed.success) {
+            res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid verticalType' });
+            return;
+          }
+        }
         let bundles;
         if (verticalType) {
           bundles = await bundleRepo.findByVertical(
@@ -66,9 +74,10 @@ export function createBundleRouter(bundleRepo: ServiceBundleRepository): Router 
     requirePermission('estimates:create'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        const parsed = createBundleSchema.parse(req.body);
         const result = await createBundle(
           {
-            ...req.body,
+            ...parsed,
             tenantId: req.auth!.tenantId,
           },
           bundleRepo
@@ -117,8 +126,14 @@ export function createBundleRouter(bundleRepo: ServiceBundleRepository): Router 
     requirePermission('estimates:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        const { name, description, categoryIds, lineItemTemplates, triggerKeywords, isActive } = req.body;
         const result = await bundleRepo.update(req.auth!.tenantId, req.params.id, {
-          ...req.body,
+          ...(name !== undefined && { name }),
+          ...(description !== undefined && { description }),
+          ...(categoryIds !== undefined && { categoryIds }),
+          ...(lineItemTemplates !== undefined && { lineItemTemplates }),
+          ...(triggerKeywords !== undefined && { triggerKeywords }),
+          ...(isActive !== undefined && { isActive }),
           updatedAt: new Date(),
         });
         if (!result) {

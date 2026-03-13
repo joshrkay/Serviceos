@@ -3,6 +3,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalType } from './registry';
+import { ValidationError } from '../shared/errors';
 
 export interface WordingPreference {
   id: string;
@@ -69,7 +70,7 @@ export async function createWordingPreference(
   repository: WordingPreferenceRepository
 ): Promise<WordingPreference> {
   const errors = validateWordingPreferenceInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const pref: WordingPreference = {
     id: uuidv4(),

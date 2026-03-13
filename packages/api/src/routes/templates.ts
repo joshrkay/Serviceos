@@ -2,11 +2,11 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
+import { createTemplateSchema, verticalTypeSchema } from '../shared/contracts';
 import {
   EstimateTemplateRepository,
   createTemplate,
   instantiateTemplate,
-  validateTemplateInput,
 } from '../templates/estimate-template';
 
 export function createTemplateRouter(templateRepo: EstimateTemplateRepository): Router {
@@ -22,6 +22,14 @@ export function createTemplateRouter(templateRepo: EstimateTemplateRepository): 
       try {
         const verticalType = req.query.verticalType as string | undefined;
         const categoryId = req.query.categoryId as string | undefined;
+
+        if (verticalType) {
+          const parsed = verticalTypeSchema.safeParse(verticalType);
+          if (!parsed.success) {
+            res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid verticalType' });
+            return;
+          }
+        }
 
         let templates;
         if (categoryId) {
@@ -72,9 +80,10 @@ export function createTemplateRouter(templateRepo: EstimateTemplateRepository): 
     requirePermission('estimates:create'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        const parsed = createTemplateSchema.parse(req.body);
         const result = await createTemplate(
           {
-            ...req.body,
+            ...parsed,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
           },
@@ -119,8 +128,15 @@ export function createTemplateRouter(templateRepo: EstimateTemplateRepository): 
     requirePermission('estimates:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        const { name, description, lineItemTemplates, defaultDiscountCents, defaultTaxRateBps, defaultCustomerMessage, isActive } = req.body;
         const result = await templateRepo.update(req.auth!.tenantId, req.params.id, {
-          ...req.body,
+          ...(name !== undefined && { name }),
+          ...(description !== undefined && { description }),
+          ...(lineItemTemplates !== undefined && { lineItemTemplates }),
+          ...(defaultDiscountCents !== undefined && { defaultDiscountCents }),
+          ...(defaultTaxRateBps !== undefined && { defaultTaxRateBps }),
+          ...(defaultCustomerMessage !== undefined && { defaultCustomerMessage }),
+          ...(isActive !== undefined && { isActive }),
           updatedAt: new Date(),
         });
         if (!result) {

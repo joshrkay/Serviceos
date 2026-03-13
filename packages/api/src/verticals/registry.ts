@@ -105,9 +105,12 @@ export function getCategoryHierarchy(
   categoryId: string
 ): ServiceCategory[] {
   const result: ServiceCategory[] = [];
+  const visited = new Set<string>();
   let current = pack.categories.find((c) => c.id === categoryId);
 
   while (current) {
+    if (visited.has(current.id)) break; // Guard against cyclic parentId
+    visited.add(current.id);
     result.unshift(current);
     if (!current.parentId) break;
     current = pack.categories.find((c) => c.id === current!.parentId);
@@ -125,41 +128,45 @@ export function getChildCategories(
     .sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
+function clonePack(p: VerticalPack): VerticalPack {
+  return { ...p, categories: p.categories.map((c) => ({ ...c })), terminology: { ...p.terminology } };
+}
+
 export class InMemoryVerticalPackRepository implements VerticalPackRepository {
   private packs: Map<string, VerticalPack> = new Map();
 
   async create(pack: VerticalPack): Promise<VerticalPack> {
-    this.packs.set(pack.id, { ...pack });
-    return { ...pack };
+    this.packs.set(pack.id, clonePack(pack));
+    return clonePack(pack);
   }
 
   async findById(id: string): Promise<VerticalPack | null> {
     const p = this.packs.get(id);
-    return p ? { ...p } : null;
+    return p ? clonePack(p) : null;
   }
 
   async findByType(type: VerticalType): Promise<VerticalPack | null> {
     for (const p of this.packs.values()) {
-      if (p.type === type && p.isActive) return { ...p };
+      if (p.type === type && p.isActive) return clonePack(p);
     }
     return null;
   }
 
   async findAll(): Promise<VerticalPack[]> {
-    return Array.from(this.packs.values()).map((p) => ({ ...p }));
+    return Array.from(this.packs.values()).map(clonePack);
   }
 
   async findActive(): Promise<VerticalPack[]> {
     return Array.from(this.packs.values())
       .filter((p) => p.isActive)
-      .map((p) => ({ ...p }));
+      .map(clonePack);
   }
 
   async update(id: string, updates: Partial<VerticalPack>): Promise<VerticalPack | null> {
     const p = this.packs.get(id);
     if (!p) return null;
     const updated = { ...p, ...updates, updatedAt: new Date() };
-    this.packs.set(id, updated);
-    return { ...updated };
+    this.packs.set(id, clonePack(updated));
+    return clonePack(updated);
   }
 }

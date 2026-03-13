@@ -10,6 +10,7 @@ describe('P4-005 — Approved Estimate Retrieval', () => {
   let repo: InMemoryApprovedEstimateRepository;
 
   const createSampleEstimate = (overrides: Partial<ApprovedEstimateContext> = {}): ApprovedEstimateContext => ({
+    tenantId: 'tenant-1',
     estimateId: 'est-1',
     estimateNumber: 'EST-0001',
     jobId: 'job-1',
@@ -137,6 +138,24 @@ describe('P4-005 — Approved Estimate Retrieval', () => {
     expect(stats.cleanApprovalRate).toBe(0);
     expect(stats.editRate).toBe(0);
     expect(stats.averageTotalCents).toBe(0);
+  });
+
+  it('tenant isolation — findApprovedByTenant does not return other tenant data', async () => {
+    repo.addEstimate(createSampleEstimate({ tenantId: 'tenant-1' }));
+    repo.addEstimate(createSampleEstimate({ tenantId: 'tenant-2', estimateId: 'est-2' }));
+
+    const results = await repo.findApprovedByTenant({ tenantId: 'tenant-1' });
+    expect(results).toHaveLength(1);
+    expect(results[0].tenantId).toBe('tenant-1');
+  });
+
+  it('tenant isolation — findSimilar does not return other tenant data', async () => {
+    repo.addEstimate(createSampleEstimate({ tenantId: 'tenant-1', categoryId: 'hvac-repair-ac' }));
+    repo.addEstimate(createSampleEstimate({ tenantId: 'tenant-2', estimateId: 'est-2', categoryId: 'hvac-repair-ac' }));
+
+    const results = await repo.findSimilar('tenant-1', 'hvac-repair-ac', { min: 0, max: 999999 }, 10);
+    expect(results).toHaveLength(1);
+    expect(results[0].tenantId).toBe('tenant-1');
   });
 
   it('computes per-category stats', () => {

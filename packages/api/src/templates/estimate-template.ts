@@ -4,6 +4,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LineItem, buildLineItem, calculateDocumentTotals, DocumentTotals } from '../shared/billing-engine';
 import { VerticalType } from '../verticals/registry';
+import { ValidationError } from '../shared/errors';
 
 export interface EstimateTemplate {
   id: string;
@@ -82,7 +83,7 @@ export async function createTemplate(
   repository: EstimateTemplateRepository
 ): Promise<EstimateTemplate> {
   const errors = validateTemplateInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const template: EstimateTemplate = {
     id: uuidv4(),

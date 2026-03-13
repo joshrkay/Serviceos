@@ -4,6 +4,7 @@
 import { Estimate, EstimateRepository } from '../estimates/estimate';
 
 export interface ApprovedEstimateContext {
+  tenantId: string;
   estimateId: string;
   estimateNumber: string;
   jobId: string;
@@ -74,6 +75,7 @@ export function buildApprovedEstimateContext(
   }
 ): ApprovedEstimateContext {
   return {
+    tenantId: estimate.tenantId,
     estimateId: estimate.id,
     estimateNumber: estimate.estimateNumber,
     jobId: estimate.jobId,
@@ -149,7 +151,7 @@ export class InMemoryApprovedEstimateRepository implements ApprovedEstimateRepos
   }
 
   async findApprovedByTenant(query: EstimateRetrievalQuery): Promise<ApprovedEstimateContext[]> {
-    let results = [...this.estimates];
+    let results = this.estimates.filter((e) => e.tenantId === query.tenantId);
 
     if (query.verticalType) {
       results = results.filter((e) => e.verticalType === query.verticalType);
@@ -177,7 +179,7 @@ export class InMemoryApprovedEstimateRepository implements ApprovedEstimateRepos
   }
 
   async findSimilar(
-    _tenantId: string,
+    tenantId: string,
     categoryId: string,
     totalCentsRange: { min: number; max: number },
     limit: number
@@ -185,6 +187,7 @@ export class InMemoryApprovedEstimateRepository implements ApprovedEstimateRepos
     return this.estimates
       .filter(
         (e) =>
+          e.tenantId === tenantId &&
           e.categoryId === categoryId &&
           e.totals.totalCents >= totalCentsRange.min &&
           e.totals.totalCents <= totalCentsRange.max
@@ -193,7 +196,8 @@ export class InMemoryApprovedEstimateRepository implements ApprovedEstimateRepos
       .slice(0, limit);
   }
 
-  async getApprovalStats(_tenantId: string): Promise<ApprovalStats> {
-    return computeApprovalStats(this.estimates, 0);
+  async getApprovalStats(tenantId: string): Promise<ApprovalStats> {
+    const tenantEstimates = this.estimates.filter((e) => e.tenantId === tenantId);
+    return computeApprovalStats(tenantEstimates, 0);
   }
 }
