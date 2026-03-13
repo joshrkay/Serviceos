@@ -60,8 +60,6 @@ export async function computeVerticalQualityMetrics(
   const approved = relevantApprovals.filter(
     (a) => a.status === 'approved' || a.status === 'approved_with_edits'
   );
-  const approvedWithEdits = relevantApprovals.filter((a) => a.status === 'approved_with_edits');
-
   // Gather deltas for all estimates
   const allDeltas: EstimateEditDelta[] = [];
   for (const estimateId of estimateIds) {
@@ -73,8 +71,6 @@ export async function computeVerticalQualityMetrics(
 
   // Count correction patterns
   const fieldCounts = new Map<string, { count: number; numericDeltas: number[] }>();
-  let lineItemChanges = 0;
-  let totalLineItemDeltas = 0;
 
   for (const delta of allDeltas) {
     for (const entry of delta.deltas) {
@@ -85,11 +81,6 @@ export async function computeVerticalQualityMetrics(
         existing.numericDeltas.push(entry.newValue - entry.oldValue);
       }
       fieldCounts.set(field, existing);
-
-      if (entry.type.startsWith('line_item_')) {
-        lineItemChanges++;
-      }
-      totalLineItemDeltas++;
     }
   }
 

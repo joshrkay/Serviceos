@@ -90,12 +90,9 @@ export async function findTemplate(
   serviceCategory: ServiceCategory,
   repository: EstimateTemplateRepository
 ): Promise<EstimateTemplate | null> {
-  // Try exact match first
-  const exact = await repository.findByVerticalAndCategory(verticalType, serviceCategory);
-  if (exact) return exact;
-
-  // No fallback — return null
-  return null;
+  // Exact match only — no fallback
+  const match = await repository.findByVerticalAndCategory(verticalType, serviceCategory);
+  return match ?? null;
 }
 
 export class InMemoryEstimateTemplateRepository implements EstimateTemplateRepository {

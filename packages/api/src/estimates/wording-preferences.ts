@@ -49,9 +49,6 @@ export function captureWordingPreferences(
     const existing = prefMap.get(normalizedOriginal);
     if (existing) {
       existing.count += 1;
-      if (normalizedRevised === existing.preferred.toLowerCase().trim()) {
-        existing.count += 1;
-      }
     } else {
       prefMap.set(normalizedOriginal, { preferred: diff.revised, count: 1 });
     }

@@ -41,8 +41,6 @@ export function storeMissingItemSignal(
   repeatedItems: RepeatedItemSignal[],
   maxAge: Date = new Date()
 ): MissingItemSignal[] {
-  const daysSinceEpoch = maxAge.getTime() / (1000 * 60 * 60 * 24);
-
   return repeatedItems.map((item) => ({
     id: uuidv4(),
     tenantId: item.tenantId,
