@@ -75,6 +75,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'audit:view',
     'reports:view',
     'proposals:approve',
+    'proposals:edit',
     'proposals:view',
     // Phase 1
     'customers:create',
@@ -120,6 +121,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'files:view',
     'ai:run',
     'reports:view',
+    'proposals:approve',
+    'proposals:edit',
     'proposals:view',
     // Phase 1
     'customers:create',
