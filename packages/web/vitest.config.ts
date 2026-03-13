@@ -14,8 +14,8 @@ export default defineConfig({
       include: ['src/**/*.{ts,tsx}'],
       exclude: ['src/**/*.test.{ts,tsx}', 'src/test-setup.ts'],
       thresholds: {
-        // UI components: 60% minimum per PRD
-        lines: 60,
+        // UI components: 80% minimum
+        lines: 80,
       },
     },
   },
