@@ -87,8 +87,8 @@ export class InMemoryVerticalPackRegistry implements VerticalPackRegistry {
   private packs: Map<string, VerticalPack> = new Map();
 
   async register(pack: VerticalPack): Promise<VerticalPack> {
-    this.packs.set(pack.id, { ...pack });
-    return { ...pack };
+    this.packs.set(pack.id, JSON.parse(JSON.stringify(pack)));
+    return JSON.parse(JSON.stringify(pack));
   }
 
   async get(id: string): Promise<VerticalPack | null> {
