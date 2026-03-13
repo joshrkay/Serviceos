@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Service OS — Phase 0 Service Map</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+
+  header { background: #1a1d27; border-bottom: 1px solid #2d3148; padding: 24px 32px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 20px; font-weight: 700; color: #f8fafc; letter-spacing: -0.3px; }
+  header p { font-size: 13px; color: #64748b; margin-top: 2px; }
+  .badge { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 4px 10px; font-size: 12px; color: #94a3b8; }
+
+  .main { max-width: 1400px; margin: 0 auto; padding: 32px; }
+
+  /* Summary row */
+  .summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 36px; }
+  .stat { background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px; padding: 18px 20px; }
+  .stat-num { font-size: 28px; font-weight: 700; color: #f8fafc; line-height: 1; }
+  .stat-label { font-size: 12px; color: #64748b; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* Sections */
+  .section { margin-bottom: 36px; }
+  .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .section-header h2 { font-size: 15px; font-weight: 600; color: #f1f5f9; }
+  .section-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+
+  /* Cards */
+  .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px; padding: 16px 18px; transition: border-color 0.15s; }
+  .card:hover { border-color: #3d4268; }
+  .card-title { font-size: 13px; font-weight: 600; color: #f1f5f9; display: flex; align-items: center; gap: 8px; }
+  .card-sub { font-size: 11px; color: #64748b; margin-top: 4px; }
+  .card-story { font-size: 11px; color: #475569; margin-top: 10px; font-family: monospace; }
+  .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 3px; font-weight: 500; }
+
+  /* Status */
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .not-started { background: #374151; }
+  .pending { background: #d97706; }
+  .done { background: #10b981; }
+
+  /* AWS color */
+  .aws { border-left: 3px solid #ff9900; }
+  .clerk-card { border-left: 3px solid #7c3aed; }
+  .sentry-card { border-left: 3px solid #f43f5e; }
+  .twilio-card { border-left: 3px solid #ef4444; }
+  .stripe-card { border-left: 3px solid #635bff; }
+  .qb-card { border-left: 3px solid #2ca01c; }
+  .code-card { border-left: 3px solid #3b82f6; }
+
+  /* Tags */
+  .tag-infra { background: #451a03; color: #fb923c; }
+  .tag-auth { background: #2e1065; color: #c084fc; }
+  .tag-data { background: #042f2e; color: #34d399; }
+  .tag-platform { background: #0c1a2e; color: #60a5fa; }
+  .tag-ai { background: #1a0533; color: #e879f9; }
+  .tag-ops { background: #0f1f0f; color: #4ade80; }
+  .tag-workers { background: #1c1105; color: #fbbf24; }
+  .tag-storage { background: #0c1520; color: #38bdf8; }
+  .tag-voice { background: #1a0a0a; color: #f87171; }
+  .tag-conv { background: #0a1220; color: #818cf8; }
+  .tag-int { background: #111520; color: #a5b4fc; }
+  .tag-release { background: #0a1a0a; color: #86efac; }
+
+  /* Story table */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { background: #1a1d27; color: #64748b; text-align: left; padding: 10px 14px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; border-bottom: 1px solid #2d3148; }
+  td { padding: 10px 14px; border-bottom: 1px solid #1e2235; color: #cbd5e1; vertical-align: top; }
+  tr:hover td { background: #1e2235; }
+  .story-id { font-family: monospace; font-weight: 600; color: #60a5fa; font-size: 12px; }
+  .review-heavy { color: #f87171; font-weight: 600; }
+  .review-mod { color: #fbbf24; }
+  .review-light { color: #34d399; }
+  .dep-list { font-family: monospace; font-size: 10px; color: #475569; }
+
+  /* Module grid */
+  .module-card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 8px; padding: 14px 16px; }
+  .module-path { font-family: monospace; font-size: 11px; color: #60a5fa; margin-bottom: 8px; }
+  .module-items { list-style: none; }
+  .module-items li { font-size: 11px; color: #94a3b8; padding: 2px 0; display: flex; gap: 6px; align-items: center; }
+  .module-items li::before { content: '→'; color: #475569; flex-shrink: 0; }
+
+  .divider { border: none; border-top: 1px solid #2d3148; margin: 32px 0; }
+
+  .callout { background: #0f1d35; border: 1px solid #1d3461; border-radius: 8px; padding: 14px 18px; font-size: 12px; color: #93c5fd; line-height: 1.6; margin-bottom: 24px; }
+  .callout strong { color: #bfdbfe; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>AI Service OS — Phase 0 Service Map</h1>
+    <p>Platform Foundation · 18 stories · Complete build reference</p>
+  </div>
+  <span class="badge">Generated 2026-03-12</span>
+</header>
+
+<div class="main">
+
+  <!-- Summary -->
+  <div class="summary">
+    <div class="stat"><div class="stat-num">18</div><div class="stat-label">Stories</div></div>
+    <div class="stat"><div class="stat-num">7</div><div class="stat-label">AWS Services</div></div>
+    <div class="stat"><div class="stat-num">4</div><div class="stat-label">Third-Party SaaS</div></div>
+    <div class="stat"><div class="stat-num">22</div><div class="stat-label">Code Modules</div></div>
+    <div class="stat"><div class="stat-num">0</div><div class="stat-label">Files Written</div></div>
+  </div>
+
+  <div class="callout">
+    <strong>Current state:</strong> Codebase is scaffolded but empty — all <code>packages/api/src/</code>, <code>infra/</code>, and <code>packages/api/migrations/</code> directories exist with no source files. Everything below needs to be built from scratch.
+  </div>
+
+  <!-- AWS Services -->
+  <div class="section">
+    <div class="section-header">
+      <h2>☁️ AWS Services to Provision</h2>
+      <span class="section-tag tag-infra">IaC via CDK · TypeScript</span>
+    </div>
+    <div class="grid-4">
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> ECS / Fargate</div>
+        <div class="card-sub">Container runtime for the API service. Three clusters: dev, staging, prod.</div>
+        <div class="card-tags"><span class="tag tag-infra">P0-001</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> ECR</div>
+        <div class="card-sub">Container registry for Docker images. One repo per environment.</div>
+        <div class="card-tags"><span class="tag tag-infra">P0-001</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> ALB</div>
+        <div class="card-sub">Application Load Balancer. Routes traffic to ECS tasks, health check path <code>/health</code>.</div>
+        <div class="card-tags"><span class="tag tag-infra">P0-001</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> RDS Postgres</div>
+        <div class="card-sub">Primary database. Multi-AZ in prod. RLS-enabled. Drizzle ORM migrations.</div>
+        <div class="card-tags"><span class="tag tag-data">P0-001</span><span class="tag tag-data">P0-004</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> S3</div>
+        <div class="card-sub">File/attachment storage. Pre-signed URL uploads. Per-tenant prefix isolation.</div>
+        <div class="card-tags"><span class="tag tag-storage">P0-001</span><span class="tag tag-storage">P0-010</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> SQS</div>
+        <div class="card-sub">Async job queues. Standard queues + dead-letter queues. Transcription, diff, webhook queues.</div>
+        <div class="card-tags"><span class="tag tag-workers">P0-001</span><span class="tag tag-workers">P0-009</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> Secrets Manager</div>
+        <div class="card-sub">Runtime secret resolution. Separate paths per environment. Rotation-ready.</div>
+        <div class="card-tags"><span class="tag tag-platform">P0-006</span></div>
+      </div>
+      <div class="card aws">
+        <div class="card-title"><span class="status-dot not-started"></span> CloudWatch</div>
+        <div class="card-sub">Structured JSON logs. Log groups per service/environment. Metric filters for alerts.</div>
+        <div class="card-tags"><span class="tag tag-ops">P0-008</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Third-party SaaS -->
+  <div class="section">
+    <div class="section-header">
+      <h2>🔌 Third-Party Services to Configure</h2>
+      <span class="section-tag tag-auth">Accounts + API keys required</span>
+    </div>
+    <div class="grid-4">
+      <div class="card clerk-card">
+        <div class="card-title"><span class="status-dot not-started"></span> Clerk</div>
+        <div class="card-sub">Auth provider. Owner signup, sign-in, session JWTs, webhooks for user events, tenant bootstrap on first owner signup.</div>
+        <div class="card-tags"><span class="tag tag-auth">P0-002</span></div>
+      </div>
+      <div class="card sentry-card">
+        <div class="card-title"><span class="status-dot not-started"></span> Sentry</div>
+        <div class="card-sub">Error/exception tracking. DSN per environment. Integrates with structured logger. No PII in payloads.</div>
+        <div class="card-tags"><span class="tag tag-ops">P0-008</span></div>
+      </div>
+      <div class="card stripe-card">
+        <div class="card-title"><span class="status-dot not-started"></span> Stripe</div>
+        <div class="card-sub">Payment links only (Phase 0: foundation webhook handler). Full payment flow in later phases.</div>
+        <div class="card-tags"><span class="tag tag-int">P0-014</span></div>
+      </div>
+      <div class="card twilio-card">
+        <div class="card-title"><span class="status-dot not-started"></span> Twilio</div>
+        <div class="card-sub">SMS operational messages. Webhook ingestion handler needed for Phase 0 foundation.</div>
+        <div class="card-tags"><span class="tag tag-int">P0-014</span></div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Code modules -->
+  <div class="section">
+    <div class="section-header">
+      <h2>🗂️ Code Modules to Build</h2>
+      <span class="section-tag tag-platform">packages/api/src/</span>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+
+      <div class="module-card code-card" style="border-left-color: #7c3aed;">
+        <div class="module-path">auth/ &amp; middleware/</div>
+        <ul class="module-items">
+          <li>Clerk JWT verification middleware</li>
+          <li>Tenant extraction + context injection</li>
+          <li>Role model (owner / dispatcher / technician)</li>
+          <li>Permission middleware + RBAC checks</li>
+          <li>First-owner tenant bootstrap on signup</li>
+          <li>403/401 error responses</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-auth">P0-002</span><span class="tag tag-auth">P0-003</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #34d399;">
+        <div class="module-path">db/</div>
+        <ul class="module-items">
+          <li>Postgres connection pool (pg)</li>
+          <li>RLS setup + tenant context setting</li>
+          <li>Migration runner (up/down/status)</li>
+          <li>Initial schema migrations</li>
+          <li>Tenants, users, roles tables</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-data">P0-004</span></div>
+      </div>
+
+      <div class="module-card code-card">
+        <div class="module-path">shared/ &amp; config/</div>
+        <ul class="module-items">
+          <li>Standard response envelope</li>
+          <li>Structured error types + codes</li>
+          <li>Zod validation helpers</li>
+          <li>Health endpoint (<code>GET /health</code>)</li>
+          <li>Correlation ID middleware</li>
+          <li>Env config validation on startup</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-platform">P0-005</span></div>
+      </div>
+
+      <div class="module-card code-card">
+        <div class="module-path">secrets/</div>
+        <ul class="module-items">
+          <li>AWS Secrets Manager client</li>
+          <li>Environment-scoped secret paths</li>
+          <li>Startup validation (fail-fast)</li>
+          <li>Platform vs tenant secret separation</li>
+          <li>Local <code>.env</code> fallback for dev</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-platform">P0-006</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #f59e0b;">
+        <div class="module-path">audit/</div>
+        <ul class="module-items">
+          <li>Audit events table + migration</li>
+          <li><code>emitAuditEvent()</code> function</li>
+          <li>Actor, tenant, entity, event type fields</li>
+          <li>Correlation ID linkage</li>
+          <li>Append-only (no deletes/updates)</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-platform">P0-007</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #4ade80;">
+        <div class="module-path">logging/ &amp; monitoring/</div>
+        <ul class="module-items">
+          <li>Pino JSON structured logger</li>
+          <li>Correlation ID in every log entry</li>
+          <li>No-PII log sanitizer</li>
+          <li>Sentry integration (<code>@sentry/node</code>)</li>
+          <li>Health metrics endpoint</li>
+          <li>Request/response logging middleware</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-ops">P0-008</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #fbbf24;">
+        <div class="module-path">queues/ &amp; workers/</div>
+        <ul class="module-items">
+          <li>SQS queue definitions (transcription, diff, webhook)</li>
+          <li>Base worker class (poll → process → ack)</li>
+          <li>Retry logic + visibility timeout</li>
+          <li>Dead-letter queue routing</li>
+          <li>Idempotency guidance pattern</li>
+          <li>Worker registry</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-workers">P0-009</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #38bdf8;">
+        <div class="module-path">files/</div>
+        <ul class="module-items">
+          <li>S3 presigned URL upload flow</li>
+          <li>File metadata table + migration</li>
+          <li>Entity linkage (polymorphic)</li>
+          <li>Secure retrieval (tenant-scoped)</li>
+          <li>MIME type validation</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-storage">P0-010</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #818cf8;">
+        <div class="module-path">conversations/</div>
+        <ul class="module-items">
+          <li>Thread + message tables + migrations</li>
+          <li>Message types: text, transcript, system-event, note</li>
+          <li>Entity linkage (job, customer, etc.)</li>
+          <li>Source tracking (user, ai, system)</li>
+          <li>Thread permission checks</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-conv">P0-011</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #f87171;">
+        <div class="module-path">voice/ &amp; workers/transcription</div>
+        <ul class="module-items">
+          <li>Audio upload endpoint</li>
+          <li>Enqueue transcription job to SQS</li>
+          <li>Transcription worker (Whisper/provider)</li>
+          <li>Status tracking (pending → processing → done)</li>
+          <li>Transcript linked to conversation thread</li>
+          <li>Source audio preserved in S3</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-voice">P0-012</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #86efac;">
+        <div class="module-path">flags/</div>
+        <ul class="module-items">
+          <li>Feature flag store (env + tenant scoped)</li>
+          <li><code>isEnabled(flag, ctx)</code> helper</li>
+          <li>Static flag definitions file</li>
+          <li>Override support for tenants</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-release">P0-013</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #a5b4fc;">
+        <div class="module-path">webhooks/</div>
+        <ul class="module-items">
+          <li>Signed webhook ingestion base</li>
+          <li>Replay protection (idempotency key store)</li>
+          <li>Async handoff to SQS</li>
+          <li>Clerk webhook handler</li>
+          <li>Stripe webhook handler (stub)</li>
+          <li>Twilio webhook handler (stub)</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-int">P0-014</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #e879f9;">
+        <div class="module-path">ai/runs/</div>
+        <ul class="module-items">
+          <li>AI run table + migration</li>
+          <li>Task type, model, prompt version fields</li>
+          <li>Input/output snapshot refs (S3)</li>
+          <li>Status + timing metadata</li>
+          <li><code>logAiRun()</code> helper</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-ai">P0-015</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #e879f9;">
+        <div class="module-path">ai/prompts/</div>
+        <ul class="module-items">
+          <li>Prompt version registry table + migration</li>
+          <li>Task type, version, active status</li>
+          <li>Linkage to AI runs</li>
+          <li><code>getActivePrompt(taskType)</code></li>
+          <li>Rollback-safe versioning</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-ai">P0-016</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #e879f9;">
+        <div class="module-path">ai/revisions/</div>
+        <ul class="module-items">
+          <li>Revision snapshots table + migration</li>
+          <li>Entity type + ID + version number</li>
+          <li>Snapshot content (JSON)</li>
+          <li>Source (user / ai) + actor ID</li>
+          <li><code>saveRevision()</code> + <code>getRevisions()</code></li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-ai">P0-017</span></div>
+      </div>
+
+      <div class="module-card code-card" style="border-left-color: #e879f9;">
+        <div class="module-path">ai/diff/ (worker)</div>
+        <ul class="module-items">
+          <li>Diff worker base contract</li>
+          <li>Compares two revision snapshots</li>
+          <li>Stores normalized diff output</li>
+          <li>Diff results table + migration</li>
+          <li>Enqueued via SQS on new revision</li>
+        </ul>
+        <div class="card-tags" style="margin-top:10px;"><span class="tag tag-ai">P0-018</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Infra -->
+  <div class="section">
+    <div class="section-header">
+      <h2>🏗️ Infrastructure Files to Build</h2>
+      <span class="section-tag tag-infra">infra/ · AWS CDK TypeScript</span>
+    </div>
+    <div class="grid-3">
+      <div class="card aws">
+        <div class="card-title">Network Stack</div>
+        <div class="card-sub">VPC, subnets (public/private), security groups, NAT gateway</div>
+        <div class="card-story">infra/lib/network-stack.ts</div>
+      </div>
+      <div class="card aws">
+        <div class="card-title">Data Stack</div>
+        <div class="card-sub">RDS Postgres (dev/staging/prod), S3 buckets, parameter groups</div>
+        <div class="card-story">infra/lib/data-stack.ts</div>
+      </div>
+      <div class="card aws">
+        <div class="card-title">App Stack</div>
+        <div class="card-sub">ECS cluster, Fargate task def, ALB, ECR repo, service auto-scaling</div>
+        <div class="card-story">infra/lib/app-stack.ts</div>
+      </div>
+      <div class="card aws">
+        <div class="card-title">Queue Stack</div>
+        <div class="card-sub">SQS queues + DLQs: transcription, diff-analysis, webhooks</div>
+        <div class="card-story">infra/lib/queue-stack.ts</div>
+      </div>
+      <div class="card aws">
+        <div class="card-title">Secrets Stack</div>
+        <div class="card-sub">Secrets Manager placeholders per env, IAM role grants</div>
+        <div class="card-story">infra/lib/secrets-stack.ts</div>
+      </div>
+      <div class="card aws">
+        <div class="card-title">Observability Stack</div>
+        <div class="card-sub">CloudWatch log groups, metric filters, alarm stubs</div>
+        <div class="card-story">infra/lib/observability-stack.ts</div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Migrations -->
+  <div class="section">
+    <div class="section-header">
+      <h2>🗄️ Database Migrations Needed</h2>
+      <span class="section-tag tag-data">packages/api/migrations/</span>
+    </div>
+    <div class="grid-4">
+      <div class="card" style="border-left: 3px solid #34d399;">
+        <div class="card-title">001 — tenants + users</div>
+        <div class="card-sub">Core multi-tenant schema. Tenants table, users table, roles, RLS policies.</div>
+        <div class="card-story">P0-002, P0-004</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #34d399;">
+        <div class="card-title">002 — audit_events</div>
+        <div class="card-sub">Append-only audit log. Actor, entity, event type, correlation ID, metadata JSONB.</div>
+        <div class="card-story">P0-007</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #34d399;">
+        <div class="card-title">003 — files</div>
+        <div class="card-sub">File metadata. S3 key, MIME, size, entity linkage (polymorphic), uploader.</div>
+        <div class="card-story">P0-010</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #34d399;">
+        <div class="card-title">004 — conversations</div>
+        <div class="card-sub">Threads + messages. Message type enum, source, entity linkage.</div>
+        <div class="card-story">P0-011</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #34d399;">
+        <div class="card-title">005 — transcriptions</div>
+        <div class="card-sub">Transcription jobs. Status enum, result text, file ID FK, conversation link.</div>
+        <div class="card-story">P0-012</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #34d399;">
+        <div class="card-title">006 — webhook_events</div>
+        <div class="card-sub">Idempotency store. Provider, event ID, payload hash, processed_at.</div>
+        <div class="card-story">P0-014</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #e879f9;">
+        <div class="card-title">007 — ai_runs</div>
+        <div class="card-sub">AI run log. Task type, model, prompt version ref, status, timing, input/output refs.</div>
+        <div class="card-story">P0-015</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #e879f9;">
+        <div class="card-title">008 — prompt_versions</div>
+        <div class="card-sub">Prompt registry. Task type, version, content hash, active flag.</div>
+        <div class="card-story">P0-016</div>
+      </div>
+      <div class="card" style="border-left: 3px solid #e879f9;">
+        <div class="card-title">009 — revisions + diffs</div>
+        <div class="card-sub">Document revisions + diff results. Entity snapshot JSONB, diff output JSONB.</div>
+        <div class="card-story">P0-017, P0-018</div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- CI/CD -->
+  <div class="section">
+    <div class="section-header">
+      <h2>⚙️ CI/CD Workflows Needed</h2>
+      <span class="section-tag tag-ops">.github/workflows/</span>
+    </div>
+    <div class="grid-3">
+      <div class="card">
+        <div class="card-title">ci.yml</div>
+        <div class="card-sub">On PR: typecheck → lint → unit tests → integration tests (Testcontainers). Required to pass before merge.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">deploy-staging.yml</div>
+        <div class="card-sub">On push to main: build Docker image → push to ECR → deploy to staging ECS via CDK.</div>
+      </div>
+      <div class="card">
+        <div class="card-title">deploy-prod.yml</div>
+        <div class="card-sub">Manual trigger (or tag): deploy prod stack. Requires human approval step in GitHub Actions.</div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- Story table -->
+  <div class="section">
+    <div class="section-header">
+      <h2>📋 Story Execution Order</h2>
+      <span class="section-tag tag-platform">Build sequence with dependencies</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Title</th>
+          <th>Layer</th>
+          <th>Human Review</th>
+          <th>Dependencies</th>
+          <th>Key Deliverable</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="story-id">P0-001</td><td>Cloud environments &amp; CDK baseline</td><td><span class="tag tag-infra">Infra</span></td><td class="review-mod">Moderate</td><td class="dep-list">—</td><td>Dev/staging/prod CDK stacks</td></tr>
+        <tr><td class="story-id">P0-002</td><td>Clerk auth &amp; tenant bootstrap</td><td><span class="tag tag-auth">Auth</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-001</td><td>Tenant creation on first owner signup</td></tr>
+        <tr><td class="story-id">P0-003</td><td>RBAC — owner / dispatcher / technician</td><td><span class="tag tag-auth">Auth</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-002</td><td>Permission middleware + role model</td></tr>
+        <tr><td class="story-id">P0-004</td><td>Tenant-safe Postgres schema + RLS</td><td><span class="tag tag-data">Data</span></td><td class="review-heavy">Heavy ⚠️</td><td class="dep-list">P0-001, P0-002</td><td>RLS policies, initial migrations</td></tr>
+        <tr><td class="story-id">P0-005</td><td>Backend service skeleton + shared contracts</td><td><span class="tag tag-platform">Platform</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-001–004</td><td>Express app, health endpoint, error types</td></tr>
+        <tr><td class="story-id">P0-006</td><td>Secrets / config framework</td><td><span class="tag tag-platform">Platform</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-001, P0-005</td><td>Secrets Manager client, startup validation</td></tr>
+        <tr><td class="story-id">P0-007</td><td>Audit logging foundation</td><td><span class="tag tag-platform">Trust</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-002, P0-004, P0-005</td><td>Append-only audit_events table + emitter</td></tr>
+        <tr><td class="story-id">P0-008</td><td>Observability, structured logging, Sentry</td><td><span class="tag tag-ops">Ops</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-001, P0-005</td><td>Pino logger, Sentry integration</td></tr>
+        <tr><td class="story-id">P0-009</td><td>Async job processing with SQS</td><td><span class="tag tag-workers">Workers</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-001, P0-005, P0-008</td><td>Base worker class, queue definitions</td></tr>
+        <tr><td class="story-id">P0-010</td><td>File upload &amp; attachment storage</td><td><span class="tag tag-storage">Storage</span></td><td class="review-light">Light</td><td class="dep-list">P0-001, P0-004, P0-005</td><td>S3 presigned uploads, files metadata table</td></tr>
+        <tr><td class="story-id">P0-011</td><td>Conversation &amp; message persistence</td><td><span class="tag tag-conv">Conv</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-004, P0-010</td><td>Thread/message model, 4 message types</td></tr>
+        <tr><td class="story-id">P0-012</td><td>Voice ingestion &amp; transcription pipeline</td><td><span class="tag tag-voice">Voice</span></td><td class="review-heavy">Heavy ⚠️</td><td class="dep-list">P0-009, P0-010, P0-011</td><td>Audio upload → SQS → transcript → thread</td></tr>
+        <tr><td class="story-id">P0-013</td><td>Feature flags &amp; environment gating</td><td><span class="tag tag-release">Release</span></td><td class="review-light">Light</td><td class="dep-list">P0-006</td><td>isEnabled() helper, env/tenant scoping</td></tr>
+        <tr><td class="story-id">P0-014</td><td>Webhook security &amp; idempotency</td><td><span class="tag tag-int">Integrations</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-006, P0-009</td><td>Signed ingestion + replay protection</td></tr>
+        <tr><td class="story-id">P0-015</td><td>AI run logging foundation</td><td><span class="tag tag-ai">AI</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-004, P0-005, P0-007</td><td>ai_runs table, logAiRun() helper</td></tr>
+        <tr><td class="story-id">P0-016</td><td>Prompt version registry</td><td><span class="tag tag-ai">AI</span></td><td class="review-light">Light</td><td class="dep-list">P0-015</td><td>prompt_versions table, getActivePrompt()</td></tr>
+        <tr><td class="story-id">P0-017</td><td>Document revision storage</td><td><span class="tag tag-ai">AI</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-004, P0-005</td><td>Revision snapshots, saveRevision()</td></tr>
+        <tr><td class="story-id">P0-018</td><td>Async diff-analysis worker</td><td><span class="tag tag-ai">AI</span></td><td class="review-mod">Moderate</td><td class="dep-list">P0-009, P0-017</td><td>Diff worker, normalized diff output table</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Build order callout -->
+  <div class="callout" style="background:#0f1f10; border-color: #1a4020; color: #86efac; margin-top: 24px;">
+    <strong>Suggested parallel build tracks:</strong><br>
+    Track A (unblocked now): <strong>P0-001</strong> → P0-002 → P0-003 → P0-004 → P0-005 → P0-006/P0-007/P0-008 (parallel) → P0-009<br>
+    Track B (after P0-009 + P0-010): P0-011 → P0-012 &nbsp;|&nbsp; P0-013 (tiny, can go any time after P0-006) &nbsp;|&nbsp; P0-014<br>
+    Track C (after P0-015): P0-016 → then P0-017 → P0-018
+  </div>
+
+</div>
+</body>
+</html>
