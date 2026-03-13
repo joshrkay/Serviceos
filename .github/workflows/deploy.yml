@@ -39,14 +39,66 @@ jobs:
       - name: Coverage check
         run: npm run test:coverage
 
-      - name: CDK synth
-        run: npx cdk synth
-        working-directory: infra
-
       - name: Migration dry-run
         run: npm run migrate:dryrun
         working-directory: packages/api
 
+  # Railway deployment pipeline (primary)
+  deploy-railway-dev:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (dev)
+        run: railway up --service api --environment dev --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (dev)
+        run: railway up --service web --environment dev --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  deploy-railway-staging:
+    needs: deploy-railway-dev
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (staging)
+        run: railway up --service api --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (staging)
+        run: railway up --service web --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  deploy-railway-prod:
+    needs: deploy-railway-staging
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (prod)
+        run: railway up --service api --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (prod)
+        run: railway up --service web --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
+  # AWS CDK deployment pipeline (kept as fallback — remove when Railway is confirmed stable)
   deploy-dev:
     needs: test
     if: github.ref == 'refs/heads/main'
