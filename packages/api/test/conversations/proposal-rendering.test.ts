@@ -1,6 +1,7 @@
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
 import {
   createProposalMessage,
+  updateProposalMessage,
   getAvailableActions,
   buildProposalCard,
 } from '../../src/conversations/proposal-rendering';
@@ -81,6 +82,29 @@ describe('P2-022 — Inline proposal rendering in conversation', () => {
 
     const card = buildProposalCard(proposal);
     expect(card.actions).toEqual(['approve', 'reject', 'edit']);
+  });
+
+  it('happy path — updateProposalMessage updates metadata on status change', async () => {
+    const conv = await conversationRepo.createConversation({
+      tenantId: 'tenant-1',
+      createdBy: 'user-1',
+    });
+
+    let proposal = createProposal(baseInput);
+    const { messageId } = await createProposalMessage(
+      conversationRepo, 'tenant-1', conv.id, proposal, 'user-1'
+    );
+
+    // Transition to approved
+    proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+    proposal = transitionProposal(proposal, 'approved', 'user-1');
+
+    await updateProposalMessage(conversationRepo, 'tenant-1', messageId, proposal);
+
+    const messages = await conversationRepo.getMessages('tenant-1', conv.id);
+    const msg = messages[0];
+    expect(msg.metadata!.status).toBe('approved');
+    expect(msg.metadata!.actions).toEqual(['execute']);
   });
 
   it('validation — executed proposal has no actions', () => {

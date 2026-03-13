@@ -56,6 +56,7 @@ export interface ConversationRepository {
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<Conversation[]>;
   addMessage(input: CreateMessageInput): Promise<Message>;
   getMessages(tenantId: string, conversationId: string): Promise<Message[]>;
+  updateMessageMetadata(tenantId: string, messageId: string, metadata: Record<string, unknown>): Promise<Message | null>;
 }
 
 export function validateCreateConversation(input: CreateConversationInput): string[] {
@@ -135,5 +136,19 @@ export class InMemoryConversationRepository implements ConversationRepository {
     return this.messages.filter(
       (m) => m.tenantId === tenantId && m.conversationId === conversationId
     );
+  }
+
+  async updateMessageMetadata(
+    tenantId: string,
+    messageId: string,
+    metadata: Record<string, unknown>
+  ): Promise<Message | null> {
+    const idx = this.messages.findIndex((m) => m.id === messageId && m.tenantId === tenantId);
+    if (idx === -1) return null;
+    this.messages[idx] = {
+      ...this.messages[idx],
+      metadata: { ...this.messages[idx].metadata, ...metadata },
+    };
+    return { ...this.messages[idx] };
   }
 }

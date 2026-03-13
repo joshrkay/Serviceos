@@ -5,7 +5,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/api/package.json packages/api/
 COPY packages/web/package.json packages/web/
-COPY infra/package.json infra/
 RUN npm ci --ignore-scripts
 
 # Build API
@@ -26,7 +25,6 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY packages/api/package.json packages/api/
-COPY infra/package.json infra/
 COPY packages/web/package.json packages/web/
 RUN npm ci --omit=dev --ignore-scripts
 COPY --from=api-build /app/packages/api/dist packages/api/dist

@@ -14,9 +14,6 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
-      - name: Type check
-        run: npx tsc --noEmit
-        working-directory: infra
       - name: Type check API
         run: npx tsc --noEmit
         working-directory: packages/api
@@ -43,7 +40,6 @@ jobs:
         run: npm run migrate:dryrun
         working-directory: packages/api
 
-  # Railway deployment pipeline (primary)
   deploy-railway-dev:
     needs: test
     if: github.ref == 'refs/heads/main'
@@ -97,64 +93,3 @@ jobs:
         run: railway up --service web --environment production --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-  # AWS CDK deployment pipeline (kept as fallback — remove when Railway is confirmed stable)
-  deploy-dev:
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-dev --require-approval never
-        working-directory: infra
-
-  deploy-staging:
-    needs: deploy-dev
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: staging
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-staging --require-approval never
-        working-directory: infra
-      # TODO(P7-018): Add staging smoke tests when Playwright E2E is introduced
-      # - name: Staging smoke tests
-      #   run: npm run test:smoke -- --env=staging
-
-  deploy-prod:
-    needs: deploy-staging
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: prod
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-prod --require-approval broadening
-        working-directory: infra
