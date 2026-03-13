@@ -48,10 +48,13 @@ export async function identifyBundlePatterns(
 ): Promise<BundlePattern[]> {
   const minFreq = options.minFrequency ?? 2;
 
+  // Cap inputs to prevent O(n * L²) DoS with large datasets
+  const capped = approvedEstimates.slice(0, 500);
+
   // Group line item sets by estimate
-  const itemSets: string[][] = approvedEstimates
+  const itemSets: string[][] = capped
     .filter((e) => e.lineItemSummary.length >= 2)
-    .map((e) => e.lineItemSummary.map((s) => normalizeDesc(s)).sort());
+    .map((e) => e.lineItemSummary.slice(0, 20).map((s) => normalizeDesc(s)).sort());
 
   // Find co-occurring pairs
   const pairCounts = new Map<string, { items: BundleItem[]; count: number; lastSeen: Date }>();

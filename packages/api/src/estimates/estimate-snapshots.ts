@@ -41,7 +41,7 @@ export function createEstimateSummarySnapshot(
     serviceCategory: options?.serviceCategory,
     lineItemDescriptions: [...lineItemDescriptions],
     totalCents,
-    customerMessage: options?.customerMessage,
+    customerMessage: options?.customerMessage?.slice(0, 500),
     approvalOutcome,
     createdAt: new Date(),
   };

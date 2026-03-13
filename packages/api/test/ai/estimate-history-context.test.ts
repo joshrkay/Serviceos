@@ -74,6 +74,29 @@ describe('P4-009C — History- and signal-aware context assembly', () => {
     expect(context.bundleSuggestions).toHaveLength(0);
   });
 
+  it('happy path — trims history when context would exceed token budget', async () => {
+    // Seed many snapshots with very long descriptions to push context over MAX_CONTEXT_TOKENS (8000 ≈ 32K chars)
+    for (let i = 0; i < 5; i++) {
+      const longItems = Array.from({ length: 50 }, (_, j) => `Line item ${i}-${j}: ${'X'.repeat(200)} detailed description for budget test`);
+      const snap = createEstimateSummarySnapshot('t1', `est-large-${i}`, longItems, 50000, 'approved', { verticalType: 'hvac', customerMessage: 'A'.repeat(500) });
+      await snapshotRepo.create(snap);
+    }
+
+    // Seed many wording preferences
+    for (let i = 0; i < 10; i++) {
+      await wordingRepo.upsert('t1', `original phrase ${i} that is somewhat long`, `preferred phrase ${i} that is also somewhat long`, 'hvac');
+    }
+
+    const full = await assembleFullEstimateContext(
+      { tenant: { name: 'Test' } },
+      null, null, 't1', 'hvac', undefined,
+      { snapshotRepo, bundleRepo, wordingRepo, missingItemRepo }
+    );
+
+    // History should be trimmed — fewer approved examples than the 5 max
+    expect(full.history.approvedExamples.length).toBeLessThanOrEqual(3);
+  });
+
   it('mock provider — full context assembly combines vertical and history', async () => {
     const full = await assembleFullEstimateContext(
       { tenant: { name: 'Test' } },

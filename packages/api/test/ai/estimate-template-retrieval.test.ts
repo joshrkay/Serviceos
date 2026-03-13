@@ -45,14 +45,24 @@ describe('P4-004B — Template retrieval by vertical and category', () => {
     expect(template!.name).toBe('Drain Service');
   });
 
-  it('happy path — returns null for no match', async () => {
+  it('happy path — falls back to vertical default when no category match', async () => {
+    // No HVAC emergency template exists, so falls back to lowest-sortOrder HVAC template
     const template = await findTemplate('hvac', 'emergency', repo);
-    expect(template).toBeNull();
+    expect(template).not.toBeNull();
+    expect(template!.verticalType).toBe('hvac');
   });
 
-  it('happy path — does not cross verticals', async () => {
+  it('happy path — fallback does not cross verticals', async () => {
+    // No plumbing diagnostic template, but falls back to plumbing's drain template
     const template = await findTemplate('plumbing', 'diagnostic', repo);
-    // No plumbing diagnostic template exists
+    expect(template).not.toBeNull();
+    expect(template!.verticalType).toBe('plumbing');
+    expect(template!.name).toBe('Drain Service');
+  });
+
+  it('happy path — returns null when no templates for vertical exist', async () => {
+    const emptyRepo = new InMemoryEstimateTemplateRepository();
+    const template = await findTemplate('hvac', 'diagnostic', emptyRepo);
     expect(template).toBeNull();
   });
 

@@ -24,6 +24,8 @@ export function validateWordingPreference(pref: Partial<WordingPreference>): str
   if (!pref.tenantId) errors.push('tenantId is required');
   if (!pref.canonicalPhrase) errors.push('canonicalPhrase is required');
   if (!pref.preferredPhrase) errors.push('preferredPhrase is required');
+  if (pref.canonicalPhrase && pref.canonicalPhrase.length > 200) errors.push('canonicalPhrase must be 200 characters or fewer');
+  if (pref.preferredPhrase && pref.preferredPhrase.length > 200) errors.push('preferredPhrase must be 200 characters or fewer');
   if (pref.canonicalPhrase === pref.preferredPhrase) errors.push('canonicalPhrase and preferredPhrase must differ');
   return errors;
 }

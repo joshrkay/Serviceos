@@ -90,9 +90,18 @@ export async function findTemplate(
   serviceCategory: ServiceCategory,
   repository: EstimateTemplateRepository
 ): Promise<EstimateTemplate | null> {
-  // Exact match only — no fallback
-  const match = await repository.findByVerticalAndCategory(verticalType, serviceCategory);
-  return match ?? null;
+  // Exact match: verticalType + serviceCategory
+  const exact = await repository.findByVerticalAndCategory(verticalType, serviceCategory);
+  if (exact) return exact;
+
+  // Fallback: lowest-sortOrder template for the vertical (vertical-only default)
+  const verticalTemplates = await repository.findByVertical(verticalType);
+  if (verticalTemplates.length > 0) {
+    const sorted = verticalTemplates.sort((a, b) => a.sortOrder - b.sortOrder);
+    return sorted[0];
+  }
+
+  return null;
 }
 
 export class InMemoryEstimateTemplateRepository implements EstimateTemplateRepository {

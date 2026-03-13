@@ -45,7 +45,8 @@ export async function activatePack(
       activatedAt: new Date(),
       deactivatedAt: undefined,
     });
-    return reactivated!;
+    if (!reactivated) throw new Error('Failed to reactivate pack');
+    return reactivated;
   }
 
   const activation: TenantPackActivation = {

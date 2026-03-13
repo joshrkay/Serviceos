@@ -33,7 +33,7 @@ export async function detectRepeatedlyAddedItems(
     const deltas = await deltaRepo.findByEstimate(tenantId, estimateId);
     for (const delta of deltas) {
       for (const entry of delta.deltas) {
-        if (entry.type === 'line_item_added' && entry.newValue) {
+        if (entry.type === 'line_item_added' && entry.newValue && typeof entry.newValue === 'object') {
           const item = entry.newValue as Record<string, unknown>;
           const desc = typeof item.description === 'string' ? item.description : '';
           if (!desc) continue;
