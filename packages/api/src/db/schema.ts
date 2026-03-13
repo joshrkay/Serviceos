@@ -714,7 +714,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_wp_tenant ON wording_preferences(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_wp_scope ON wording_preferences(tenant_id, scope);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_wp_tenant_key ON wording_preferences(tenant_id, key);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_wp_tenant_scope_key ON wording_preferences(tenant_id, scope, key);
     ALTER TABLE wording_preferences ENABLE ROW LEVEL SECURITY;
     ALTER TABLE wording_preferences FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_wording ON wording_preferences
