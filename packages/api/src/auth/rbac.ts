@@ -22,6 +22,7 @@ export type Permission =
   | 'reports:view'
   | 'proposals:approve'
   | 'proposals:view'
+  | 'proposals:edit'
   // Phase 1 permissions
   | 'customers:create'
   | 'customers:view'
