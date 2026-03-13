@@ -11,6 +11,12 @@ export interface TranscriptMessageProps {
   createdAt?: string;
 }
 
+function formatTime(dateString: string): string {
+  const date = new Date(dateString);
+  if (isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString();
+}
+
 export function TranscriptMessage({
   transcript,
   status,
@@ -26,9 +32,9 @@ export function TranscriptMessage({
         <div className="transcript-header">
           <span className="transcript-sender" data-testid="transcript-sender">{senderId}</span>
           {senderRole && <span className="transcript-role">{senderRole}</span>}
-          {createdAt && (
+          {createdAt && formatTime(createdAt) && (
             <span className="transcript-time">
-              {new Date(createdAt).toLocaleTimeString()}
+              {formatTime(createdAt)}
             </span>
           )}
         </div>

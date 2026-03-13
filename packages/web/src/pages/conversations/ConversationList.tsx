@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { Conversation } from '../../types/conversation';
 import { SearchBar } from '../../components/conversations/SearchBar';
 
@@ -38,9 +38,17 @@ export function ConversationList({
 }: ConversationListProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Stabilize searchFields reference to avoid unnecessary re-filtering
+  const searchFieldsJson = JSON.stringify(searchFields);
+  const stableSearchFields = useRef(searchFields);
+  if (JSON.stringify(stableSearchFields.current) !== searchFieldsJson) {
+    stableSearchFields.current = searchFields;
+  }
+
   const filtered = useMemo(
-    () => sortByRecent(filterConversations(conversations, searchQuery, searchFields)),
-    [conversations, searchQuery, searchFields]
+    () => sortByRecent(filterConversations(conversations, searchQuery, stableSearchFields.current)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [conversations, searchQuery, searchFieldsJson]
   );
 
   return (

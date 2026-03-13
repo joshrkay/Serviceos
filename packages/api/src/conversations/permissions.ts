@@ -84,8 +84,16 @@ export function requireConversationAccess(
       return;
     }
 
-    if (!isValidRole(req.auth.role)) {
-      res.status(403).json({ error: 'FORBIDDEN', message: 'Invalid role' });
+    let conversation: ConversationRecord | null;
+    try {
+      conversation = await getConversation(req.auth.tenantId, conversationId);
+    } catch (err) {
+      res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to check conversation access' });
+      return;
+    }
+
+    if (!conversation) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
       return;
     }
 

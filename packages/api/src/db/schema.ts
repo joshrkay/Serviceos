@@ -269,6 +269,365 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_idempotency ON webhook_events(source, idempotency_key);
     CREATE INDEX IF NOT EXISTS idx_webhook_status ON webhook_events(status);
   `,
+
+  // Phase 1 — Core Business Entity Migrations
+
+  '013_create_tenant_settings': `
+    CREATE TABLE IF NOT EXISTS tenant_settings (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL UNIQUE REFERENCES tenants(id),
+      business_name TEXT NOT NULL,
+      business_phone TEXT,
+      business_email TEXT,
+      timezone TEXT NOT NULL DEFAULT 'America/New_York',
+      estimate_prefix TEXT NOT NULL DEFAULT 'EST-',
+      invoice_prefix TEXT NOT NULL DEFAULT 'INV-',
+      next_estimate_number INTEGER NOT NULL DEFAULT 1,
+      next_invoice_number INTEGER NOT NULL DEFAULT 1,
+      default_payment_term_days INTEGER NOT NULL DEFAULT 30,
+      terminology_preferences JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE tenant_settings ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_settings ON tenant_settings
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '014_create_customers': `
+    CREATE TABLE IF NOT EXISTS customers (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      first_name TEXT NOT NULL DEFAULT '',
+      last_name TEXT NOT NULL DEFAULT '',
+      display_name TEXT NOT NULL,
+      company_name TEXT,
+      primary_phone TEXT,
+      secondary_phone TEXT,
+      email TEXT,
+      preferred_channel TEXT NOT NULL DEFAULT 'none' CHECK (preferred_channel IN ('phone', 'email', 'sms', 'none')),
+      sms_consent BOOLEAN NOT NULL DEFAULT false,
+      communication_notes TEXT,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      archived_at TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_customers_tenant ON customers(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(tenant_id, display_name);
+    CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(tenant_id, email);
+    CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(tenant_id, primary_phone);
+    ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_customers ON customers
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '015_create_service_locations': `
+    CREATE TABLE IF NOT EXISTS service_locations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      label TEXT,
+      street1 TEXT NOT NULL,
+      street2 TEXT,
+      city TEXT NOT NULL,
+      state TEXT NOT NULL,
+      postal_code TEXT NOT NULL,
+      country TEXT NOT NULL DEFAULT 'US',
+      latitude NUMERIC,
+      longitude NUMERIC,
+      access_notes TEXT,
+      is_primary BOOLEAN NOT NULL DEFAULT false,
+      is_archived BOOLEAN NOT NULL DEFAULT false,
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_locations_tenant ON service_locations(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_locations_customer ON service_locations(customer_id);
+    ALTER TABLE service_locations ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_locations ON service_locations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '016_create_jobs': `
+    CREATE TABLE IF NOT EXISTS jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      location_id UUID NOT NULL REFERENCES service_locations(id),
+      job_number TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      problem_description TEXT,
+      status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'scheduled', 'in_progress', 'completed', 'canceled')),
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+      assigned_technician_id UUID REFERENCES users(id),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_tenant ON jobs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_customer ON jobs(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(tenant_id, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_number ON jobs(tenant_id, job_number);
+    ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_jobs ON jobs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '017_create_job_timeline_events': `
+    CREATE TABLE IF NOT EXISTS job_timeline_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      event_type TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT,
+      description TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      metadata JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_timeline_job ON job_timeline_events(job_id);
+    CREATE INDEX IF NOT EXISTS idx_timeline_tenant ON job_timeline_events(tenant_id);
+    ALTER TABLE job_timeline_events ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_timeline ON job_timeline_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '018_create_appointments': `
+    CREATE TABLE IF NOT EXISTS appointments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      scheduled_start TIMESTAMPTZ NOT NULL,
+      scheduled_end TIMESTAMPTZ NOT NULL,
+      arrival_window_start TIMESTAMPTZ,
+      arrival_window_end TIMESTAMPTZ,
+      timezone TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'confirmed', 'in_progress', 'completed', 'canceled', 'no_show')),
+      notes TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_appointments_tenant ON appointments(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_appointments_job ON appointments(job_id);
+    CREATE INDEX IF NOT EXISTS idx_appointments_schedule ON appointments(tenant_id, scheduled_start);
+    ALTER TABLE appointments ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_appointments ON appointments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '019_create_appointment_assignments': `
+    CREATE TABLE IF NOT EXISTS appointment_assignments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL REFERENCES appointments(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      is_primary BOOLEAN NOT NULL DEFAULT true,
+      assigned_by TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignments_appointment ON appointment_assignments(appointment_id);
+    CREATE INDEX IF NOT EXISTS idx_assignments_technician ON appointment_assignments(technician_id);
+    ALTER TABLE appointment_assignments ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_assignments ON appointment_assignments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '020_create_estimates': `
+    CREATE TABLE IF NOT EXISTS estimates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      estimate_number TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'ready_for_review', 'sent', 'accepted', 'rejected', 'expired')),
+      discount_cents INTEGER NOT NULL DEFAULT 0,
+      tax_rate_bps INTEGER NOT NULL DEFAULT 0,
+      subtotal_cents INTEGER NOT NULL DEFAULT 0,
+      taxable_subtotal_cents INTEGER NOT NULL DEFAULT 0,
+      tax_cents INTEGER NOT NULL DEFAULT 0,
+      total_cents INTEGER NOT NULL DEFAULT 0,
+      valid_until TIMESTAMPTZ,
+      customer_message TEXT,
+      internal_notes TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_estimates_tenant ON estimates(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_estimates_job ON estimates(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_estimates_number ON estimates(tenant_id, estimate_number);
+    ALTER TABLE estimates ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_estimates ON estimates
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '021_create_estimate_line_items': `
+    CREATE TABLE IF NOT EXISTS estimate_line_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      estimate_id UUID NOT NULL REFERENCES estimates(id) ON DELETE CASCADE,
+      description TEXT NOT NULL,
+      category TEXT CHECK (category IN ('labor', 'material', 'equipment', 'other')),
+      quantity NUMERIC NOT NULL,
+      unit_price_cents INTEGER NOT NULL,
+      total_cents INTEGER NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      taxable BOOLEAN NOT NULL DEFAULT true
+    );
+    CREATE INDEX IF NOT EXISTS idx_est_items_estimate ON estimate_line_items(estimate_id);
+    ALTER TABLE estimate_line_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_est_items ON estimate_line_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '022_create_estimate_provenance': `
+    CREATE TABLE IF NOT EXISTS estimate_provenance (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      estimate_id UUID NOT NULL REFERENCES estimates(id),
+      source_type TEXT NOT NULL CHECK (source_type IN ('manual', 'ai_generated', 'ai_revised', 'template', 'cloned')),
+      source_reference TEXT,
+      creator_id TEXT NOT NULL,
+      creator_role TEXT NOT NULL,
+      ai_run_id UUID REFERENCES ai_runs(id),
+      conversation_id UUID REFERENCES conversations(id),
+      metadata JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_provenance_estimate ON estimate_provenance(estimate_id);
+    ALTER TABLE estimate_provenance ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_provenance ON estimate_provenance
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '023_create_estimate_approvals': `
+    CREATE TABLE IF NOT EXISTS estimate_approvals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      estimate_id UUID NOT NULL REFERENCES estimates(id),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'approved_with_edits', 'rejected')),
+      approved_by TEXT,
+      approved_at TIMESTAMPTZ,
+      rejected_by TEXT,
+      rejected_at TIMESTAMPTZ,
+      rejection_reason TEXT,
+      approved_with_edits BOOLEAN NOT NULL DEFAULT false,
+      final_revision_id UUID REFERENCES document_revisions(id),
+      metadata JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_approvals_estimate ON estimate_approvals(estimate_id);
+    ALTER TABLE estimate_approvals ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_approvals ON estimate_approvals
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '024_create_invoices': `
+    CREATE TABLE IF NOT EXISTS invoices (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      estimate_id UUID REFERENCES estimates(id),
+      invoice_number TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'open', 'partially_paid', 'paid', 'void', 'canceled')),
+      discount_cents INTEGER NOT NULL DEFAULT 0,
+      tax_rate_bps INTEGER NOT NULL DEFAULT 0,
+      subtotal_cents INTEGER NOT NULL DEFAULT 0,
+      taxable_subtotal_cents INTEGER NOT NULL DEFAULT 0,
+      tax_cents INTEGER NOT NULL DEFAULT 0,
+      total_cents INTEGER NOT NULL DEFAULT 0,
+      amount_paid_cents INTEGER NOT NULL DEFAULT 0,
+      amount_due_cents INTEGER NOT NULL DEFAULT 0,
+      issued_at TIMESTAMPTZ,
+      due_date TIMESTAMPTZ,
+      customer_message TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant ON proposals(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+    CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(proposal_type);
+    CREATE INDEX IF NOT EXISTS idx_proposals_ai_run ON proposals(ai_run_id);
+    CREATE INDEX IF NOT EXISTS idx_proposals_idempotency ON proposals(idempotency_key);
+    CREATE INDEX IF NOT EXISTS idx_proposals_target ON proposals(target_entity_type, target_entity_id);
+    ALTER TABLE proposals ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_proposals ON proposals
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '014_create_proposal_analytics': `
+    CREATE TABLE IF NOT EXISTS proposal_analytics (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      proposal_type TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('approved', 'approved_with_edits', 'rejected', 'expired', 'execution_failed')),
+      edited_fields JSONB DEFAULT '[]',
+      rejection_reason TEXT,
+      confidence_score NUMERIC,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_analytics_tenant ON proposal_analytics(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_type ON proposal_analytics(proposal_type);
+    CREATE INDEX IF NOT EXISTS idx_analytics_outcome ON proposal_analytics(outcome);
+    ALTER TABLE proposal_analytics ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_analytics ON proposal_analytics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '015_create_evaluation_snapshots': `
+    CREATE TABLE IF NOT EXISTS evaluation_snapshots (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      ai_run_id UUID REFERENCES ai_runs(id),
+      task_type TEXT NOT NULL,
+      input JSONB NOT NULL DEFAULT '{}',
+      output JSONB NOT NULL DEFAULT '{}',
+      outcome JSONB NOT NULL DEFAULT '{}',
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_eval_tenant ON evaluation_snapshots(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_eval_task ON evaluation_snapshots(task_type);
+    ALTER TABLE evaluation_snapshots ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_eval ON evaluation_snapshots
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '016_create_llm_cache': `
+    CREATE TABLE IF NOT EXISTS llm_cache (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      cache_key TEXT NOT NULL UNIQUE,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      task_type TEXT NOT NULL,
+      response JSONB NOT NULL,
+      ttl_ms INTEGER NOT NULL,
+      cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_cache_key ON llm_cache(cache_key);
+    CREATE INDEX IF NOT EXISTS idx_cache_tenant ON llm_cache(tenant_id);
+    ALTER TABLE llm_cache ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_cache ON llm_cache
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '017_create_provider_health': `
+    CREATE TABLE IF NOT EXISTS provider_health (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      provider_name TEXT NOT NULL,
+      latency_ms INTEGER NOT NULL,
+      success BOOLEAN NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_health_provider ON provider_health(provider_name);
+    CREATE INDEX IF NOT EXISTS idx_health_recorded ON provider_health(recorded_at);
+  `,
 };
 
 export function getMigrationSQL(): string {
@@ -277,17 +636,9 @@ export function getMigrationSQL(): string {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export interface ParameterizedQuery {
-  sql: string;
-  params: string[];
-}
-
-export function setTenantContext(tenantId: string): ParameterizedQuery {
-  if (!tenantId || !UUID_REGEX.test(tenantId)) {
+export function setTenantContext(tenantId: string): string {
+  if (!UUID_REGEX.test(tenantId)) {
     throw new Error('Invalid tenant ID format: must be a valid UUID');
   }
-  return {
-    sql: 'SELECT set_config($1, $2, true)',
-    params: ['app.current_tenant_id', tenantId],
-  };
+  return `SET app.current_tenant_id = '${tenantId}'`;
 }

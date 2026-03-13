@@ -37,7 +37,7 @@ export function VoiceRecorder({
 
       {state === 'recording' && (
         <>
-          <span className="voice-duration" data-testid="recording-duration">
+          <span className="voice-duration" data-testid="recording-duration" role="status" aria-live="polite">
             {formatDuration(duration)}
           </span>
           <button className="voice-stop-btn" data-testid="stop-button" onClick={onStop} aria-label="Stop recording">
@@ -67,13 +67,13 @@ export function VoiceRecorder({
       )}
 
       {state === 'uploading' && (
-        <span className="voice-status" data-testid="upload-status">
+        <span className="voice-status" data-testid="upload-status" role="status" aria-live="polite" aria-busy="true">
           Uploading...
         </span>
       )}
 
       {state === 'transcribing' && (
-        <span className="voice-status" data-testid="transcribing-status">
+        <span className="voice-status" data-testid="transcribing-status" role="status" aria-live="polite" aria-busy="true">
           Transcribing...
         </span>
       )}
