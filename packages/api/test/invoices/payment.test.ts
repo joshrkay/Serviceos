@@ -7,6 +7,7 @@ import {
 import {
   createInvoice,
   issueInvoice,
+  transitionInvoiceStatus,
   InMemoryInvoiceRepository,
 } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
@@ -168,7 +169,6 @@ describe('P1-013 — Payment entity + partial payments', () => {
 
   it('validation — rejects payment on void invoice', async () => {
     // Void the issued invoice
-    const { transitionInvoiceStatus } = require('../../src/invoices/invoice');
     await transitionInvoiceStatus('tenant-1', invoiceId, 'void', invoiceRepo);
 
     await expect(

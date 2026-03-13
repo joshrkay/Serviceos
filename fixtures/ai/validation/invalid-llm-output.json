@@ -1,0 +1,16 @@
+{
+  "id": "invalid-001",
+  "description": "Invalid LLM output missing required fields — should fail schema validation",
+  "output": {
+    "summary": "Some estimate",
+    "payload": {
+      "line_items": []
+    }
+  },
+  "expected_validation_result": "fail",
+  "expected_errors": [
+    "proposal_type is required",
+    "At least one line item is required",
+    "confidence_score is required"
+  ]
+}
