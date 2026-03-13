@@ -91,4 +91,32 @@ describe('P5-013B: Capture time-to-cash milestones', () => {
       expect(event1.id).not.toBe(event2.id);
     });
   });
+
+  describe('Tenant isolation', () => {
+    it('should not return milestones from a different tenant', async () => {
+      await captureTimeToCashMilestone('tenant-A', jobId, 'inv-001', 'invoice_drafted', repo);
+      await captureTimeToCashMilestone('tenant-B', jobId, 'inv-001', 'invoice_approved', repo);
+
+      const eventsA = await repo.findByJob('tenant-A', jobId);
+      const eventsB = await repo.findByJob('tenant-B', jobId);
+
+      expect(eventsA).toHaveLength(1);
+      expect(eventsA[0].milestone).toBe('invoice_drafted');
+      expect(eventsB).toHaveLength(1);
+      expect(eventsB[0].milestone).toBe('invoice_approved');
+    });
+
+    it('should isolate findByInvoice across tenants', async () => {
+      await captureTimeToCashMilestone('tenant-A', jobId, 'inv-shared', 'first_payment', repo);
+      await captureTimeToCashMilestone('tenant-B', jobId, 'inv-shared', 'fully_paid', repo);
+
+      const eventsA = await repo.findByInvoice('tenant-A', 'inv-shared');
+      expect(eventsA).toHaveLength(1);
+      expect(eventsA[0].tenantId).toBe('tenant-A');
+
+      const eventsB = await repo.findByInvoice('tenant-B', 'inv-shared');
+      expect(eventsB).toHaveLength(1);
+      expect(eventsB[0].tenantId).toBe('tenant-B');
+    });
+  });
 });

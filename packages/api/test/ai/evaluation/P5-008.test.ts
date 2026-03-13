@@ -151,4 +151,27 @@ describe('P5-008 — Structured invoice edit deltas', () => {
     expect(found).toHaveLength(1);
     expect(found[0].id).toBe(editDelta.id);
   });
+
+  it('tenant isolation — findByInvoice returns empty for different tenant', async () => {
+    const oldSnapshot = {
+      lineItems: [buildLineItem('li-1', 'Service', 1, 5000, 1, true)],
+    };
+    const newSnapshot = {
+      lineItems: [buildLineItem('li-1', 'Updated Service', 2, 6000, 1, true)],
+    };
+
+    await createInvoiceEditDelta('tenant-A', invoiceId, 'rev-1', 'rev-2', oldSnapshot, newSnapshot, repo);
+    await createInvoiceEditDelta('tenant-B', invoiceId, 'rev-3', 'rev-4', oldSnapshot, newSnapshot, repo);
+
+    const foundA = await repo.findByInvoice('tenant-A', invoiceId);
+    const foundB = await repo.findByInvoice('tenant-B', invoiceId);
+
+    expect(foundA).toHaveLength(1);
+    expect(foundA[0].tenantId).toBe('tenant-A');
+    expect(foundB).toHaveLength(1);
+    expect(foundB[0].tenantId).toBe('tenant-B');
+
+    const foundOther = await repo.findByInvoice('tenant-other', invoiceId);
+    expect(foundOther).toHaveLength(0);
+  });
 });
