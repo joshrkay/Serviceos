@@ -42,30 +42,32 @@ export function createApp() {
   app.use(express.json());
 
   // CORS
+  const corsOrigin = process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? false : true);
   app.use(cors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: corsOrigin,
     credentials: true,
   }));
-
-  // Database connection pool
-  const pool = createPool();
 
   // Swagger UI — no auth required
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
   // Health checks — no auth required
-  const dbHealthCheck: HealthCheck = {
-    name: 'database',
-    check: async () => {
-      try {
-        await pool.query('SELECT 1');
-        return { status: 'ok' };
-      } catch {
-        return { status: 'down', message: 'Database connection failed' };
-      }
-    },
-  };
-  const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', [dbHealthCheck]);
+  const checks: HealthCheck[] = [];
+  if (process.env.DATABASE_URL) {
+    const pool = createPool();
+    checks.push({
+      name: 'database',
+      check: async () => {
+        try {
+          await pool.query('SELECT 1');
+          return { status: 'ok' };
+        } catch {
+          return { status: 'down', message: 'Database connection failed' };
+        }
+      },
+    });
+  }
+  const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
   // Auth middleware for API routes

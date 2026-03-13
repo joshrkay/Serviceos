@@ -11,7 +11,7 @@ RUN npm ci --ignore-scripts
 FROM base AS api-build
 COPY tsconfig.base.json ./
 COPY packages/api/ packages/api/
-RUN cd packages/api && npx tsc --project tsconfig.json
+RUN cd packages/api && npx tsc --project tsconfig.build.json
 
 # Build Web
 FROM base AS web-build
