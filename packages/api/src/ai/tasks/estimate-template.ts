@@ -102,8 +102,8 @@ export class InMemoryEstimateTemplateRepository implements EstimateTemplateRepos
     this.templates.set(template.id, { ...template, defaultLineItems: [...template.defaultLineItems] });
     return { ...template, defaultLineItems: [...template.defaultLineItems] };
   }
-
-  async findById(id: string): Promise<EstimateTemplate | null> {
+    this.templates.set(template.id, { ...template, defaultLineItems: template.defaultLineItems.map(li => ({ ...li })) });
+    return { ...template, defaultLineItems: template.defaultLineItems.map(li => ({ ...li })) };
     const t = this.templates.get(id);
     return t ? { ...t, defaultLineItems: [...t.defaultLineItems] } : null;
   }
