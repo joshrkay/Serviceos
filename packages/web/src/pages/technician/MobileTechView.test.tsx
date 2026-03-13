@@ -1,6 +1,33 @@
-import React from 'react';
+import React, { useState, useRef } from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('../../components/voice/useVoiceRecorder', () => ({
+  useVoiceRecorder: () => {
+    const [state, setState] = useState<string>('idle');
+    const [duration, setDuration] = useState(0);
+    const blobRef = useRef(new Blob(['test-audio'], { type: 'audio/webm' }));
+    return {
+      state,
+      duration,
+      start: () => { setState('recording'); setDuration(0); },
+      stop: () => setState('stopped'),
+      cancel: () => { setState('idle'); setDuration(0); },
+      reRecord: () => { setState('idle'); setDuration(0); },
+      getBlob: () => blobRef.current,
+      upload: async (onUpload: (blob: Blob) => Promise<void>) => {
+        setState('uploading');
+        try {
+          await onUpload(blobRef.current);
+          setState('transcribing');
+        } catch {
+          setState('stopped');
+        }
+      },
+    };
+  },
+}));
+
 import { MobileTechView, AssignedJob } from './MobileTechView';
 
 describe('P3-013 — Mobile-friendly technician interactions', () => {

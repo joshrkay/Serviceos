@@ -1,14 +1,23 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 
 export interface SearchBarProps {
   onSearch: (query: string) => void;
   placeholder?: string;
+  debounceMs?: number;
 }
 
-export function SearchBar({ onSearch, placeholder = 'Search conversations...' }: SearchBarProps) {
+export function SearchBar({ onSearch, placeholder = 'Search conversations...', debounceMs = 300 }: SearchBarProps) {
   const [query, setQuery] = useState('');
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const handleSearch = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
     onSearch(query.trim());
   }, [query, onSearch]);
 
@@ -25,12 +34,12 @@ export function SearchBar({ onSearch, placeholder = 'Search conversations...' }:
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const value = e.target.value;
       setQuery(value);
-      // Trigger search on clear. TODO: Add debounce when connected to an API.
-      if (!value.trim()) {
-        onSearch('');
-      }
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        onSearch(value.trim());
+      }, debounceMs);
     },
-    [onSearch]
+    [onSearch, debounceMs]
   );
 
   return (
