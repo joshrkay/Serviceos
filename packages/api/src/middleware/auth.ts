@@ -104,6 +104,10 @@ export function enforceTenantIsolation(tenantIdParam: string = 'tenantId') {
       return;
     }
 
+    // Ensure tenant context is always set from authenticated user
+    if (!req.body) req.body = {};
+    req.body.tenantId = req.auth.tenantId;
+
     next();
   };
 }

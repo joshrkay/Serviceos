@@ -72,4 +72,17 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
     const valid = verifyWebhookSignature('payload', 'no-format', secret);
     expect(valid).toBe(false);
   });
+
+  it('validation — rejects invalid hex in signature', () => {
+    const payload = JSON.stringify({ event: 'test' });
+    const timestamp = Math.floor(Date.now() / 1000);
+    const valid = verifyWebhookSignature(payload, `t=${timestamp},v1=not-valid-hex!@#$`, secret);
+    expect(valid).toBe(false);
+  });
+
+  it('validation — rejects NaN timestamp', () => {
+    const payload = JSON.stringify({ event: 'test' });
+    const valid = verifyWebhookSignature(payload, 't=notanumber,v1=abcdef', secret);
+    expect(valid).toBe(false);
+  });
 });

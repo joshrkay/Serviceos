@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import {
   decodeClerkToken,
   bootstrapTenant,
@@ -5,10 +6,16 @@ import {
   Tenant,
 } from '../../src/auth/clerk';
 
-function createMockToken(payload: Record<string, unknown>): string {
-  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+const TEST_SECRET = 'test-secret-key';
+
+function createMockToken(payload: Record<string, unknown>, secret: string = TEST_SECRET): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = Buffer.from('mock-signature').toString('base64url');
+  const signatureInput = `${header}.${body}`;
+  const sig = crypto
+    .createHmac('sha256', secret)
+    .update(signatureInput)
+    .digest('base64url');
   return `${header}.${body}.${sig}`;
 }
 
@@ -23,7 +30,7 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
         exp: Math.floor(Date.now() / 1000) + 3600,
       });
 
-      const result = decodeClerkToken(token, 'test-secret');
+      const result = decodeClerkToken(token, TEST_SECRET);
       expect(result.sub).toBe('user_123');
       expect(result.sid).toBe('sess_abc');
       expect(result.tenant_id).toBe('tenant_456');
@@ -31,28 +38,64 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
     });
 
     it('validation — rejects malformed token', () => {
-      expect(() => decodeClerkToken('invalid-token', 'secret')).toThrow('Invalid token format');
+      expect(() => decodeClerkToken('invalid-token', TEST_SECRET)).toThrow('Invalid token format');
     });
 
     it('validation — rejects token missing sub claim', () => {
-      const token = createMockToken({ sid: 'sess_abc' });
-      expect(() => decodeClerkToken(token, 'secret')).toThrow('Missing required token claims');
+      const token = createMockToken({ sid: 'sess_abc', exp: Math.floor(Date.now() / 1000) + 3600, role: 'owner' });
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Missing required token claims');
     });
 
     it('validation — rejects expired token', () => {
       const token = createMockToken({
         sub: 'user_123',
         sid: 'sess_abc',
+        role: 'owner',
         exp: Math.floor(Date.now() / 1000) - 3600,
       });
-      expect(() => decodeClerkToken(token, 'secret')).toThrow('Token expired');
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token expired');
+    });
+
+    it('validation — rejects token with invalid signature', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }, 'correct-secret');
+      expect(() => decodeClerkToken(token, 'wrong-secret')).toThrow('Invalid token signature');
+    });
+
+    it('validation — rejects token missing exp claim', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        role: 'owner',
+      });
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token missing expiration claim');
+    });
+
+    it('validation — rejects token missing role claim', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token missing or invalid role claim');
+    });
+
+    it('validation — rejects token with invalid role', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        role: 'superadmin',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token missing or invalid role claim');
     });
 
     it('missing auth returns 401 — no bearer token results in no auth context', () => {
-      // When there's no token, decodeClerkToken is never called.
-      // The middleware simply doesn't set req.auth.
-      // This test validates the token validation itself rejects empty input.
-      expect(() => decodeClerkToken('', 'secret')).toThrow();
+      expect(() => decodeClerkToken('', TEST_SECRET)).toThrow();
     });
   });
 

@@ -34,9 +34,14 @@ export function createQueueConfig(env: string): QueueConfig {
   };
 }
 
+/**
+ * In-memory queue for testing only. Not safe for production use.
+ * Use a real SQS-backed queue implementation for production.
+ */
 export class InMemoryQueue implements Queue {
   private messages: QueueMessage[] = [];
   private config: QueueConfig;
+  private receiving = false;
 
   constructor(config?: Partial<QueueConfig>) {
     this.config = {
@@ -61,10 +66,16 @@ export class InMemoryQueue implements Queue {
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
-    const msg = this.messages.shift();
-    if (!msg) return null;
-    msg.attempts++;
-    return msg as QueueMessage<T>;
+    if (this.receiving) return null;
+    this.receiving = true;
+    try {
+      const msg = this.messages.shift();
+      if (!msg) return null;
+      msg.attempts++;
+      return msg as QueueMessage<T>;
+    } finally {
+      this.receiving = false;
+    }
   }
 
   async delete(_messageId: string): Promise<void> {

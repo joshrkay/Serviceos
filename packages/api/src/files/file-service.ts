@@ -60,10 +60,27 @@ const ALLOWED_CONTENT_TYPES = [
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ];
 
+export function sanitizeFilename(filename: string): string {
+  // Remove path separators, parent directory references, and null bytes
+  return filename
+    .replace(/\0/g, '')
+    .replace(/\.\./g, '')
+    .replace(/[/\\]/g, '')
+    .trim();
+}
+
 export function validateUpload(request: UploadRequest): string[] {
   const errors: string[] = [];
   if (!request.filename || request.filename.trim().length === 0) {
     errors.push('Filename is required');
+  } else {
+    const sanitized = sanitizeFilename(request.filename);
+    if (sanitized.length === 0) {
+      errors.push('Filename contains only invalid characters');
+    }
+    if (sanitized !== request.filename) {
+      errors.push('Filename contains invalid characters (path separators or ".." not allowed)');
+    }
   }
   if (!request.contentType) {
     errors.push('Content type is required');
@@ -86,7 +103,8 @@ export function validateUpload(request: UploadRequest): string[] {
 
 export function createFileRecord(request: UploadRequest, bucket: string): FileRecord {
   const id = uuidv4();
-  const key = `${request.tenantId}/${id}/${request.filename}`;
+  const safeName = sanitizeFilename(request.filename);
+  const key = `${request.tenantId}/${id}/${safeName}`;
   return {
     id,
     tenantId: request.tenantId,
