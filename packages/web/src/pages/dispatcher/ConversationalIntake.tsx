@@ -3,7 +3,7 @@ import { Message, Proposal } from '../../types/conversation';
 import { ConversationThread } from '../conversations/ConversationThread';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { ProposalCard } from '../../components/conversations/ProposalCard';
-import { RecordingState } from '../../components/voice/useVoiceRecorder';
+import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 
 export interface ConversationalIntakeProps {
   conversationId?: string;
@@ -30,9 +30,7 @@ export function ConversationalIntake({
   onApproveProposal,
   onRejectProposal,
 }: ConversationalIntakeProps) {
-  const [voiceState, setVoiceState] = useState<RecordingState>('idle');
-  const [duration, setDuration] = useState(0);
-  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
+  const { state: voiceState, duration, start, stop, cancel, reRecord, upload } = useVoiceRecorder();
   const [showVoice, setShowVoice] = useState(false);
 
   const handleSend = useCallback(
@@ -80,25 +78,11 @@ export function ConversationalIntake({
           <VoiceRecorder
             state={voiceState}
             duration={duration}
-            onStart={() => setVoiceState('recording')}
-            onStop={() => setVoiceState('stopped')}
-            onCancel={() => {
-              setVoiceState('idle');
-              setDuration(0);
-            }}
-            onReRecord={() => {
-              setVoiceState('idle');
-              setDuration(0);
-            }}
-            onUpload={async () => {
-              setVoiceState('uploading');
-              try {
-                await onUploadVoice(recordedBlob);
-                setVoiceState('transcribing');
-              } catch {
-                setVoiceState('stopped');
-              }
-            }}
+            onStart={start}
+            onStop={stop}
+            onCancel={cancel}
+            onReRecord={reRecord}
+            onUpload={() => upload(onUploadVoice)}
           />
         </div>
       )}

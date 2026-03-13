@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { Message, TranscriptionStatus, Proposal } from '../../types/conversation';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { TranscriptMessage } from '../../components/voice/TranscriptMessage';
-import { RecordingState } from '../../components/voice/useVoiceRecorder';
+import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 
 export interface AssignedJob {
   id: string;
@@ -35,9 +35,7 @@ export function MobileTechView({
   messages = [],
   onRetryTranscription,
 }: MobileTechViewProps) {
-  const [voiceState, setVoiceState] = useState<RecordingState>('idle');
-  const [duration, setDuration] = useState(0);
-  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
+  const { state: voiceState, duration, start, stop, cancel, reRecord, upload } = useVoiceRecorder();
 
   const selectedJob = assignedJobs.find((j) => j.id === selectedJobId);
 
@@ -75,28 +73,11 @@ export function MobileTechView({
             <VoiceRecorder
               state={voiceState}
               duration={duration}
-              onStart={() => {
-                setVoiceState('recording');
-                setDuration(0);
-              }}
-              onStop={() => setVoiceState('stopped')}
-              onCancel={() => {
-                setVoiceState('idle');
-                setDuration(0);
-              }}
-              onReRecord={() => {
-                setVoiceState('idle');
-                setDuration(0);
-              }}
-              onUpload={async () => {
-                setVoiceState('uploading');
-                try {
-                  await onUploadRecording(selectedJob.id, recordedBlob);
-                  setVoiceState('transcribing');
-                } catch {
-                  setVoiceState('stopped');
-                }
-              }}
+              onStart={start}
+              onStop={stop}
+              onCancel={cancel}
+              onReRecord={reRecord}
+              onUpload={() => upload((blob) => onUploadRecording(selectedJob.id, blob))}
             />
           </div>
 
