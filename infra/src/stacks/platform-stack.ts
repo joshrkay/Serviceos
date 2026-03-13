@@ -4,8 +4,12 @@ import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as kms from 'aws-cdk-lib/aws-kms';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import { Construct } from 'constructs';
 import { EnvironmentConfig, commonTags } from '../config';
+
+const CONTAINER_PORT = 3000;
 
 export interface PlatformStackProps extends cdk.StackProps {
   envConfig: EnvironmentConfig;
@@ -46,6 +50,7 @@ export class PlatformStack extends cdk.Stack {
 
     this.repository = new ecr.Repository(this, 'ApiRepo', {
       repositoryName: `serviceos-api-${envConfig.environment}`,
+      imageScanOnPush: true,
       removalPolicy: envConfig.enableDeletionProtection
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
@@ -59,7 +64,7 @@ export class PlatformStack extends cdk.Stack {
       memoryLimitMiB: envConfig.memoryMiB,
     });
 
-    const logGroup = new logs.LogGroup(this, 'ApiLogGroup', {
+    const logGroupProps: logs.LogGroupProps = {
       logGroupName: `/serviceos/${envConfig.environment}/api`,
       retention: envConfig.environment === 'prod'
         ? logs.RetentionDays.ONE_YEAR
@@ -67,21 +72,32 @@ export class PlatformStack extends cdk.Stack {
       removalPolicy: envConfig.enableDeletionProtection
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
-    });
+    };
+
+    if (envConfig.environment === 'prod') {
+      const logEncryptionKey = new kms.Key(this, 'LogEncryptionKey', {
+        description: 'KMS key for encrypting ServiceOS API log groups',
+        enableKeyRotation: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      });
+      (logGroupProps as any).encryptionKey = logEncryptionKey;
+    }
+
+    const logGroup = new logs.LogGroup(this, 'ApiLogGroup', logGroupProps);
 
     taskDefinition.addContainer('api', {
       image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
-      portMappings: [{ containerPort: 3000 }],
+      portMappings: [{ containerPort: CONTAINER_PORT }],
       environment: {
         NODE_ENV: envConfig.environment,
-        PORT: '3000',
+        PORT: String(CONTAINER_PORT),
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'api',
         logGroup,
       }),
       healthCheck: {
-        command: ['CMD-SHELL', 'curl -f http://localhost:3000/health || exit 1'],
+        command: ['CMD-SHELL', `curl -f http://localhost:${CONTAINER_PORT}/health || exit 1`],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(5),
         retries: 3,
@@ -95,30 +111,72 @@ export class PlatformStack extends cdk.Stack {
       loadBalancerName: `serviceos-${envConfig.environment}`,
     });
 
-    const listener = this.alb.addListener('HttpListener', {
-      port: 80,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-    });
+    if (envConfig.certificateArn) {
+      const certificate = acm.Certificate.fromCertificateArn(
+        this, 'Certificate', envConfig.certificateArn
+      );
 
-    this.service = new ecs.FargateService(this, 'ApiService', {
-      cluster: this.cluster,
-      taskDefinition,
-      desiredCount: envConfig.desiredCount,
-      assignPublicIp: false,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-    });
+      const httpsListener = this.alb.addListener('HttpsListener', {
+        port: 443,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [certificate],
+      });
 
-    listener.addTargets('ApiTarget', {
-      port: 3000,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [this.service],
-      healthCheck: {
-        path: '/health',
-        interval: cdk.Duration.seconds(30),
-        healthyThresholdCount: 2,
-        unhealthyThresholdCount: 3,
-      },
-    });
+      this.alb.addListener('HttpListener', {
+        port: 80,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        defaultAction: elbv2.ListenerAction.redirect({
+          protocol: 'HTTPS',
+          port: '443',
+          permanent: true,
+        }),
+      });
+
+      this.service = new ecs.FargateService(this, 'ApiService', {
+        cluster: this.cluster,
+        taskDefinition,
+        desiredCount: envConfig.desiredCount,
+        assignPublicIp: false,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      });
+
+      httpsListener.addTargets('ApiTarget', {
+        port: CONTAINER_PORT,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        targets: [this.service],
+        healthCheck: {
+          path: '/health',
+          interval: cdk.Duration.seconds(30),
+          healthyThresholdCount: 2,
+          unhealthyThresholdCount: 3,
+        },
+      });
+    } else {
+      const listener = this.alb.addListener('HttpListener', {
+        port: 80,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+      });
+
+      this.service = new ecs.FargateService(this, 'ApiService', {
+        cluster: this.cluster,
+        taskDefinition,
+        desiredCount: envConfig.desiredCount,
+        assignPublicIp: false,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      });
+
+      listener.addTargets('ApiTarget', {
+        port: CONTAINER_PORT,
+        protocol: elbv2.ApplicationProtocol.HTTP,
+        targets: [this.service],
+        healthCheck: {
+          path: '/health',
+          interval: cdk.Duration.seconds(30),
+          healthyThresholdCount: 2,
+          unhealthyThresholdCount: 3,
+        },
+      });
+    }
 
     new cdk.CfnOutput(this, 'AlbDnsName', {
       value: this.alb.loadBalancerDnsName,

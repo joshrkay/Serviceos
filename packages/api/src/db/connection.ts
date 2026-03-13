@@ -22,11 +22,11 @@ export interface DatabaseClient {
 export function createDatabaseConfig(env: string): DatabaseConfig {
   const configs: Record<string, DatabaseConfig> = {
     dev: {
-      host: 'localhost',
-      port: 5432,
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432', 10),
       database: 'serviceos_dev',
-      user: 'serviceos',
-      password: 'dev_password',
+      user: process.env.DB_USER || 'serviceos',
+      password: process.env.DB_PASSWORD || '',
       ssl: false,
       maxConnections: 10,
     },

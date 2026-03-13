@@ -50,7 +50,6 @@ describe('P0-001 — Cloud environments and CDK baseline', () => {
     });
     const template = Template.fromStack(stack);
 
-    // The stack itself should have tags propagated
     const resources = template.toJSON().Resources;
     const vpcResource = Object.values(resources).find(
       (r: any) => r.Type === 'AWS::EC2::VPC'
@@ -92,5 +91,51 @@ describe('P0-001 — Cloud environments and CDK baseline', () => {
         },
       ],
     });
+  });
+
+  it('ECR has image scan on push enabled', () => {
+    const app = new cdk.App();
+    const stack = new PlatformStack(app, 'TestEcrScan', {
+      envConfig: getEnvironmentConfig('dev'),
+    });
+    const template = Template.fromStack(stack);
+
+    template.hasResourceProperties('AWS::ECR::Repository', {
+      ImageScanningConfiguration: {
+        ScanOnPush: true,
+      },
+    });
+  });
+
+  it('HTTPS listener created when certificateArn provided', () => {
+    const app = new cdk.App();
+    const config = { ...getEnvironmentConfig('staging'), certificateArn: 'arn:aws:acm:us-east-1:123456789:certificate/abc-123' };
+    const stack = new PlatformStack(app, 'TestHttps', {
+      envConfig: config,
+    });
+    const template = Template.fromStack(stack);
+
+    // Should have HTTPS listener on port 443
+    template.hasResourceProperties('AWS::ElasticLoadBalancingV2::Listener', {
+      Port: 443,
+      Protocol: 'HTTPS',
+    });
+
+    // Should have HTTP redirect listener on port 80
+    template.hasResourceProperties('AWS::ElasticLoadBalancingV2::Listener', {
+      Port: 80,
+      Protocol: 'HTTP',
+    });
+  });
+
+  it('prod has KMS encryption for log groups', () => {
+    const app = new cdk.App();
+    const stack = new PlatformStack(app, 'TestProdKms', {
+      envConfig: getEnvironmentConfig('prod'),
+    });
+    const template = Template.fromStack(stack);
+
+    // Should have a KMS key
+    template.resourceCountIs('AWS::KMS::Key', 1);
   });
 });

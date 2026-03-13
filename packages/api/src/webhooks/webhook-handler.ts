@@ -39,7 +39,10 @@ export function verifyWebhookSignature(
   if (!timestampPart || !signaturePart) return false;
 
   const timestamp = parseInt(timestampPart.substring(2), 10);
+  if (isNaN(timestamp)) return false;
+
   const providedSig = signaturePart.substring(3);
+  if (!providedSig) return false;
 
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - timestamp) > toleranceSeconds) return false;
@@ -49,10 +52,14 @@ export function verifyWebhookSignature(
     .update(`${timestamp}.${payload}`)
     .digest('hex');
 
-  return crypto.timingSafeEqual(
-    Buffer.from(providedSig, 'hex'),
-    Buffer.from(expectedSig, 'hex')
-  );
+  try {
+    const providedBuf = Buffer.from(providedSig, 'hex');
+    const expectedBuf = Buffer.from(expectedSig, 'hex');
+    if (providedBuf.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(providedBuf, expectedBuf);
+  } catch {
+    return false;
+  }
 }
 
 export function createWebhookSignature(payload: string, secret: string, timestamp?: number): string {

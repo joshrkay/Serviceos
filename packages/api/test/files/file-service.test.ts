@@ -1,6 +1,7 @@
 import {
   validateUpload,
   createFileRecord,
+  sanitizeFilename,
   InMemoryFileRepository,
   UploadRequest,
 } from '../../src/files/file-service';
@@ -64,5 +65,28 @@ describe('P0-010 — File upload and attachment storage', () => {
 
     const found = await repo.findById('other-tenant', record.id);
     expect(found).toBeNull();
+  });
+
+  describe('path traversal protection', () => {
+    it('sanitizes path separators from filename', () => {
+      expect(sanitizeFilename('../../etc/passwd')).toBe('etcpasswd');
+      expect(sanitizeFilename('path/to/file.txt')).toBe('pathtofile.txt');
+      expect(sanitizeFilename('path\\to\\file.txt')).toBe('pathtofile.txt');
+    });
+
+    it('strips null bytes', () => {
+      expect(sanitizeFilename('file\0.txt')).toBe('file.txt');
+    });
+
+    it('rejects filenames with path traversal in validation', () => {
+      const errors = validateUpload({ ...validRequest, filename: '../../../etc/passwd' });
+      expect(errors.some((e) => e.includes('invalid characters'))).toBe(true);
+    });
+
+    it('creates safe S3 key from sanitized filename', () => {
+      const record = createFileRecord({ ...validRequest, filename: 'safe-file.jpg' }, 'my-bucket');
+      expect(record.s3Key).not.toContain('..');
+      expect(record.s3Key).toContain('safe-file.jpg');
+    });
   });
 });

@@ -50,6 +50,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_users_clerk ON users(clerk_user_id);
     ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE users FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_users ON users
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -71,6 +72,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_events(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_events(correlation_id);
     ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_audit ON audit_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -93,6 +95,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_files_tenant ON files(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_files_entity ON files(entity_type, entity_id);
     ALTER TABLE files ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE files FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_files ON files
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -112,6 +115,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_conversations_tenant ON conversations(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_entity ON conversations(entity_type, entity_id);
     ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_conversations ON conversations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -133,6 +137,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_messages_tenant ON messages(tenant_id);
     ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE messages FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_messages ON messages
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -155,6 +160,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_voice_tenant ON voice_recordings(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_voice_status ON voice_recordings(status);
     ALTER TABLE voice_recordings ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_recordings FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_voice ON voice_recordings
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -182,6 +188,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_ai_runs_task ON ai_runs(task_type);
     CREATE INDEX IF NOT EXISTS idx_ai_runs_prompt ON ai_runs(prompt_version_id);
     ALTER TABLE ai_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_runs FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_ai_runs ON ai_runs
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -220,6 +227,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_doc_rev_tenant ON document_revisions(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_doc_rev_document ON document_revisions(document_type, document_id);
     ALTER TABLE document_revisions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE document_revisions FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_doc_rev ON document_revisions
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -241,6 +249,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_diff_tenant ON diff_analyses(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_diff_document ON diff_analyses(document_type, document_id);
     ALTER TABLE diff_analyses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE diff_analyses FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_diffs ON diff_analyses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
@@ -266,6 +275,19 @@ export function getMigrationSQL(): string {
   return Object.values(MIGRATIONS).join('\n');
 }
 
-export function setTenantContext(tenantId: string): string {
-  return `SET app.current_tenant_id = '${tenantId}'`;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface ParameterizedQuery {
+  sql: string;
+  params: string[];
+}
+
+export function setTenantContext(tenantId: string): ParameterizedQuery {
+  if (!tenantId || !UUID_REGEX.test(tenantId)) {
+    throw new Error('Invalid tenant ID format: must be a valid UUID');
+  }
+  return {
+    sql: 'SELECT set_config($1, $2, true)',
+    params: ['app.current_tenant_id', tenantId],
+  };
 }

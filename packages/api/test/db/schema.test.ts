@@ -28,9 +28,21 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(sql).toContain('tenant_isolation_messages');
   });
 
-  it('happy path — setTenantContext generates correct SQL', () => {
-    const sql = setTenantContext('abc-123');
-    expect(sql).toBe("SET app.current_tenant_id = 'abc-123'");
+  it('tenant isolation — FORCE RLS is enabled on tenant-scoped tables', () => {
+    const sql = getMigrationSQL();
+    expect(sql).toContain('FORCE ROW LEVEL SECURITY');
+  });
+
+  it('happy path — setTenantContext returns parameterized query', () => {
+    const result = setTenantContext('550e8400-e29b-41d4-a716-446655440000');
+    expect(result.sql).toBe('SELECT set_config($1, $2, true)');
+    expect(result.params).toEqual(['app.current_tenant_id', '550e8400-e29b-41d4-a716-446655440000']);
+  });
+
+  it('validation — setTenantContext rejects non-UUID tenant ID', () => {
+    expect(() => setTenantContext('abc-123')).toThrow('Invalid tenant ID format');
+    expect(() => setTenantContext("'; DROP TABLE tenants; --")).toThrow('Invalid tenant ID format');
+    expect(() => setTenantContext('')).toThrow('Invalid tenant ID format');
   });
 
   it('validation — createDatabaseConfig rejects unknown env', () => {

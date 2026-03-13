@@ -9,6 +9,7 @@ export interface EnvironmentConfig {
   cpu: number;
   memoryMiB: number;
   enableDeletionProtection: boolean;
+  certificateArn?: string;
 }
 
 export const environments: Record<Environment, EnvironmentConfig> = {
