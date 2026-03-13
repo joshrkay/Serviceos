@@ -3,8 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "build": "tsc --noEmit",
-    "start": "ts-node src/index.ts",
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/src/index.js",
     "test": "jest --passWithNoTests",
     "lint": "tsc --noEmit"
   },

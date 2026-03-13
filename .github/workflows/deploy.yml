@@ -16,67 +16,29 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx tsc --noEmit
-        working-directory: infra
-      - run: npx tsc --noEmit
         working-directory: packages/api
-      - run: npm test
-        working-directory: infra
       - run: npm test
         working-directory: packages/api
 
-  deploy-dev:
+  deploy-api:
     needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: dev
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-dev --require-approval never
-        working-directory: infra
+      - run: npm install -g @railway/cli
+      - run: railway up --service api --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-  deploy-staging:
-    needs: deploy-dev
+  deploy-web:
+    needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: staging
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-staging --require-approval never
-        working-directory: infra
-
-  deploy-prod:
-    needs: deploy-staging
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: prod
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-prod --require-approval broadening
-        working-directory: infra
+      - run: npm install -g @railway/cli
+      - run: railway up --service web --detach
+        working-directory: packages/web
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
