@@ -15,6 +15,10 @@ import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { createVerticalRouter } from './routes/verticals';
+import { createTemplateRouter } from './routes/templates';
+import { createBundleRouter } from './routes/bundles';
+import { createQualityRouter } from './routes/quality';
 
 // In-memory repositories
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -29,6 +33,10 @@ import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
+import { InMemoryVerticalPackRepository } from './verticals/registry';
+import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
+import { InMemoryServiceBundleRepository } from './verticals/bundles';
+import { InMemoryQualityMetricsRepository } from './quality/metrics';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -63,6 +71,10 @@ export function createApp() {
   const conversationRepo = new InMemoryConversationRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
+  const verticalPackRepo = new InMemoryVerticalPackRepository();
+  const templateRepo = new InMemoryEstimateTemplateRepository();
+  const bundleRepo = new InMemoryServiceBundleRepository();
+  const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
 
   // Mount API routes
   app.use('/api/v1/customers', createCustomerRouter(customerRepo, auditRepo));
@@ -75,6 +87,10 @@ export function createApp() {
   app.use('/api/v1/notes', createNoteRouter(noteRepo));
   app.use('/api/v1/conversations', createConversationRouter(conversationRepo));
   app.use('/api/v1/settings', createSettingsRouter(settingsRepo));
+  app.use('/api/v1/verticals', createVerticalRouter(verticalPackRepo));
+  app.use('/api/v1/templates', createTemplateRouter(templateRepo));
+  app.use('/api/v1/bundles', createBundleRouter(bundleRepo));
+  app.use('/api/v1/quality', createQualityRouter(qualityMetricsRepo));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

@@ -628,6 +628,116 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_health_provider ON provider_health(provider_name);
     CREATE INDEX IF NOT EXISTS idx_health_recorded ON provider_health(recorded_at);
   `,
+
+  // Phase 4 — Vertical Packs + Estimate Intelligence
+
+  '025_create_vertical_packs': `
+    CREATE TABLE IF NOT EXISTS vertical_packs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      type TEXT NOT NULL UNIQUE CHECK (type IN ('hvac', 'plumbing')),
+      name TEXT NOT NULL,
+      version TEXT NOT NULL,
+      description TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      categories JSONB NOT NULL DEFAULT '[]',
+      terminology JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_vp_type ON vertical_packs(type);
+    CREATE INDEX IF NOT EXISTS idx_vp_active ON vertical_packs(is_active);
+  `,
+
+  '026_create_estimate_templates': `
+    CREATE TABLE IF NOT EXISTS estimate_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      vertical_type TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      line_item_templates JSONB NOT NULL DEFAULT '[]',
+      default_discount_cents INTEGER NOT NULL DEFAULT 0,
+      default_tax_rate_bps INTEGER NOT NULL DEFAULT 0,
+      default_customer_message TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_et_tenant ON estimate_templates(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_et_category ON estimate_templates(tenant_id, category_id);
+    CREATE INDEX IF NOT EXISTS idx_et_vertical ON estimate_templates(tenant_id, vertical_type);
+    ALTER TABLE estimate_templates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE estimate_templates FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_templates ON estimate_templates
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '027_create_service_bundles': `
+    CREATE TABLE IF NOT EXISTS service_bundles (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      vertical_type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      category_ids JSONB NOT NULL DEFAULT '[]',
+      line_item_templates JSONB NOT NULL DEFAULT '[]',
+      trigger_keywords JSONB NOT NULL DEFAULT '[]',
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_sb_tenant ON service_bundles(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_sb_vertical ON service_bundles(tenant_id, vertical_type);
+    ALTER TABLE service_bundles ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_bundles FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_bundles ON service_bundles
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '028_create_wording_preferences': `
+    CREATE TABLE IF NOT EXISTS wording_preferences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      vertical_type TEXT,
+      scope TEXT NOT NULL CHECK (scope IN ('line_item_description', 'customer_message', 'internal_note', 'estimate_header', 'estimate_footer')),
+      key TEXT NOT NULL,
+      preferred_wording TEXT NOT NULL,
+      avoid_wordings JSONB NOT NULL DEFAULT '[]',
+      context TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_wp_tenant ON wording_preferences(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_wp_scope ON wording_preferences(tenant_id, scope);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_wp_tenant_key ON wording_preferences(tenant_id, key);
+    ALTER TABLE wording_preferences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE wording_preferences FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_wording ON wording_preferences
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '029_create_quality_metrics': `
+    CREATE TABLE IF NOT EXISTS quality_metrics (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      metric_name TEXT NOT NULL,
+      value NUMERIC NOT NULL,
+      metadata JSONB DEFAULT '{}',
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_qm_tenant ON quality_metrics(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_qm_metric ON quality_metrics(tenant_id, metric_name);
+    CREATE INDEX IF NOT EXISTS idx_qm_recorded ON quality_metrics(recorded_at);
+    ALTER TABLE quality_metrics ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE quality_metrics FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_qm ON quality_metrics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 export function getMigrationSQL(): string {
