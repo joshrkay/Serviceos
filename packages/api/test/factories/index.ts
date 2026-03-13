@@ -16,4 +16,4 @@ export { buildNote, buildCreateNoteInput } from './note.factory';
 export { buildProposal, buildCreateProposalInput } from './proposal.factory';
 export { buildAuditEvent } from './audit.factory';
 export { buildTenant, buildUser } from './tenant.factory';
-export { buildLineItemFactory } from './line-item.factory';
+export { buildLineItem } from './line-item.factory';

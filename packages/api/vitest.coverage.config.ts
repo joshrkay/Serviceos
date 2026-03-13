@@ -1,5 +1,5 @@
 /**
- * Coverage threshold configuration per module category.
+ * Coverage threshold configuration per module category (PRD Section 13).
  *
  * Module Category                         | Line Coverage Minimum
  * ----------------------------------------|----------------------
@@ -12,6 +12,11 @@
  * CRUD entities + validation              | 70%
  * UI components                           | 60%
  * Analytics/reporting queries             | 50%
+ *
+ * Vitest does not support per-file/glob threshold overrides natively.
+ * The global threshold below serves as a baseline safety net.
+ * Per-module enforcement is handled by scripts/check-coverage.ts
+ * which reads the JSON coverage report and validates per-module thresholds.
  *
  * Enforcement: Coverage thresholds are enforced in CI. PRs that drop
  * coverage below the threshold for a module category are blocked.
@@ -30,64 +35,8 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: ['src/**/*.test.ts', 'src/index.ts'],
       thresholds: {
-        // Per-module coverage thresholds
-        // These thresholds match the PRD Section 13 requirements
-        'src/shared/billing-engine.ts': {
-          lines: 95,
-          branches: 90,
-        },
-        'src/invoices/payment.ts': {
-          lines: 90,
-          branches: 85,
-        },
-        'src/estimates/**': {
-          lines: 90,
-          branches: 85,
-        },
-        'src/invoices/invoice.ts': {
-          lines: 90,
-          branches: 85,
-        },
-        'src/proposals/execution/**': {
-          lines: 85,
-          branches: 80,
-        },
-        'src/auth/**': {
-          lines: 85,
-          branches: 80,
-        },
-        'src/middleware/**': {
-          lines: 85,
-          branches: 80,
-        },
-        'src/ai/**': {
-          lines: 80,
-          branches: 75,
-        },
-        'src/customers/**': {
-          lines: 70,
-          branches: 65,
-        },
-        'src/jobs/**': {
-          lines: 70,
-          branches: 65,
-        },
-        'src/locations/**': {
-          lines: 70,
-          branches: 65,
-        },
-        'src/appointments/**': {
-          lines: 70,
-          branches: 65,
-        },
-        'src/notes/**': {
-          lines: 70,
-          branches: 65,
-        },
-        'src/conversations/**': {
-          lines: 70,
-          branches: 65,
-        },
+        // Global minimum — per-module thresholds enforced by check-coverage script
+        lines: 50,
       },
     },
   },

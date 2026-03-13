@@ -48,17 +48,16 @@ export async function stopTestDatabase(): Promise<void> {
 
 /**
  * Run all migrations against the test database.
- * In a real implementation, this would use a proper migration runner.
- * For now it executes the combined migration SQL.
+ *
+ * TODO(P0-004): Implement with `pg` client when the database dependency is added.
+ * This requires adding `pg` to devDependencies and using:
+ *   const client = new Client({ connectionString: connectionUri });
+ *   await client.connect();
+ *   await client.query(getMigrationSQL());
+ *   await client.end();
  */
-export async function runMigrations(connectionUri: string): Promise<void> {
-  // This would be implemented with pg client when pg dependency is added
-  // const client = new Client({ connectionString: connectionUri });
-  // await client.connect();
-  // await client.query(getMigrationSQL());
-  // await client.end();
-  const _sql = getMigrationSQL();
-  const _uri = connectionUri;
+export async function runMigrations(_connectionUri: string): Promise<void> {
+  throw new Error('runMigrations not yet implemented — requires pg dependency (see P0-004)');
 }
 
 /**

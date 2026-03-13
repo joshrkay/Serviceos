@@ -1,7 +1,7 @@
 import { faker } from '@faker-js/faker';
 import { LineItem, LineItemCategory, calculateLineItemTotal } from '../../src/shared/billing-engine';
 
-export function buildLineItemFactory(overrides?: Partial<LineItem>): LineItem {
+export function buildLineItem(overrides?: Partial<LineItem>): LineItem {
   const quantity = overrides?.quantity ?? faker.number.int({ min: 1, max: 10 });
   const unitPriceCents = overrides?.unitPriceCents ?? faker.number.int({ min: 500, max: 50000 });
   const totalCents = overrides?.totalCents ?? calculateLineItemTotal(quantity, unitPriceCents);

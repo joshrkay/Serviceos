@@ -20,6 +20,9 @@ jobs:
       - name: Type check API
         run: npx tsc --noEmit
         working-directory: packages/api
+      - name: Type check Web
+        run: npx tsc --noEmit
+        working-directory: packages/web
 
       - name: Lint
         run: npm run lint
@@ -81,9 +84,9 @@ jobs:
           aws-region: us-east-1
       - run: npx cdk deploy ServiceOS-staging --require-approval never
         working-directory: infra
-      - name: Staging smoke tests
-        run: npm run test:smoke -- --env=staging || true
-        continue-on-error: true
+      # TODO(P7-018): Add staging smoke tests when Playwright E2E is introduced
+      # - name: Staging smoke tests
+      #   run: npm run test:smoke -- --env=staging
 
   deploy-prod:
     needs: deploy-staging
