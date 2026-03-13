@@ -260,6 +260,112 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_idempotency ON webhook_events(source, idempotency_key);
     CREATE INDEX IF NOT EXISTS idx_webhook_status ON webhook_events(status);
   `,
+
+  '013_create_proposals': `
+    CREATE TABLE IF NOT EXISTS proposals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_type TEXT NOT NULL CHECK (proposal_type IN ('create_customer', 'update_customer', 'create_job', 'create_appointment', 'draft_estimate', 'update_estimate')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed')),
+      payload JSONB NOT NULL DEFAULT '{}',
+      summary TEXT NOT NULL,
+      explanation TEXT,
+      confidence_score NUMERIC,
+      confidence_factors JSONB DEFAULT '[]',
+      source_context JSONB DEFAULT '{}',
+      ai_run_id UUID REFERENCES ai_runs(id),
+      prompt_version_id UUID REFERENCES prompt_versions(id),
+      target_entity_type TEXT,
+      target_entity_id TEXT,
+      result_entity_id TEXT,
+      rejection_reason TEXT,
+      rejection_details TEXT,
+      idempotency_key TEXT,
+      expires_at TIMESTAMPTZ,
+      executed_at TIMESTAMPTZ,
+      executed_by TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposals_tenant ON proposals(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
+    CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(proposal_type);
+    CREATE INDEX IF NOT EXISTS idx_proposals_ai_run ON proposals(ai_run_id);
+    CREATE INDEX IF NOT EXISTS idx_proposals_idempotency ON proposals(idempotency_key);
+    CREATE INDEX IF NOT EXISTS idx_proposals_target ON proposals(target_entity_type, target_entity_id);
+    ALTER TABLE proposals ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_proposals ON proposals
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '014_create_proposal_analytics': `
+    CREATE TABLE IF NOT EXISTS proposal_analytics (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      proposal_type TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('approved', 'approved_with_edits', 'rejected', 'expired', 'execution_failed')),
+      edited_fields JSONB DEFAULT '[]',
+      rejection_reason TEXT,
+      confidence_score NUMERIC,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_analytics_tenant ON proposal_analytics(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_type ON proposal_analytics(proposal_type);
+    CREATE INDEX IF NOT EXISTS idx_analytics_outcome ON proposal_analytics(outcome);
+    ALTER TABLE proposal_analytics ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_analytics ON proposal_analytics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '015_create_evaluation_snapshots': `
+    CREATE TABLE IF NOT EXISTS evaluation_snapshots (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      ai_run_id UUID REFERENCES ai_runs(id),
+      task_type TEXT NOT NULL,
+      input JSONB NOT NULL DEFAULT '{}',
+      output JSONB NOT NULL DEFAULT '{}',
+      outcome JSONB NOT NULL DEFAULT '{}',
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_eval_tenant ON evaluation_snapshots(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_eval_task ON evaluation_snapshots(task_type);
+    ALTER TABLE evaluation_snapshots ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_eval ON evaluation_snapshots
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '016_create_llm_cache': `
+    CREATE TABLE IF NOT EXISTS llm_cache (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      cache_key TEXT NOT NULL UNIQUE,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      task_type TEXT NOT NULL,
+      response JSONB NOT NULL,
+      ttl_ms INTEGER NOT NULL,
+      cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_cache_key ON llm_cache(cache_key);
+    CREATE INDEX IF NOT EXISTS idx_cache_tenant ON llm_cache(tenant_id);
+    ALTER TABLE llm_cache ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_cache ON llm_cache
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '017_create_provider_health': `
+    CREATE TABLE IF NOT EXISTS provider_health (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      provider_name TEXT NOT NULL,
+      latency_ms INTEGER NOT NULL,
+      success BOOLEAN NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_health_provider ON provider_health(provider_name);
+    CREATE INDEX IF NOT EXISTS idx_health_recorded ON provider_health(recorded_at);
+  `,
 };
 
 export function getMigrationSQL(): string {

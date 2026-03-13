@@ -21,6 +21,7 @@ export type Permission =
   | 'audit:view'
   | 'reports:view'
   | 'proposals:approve'
+  | 'proposals:edit'
   | 'proposals:view';
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
@@ -45,6 +46,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'audit:view',
     'reports:view',
     'proposals:approve',
+    'proposals:edit',
     'proposals:view',
   ],
   dispatcher: [
@@ -60,6 +62,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'files:view',
     'ai:run',
     'reports:view',
+    'proposals:approve',
+    'proposals:edit',
     'proposals:view',
   ],
   technician: [
