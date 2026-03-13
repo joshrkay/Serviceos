@@ -10,6 +10,7 @@ export type DeltaType =
   | 'price_changed'
   | 'category_changed'
   | 'order_changed'
+  | 'taxable_changed'
   | 'discount_changed'
   | 'tax_changed'
   | 'message_changed';
@@ -118,6 +119,15 @@ export function computeEstimateDeltas(
         field: 'sortOrder',
         oldValue: oldItem.sortOrder,
         newValue: newItem.sortOrder,
+      });
+    }
+    if (oldItem.taxable !== newItem.taxable) {
+      deltas.push({
+        type: 'taxable_changed',
+        lineItemId: id,
+        field: 'taxable',
+        oldValue: oldItem.taxable,
+        newValue: newItem.taxable,
       });
     }
   }

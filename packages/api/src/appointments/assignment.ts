@@ -87,6 +87,11 @@ export async function syncJobAssignment(
       assignedTechnicianId: primary.technicianId,
       updatedAt: new Date(),
     });
+  } else {
+    await jobRepo.update(tenantId, jobId, {
+      assignedTechnicianId: undefined,
+      updatedAt: new Date(),
+    });
   }
 }
 

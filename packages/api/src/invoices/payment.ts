@@ -58,6 +58,11 @@ export async function recordPayment(
   const invoice = await invoiceRepo.findById(input.tenantId, input.invoiceId);
   if (!invoice) throw new Error('Invoice not found');
 
+  const PAYABLE_STATUSES = ['open', 'partially_paid'];
+  if (!PAYABLE_STATUSES.includes(invoice.status)) {
+    throw new Error(`Cannot record payment on invoice with status '${invoice.status}'`);
+  }
+
   if (input.amountCents > invoice.amountDueCents) {
     throw new Error('Payment amount exceeds amount due');
   }
@@ -86,7 +91,7 @@ export async function recordPayment(
   let newStatus = invoice.status;
   if (newAmountDue === 0) {
     newStatus = 'paid';
-  } else if (newAmountPaid > 0 && invoice.status === 'open') {
+  } else if (newAmountPaid > 0 && ['open', 'partially_paid'].includes(invoice.status)) {
     newStatus = 'partially_paid';
   }
 

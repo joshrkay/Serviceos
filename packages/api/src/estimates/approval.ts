@@ -61,6 +61,9 @@ export async function recordApproval(
   input: RecordApprovalInput,
   repository: ApprovalRepository
 ): Promise<EstimateApproval> {
+  const existing = await repository.findByEstimate(input.tenantId, input.estimateId);
+  if (existing) throw new Error('Approval or rejection already recorded for this estimate');
+
   const approval: EstimateApproval = {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -81,6 +84,9 @@ export async function recordRejection(
   input: RecordRejectionInput,
   repository: ApprovalRepository
 ): Promise<EstimateApproval> {
+  const existing = await repository.findByEstimate(input.tenantId, input.estimateId);
+  if (existing) throw new Error('Approval or rejection already recorded for this estimate');
+
   const approval: EstimateApproval = {
     id: uuidv4(),
     tenantId: input.tenantId,

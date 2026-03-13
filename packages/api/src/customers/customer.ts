@@ -37,6 +37,7 @@ export interface CreateCustomerInput {
   smsConsent?: boolean;
   communicationNotes?: string;
   createdBy: string;
+  actorRole?: string;
 }
 
 export interface UpdateCustomerInput {
@@ -111,6 +112,9 @@ export async function createCustomer(
   repository: CustomerRepository,
   auditRepo?: AuditRepository
 ): Promise<Customer> {
+  const errors = validateCustomerInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const customer: Customer = {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -136,7 +140,7 @@ export async function createCustomer(
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
-      actorRole: 'owner',
+      actorRole: input.actorRole ?? 'unknown',
       eventType: 'customer.created',
       entityType: 'customer',
       entityId: created.id,
@@ -167,7 +171,7 @@ export async function updateCustomer(
   if (!existing) return null;
 
   const updates: Partial<Customer> = { ...input, updatedAt: new Date() };
-  if (input.firstName !== undefined || input.lastName !== undefined) {
+  if (input.firstName !== undefined || input.lastName !== undefined || input.companyName !== undefined) {
     updates.displayName = computeDisplayName(
       input.firstName ?? existing.firstName,
       input.lastName ?? existing.lastName,
@@ -181,7 +185,7 @@ export async function updateCustomer(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'owner',
+      actorRole: 'unknown',
       eventType: 'customer.updated',
       entityType: 'customer',
       entityId: id,
@@ -210,7 +214,7 @@ export async function archiveCustomer(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'owner',
+      actorRole: 'unknown',
       eventType: 'customer.archived',
       entityType: 'customer',
       entityId: id,
@@ -238,7 +242,7 @@ export async function restoreCustomer(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'owner',
+      actorRole: 'unknown',
       eventType: 'customer.restored',
       entityType: 'customer',
       entityId: id,

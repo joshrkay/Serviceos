@@ -38,8 +38,9 @@ export function validateProvenanceInput(input: CreateProvenanceInput): string[] 
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.estimateId) errors.push('estimateId is required');
-  if (!input.sourceType) errors.push('sourceType is required');
-  if (!['manual', 'ai_generated', 'ai_revised', 'template', 'cloned'].includes(input.sourceType)) {
+  if (!input.sourceType) {
+    errors.push('sourceType is required');
+  } else if (!['manual', 'ai_generated', 'ai_revised', 'template', 'cloned'].includes(input.sourceType)) {
     errors.push('Invalid sourceType');
   }
   if (!input.creatorId) errors.push('creatorId is required');

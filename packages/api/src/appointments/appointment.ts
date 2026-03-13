@@ -63,6 +63,9 @@ export async function createAppointment(
   input: CreateAppointmentInput,
   repository: AppointmentRepository
 ): Promise<Appointment> {
+  const errors = validateAppointmentInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const appointment: Appointment = {
     id: uuidv4(),
     tenantId: input.tenantId,

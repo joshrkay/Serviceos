@@ -80,10 +80,13 @@ export async function createEstimate(
   repository: EstimateRepository,
   auditRepo?: AuditRepository
 ): Promise<Estimate> {
+  const errors = validateEstimateInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const totals = calculateDocumentTotals(
     input.lineItems,
-    input.discountCents || 0,
-    input.taxRateBps || 0
+    input.discountCents ?? 0,
+    input.taxRateBps ?? 0
   );
 
   const estimate: Estimate = {
@@ -108,7 +111,7 @@ export async function createEstimate(
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
-      actorRole: 'owner',
+      actorRole: 'unknown',
       eventType: 'estimate.created',
       entityType: 'estimate',
       entityId: created.id,
@@ -135,6 +138,10 @@ export async function updateEstimate(
 ): Promise<Estimate | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
+
+  if (!['draft', 'ready_for_review'].includes(existing.status)) {
+    throw new Error(`Cannot edit estimate in '${existing.status}' status`);
+  }
 
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;

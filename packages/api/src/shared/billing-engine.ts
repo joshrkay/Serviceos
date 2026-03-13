@@ -37,7 +37,7 @@ export function calculateDocumentTotals(
     .filter((item) => item.taxable)
     .reduce((sum, item) => sum + item.totalCents, 0);
 
-  // Apply discount proportionally to taxable amount
+  // Apply discount to taxable amount before computing tax
   const effectiveTaxableAmount = Math.max(0, taxableSubtotalCents - discountCents);
   const taxCents = Math.round((effectiveTaxableAmount * taxRateBps) / 10000);
   const totalCents = subtotalCents - discountCents + taxCents;

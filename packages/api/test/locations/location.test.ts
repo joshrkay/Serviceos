@@ -148,6 +148,74 @@ describe('P1-003 — Service location entity', () => {
     expect(updatedLoc2!.isPrimary).toBe(true);
   });
 
+  it('isPrimary — creating with isPrimary unsets existing primary', async () => {
+    const loc1 = await createLocation(
+      {
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        street1: '123 Main St',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62701',
+      },
+      repo
+    );
+    expect(loc1.isPrimary).toBe(true);
+
+    const loc2 = await createLocation(
+      {
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        street1: '456 Oak Ave',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62702',
+        isPrimary: true,
+      },
+      repo
+    );
+    expect(loc2.isPrimary).toBe(true);
+
+    const updatedLoc1 = await getLocation('tenant-1', loc1.id, repo);
+    expect(updatedLoc1!.isPrimary).toBe(false);
+  });
+
+  it('archive — archiving primary promotes sibling', async () => {
+    const loc1 = await createLocation(
+      {
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        street1: '123 Main St',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62701',
+      },
+      repo
+    );
+
+    const loc2 = await createLocation(
+      {
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        street1: '456 Oak Ave',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62702',
+      },
+      repo
+    );
+
+    // loc1 is primary, archive it
+    await archiveLocation('tenant-1', loc1.id, repo);
+
+    const archivedLoc1 = await getLocation('tenant-1', loc1.id, repo);
+    expect(archivedLoc1!.isArchived).toBe(true);
+    expect(archivedLoc1!.isPrimary).toBe(false);
+
+    const promotedLoc2 = await getLocation('tenant-1', loc2.id, repo);
+    expect(promotedLoc2!.isPrimary).toBe(true);
+  });
+
   it('validation — rejects missing required fields', () => {
     const errors = validateLocationInput({
       tenantId: '',

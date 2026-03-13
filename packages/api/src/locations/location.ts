@@ -73,6 +73,9 @@ export async function createLocation(
   input: CreateLocationInput,
   repository: LocationRepository
 ): Promise<ServiceLocation> {
+  const errors = validateLocationInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const location: ServiceLocation = {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -97,6 +100,13 @@ export async function createLocation(
   const existing = await repository.findByCustomer(input.tenantId, input.customerId);
   if (existing.length === 0) {
     location.isPrimary = true;
+  } else if (location.isPrimary) {
+    // Unset existing primary when new location requests primary
+    for (const loc of existing) {
+      if (loc.isPrimary) {
+        await repository.update(input.tenantId, loc.id, { isPrimary: false, updatedAt: new Date() });
+      }
+    }
   }
 
   return repository.create(location);
@@ -124,8 +134,21 @@ export async function archiveLocation(
   id: string,
   repository: LocationRepository
 ): Promise<ServiceLocation | null> {
+  const location = await repository.findById(tenantId, id);
+  if (!location) return null;
+
+  // If archiving the primary, promote another active location
+  if (location.isPrimary) {
+    const siblings = await repository.findByCustomer(tenantId, location.customerId);
+    const otherActive = siblings.filter((l) => l.id !== id && !l.isArchived);
+    if (otherActive.length > 0) {
+      await repository.update(tenantId, otherActive[0].id, { isPrimary: true, updatedAt: new Date() });
+    }
+  }
+
   return repository.update(tenantId, id, {
     isArchived: true,
+    isPrimary: false,
     archivedAt: new Date(),
     updatedAt: new Date(),
   });

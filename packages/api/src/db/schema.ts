@@ -280,7 +280,6 @@ export const MIGRATIONS = {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS idx_settings_tenant ON tenant_settings(tenant_id);
     ALTER TABLE tenant_settings ENABLE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_settings ON tenant_settings
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -461,6 +460,7 @@ export const MIGRATIONS = {
   '021_create_estimate_line_items': `
     CREATE TABLE IF NOT EXISTS estimate_line_items (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
       estimate_id UUID NOT NULL REFERENCES estimates(id) ON DELETE CASCADE,
       description TEXT NOT NULL,
       category TEXT CHECK (category IN ('labor', 'material', 'equipment', 'other')),
@@ -471,6 +471,9 @@ export const MIGRATIONS = {
       taxable BOOLEAN NOT NULL DEFAULT true
     );
     CREATE INDEX IF NOT EXISTS idx_est_items_estimate ON estimate_line_items(estimate_id);
+    ALTER TABLE estimate_line_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_est_items ON estimate_line_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
   '022_create_estimate_provenance': `
@@ -549,6 +552,7 @@ export const MIGRATIONS = {
   '025_create_invoice_line_items': `
     CREATE TABLE IF NOT EXISTS invoice_line_items (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
       invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
       description TEXT NOT NULL,
       category TEXT CHECK (category IN ('labor', 'material', 'equipment', 'other')),
@@ -559,6 +563,9 @@ export const MIGRATIONS = {
       taxable BOOLEAN NOT NULL DEFAULT true
     );
     CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_line_items(invoice_id);
+    ALTER TABLE invoice_line_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_inv_items ON invoice_line_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
   '026_create_payments': `

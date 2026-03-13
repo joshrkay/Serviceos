@@ -150,6 +150,36 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(errors).toContain('invoiceId is required');
   });
 
+  it('validation — rejects payment on draft invoice', async () => {
+    // Create a new invoice but do NOT issue it (stays in draft)
+    const draftInvoice = await createInvoice(
+      { tenantId: 'tenant-1', jobId: 'job-1', invoiceNumber: 'INV-DRAFT', lineItems: sampleItems, createdBy: 'u-1' },
+      invoiceRepo
+    );
+
+    await expect(
+      recordPayment(
+        { tenantId: 'tenant-1', invoiceId: draftInvoice.id, amountCents: 5000, method: 'cash', processedBy: 'u-1' },
+        invoiceRepo,
+        paymentRepo
+      )
+    ).rejects.toThrow("Cannot record payment on invoice with status 'draft'");
+  });
+
+  it('validation — rejects payment on void invoice', async () => {
+    // Void the issued invoice
+    const { transitionInvoiceStatus } = require('../../src/invoices/invoice');
+    await transitionInvoiceStatus('tenant-1', invoiceId, 'void', invoiceRepo);
+
+    await expect(
+      recordPayment(
+        { tenantId: 'tenant-1', invoiceId, amountCents: 5000, method: 'cash', processedBy: 'u-1' },
+        invoiceRepo,
+        paymentRepo
+      )
+    ).rejects.toThrow("Cannot record payment on invoice with status 'void'");
+  });
+
   it('tenant isolation — cross-tenant payment inaccessible', async () => {
     await recordPayment(
       { tenantId: 'tenant-1', invoiceId, amountCents: 5000, method: 'cash', processedBy: 'u-1' },

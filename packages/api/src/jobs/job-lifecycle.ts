@@ -84,7 +84,8 @@ export async function transitionJobStatus(
     await auditRepo.create(event);
   }
 
-  return { job: updated!, timelineEntry: entry };
+  if (!updated) throw new Error('Failed to update job status');
+  return { job: updated, timelineEntry: entry };
 }
 
 export async function addTimelineEntry(

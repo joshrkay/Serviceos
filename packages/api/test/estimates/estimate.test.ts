@@ -97,6 +97,39 @@ describe('P1-009 — Estimate entity + shared line-item schema', () => {
     expect(found).toBeNull();
   });
 
+  it('status transition — valid transition draft to sent', async () => {
+    const estimate = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-0001', lineItems: sampleItems, createdBy: 'u-1' },
+      repo
+    );
+
+    const result = await transitionEstimateStatus('tenant-1', estimate.id, 'sent', repo);
+    expect(result!.status).toBe('sent');
+  });
+
+  it('status transition — rejects invalid transition draft to accepted', async () => {
+    const estimate = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-0001', lineItems: sampleItems, createdBy: 'u-1' },
+      repo
+    );
+
+    await expect(
+      transitionEstimateStatus('tenant-1', estimate.id, 'accepted', repo)
+    ).rejects.toThrow('Invalid transition from draft to accepted');
+  });
+
+  it('edit guard — rejects update on sent estimate', async () => {
+    const estimate = await createEstimate(
+      { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-0001', lineItems: sampleItems, createdBy: 'u-1' },
+      repo
+    );
+    await transitionEstimateStatus('tenant-1', estimate.id, 'sent', repo);
+
+    await expect(
+      updateEstimate('tenant-1', estimate.id, { discountCents: 1000 }, repo)
+    ).rejects.toThrow("Cannot edit estimate in 'sent' status");
+  });
+
   it('zero amount edge case — zero-value line items', async () => {
     const zeroItems = [buildLineItem('z-1', 'Free consultation', 1, 0, 1, true)];
     const estimate = await createEstimate(

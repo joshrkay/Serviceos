@@ -28,6 +28,7 @@ export interface CreateJobInput {
   problemDescription?: string;
   priority?: JobPriority;
   createdBy: string;
+  actorRole?: string;
 }
 
 export interface UpdateJobInput {
@@ -94,7 +95,7 @@ export async function createJob(
     const event = createAuditEvent({
       tenantId: input.tenantId,
       actorId: input.createdBy,
-      actorRole: 'owner',
+      actorRole: input.actorRole ?? 'unknown',
       eventType: 'job.created',
       entityType: 'job',
       entityId: created.id,
@@ -127,7 +128,7 @@ export async function updateJob(
     const event = createAuditEvent({
       tenantId,
       actorId,
-      actorRole: 'owner',
+      actorRole: 'unknown',
       eventType: 'job.updated',
       entityType: 'job',
       entityId: id,
