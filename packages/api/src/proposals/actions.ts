@@ -69,7 +69,7 @@ export async function editProposal(
   actorRole: Role,
   edits: Record<string, unknown>
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
-  if (!hasPermission(actorRole, 'proposals:approve')) {
+  if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
   }
 
