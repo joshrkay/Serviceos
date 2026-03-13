@@ -114,7 +114,8 @@ export class InMemoryVerticalPackRegistry implements VerticalPackRegistry {
   async update(id: string, updates: Partial<VerticalPack>): Promise<VerticalPack | null> {
     const pack = this.packs.get(id);
     if (!pack) return null;
-    const updated = { ...pack, ...updates };
+    const { id: _id, packId: _pid, createdAt: _ca, ...safeUpdates } = updates;
+    const updated = { ...pack, ...safeUpdates };
     this.packs.set(id, updated);
     return { ...updated };
   }

@@ -57,6 +57,12 @@ export function validateTemplateInput(input: CreateTemplateInput): string[] {
   return errors;
 }
 
+/**
+ * Template repository is intentionally NOT tenant-scoped.
+ * Templates belong to vertical packs and are shared across all tenants
+ * that activate a given pack. Access control is enforced at the
+ * pack-activation layer (see pack-activation.ts).
+ */
 export interface EstimateTemplateRepository {
   create(template: EstimateTemplate): Promise<EstimateTemplate>;
   findById(id: string): Promise<EstimateTemplate | null>;
@@ -108,13 +114,13 @@ export class InMemoryEstimateTemplateRepository implements EstimateTemplateRepos
   private templates: Map<string, EstimateTemplate> = new Map();
 
   async create(template: EstimateTemplate): Promise<EstimateTemplate> {
-    this.templates.set(template.id, { ...template, defaultLineItems: [...template.defaultLineItems] });
-    return { ...template, defaultLineItems: [...template.defaultLineItems] };
-  }
     this.templates.set(template.id, { ...template, defaultLineItems: template.defaultLineItems.map(li => ({ ...li })) });
     return { ...template, defaultLineItems: template.defaultLineItems.map(li => ({ ...li })) };
+  }
+
+  async findById(id: string): Promise<EstimateTemplate | null> {
     const t = this.templates.get(id);
-    return t ? { ...t, defaultLineItems: [...t.defaultLineItems] } : null;
+    return t ? { ...t, defaultLineItems: t.defaultLineItems.map(li => ({ ...li })) } : null;
   }
 
   async findByVerticalAndCategory(verticalType: VerticalType, category: ServiceCategory): Promise<EstimateTemplate | null> {

@@ -107,7 +107,8 @@ export class InMemoryPackActivationRepository implements PackActivationRepositor
   async update(id: string, updates: Partial<TenantPackActivation>): Promise<TenantPackActivation | null> {
     const existing = this.activations.get(id);
     if (!existing) return null;
-    const updated = { ...existing, ...updates };
+    const { id: _id, tenantId: _tid, packId: _pid, ...safeUpdates } = updates;
+    const updated = { ...existing, ...safeUpdates };
     this.activations.set(id, updated);
     return { ...updated };
   }

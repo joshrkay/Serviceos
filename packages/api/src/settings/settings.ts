@@ -191,7 +191,8 @@ export class InMemorySettingsRepository implements SettingsRepository {
   async update(tenantId: string, updates: Partial<TenantSettings>): Promise<TenantSettings | null> {
     const s = this.settings.get(tenantId);
     if (!s) return null;
-    const updated = { ...s, ...updates };
+    const { id: _id, tenantId: _tid, createdAt: _ca, ...safeUpdates } = updates;
+    const updated = { ...s, ...safeUpdates };
     this.settings.set(tenantId, updated);
     return { ...updated };
   }

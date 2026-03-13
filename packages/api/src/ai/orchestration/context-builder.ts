@@ -106,8 +106,8 @@ export async function buildSourceContext(
           categories: verticalConfig.categories,
         };
       }
-    } catch {
-      // Malformed vertical config should not break context assembly
+    } catch (err) {
+      console.error('Failed to load vertical config for tenant', tenantId, err);
     }
   }
 
