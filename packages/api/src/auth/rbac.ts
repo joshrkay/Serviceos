@@ -53,7 +53,12 @@ export type Permission =
   | 'notes:update'
   | 'notes:delete'
   | 'settings:view'
-  | 'settings:update';
+  | 'settings:update'
+  // Phase 6 permissions
+  | 'dispatch:view'
+  | 'dispatch:manage'
+  | 'availability:view'
+  | 'availability:manage';
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: [
@@ -109,6 +114,11 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'notes:delete',
     'settings:view',
     'settings:update',
+    // Phase 6
+    'dispatch:view',
+    'dispatch:manage',
+    'availability:view',
+    'availability:manage',
   ],
   dispatcher: [
     'users:list',
@@ -148,6 +158,11 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'notes:view',
     'notes:update',
     'settings:view',
+    // Phase 6
+    'dispatch:view',
+    'dispatch:manage',
+    'availability:view',
+    'availability:manage',
   ],
   technician: [
     'jobs:view',
@@ -166,6 +181,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'appointments:view',
     'notes:create',
     'notes:view',
+    // Phase 6
+    'availability:view',
   ],
 };
 
