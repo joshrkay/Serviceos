@@ -6,8 +6,8 @@ export interface FileRecord {
   filename: string;
   contentType: string;
   sizeBytes: number;
-  s3Bucket: string;
-  s3Key: string;
+  storageBucket: string;
+  storageKey: string;
   entityType?: string;
   entityId?: string;
   uploadedBy: string;
@@ -37,6 +37,10 @@ export interface FileRepository {
   delete(tenantId: string, id: string): Promise<boolean>;
 }
 
+// StorageProvider abstracts object storage. The production implementation
+// targets Cloudflare R2, which is S3-compatible — use the AWS SDK v3
+// S3Client pointed at the R2 endpoint:
+//   https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com
 export interface StorageProvider {
   generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string>;
   generateDownloadUrl(bucket: string, key: string): Promise<string>;
@@ -111,8 +115,8 @@ export function createFileRecord(request: UploadRequest, bucket: string): FileRe
     filename: request.filename,
     contentType: request.contentType,
     sizeBytes: request.sizeBytes,
-    s3Bucket: bucket,
-    s3Key: key,
+    storageBucket: bucket,
+    storageKey: key,
     entityType: request.entityType,
     entityId: request.entityId,
     uploadedBy: request.uploadedBy,

@@ -6,12 +6,14 @@ AI Service OS is a voice-first, proposal-driven operating system for small HVAC 
 
 ## Tech Stack
 
-- **Language:** TypeScript everywhere (CDK, API, Web, Shared)
-- **Backend:** Node.js with Express, Zod validation, Postgres via Drizzle ORM
+- **Language:** TypeScript everywhere (API, Web, Shared)
+- **Backend:** Node.js with Express, Zod validation, Postgres (pg)
 - **Frontend:** React 18, TypeScript, Tailwind CSS, Vite
-- **Infrastructure:** AWS CDK, ECS/Fargate, RDS Postgres, S3, SQS, CloudWatch
+- **Infrastructure:** Railway (compute + Postgres), Cloudflare R2 (file storage)
+- **Queue:** pg-boss (Postgres-backed job queue — no separate queue service)
 - **Auth:** Clerk (sign-up, sign-in, session management, webhooks)
-- **Monitoring:** CloudWatch for logs, Sentry for errors
+- **Secrets:** Railway environment variables (all environments)
+- **Monitoring:** Railway logs (structured JSON stdout), Sentry for errors
 - **Payments:** Stripe (payment links only)
 - **SMS:** Twilio (operational messages only)
 - **Accounting:** QuickBooks (one-way invoice sync)
@@ -20,7 +22,7 @@ AI Service OS is a voice-first, proposal-driven operating system for small HVAC 
 
 ```
 /
-├── infra/                    # AWS CDK stacks (TypeScript)
+├── infra/                    # Railway config (railway.toml files)
 ├── packages/
 │   ├── api/                  # Backend API
 │   │   ├── src/
@@ -28,7 +30,7 @@ AI Service OS is a voice-first, proposal-driven operating system for small HVAC 
 │   │   │   ├── middleware/   # Auth, permissions, correlation, tenant context
 │   │   │   ├── shared/       # Response envelope, errors, billing engine, line items
 │   │   │   ├── config/       # Environment config, AI routing config
-│   │   │   ├── secrets/      # AWS Secrets Manager resolution
+│   │   │   ├── secrets/      # Secret resolution (Railway env vars)
 │   │   │   ├── db/           # Connection, RLS setup, migration runner
 │   │   │   ├── audit/        # Immutable audit event system
 │   │   │   ├── logging/      # Structured JSON logging
