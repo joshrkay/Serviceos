@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ListPage, Column } from '../../components/ListPage';
 import { useListQuery } from '../../hooks/useListQuery';
+import { FilterConfig } from '../../components/FilterBar';
 
 interface Job {
   id: string;
@@ -11,8 +12,33 @@ interface Job {
   customerId: string;
 }
 
+const filters: FilterConfig[] = [
+  {
+    key: 'status',
+    label: 'Status',
+    options: [
+      { label: 'New', value: 'new' },
+      { label: 'Scheduled', value: 'scheduled' },
+      { label: 'In Progress', value: 'in_progress' },
+      { label: 'Completed', value: 'completed' },
+      { label: 'Canceled', value: 'canceled' },
+    ],
+  },
+  {
+    key: 'priority',
+    label: 'Priority',
+    options: [
+      { label: 'Low', value: 'low' },
+      { label: 'Normal', value: 'normal' },
+      { label: 'High', value: 'high' },
+      { label: 'Emergency', value: 'emergency' },
+    ],
+  },
+];
+
 export function JobList() {
-  const { data, total, page, pageSize, isLoading, error, refetch, setPage, setSearch } =
+  const [activeFilters, setActiveFilters] = useState<Record<string, string>>({});
+  const { data, total, page, pageSize, isLoading, error, refetch, setPage, setSearch, setFilters } =
     useListQuery<Job>('/api/jobs');
 
   const columns: Column<Job>[] = [
@@ -21,6 +47,22 @@ export function JobList() {
     { key: 'status', header: 'Status', render: (j) => j.status },
     { key: 'priority', header: 'Priority', render: (j) => j.priority },
   ];
+
+  const handleFilterChange = (key: string, value: string) => {
+    const updated = { ...activeFilters };
+    if (value) {
+      updated[key] = value;
+    } else {
+      delete updated[key];
+    }
+    setActiveFilters(updated);
+    setFilters(updated);
+  };
+
+  const handleClearFilters = () => {
+    setActiveFilters({});
+    setFilters({});
+  };
 
   return (
     <ListPage<Job>
@@ -33,6 +75,10 @@ export function JobList() {
       isLoading={isLoading}
       error={error}
       searchPlaceholder="Search jobs..."
+      filters={filters}
+      activeFilters={activeFilters}
+      onFilterChange={handleFilterChange}
+      onClearFilters={handleClearFilters}
       emptyTitle="No jobs yet"
       createLabel="New Job"
       onSearch={setSearch}

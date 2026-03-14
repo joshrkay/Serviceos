@@ -84,7 +84,12 @@ export function requireConversationAccess(
       return;
     }
 
-    let conversation: ConversationRecord | null;
+    if (!isValidRole(req.auth.role)) {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'Invalid role' });
+      return;
+    }
+
+    let conversation: Conversation | null;
     try {
       conversation = await getConversation(req.auth.tenantId, conversationId);
     } catch (err) {
@@ -92,12 +97,6 @@ export function requireConversationAccess(
       return;
     }
 
-    if (!conversation) {
-      res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
-      return;
-    }
-
-    const conversation = await getConversation(req.auth.tenantId, conversationId);
     if (!conversation) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
       return;

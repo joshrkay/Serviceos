@@ -8,3 +8,4 @@ app.listen(PORT, () => {
   console.log(`Swagger UI available at http://localhost:${PORT}/api-docs`);
   console.log(`Health check at http://localhost:${PORT}/health`);
 });
+// Railway: targets api stage via dockerfileTarget in railway.toml

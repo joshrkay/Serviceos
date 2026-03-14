@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { TranscriptMessage } from '../../components/voice/TranscriptMessage';
-import { RecordingState } from '../../components/voice/useVoiceRecorder';
+import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 import { TranscriptionStatus, Proposal } from '../../types/conversation';
 
 export interface JobContext {
@@ -38,9 +38,7 @@ export function VoiceUpdate({
   transcript,
   transcriptionError,
 }: VoiceUpdateProps) {
-  const [recordingState, setRecordingState] = useState<RecordingState>('idle');
-  const [duration, setDuration] = useState(0);
-  const [recordedBlob, setRecordedBlob] = useState<Blob>(new Blob());
+  const recorder = useVoiceRecorder();
   const [error, setError] = useState<string | null>(null);
   const [recordingId, setRecordingId] = useState<string | null>(null);
 
@@ -52,36 +50,21 @@ export function VoiceUpdate({
       return;
     }
     setError(null);
-    setRecordingState('recording');
-    setDuration(0);
-  }, [contextError]);
-
-  const handleStop = useCallback(() => {
-    setRecordingState('stopped');
-  }, []);
-
-  const handleCancel = useCallback(() => {
-    setRecordingState('idle');
-    setDuration(0);
-  }, []);
-
-  const handleReRecord = useCallback(() => {
-    setRecordingState('idle');
-    setDuration(0);
-  }, []);
+    recorder.start();
+  }, [contextError, recorder.start]);
 
   const handleUpload = useCallback(async () => {
     if (!jobContext) return;
-    setRecordingState('uploading');
-    try {
-      const id = await onUploadRecording(jobContext.jobId, recordedBlob);
-      setRecordingId(id);
-      setRecordingState('transcribing');
-    } catch {
-      setRecordingState('stopped');
-      setError('Upload failed. Please try again.');
-    }
-  }, [jobContext, onUploadRecording]);
+    await recorder.upload(async (blob) => {
+      try {
+        const id = await onUploadRecording(jobContext.jobId, blob);
+        setRecordingId(id);
+      } catch (err) {
+        setError('Upload failed. Please try again.');
+        throw err;
+      }
+    });
+  }, [jobContext, onUploadRecording, recorder.upload]);
 
   return (
     <div className="voice-update" data-testid="voice-update">
@@ -105,12 +88,12 @@ export function VoiceUpdate({
       )}
 
       <VoiceRecorder
-        state={recordingState}
-        duration={duration}
+        state={recorder.state}
+        duration={recorder.duration}
         onStart={handleStart}
-        onStop={handleStop}
-        onCancel={handleCancel}
-        onReRecord={handleReRecord}
+        onStop={recorder.stop}
+        onCancel={recorder.cancel}
+        onReRecord={recorder.reRecord}
         onUpload={handleUpload}
       />
 

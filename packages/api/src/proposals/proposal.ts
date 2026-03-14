@@ -1,7 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ConflictError } from '../shared/errors';
 
 export type ProposalStatus = 'draft' | 'ready_for_review' | 'approved' | 'rejected' | 'expired' | 'executed' | 'execution_failed';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -10,6 +11,7 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_appointment',
   'draft_estimate',
   'update_estimate',
+  'draft_invoice',
 ];
 
 export interface Proposal {
@@ -129,6 +131,16 @@ export class InMemoryProposalRepository implements ProposalRepository {
   private proposals: Map<string, Proposal> = new Map();
 
   async create(proposal: Proposal): Promise<Proposal> {
+    if (proposal.idempotencyKey) {
+      const existing = Array.from(this.proposals.values()).find(
+        (p) => p.tenantId === proposal.tenantId && p.idempotencyKey === proposal.idempotencyKey
+      );
+      if (existing) {
+        throw new ConflictError(
+          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
+        );
+      }
+    }
     this.proposals.set(proposal.id, { ...proposal });
     return { ...proposal };
   }

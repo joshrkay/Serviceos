@@ -6,6 +6,5 @@ dist/
 .env
 .env.*
 !.env.example
-cdk.out/
 *.tsbuildinfo
 coverage/

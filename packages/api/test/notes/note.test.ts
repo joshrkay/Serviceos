@@ -3,6 +3,8 @@ import {
   updateNote,
   deleteNote,
   listNotes,
+  pinNote,
+  unpinNote,
   validateNoteInput,
   InMemoryNoteRepository,
 } from '../../src/notes/note';
@@ -101,6 +103,36 @@ describe('P1-015 — Internal notes across key entities', () => {
     );
 
     expect(note.isPinned).toBe(true);
+  });
+
+  it('happy path — pins an existing note', async () => {
+    const note = await createNote(
+      { tenantId: 'tenant-1', entityType: 'job', entityId: 'job-1', content: 'Pin me', authorId: 'u-1', authorRole: 'owner' },
+      repo
+    );
+    expect(note.isPinned).toBe(false);
+
+    const pinned = await pinNote('tenant-1', note.id, repo);
+    expect(pinned!.isPinned).toBe(true);
+  });
+
+  it('happy path — unpins a pinned note', async () => {
+    const note = await createNote(
+      { tenantId: 'tenant-1', entityType: 'job', entityId: 'job-1', content: 'Unpin me', authorId: 'u-1', authorRole: 'owner', isPinned: true },
+      repo
+    );
+    expect(note.isPinned).toBe(true);
+
+    const unpinned = await unpinNote('tenant-1', note.id, repo);
+    expect(unpinned!.isPinned).toBe(false);
+  });
+
+  it('pin/unpin — returns null for non-existent note', async () => {
+    const result = await pinNote('tenant-1', 'non-existent', repo);
+    expect(result).toBeNull();
+
+    const result2 = await unpinNote('tenant-1', 'non-existent', repo);
+    expect(result2).toBeNull();
   });
 
   it('validation — rejects missing required fields', () => {

@@ -1,0 +1,38 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Type check API
+        run: npx tsc --noEmit
+        working-directory: packages/api
+      - name: Type check Web
+        run: npx tsc --noEmit
+        working-directory: packages/web
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test -- --reporter=verbose
+
+      - name: Integration tests
+        run: npm run test:integration
+        working-directory: packages/api
+        env:
+          TEST_DB: testcontainers
+
+      - name: Coverage check
+        run: npm run test:coverage

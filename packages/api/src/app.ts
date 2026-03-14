@@ -1,8 +1,10 @@
 import express from 'express';
+import cors from 'cors';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
-import { createHealthRouter } from './health/health';
+import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
+import { createPool } from './db/pool';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
@@ -47,11 +49,33 @@ export function createApp() {
   // Body parsing
   app.use(express.json());
 
+  // CORS
+  const corsOrigin = process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? false : true);
+  app.use(cors({
+    origin: corsOrigin,
+    credentials: true,
+  }));
+
   // Swagger UI — no auth required
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
   // Health checks — no auth required
-  const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development');
+  const checks: HealthCheck[] = [];
+  if (process.env.DATABASE_URL) {
+    const pool = createPool();
+    checks.push({
+      name: 'database',
+      check: async () => {
+        try {
+          await pool.query('SELECT 1');
+          return { status: 'ok' };
+        } catch {
+          return { status: 'down', message: 'Database connection failed' };
+        }
+      },
+    });
+  }
+  const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
   // Auth middleware for API routes

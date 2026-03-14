@@ -55,3 +55,13 @@ export async function createProposalMessage(
 
   return { messageId: message.id };
 }
+
+export async function updateProposalMessage(
+  conversationRepo: ConversationRepository,
+  tenantId: string,
+  messageId: string,
+  proposal: Proposal
+): Promise<void> {
+  const metadata = buildProposalCard(proposal);
+  await conversationRepo.updateMessageMetadata(tenantId, messageId, metadata);
+}

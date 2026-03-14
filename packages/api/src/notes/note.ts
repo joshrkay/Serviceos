@@ -84,6 +84,22 @@ export async function deleteNote(
   return repository.delete(tenantId, noteId);
 }
 
+export async function pinNote(
+  tenantId: string,
+  noteId: string,
+  repository: NoteRepository
+): Promise<InternalNote | null> {
+  return repository.update(tenantId, noteId, { isPinned: true, updatedAt: new Date() });
+}
+
+export async function unpinNote(
+  tenantId: string,
+  noteId: string,
+  repository: NoteRepository
+): Promise<InternalNote | null> {
+  return repository.update(tenantId, noteId, { isPinned: false, updatedAt: new Date() });
+}
+
 export async function listNotes(
   tenantId: string,
   entityType: NoteEntityType,

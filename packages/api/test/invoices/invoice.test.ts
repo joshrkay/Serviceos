@@ -4,6 +4,7 @@ import {
   updateInvoice,
   issueInvoice,
   transitionInvoiceStatus,
+  isValidInvoiceTransition,
   validateInvoiceInput,
   recalculateBalance,
   calculateDueDate,
@@ -168,7 +169,6 @@ describe('P1-012 — Invoice numbering + due dates + statuses', () => {
   });
 
   it('validation — paid and void are terminal', () => {
-    const { isValidInvoiceTransition } = require('../../src/invoices/invoice');
     expect(isValidInvoiceTransition('paid', 'open')).toBe(false);
     expect(isValidInvoiceTransition('void', 'open')).toBe(false);
   });
