@@ -1,4 +1,12 @@
 import { Message } from '../../conversations/conversation-service';
+import { VerticalType } from '../../shared/vertical-types';
+
+export interface VerticalContext {
+  type: VerticalType;
+  packId: string;
+  terminology?: Record<string, unknown>;
+  categories?: unknown[];
+}
 
 export interface SourceContext {
   conversation?: {
@@ -9,6 +17,7 @@ export interface SourceContext {
   job?: Record<string, unknown>;
   location?: Record<string, unknown>;
   tenant?: { name: string; settings?: Record<string, unknown> };
+  vertical?: VerticalContext;
 }
 
 export interface EntityRefs {
@@ -17,12 +26,20 @@ export interface EntityRefs {
   locationId?: string;
 }
 
+export interface VerticalConfigResult {
+  type: VerticalType;
+  packId: string;
+  terminology: Record<string, unknown>;
+  categories: unknown[];
+}
+
 export interface ContextRepositories {
   getConversationMessages?(tenantId: string, conversationId: string): Promise<Message[]>;
   getCustomer?(tenantId: string, customerId: string): Promise<Record<string, unknown> | null>;
   getJob?(tenantId: string, jobId: string): Promise<Record<string, unknown> | null>;
   getLocation?(tenantId: string, locationId: string): Promise<Record<string, unknown> | null>;
   getTenantInfo?(tenantId: string): Promise<{ name: string; settings?: Record<string, unknown> } | null>;
+  getActiveVerticalConfig?(tenantId: string): Promise<VerticalConfigResult | null>;
 }
 
 export const MAX_CONTEXT_TOKENS = 8000;
@@ -75,6 +92,22 @@ export async function buildSourceContext(
     const tenant = await repos.getTenantInfo(tenantId);
     if (tenant) {
       context.tenant = tenant;
+    }
+  }
+
+  if (repos.getActiveVerticalConfig) {
+    try {
+      const verticalConfig = await repos.getActiveVerticalConfig(tenantId);
+      if (verticalConfig) {
+        context.vertical = {
+          type: verticalConfig.type,
+          packId: verticalConfig.packId,
+          terminology: verticalConfig.terminology,
+          categories: verticalConfig.categories,
+        };
+      }
+    } catch (err) {
+      console.error('Failed to load vertical config for tenant', tenantId, err);
     }
   }
 
