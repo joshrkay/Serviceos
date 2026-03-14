@@ -47,7 +47,7 @@ export function ConversationList({
 
   const filtered = useMemo(
     () => sortByRecent(filterConversations(conversations, searchQuery, stableSearchFields.current)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line -- deps intentionally exclude stableSearchFields ref
     [conversations, searchQuery, searchFieldsJson]
   );
 
