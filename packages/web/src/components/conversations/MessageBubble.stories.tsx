@@ -5,6 +5,15 @@ import type { Message } from '../../types/conversation';
 const meta: Meta<typeof MessageBubble> = {
   title: 'Conversations/MessageBubble',
   component: MessageBubble,
+  parameters: {
+    // Link the specific Figma frame for this component.
+    // To get the node id: open Figma → right-click the MessageBubble frame → "Copy link to selection"
+    // The URL will contain ?node-id=XXXX-YYYY — paste the full URL below.
+    design: {
+      type: 'figma',
+      url: 'https://www.figma.com/make/prZaqgtGkagNYeVutpTSgU/Service-business-OS-AI-base?node-id=REPLACE-WITH-ACTUAL-NODE-ID',
+    },
+  },
 };
 export default meta;
 
