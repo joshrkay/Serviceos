@@ -130,7 +130,8 @@ export function validatePlumbingCategoryTaxonomy(categories: PlumbingCategoryDef
 
     if (!cat.name) errors.push(`Category "${cat.id}" is missing name`);
     if (!cat.description) errors.push(`Category "${cat.id}" is missing description`);
-    if (cat.parentId) {
+    if (cat.parentId && !ids.has(cat.parentId)) {
+      // parentId must reference an already-seen id (assumes sorted order)
       const parentExists = categories.some((c) => c.id === cat.parentId);
       if (!parentExists) {
         errors.push(`Category "${cat.id}" references unknown parentId: ${cat.parentId}`);

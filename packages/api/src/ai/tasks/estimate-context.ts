@@ -7,6 +7,8 @@ import { BundlePatternRepository } from '../../estimates/bundle-patterns';
 import { WordingPreferenceRepository } from '../../estimates/wording-preferences';
 import { MissingItemSignalRepository } from '../../estimates/missing-item-signals';
 
+const MAX_TERMINOLOGY_HINTS = 15;
+
 // P4-009B: Service category + template context assembly
 export interface VerticalEstimateContext {
   serviceCategory?: ServiceCategory;
@@ -42,10 +44,11 @@ export function assembleVerticalEstimateContext(
   if (verticalConfig.terminology) {
     const hints: Array<{ term: string; hint: string }> = [];
     for (const [key, entry] of Object.entries(verticalConfig.terminology)) {
-      hints.push({ term: entry.displayLabel, hint: entry.promptHint });
+      if (entry.displayLabel && entry.promptHint) {
+        hints.push({ term: entry.displayLabel, hint: entry.promptHint });
+      }
     }
-    // Limit to top 15 terms to keep context size manageable
-    result.terminologyHints = hints.slice(0, 15);
+    result.terminologyHints = hints.slice(0, MAX_TERMINOLOGY_HINTS);
   }
 
   return result;

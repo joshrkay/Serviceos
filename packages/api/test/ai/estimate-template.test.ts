@@ -80,6 +80,19 @@ describe('P4-004A — Vertical estimate template schema', () => {
     expect(errors).toContain('Line item 0 has invalid category');
   });
 
+  it('deep-clones line items — mutations do not affect stored templates', async () => {
+    const template = await createTemplate(validInput, repo);
+    const retrieved = await repo.findById(template.id);
+    expect(retrieved).not.toBeNull();
+
+    // Mutate the returned line item
+    retrieved!.defaultLineItems[0].description = 'MUTATED';
+
+    // Re-fetch and verify the stored template is unaffected
+    const fresh = await repo.findById(template.id);
+    expect(fresh!.defaultLineItems[0].description).toBe('Diagnostic service call');
+  });
+
   it('mock provider — malformed input handled gracefully', () => {
     const errors = validateTemplateInput({
       packId: undefined as any,

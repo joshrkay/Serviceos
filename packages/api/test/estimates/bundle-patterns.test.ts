@@ -1,8 +1,10 @@
 import {
   InMemoryBundlePatternRepository,
   validateBundlePattern,
+  identifyBundlePatterns,
   BundlePattern,
 } from '../../src/estimates/bundle-patterns';
+import { ApprovedEstimateMetadata } from '../../src/estimates/approved-estimate-metadata';
 
 describe('P4-006A — Line-item bundle pattern model', () => {
   let repo: InMemoryBundlePatternRepository;
@@ -61,6 +63,32 @@ describe('P4-006A — Line-item bundle pattern model', () => {
       confidence: 0.5,
     });
     expect(errors).toContain('Bundle must have at least 2 items');
+  });
+
+  it('identifies co-occurring pairs above min frequency', async () => {
+    const base = { approvalOutcome: 'approved' as const, lineItemCount: 2, totalCents: 10000, approvedAt: new Date() };
+    const estimates: ApprovedEstimateMetadata[] = [
+      { id: 'a1', tenantId: 't1', estimateId: 'e1', lineItemSummary: ['Diagnostic fee', 'Inspection report'], ...base },
+      { id: 'a2', tenantId: 't1', estimateId: 'e2', lineItemSummary: ['Diagnostic fee', 'Inspection report'], ...base },
+      { id: 'a3', tenantId: 't1', estimateId: 'e3', lineItemSummary: ['Diagnostic fee', 'Other item'], ...base },
+    ];
+
+    const patterns = await identifyBundlePatterns('t1', estimates, { minFrequency: 2 });
+    expect(patterns.length).toBeGreaterThanOrEqual(1);
+    const topPattern = patterns[0];
+    expect(topPattern.frequency).toBe(2);
+    expect(topPattern.items).toHaveLength(2);
+  });
+
+  it('returns empty when no pairs meet min frequency', async () => {
+    const base = { approvalOutcome: 'approved' as const, lineItemCount: 2, totalCents: 5000, approvedAt: new Date() };
+    const estimates: ApprovedEstimateMetadata[] = [
+      { id: 'a1', tenantId: 't1', estimateId: 'e1', lineItemSummary: ['A', 'B'], ...base },
+      { id: 'a2', tenantId: 't1', estimateId: 'e2', lineItemSummary: ['C', 'D'], ...base },
+    ];
+
+    const patterns = await identifyBundlePatterns('t1', estimates, { minFrequency: 2 });
+    expect(patterns).toHaveLength(0);
   });
 
   it('validation — rejects invalid confidence', () => {

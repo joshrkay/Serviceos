@@ -80,8 +80,9 @@ export class InMemoryEstimateSummarySnapshotRepository implements EstimateSummar
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
-    if (filters.limit) {
-      results = results.slice(0, filters.limit);
+    const effectiveLimit = filters.limit && filters.limit > 0 ? filters.limit : undefined;
+    if (effectiveLimit) {
+      results = results.slice(0, effectiveLimit);
     }
 
     return results.map((s) => ({ ...s, lineItemDescriptions: [...s.lineItemDescriptions] }));

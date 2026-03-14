@@ -2,6 +2,10 @@ import { v4 as uuidv4 } from 'uuid';
 
 export type EstimateSourceType = 'manual' | 'ai_generated' | 'ai_revised' | 'template' | 'cloned' | 'vertical_template';
 
+export const VALID_SOURCE_TYPES: EstimateSourceType[] = [
+  'manual', 'ai_generated', 'ai_revised', 'template', 'cloned', 'vertical_template',
+];
+
 export interface EstimateProvenance {
   id: string;
   tenantId: string;
@@ -44,7 +48,7 @@ export function validateProvenanceInput(input: CreateProvenanceInput): string[] 
   if (!input.estimateId) errors.push('estimateId is required');
   if (!input.sourceType) {
     errors.push('sourceType is required');
-  } else if (!['manual', 'ai_generated', 'ai_revised', 'template', 'cloned', 'vertical_template'].includes(input.sourceType)) {
+  } else if (!VALID_SOURCE_TYPES.includes(input.sourceType)) {
     errors.push('Invalid sourceType');
   }
   if (!input.creatorId) errors.push('creatorId is required');

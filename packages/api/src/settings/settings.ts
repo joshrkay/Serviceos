@@ -128,6 +128,7 @@ export async function getNextEstimateNumber(
   const settings = await repository.findByTenant(tenantId);
   if (!settings) throw new Error('Tenant settings not found');
   const num = await repository.incrementEstimateNumber(tenantId);
+  // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.estimatePrefix}${String(num).padStart(4, '0')}`;
 }
 
@@ -138,6 +139,7 @@ export async function getNextInvoiceNumber(
   const settings = await repository.findByTenant(tenantId);
   if (!settings) throw new Error('Tenant settings not found');
   const num = await repository.incrementInvoiceNumber(tenantId);
+  // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
 }
 

@@ -1,5 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalType, ServiceCategory } from '../shared/vertical-types';
+import { normalizeDescription } from '../shared/text-utils';
+
+const MAX_WORDING_PREFERENCES = 20;
 
 export interface WordingPreference {
   id: string;
@@ -44,13 +47,14 @@ export function captureWordingPreferences(
   const prefMap = new Map<string, { preferred: string; count: number }>();
 
   for (const diff of diffs) {
-    const normalizedOriginal = diff.original.toLowerCase().trim();
-    const normalizedRevised = diff.revised.toLowerCase().trim();
+    const normalizedOriginal = normalizeDescription(diff.original);
+    const normalizedRevised = normalizeDescription(diff.revised);
     if (normalizedOriginal === normalizedRevised) continue;
 
     const existing = prefMap.get(normalizedOriginal);
     if (existing) {
       existing.count += 1;
+      existing.preferred = diff.revised;
     } else {
       prefMap.set(normalizedOriginal, { preferred: diff.revised, count: 1 });
     }
@@ -83,7 +87,7 @@ export async function getWordingContext(
     : await repository.findByTenant(tenantId);
 
   const sorted = prefs.sort((a, b) => b.frequency - a.frequency);
-  const topPrefs = sorted.slice(0, 20); // Limit for prompt size
+  const topPrefs = sorted.slice(0, MAX_WORDING_PREFERENCES);
 
   return {
     preferences: topPrefs.map((p) => ({

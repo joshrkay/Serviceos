@@ -60,6 +60,21 @@ describe('P4-009B — Service category + template context assembly', () => {
     expect(context.terminologyHints).toBeUndefined();
   });
 
+  it('skips terminology entries with missing displayLabel or promptHint', () => {
+    const configWithGaps: VerticalPackConfig = {
+      ...hvacConfig,
+      terminology: {
+        complete: { canonical: 'complete', displayLabel: 'Complete', promptHint: 'A complete entry', aliases: [] },
+        no_label: { canonical: 'no_label', displayLabel: '', promptHint: 'Has hint but no label', aliases: [] },
+        no_hint: { canonical: 'no_hint', displayLabel: 'No Hint', promptHint: '', aliases: [] },
+      },
+    };
+
+    const context = assembleVerticalEstimateContext(sourceContext, configWithGaps, null);
+    expect(context.terminologyHints).toHaveLength(1);
+    expect(context.terminologyHints![0].term).toBe('Complete');
+  });
+
   it('happy path — terminology hints are limited in size', () => {
     const largeConfig: VerticalPackConfig = {
       ...hvacConfig,

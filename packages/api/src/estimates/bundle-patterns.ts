@@ -1,6 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalType, ServiceCategory } from '../shared/vertical-types';
 import { ApprovedEstimateMetadataRepository, ApprovedEstimateMetadata } from './approved-estimate-metadata';
+import { normalizeDescription } from '../shared/text-utils';
+
+const MAX_ESTIMATES = 500;
+const MAX_LINE_ITEMS_PER_ESTIMATE = 20;
 
 export interface BundleItem {
   description: string;
@@ -36,10 +40,6 @@ export function validateBundlePattern(pattern: Partial<BundlePattern>): string[]
   return errors;
 }
 
-function normalizeDesc(desc: string): string {
-  return desc.toLowerCase().trim().replace(/\s+/g, ' ');
-}
-
 // P4-006B: Identify bundle patterns from approved estimates
 export async function identifyBundlePatterns(
   tenantId: string,
@@ -49,12 +49,12 @@ export async function identifyBundlePatterns(
   const minFreq = options.minFrequency ?? 2;
 
   // Cap inputs to prevent O(n * L²) DoS with large datasets
-  const capped = approvedEstimates.slice(0, 500);
+  const capped = approvedEstimates.slice(0, MAX_ESTIMATES);
 
   // Group line item sets by estimate
   const itemSets: string[][] = capped
     .filter((e) => e.lineItemSummary.length >= 2)
-    .map((e) => e.lineItemSummary.slice(0, 20).map((s) => normalizeDesc(s)).sort());
+    .map((e) => e.lineItemSummary.slice(0, MAX_LINE_ITEMS_PER_ESTIMATE).map((s) => normalizeDescription(s)).sort());
 
   // Find co-occurring pairs
   const pairCounts = new Map<string, { items: BundleItem[]; count: number; lastSeen: Date }>();
@@ -106,7 +106,7 @@ export async function suggestBundles(
   bundleRepo: BundlePatternRepository
 ): Promise<BundlePattern[]> {
   const bundles = await bundleRepo.findByTenant(tenantId);
-  const normalizedCurrent = new Set(currentLineItems.map((d) => normalizeDesc(d)));
+  const normalizedCurrent = new Set(currentLineItems.map((d) => normalizeDescription(d)));
 
   return bundles.filter((bundle) => {
     // At least one item matches, but not all (suggesting the missing ones)

@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { VerticalType, ServiceCategory } from '../shared/vertical-types';
 import { RepeatedItemSignal } from './repeated-item-detection';
 
+const RECENCY_DIVISOR = 10;
+
 export interface MissingItemSignal {
   id: string;
   tenantId: string;
@@ -49,7 +51,7 @@ export function storeMissingItemSignal(
     description: item.description,
     normalizedDescription: item.normalizedDescription,
     frequency: item.frequency,
-    recencyScore: Math.min(1, item.frequency / 10),
+    recencyScore: Math.min(1, item.frequency / RECENCY_DIVISOR),
     lastSeenAt: maxAge,
   }));
 }

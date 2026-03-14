@@ -1,5 +1,8 @@
 import { EditDeltaRepository, EstimateEditDelta } from './edit-delta';
 import { VerticalType, ServiceCategory } from '../shared/vertical-types';
+import { normalizeDescription } from '../shared/text-utils';
+
+export { normalizeDescription } from '../shared/text-utils';
 
 export interface RepeatedItemSignal {
   description: string;
@@ -14,10 +17,6 @@ export interface DetectionOptions {
   minFrequency?: number;
   verticalType?: VerticalType;
   serviceCategory?: ServiceCategory;
-}
-
-export function normalizeDescription(desc: string): string {
-  return desc.toLowerCase().trim().replace(/\s+/g, ' ');
 }
 
 export async function detectRepeatedlyAddedItems(

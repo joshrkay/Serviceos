@@ -127,17 +127,17 @@ export class InMemoryEstimateTemplateRepository implements EstimateTemplateRepos
     const found = Array.from(this.templates.values()).find(
       (t) => t.verticalType === verticalType && t.serviceCategory === category
     );
-    return found ? { ...found, defaultLineItems: [...found.defaultLineItems] } : null;
+    return found ? { ...found, defaultLineItems: found.defaultLineItems.map(li => ({ ...li })) } : null;
   }
 
   async findByVertical(verticalType: VerticalType): Promise<EstimateTemplate[]> {
     return Array.from(this.templates.values())
       .filter((t) => t.verticalType === verticalType)
-      .map((t) => ({ ...t, defaultLineItems: [...t.defaultLineItems] }));
+      .map((t) => ({ ...t, defaultLineItems: t.defaultLineItems.map(li => ({ ...li })) }));
   }
 
   async list(): Promise<EstimateTemplate[]> {
     return Array.from(this.templates.values())
-      .map((t) => ({ ...t, defaultLineItems: [...t.defaultLineItems] }));
+      .map((t) => ({ ...t, defaultLineItems: t.defaultLineItems.map(li => ({ ...li })) }));
   }
 }

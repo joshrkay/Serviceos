@@ -22,6 +22,10 @@ function getTerminology(verticalType: VerticalType): TerminologyMap {
       return HVAC_TERMINOLOGY;
     case 'plumbing':
       return PLUMBING_TERMINOLOGY;
+    default: {
+      const _exhaustive: never = verticalType;
+      throw new Error(`Unknown vertical type: ${verticalType}`);
+    }
   }
 }
 
@@ -43,6 +47,10 @@ function getCategories(verticalType: VerticalType): VerticalPackConfig['categori
         sortOrder: c.sortOrder,
         typicalLineItems: c.typicalLineItems,
       }));
+    default: {
+      const _exhaustive: never = verticalType;
+      throw new Error(`Unknown vertical type: ${verticalType}`);
+    }
   }
 }
 
