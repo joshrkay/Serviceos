@@ -3,20 +3,28 @@
   "version": "0.0.1",
   "private": true,
   "workspaces": [
+    "packages/shared",
     "packages/api",
     "packages/web"
   ],
   "scripts": {
-    "build": "npm run build --workspaces",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspaces",
     "test": "npm run test --workspaces",
     "test:integration": "npm run test:integration --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
-    "lint": "npm run lint --workspaces",
+    "lint": "npm run lint --workspaces --if-present",
+    "dev": "npm run dev --workspaces --if-present",
     "seed": "npm run seed --workspace=packages/api",
     "seed:clean": "npm run seed:clean --workspace=packages/api",
+    "migrate": "npm run migrate --workspace=packages/api",
+    "migrate:rollback": "npm run migrate:rollback --workspace=packages/api",
+    "migrate:status": "npm run migrate:status --workspace=packages/api",
     "migrate:dryrun": "npm run migrate:dryrun --workspace=packages/api"
   },
   "devDependencies": {
-    "typescript": "^5.4.0"
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.3",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.57.0"
   }
 }
