@@ -6,3 +6,4 @@ dockerfileTarget = "web"
 [deploy]
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
+# web service — nginx on port 80
