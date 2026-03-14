@@ -1,4 +1,4 @@
-import type { LLMProvider, ChatMessage, ChatResponse } from '../gateway/types';
+import type { LLMProvider, LLMRequest, LLMResponse } from '../gateway/gateway';
 
 /**
  * Deterministic mock provider for unit tests.
@@ -8,7 +8,7 @@ export class MockLLMProvider implements LLMProvider {
   readonly name = 'mock';
 
   private responses: Map<string, string> = new Map();
-  private callLog: Array<{ messages: ChatMessage[]; model: string }> = [];
+  private callLog: LLMRequest[] = [];
   private defaultResponse: string;
 
   constructor(defaultResponse = '{"mock": true}') {
@@ -25,22 +25,24 @@ export class MockLLMProvider implements LLMProvider {
     this.defaultResponse = content;
   }
 
-  async chat(
-    messages: ChatMessage[],
-    model: string,
-    _options: { temperature?: number; maxTokens?: number }
-  ): Promise<ChatResponse> {
-    this.callLog.push({ messages, model });
+  async complete(request: LLMRequest): Promise<LLMResponse> {
+    this.callLog.push(request);
+    const model = request.model ?? 'mock-model';
     const content = this.responses.get(model) ?? this.defaultResponse;
     return {
       content,
       model,
-      durationMs: 1,
+      provider: this.name,
+      latencyMs: 1,
       tokenUsage: { input: 10, output: 10, total: 20 },
     };
   }
 
-  getCalls(): Array<{ messages: ChatMessage[]; model: string }> {
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  getCalls(): LLMRequest[] {
     return [...this.callLog];
   }
 

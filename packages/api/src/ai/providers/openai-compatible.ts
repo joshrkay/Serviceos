@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import type { LLMProvider, ChatMessage, ChatResponse } from '../gateway/types';
+import type { LLMProvider, LLMRequest, LLMResponse } from '../gateway/gateway';
 
 export interface OpenAICompatibleConfig {
   apiKey: string;
@@ -30,18 +30,16 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
   }
 
-  async chat(
-    messages: ChatMessage[],
-    model: string,
-    options: { temperature?: number; maxTokens?: number }
-  ): Promise<ChatResponse> {
+  async complete(request: LLMRequest): Promise<LLMResponse> {
     const start = Date.now();
+    const model = request.model ?? 'gpt-4o-mini';
 
     const completion = await this.client.chat.completions.create({
       model,
-      messages,
-      temperature: options.temperature ?? 0.2,
-      max_tokens: options.maxTokens,
+      messages: request.messages,
+      temperature: request.temperature ?? 0.2,
+      max_tokens: request.maxTokens,
+      response_format: request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
     });
 
     const choice = completion.choices[0];
@@ -53,12 +51,22 @@ export class OpenAICompatibleProvider implements LLMProvider {
     return {
       content: choice.message.content,
       model: completion.model ?? model,
-      durationMs: Date.now() - start,
+      provider: this.name,
+      latencyMs: Date.now() - start,
       tokenUsage: {
         input: usage?.prompt_tokens ?? 0,
         output: usage?.completion_tokens ?? 0,
         total: usage?.total_tokens ?? 0,
       },
     };
+  }
+
+  async isAvailable(): Promise<boolean> {
+    try {
+      await this.client.models.list();
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

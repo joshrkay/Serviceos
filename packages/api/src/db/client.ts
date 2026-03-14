@@ -48,8 +48,7 @@ export class PgDatabaseClient implements DatabaseClient {
    * Must be called inside a transaction before any tenant-scoped queries.
    */
   async setTenantContext(tenantId: string): Promise<void> {
-    const { sql, params } = setTenantContext(tenantId);
-    await this.pool.query(sql, params);
+    await this.pool.query(setTenantContext(tenantId));
   }
 
   /**

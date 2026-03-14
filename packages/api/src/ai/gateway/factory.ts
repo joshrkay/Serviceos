@@ -1,8 +1,8 @@
 import { LLMGateway } from './gateway';
+import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
 import { MockLLMProvider } from '../providers/mock';
 import type { AppConfig } from '../../shared/config';
-import type { GatewayLogger } from './gateway';
 
 /**
  * Create the LLM gateway from application config.
@@ -21,7 +21,7 @@ import type { GatewayLogger } from './gateway';
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
-export function createLLMGateway(config: AppConfig, logger?: GatewayLogger): LLMGateway {
+export function createLLMGateway(config: AppConfig, logger?: LLMGatewayLogger): LLMGateway {
   if (!config.AI_PROVIDER_API_KEY) {
     throw new Error(
       'AI_PROVIDER_API_KEY is not set. Add it to .env to enable AI features.'
@@ -41,7 +41,12 @@ export function createLLMGateway(config: AppConfig, logger?: GatewayLogger): LLM
         : undefined,
   });
 
-  return new LLMGateway(provider, { defaultModel: config.AI_DEFAULT_MODEL }, logger);
+  const providers = new Map<string, LLMProvider>([[provider.name, provider]]);
+  const gatewayConfig: LLMGatewayConfig = {
+    defaultProvider: provider.name,
+    defaultModel: config.AI_DEFAULT_MODEL,
+  };
+  return new LLMGateway(gatewayConfig, providers, logger);
 }
 
 /** Create a mock gateway for tests — no API key needed */
@@ -50,6 +55,8 @@ export function createMockLLMGateway(defaultResponse = '{"mock": true}'): {
   provider: MockLLMProvider;
 } {
   const provider = new MockLLMProvider(defaultResponse);
-  const gateway = new LLMGateway(provider);
+  const providers = new Map<string, LLMProvider>([['mock', provider]]);
+  const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
+  const gateway = new LLMGateway(gatewayConfig, providers);
   return { gateway, provider };
 }
