@@ -1,3 +1,4 @@
+# Railway build config — api stage targets the Node.js production image
 [build]
 dockerfilePath = "Dockerfile"
 dockerfileTarget = "api"
