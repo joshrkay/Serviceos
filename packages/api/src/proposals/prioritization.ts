@@ -14,6 +14,9 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   create_job: 3,
   create_customer: 4,
   update_customer: 5,
+  reassign_appointment: 1,
+  reschedule_appointment: 1,
+  cancel_appointment: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {
