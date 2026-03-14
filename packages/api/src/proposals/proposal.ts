@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 
 export type ProposalStatus = 'draft' | 'ready_for_review' | 'approved' | 'rejected' | 'expired' | 'executed' | 'execution_failed';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -12,6 +12,9 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'draft_estimate',
   'update_estimate',
   'draft_invoice',
+  'reassign_appointment',
+  'reschedule_appointment',
+  'cancel_appointment',
 ];
 
 export interface Proposal {

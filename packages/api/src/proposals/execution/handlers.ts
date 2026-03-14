@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
+import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
+import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
+import { CancelAppointmentExecutionHandler } from './cancellation-handler';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -111,6 +114,9 @@ export function createExecutionHandlerRegistry(): Map<ProposalType, ExecutionHan
     new DraftEstimateExecutionHandler(),
     new UpdateEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(),
+    new ReassignAppointmentExecutionHandler(),
+    new RescheduleAppointmentExecutionHandler(),
+    new CancelAppointmentExecutionHandler(),
   ];
 
   const registry = new Map<ProposalType, ExecutionHandler>();

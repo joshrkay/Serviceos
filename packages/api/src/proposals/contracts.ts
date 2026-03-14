@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import { ProposalType } from './proposal';
+import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
+import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
+import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -75,6 +78,9 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   draft_estimate: draftEstimatePayloadSchema,
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,
+  reassign_appointment: reassignAppointmentPayloadSchema,
+  reschedule_appointment: rescheduleAppointmentPayloadSchema,
+  cancel_appointment: cancelAppointmentPayloadSchema,
 };
 
 export function validateProposalPayload(
