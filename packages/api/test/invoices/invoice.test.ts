@@ -8,6 +8,7 @@ import {
   validateInvoiceInput,
   recalculateBalance,
   calculateDueDate,
+  isValidInvoiceTransition,
   InMemoryInvoiceRepository,
 } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
