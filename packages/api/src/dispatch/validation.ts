@@ -61,11 +61,25 @@ function parseTime(timeStr: string): { hours: number; minutes: number } {
   return { hours, minutes };
 }
 
+function getHourMinuteInTimezone(date: Date, timezone: string): { hours: number; minutes: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  return {
+    hours: Number(parts.find((p) => p.type === 'hour')!.value),
+    minutes: Number(parts.find((p) => p.type === 'minute')!.value),
+  };
+}
+
 export function detectAvailabilityConflicts(
   scheduledStart: Date,
   scheduledEnd: Date,
   workingHours: TechnicianWorkingHours | null,
   unavailableBlocks: UnavailableBlock[],
+  timezone = 'UTC',
 ): ConflictResult[] {
   const conflicts: ConflictResult[] = [];
 
@@ -74,13 +88,11 @@ export function detectAvailabilityConflicts(
     const { hours: startH, minutes: startM } = parseTime(workingHours.startTime);
     const { hours: endH, minutes: endM } = parseTime(workingHours.endTime);
 
-    const apptStartHour = scheduledStart.getHours();
-    const apptStartMin = scheduledStart.getMinutes();
-    const apptEndHour = scheduledEnd.getHours();
-    const apptEndMin = scheduledEnd.getMinutes();
+    const apptStart = getHourMinuteInTimezone(scheduledStart, timezone);
+    const apptEnd = getHourMinuteInTimezone(scheduledEnd, timezone);
 
-    const apptStartMinutes = apptStartHour * 60 + apptStartMin;
-    const apptEndMinutes = apptEndHour * 60 + apptEndMin;
+    const apptStartMinutes = apptStart.hours * 60 + apptStart.minutes;
+    const apptEndMinutes = apptEnd.hours * 60 + apptEnd.minutes;
     const workStartMinutes = startH * 60 + startM;
     const workEndMinutes = endH * 60 + endM;
 

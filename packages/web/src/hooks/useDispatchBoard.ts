@@ -1,30 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { AppointmentCardData } from '../components/dispatch/AppointmentCard';
+import { TechnicianLaneData, BoardSummary, DispatchBoardData } from '../types/dispatch';
 
-export interface TechnicianLaneData {
-  technicianId: string;
-  technicianName: string;
-  appointments: AppointmentCardData[];
-  availabilitySummary?: {
-    workingHours?: { start: string; end: string };
-    unavailableBlocks?: { start: string; end: string; reason?: string }[];
-  };
-}
-
-export interface BoardSummary {
-  unassigned: number;
-  scheduled: number;
-  inProgress: number;
-  completed: number;
-  canceled: number;
-}
-
-export interface DispatchBoardData {
-  date: string;
-  unassignedAppointments: AppointmentCardData[];
-  technicianLanes: TechnicianLaneData[];
-  summary: BoardSummary;
-}
+export type { TechnicianLaneData, BoardSummary, DispatchBoardData };
 
 export interface UseDispatchBoardResult {
   data: DispatchBoardData | null;

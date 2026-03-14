@@ -17,6 +17,8 @@ export interface DragResult {
   sourceTechnicianId: string | null;
   targetTechnicianId: string;
   targetPosition: number | null;
+  proposedScheduledStart?: string;
+  proposedScheduledEnd?: string;
 }
 
 export interface UseDragDropResult {
@@ -71,6 +73,8 @@ export function useDragDrop(onDragComplete?: (result: DragResult) => void): UseD
   }, []);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
+    // Ignore events fired when pointer moves into a child element
+    if (e.currentTarget && e.relatedTarget && e.currentTarget.contains(e.relatedTarget as Node)) return;
     setDragState((prev) => ({
       ...prev,
       targetTechnicianId: null,

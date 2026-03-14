@@ -1,6 +1,7 @@
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
+import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
@@ -26,6 +27,12 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
       const appointment = await this.appointmentRepo.findById(context.tenantId, appointmentId);
       if (!appointment) {
         return { success: false, error: `Appointment ${appointmentId} not found` };
+      }
+
+      // Staleness check
+      const freshness = checkSchedulingProposalFreshness(proposal, appointment);
+      if (!freshness.fresh) {
+        return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
       }
 
       // Idempotency: already canceled

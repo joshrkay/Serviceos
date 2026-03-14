@@ -37,17 +37,6 @@ export function DispatchBoard() {
     name: lane.technicianName,
   })) ?? [];
 
-  if (error) {
-    return (
-      <div className="dispatch-board dispatch-board--error" data-testid="dispatch-board">
-        <div className="dispatch-board__error" data-testid="dispatch-board-error">
-          <p>{error}</p>
-          <button onClick={refetch}>Retry</button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="dispatch-board" data-testid="dispatch-board">
       <div className="dispatch-board__header">
@@ -69,6 +58,11 @@ export function DispatchBoard() {
         <div className="dispatch-board__loading" data-testid="dispatch-board-loading">
           Loading dispatch board...
         </div>
+      ) : error ? (
+        <div className="dispatch-board__error" data-testid="dispatch-board-error">
+          <p>{error}</p>
+          <button onClick={refetch}>Retry</button>
+        </div>
       ) : (
         <div className="dispatch-board__content">
           <div className="dispatch-board__sidebar">
@@ -88,7 +82,7 @@ export function DispatchBoard() {
                 appointments={filterAppointmentsByStatus(lane.appointments)}
               />
             ))}
-            {filteredLanes.length === 0 && !isLoading && (
+            {filteredLanes.length === 0 && (
               <div className="dispatch-board__empty" data-testid="dispatch-board-empty">
                 No technician lanes to display
               </div>

@@ -68,7 +68,30 @@ describe('P6-008 — Convert drag/drop into schedule proposal', () => {
     expect(body.payload.toTechnicianId).toBe('tech-2');
   });
 
-  it('creates reschedule proposal for within-lane reorder', async () => {
+  it('returns error for within-lane reorder without proposed times', async () => {
+    global.fetch = vi.fn();
+
+    const { result } = renderHook(() => useCreateScheduleProposal());
+
+    const dragResult: DragResult = {
+      appointmentId: 'appt-1',
+      sourceType: 'lane',
+      sourceTechnicianId: 'tech-1',
+      targetTechnicianId: 'tech-1',
+      targetPosition: 2,
+    };
+
+    let proposalResult: any;
+    await act(async () => {
+      proposalResult = await result.current.createProposal(dragResult);
+    });
+
+    expect(proposalResult.success).toBe(false);
+    expect(proposalResult.error).toContain('Specify new times');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('creates reschedule proposal for within-lane reorder with proposed times', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ id: 'proposal-3' }),
@@ -82,6 +105,8 @@ describe('P6-008 — Convert drag/drop into schedule proposal', () => {
       sourceTechnicianId: 'tech-1',
       targetTechnicianId: 'tech-1',
       targetPosition: 2,
+      proposedScheduledStart: '2026-03-14T10:00:00Z',
+      proposedScheduledEnd: '2026-03-14T12:00:00Z',
     };
 
     await act(async () => {
@@ -90,6 +115,8 @@ describe('P6-008 — Convert drag/drop into schedule proposal', () => {
 
     const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
     expect(body.proposalType).toBe('reschedule_appointment');
+    expect(body.payload.newScheduledStart).toBe('2026-03-14T10:00:00Z');
+    expect(body.payload.newScheduledEnd).toBe('2026-03-14T12:00:00Z');
   });
 
   it('handles API error', async () => {

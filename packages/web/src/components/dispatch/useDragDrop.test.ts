@@ -2,16 +2,22 @@ import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useDragDrop } from './useDragDrop';
 
-function createMockDragEvent(data?: Record<string, string>): React.DragEvent {
+function createMockDragEvent(
+  data?: Record<string, string>,
+  overrides?: Partial<React.DragEvent>,
+): React.DragEvent {
   const store: Record<string, string> = { ...data };
   return {
     preventDefault: vi.fn(),
+    currentTarget: null,
+    relatedTarget: null,
     dataTransfer: {
       setData: vi.fn((key: string, value: string) => { store[key] = value; }),
       getData: vi.fn((key: string) => store[key] || ''),
       effectAllowed: 'uninitialized',
       dropEffect: 'none',
     },
+    ...overrides,
   } as unknown as React.DragEvent;
 }
 

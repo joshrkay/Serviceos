@@ -9,6 +9,7 @@ export interface StalenessCheckResult {
 export function checkSchedulingProposalFreshness(
   proposal: Proposal,
   currentAppointment: Appointment,
+  currentTechnicianId?: string | null,
 ): StalenessCheckResult {
   const reasons: string[] = [];
 
@@ -43,7 +44,7 @@ export function checkSchedulingProposalFreshness(
   }
 
   // Check if technician changed
-  if (ctx.technicianId !== undefined && ctx.technicianId !== (currentAppointment as any).technicianId) {
+  if (ctx.technicianId !== undefined && ctx.technicianId !== currentTechnicianId) {
     reasons.push('Appointment technician assignment has changed');
   }
 

@@ -17,7 +17,7 @@ function buildProposalPayload(dragResult: DragResult): {
   proposalType: string;
   payload: Record<string, unknown>;
   summary: string;
-} {
+} | null {
   if (dragResult.sourceType === 'queue') {
     // Unassigned → Lane = reassignment
     return {
@@ -31,14 +31,19 @@ function buildProposalPayload(dragResult: DragResult): {
   }
 
   if (dragResult.sourceTechnicianId === dragResult.targetTechnicianId) {
-    // Within-lane reorder = reschedule
+    // Within-lane reorder = reschedule — requires explicit new times
+    if (!dragResult.proposedScheduledStart || !dragResult.proposedScheduledEnd) {
+      return null;
+    }
     return {
       proposalType: 'reschedule_appointment',
       payload: {
         appointmentId: dragResult.appointmentId,
+        newScheduledStart: dragResult.proposedScheduledStart,
+        newScheduledEnd: dragResult.proposedScheduledEnd,
         reason: 'Reordered within technician lane',
       },
-      summary: `Reorder appointment within technician lane`,
+      summary: `Reschedule appointment within technician lane`,
     };
   }
 
@@ -63,7 +68,16 @@ export function useCreateScheduleProposal(): UseCreateScheduleProposalResult {
     setLastResult(null);
 
     try {
-      const { proposalType, payload, summary } = buildProposalPayload(dragResult);
+      const proposalData = buildProposalPayload(dragResult);
+      if (!proposalData) {
+        const result: ScheduleProposalResult = {
+          success: false,
+          error: 'Specify new times to reschedule an appointment',
+        };
+        setLastResult(result);
+        return result;
+      }
+      const { proposalType, payload, summary } = proposalData;
 
       const response = await fetch('/api/proposals', {
         method: 'POST',

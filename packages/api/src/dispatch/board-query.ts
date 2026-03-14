@@ -56,10 +56,19 @@ export interface BoardQueryDependencies {
   }>;
 }
 
-function getDayBoundaries(dateStr: string, timezone?: string): { start: Date; end: Date } {
+function getTimezoneOffsetMs(date: Date, timezone: string): number {
+  const utcStr = date.toLocaleString('en-US', { timeZone: 'UTC' });
+  const tzStr = date.toLocaleString('en-US', { timeZone: timezone });
+  return new Date(tzStr).getTime() - new Date(utcStr).getTime();
+}
+
+function getDayBoundaries(dateStr: string, timezone = 'UTC'): { start: Date; end: Date } {
   const [year, month, day] = dateStr.split('-').map(Number);
-  const start = new Date(year, month - 1, day, 0, 0, 0, 0);
-  const end = new Date(year, month - 1, day, 23, 59, 59, 999);
+  // Use noon UTC as a DST-safe reference point to determine the timezone offset
+  const ref = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  const offsetMs = getTimezoneOffsetMs(ref, timezone);
+  const start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0) - offsetMs);
+  const end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - offsetMs);
   return { start, end };
 }
 
@@ -117,12 +126,16 @@ export async function getDispatchBoardData(
 
   const appointments = await deps.appointmentRepo.findByDateRange(tenantId, start, end);
 
-  // Get assignments for all appointments
-  const assignmentMap = new Map<string, AppointmentAssignment[]>();
-  for (const appt of appointments) {
-    const assignments = await deps.assignmentRepo.findByAppointment(tenantId, appt.id);
-    assignmentMap.set(appt.id, assignments);
-  }
+  // Get assignments for all appointments in parallel
+  const assignmentResults = await Promise.all(
+    appointments.map((appt) =>
+      deps.assignmentRepo.findByAppointment(tenantId, appt.id)
+        .then((assignments) => ({ apptId: appt.id, assignments }))
+    )
+  );
+  const assignmentMap = new Map<string, AppointmentAssignment[]>(
+    assignmentResults.map((r) => [r.apptId, r.assignments])
+  );
 
   // Group by technician
   const technicianAppointments = new Map<string, { appointment: Appointment; assignment: AppointmentAssignment }[]>();
@@ -141,29 +154,45 @@ export async function getDispatchBoardData(
     }
   }
 
+  // Fetch display contexts for all appointments in parallel
+  const allAppointmentsForContext = [...unassigned, ...appointments.filter((a) => !unassigned.includes(a))];
+  const displayContextMap = new Map<string, { customerName?: string; locationAddress?: string; jobSummary?: string }>();
+  if (deps.getAppointmentDisplayContext) {
+    const contextResults = await Promise.all(
+      allAppointmentsForContext.map((appt) =>
+        deps.getAppointmentDisplayContext!(appt).then((ctx) => ({ apptId: appt.id, ctx }))
+      )
+    );
+    for (const { apptId, ctx } of contextResults) {
+      displayContextMap.set(apptId, ctx);
+    }
+  }
+
   // Build unassigned list
-  const unassignedBoard: BoardAppointment[] = [];
-  for (const appt of unassigned) {
-    const context = deps.getAppointmentDisplayContext
-      ? await deps.getAppointmentDisplayContext(appt)
-      : undefined;
-    unassignedBoard.push(toBoardAppointment(appt, context));
+  const unassignedBoard: BoardAppointment[] = unassigned.map((appt) =>
+    toBoardAppointment(appt, displayContextMap.get(appt.id))
+  );
+
+  // Fetch technician names in parallel
+  const techIds = [...technicianAppointments.keys()];
+  const techNameMap = new Map<string, string>();
+  if (deps.getTechnicianName) {
+    const nameResults = await Promise.all(
+      techIds.map((id) => deps.getTechnicianName!(id).then((name) => ({ id, name })))
+    );
+    for (const { id, name } of nameResults) {
+      techNameMap.set(id, name);
+    }
   }
 
   // Build technician lanes
   const lanes: TechnicianLane[] = [];
   for (const [techId, items] of technicianAppointments) {
-    const techName = deps.getTechnicianName
-      ? await deps.getTechnicianName(techId)
-      : techId;
+    const techName = techNameMap.get(techId) ?? techId;
 
-    const laneAppointments: BoardAppointment[] = [];
-    for (const { appointment } of items) {
-      const context = deps.getAppointmentDisplayContext
-        ? await deps.getAppointmentDisplayContext(appointment)
-        : undefined;
-      laneAppointments.push(toBoardAppointment(appointment, context, techId, techName));
-    }
+    const laneAppointments: BoardAppointment[] = items.map(({ appointment }) =>
+      toBoardAppointment(appointment, displayContextMap.get(appointment.id), techId, techName)
+    );
 
     const lane: TechnicianLane = {
       technicianId: techId,

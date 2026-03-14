@@ -3,6 +3,8 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician, unassignTechnician } from '../../appointments/assignment';
+import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
+import { detectOverlappingAppointments } from '../../dispatch/validation';
 
 export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reassign_appointment';
@@ -30,6 +32,56 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
       const appointment = await this.appointmentRepo.findById(context.tenantId, appointmentId);
       if (!appointment) {
         return { success: false, error: `Appointment ${appointmentId} not found` };
+      }
+
+      // Staleness check — ensure appointment hasn't changed since proposal was created
+      if (this.assignmentRepo) {
+        const currentAssignments = await this.assignmentRepo.findByAppointment(
+          context.tenantId,
+          appointmentId,
+        );
+        const primaryAssignment = currentAssignments.find((a) => a.isPrimary);
+        const freshness = checkSchedulingProposalFreshness(
+          proposal,
+          appointment,
+          primaryAssignment?.technicianId ?? null,
+        );
+        if (!freshness.fresh) {
+          return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
+        }
+
+        // Conflict check — ensure target technician has no overlapping appointments
+        const targetAssignments = await this.assignmentRepo.findByTechnician(
+          context.tenantId,
+          toTechnicianId,
+        );
+        if (targetAssignments.length > 0) {
+          const targetAppointments = await Promise.all(
+            targetAssignments.map((a) =>
+              this.appointmentRepo!.findById(context.tenantId, a.appointmentId)
+            )
+          );
+          const existingAppts = targetAppointments
+            .filter((a): a is NonNullable<typeof a> => a !== null)
+            .map((a) => ({
+              id: a.id,
+              technicianId: toTechnicianId,
+              scheduledStart: a.scheduledStart,
+              scheduledEnd: a.scheduledEnd,
+              status: a.status,
+            }));
+          const conflicts = detectOverlappingAppointments(
+            toTechnicianId,
+            appointment.scheduledStart,
+            appointment.scheduledEnd,
+            existingAppts,
+            appointmentId,
+          );
+          const blocking = conflicts.filter((c) => c.severity === 'blocking');
+          if (blocking.length > 0) {
+            return { success: false, error: blocking[0].message };
+          }
+        }
       }
     }
 
