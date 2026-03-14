@@ -8,6 +8,7 @@ export interface PrioritizedProposal {
 
 const TYPE_PRIORITY: Record<ProposalType, number> = {
   draft_estimate: 0,
+  draft_invoice: 1,
   update_estimate: 1,
   create_appointment: 2,
   create_job: 3,

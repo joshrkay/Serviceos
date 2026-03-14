@@ -11,7 +11,7 @@ RUN npm ci --ignore-scripts
 FROM base AS api-build
 COPY tsconfig.base.json ./
 COPY packages/api/ packages/api/
-RUN cd packages/api && npx tsc --project tsconfig.json
+RUN cd packages/api && npx tsc --project tsconfig.build.json
 
 # Build Web
 FROM base AS web-build
@@ -32,7 +32,7 @@ COPY --from=api-build /app/packages/api/package.json packages/api/
 EXPOSE 3000
 CMD ["node", "packages/api/dist/src/index.js"]
 
-# Web static files (served by Railway's static hosting or a simple server)
+# Web static files (served by Railway's static hosting or nginx)
 FROM nginx:alpine AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
