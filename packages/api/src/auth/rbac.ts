@@ -194,7 +194,22 @@ export function hasPermission(role: Role, permission: Permission): boolean {
   return permissions.includes(permission);
 }
 
-// Backward-compatible Role type — accepts both enum values and string literals.
-// The shared package exports Role as an enum; this alias keeps existing API code
-// that uses string literals (e.g. 'owner') working without changes.
-export type Role = 'owner' | 'dispatcher' | 'technician';
+export function isValidRole(role: string): role is Role {
+  return role === 'owner' || role === 'dispatcher' || role === 'technician';
+}
+
+export function getPermissions(role: Role | string): Permission[] {
+  return ROLE_PERMISSIONS[role as Role] || [];
+}
+
+export interface PermissionContract {
+  role: Role;
+  permissions: Permission[];
+}
+
+export function getPermissionContract(): PermissionContract[] {
+  return (['owner', 'dispatcher', 'technician'] as Role[]).map((role) => ({
+    role,
+    permissions: ROLE_PERMISSIONS[role],
+  }));
+}
