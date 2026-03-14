@@ -1,8 +1,10 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "packages/web/Dockerfile"
+dockerfilePath = "Dockerfile"
+dockerfileTarget = "web"
 
 [deploy]
 healthcheckPath = "/"
 healthcheckTimeout = 30
-restartPolicyType = "on_failure"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
