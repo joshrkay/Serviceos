@@ -40,12 +40,12 @@ describe('P0-010 — File upload and attachment storage', () => {
     expect(errors).toContain('Tenant ID is required');
   });
 
-  it('happy path — creates file record with S3 key', () => {
+  it('happy path — creates file record with storage key', () => {
     const record = createFileRecord(validRequest, 'my-bucket');
     expect(record.id).toBeTruthy();
-    expect(record.s3Bucket).toBe('my-bucket');
-    expect(record.s3Key).toContain('tenant-1/');
-    expect(record.s3Key).toContain('photo.jpg');
+    expect(record.storageBucket).toBe('my-bucket');
+    expect(record.storageKey).toContain('tenant-1/');
+    expect(record.storageKey).toContain('photo.jpg');
   });
 
   it('happy path — repository stores and retrieves', async () => {
@@ -83,10 +83,10 @@ describe('P0-010 — File upload and attachment storage', () => {
       expect(errors.some((e) => e.includes('invalid characters'))).toBe(true);
     });
 
-    it('creates safe S3 key from sanitized filename', () => {
+    it('creates safe storage key from sanitized filename', () => {
       const record = createFileRecord({ ...validRequest, filename: 'safe-file.jpg' }, 'my-bucket');
-      expect(record.s3Key).not.toContain('..');
-      expect(record.s3Key).toContain('safe-file.jpg');
+      expect(record.storageKey).not.toContain('..');
+      expect(record.storageKey).toContain('safe-file.jpg');
     });
   });
 });
