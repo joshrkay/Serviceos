@@ -12,10 +12,8 @@ export interface QueueMessage<T = unknown> {
 }
 
 export interface QueueConfig {
-  queueUrl?: string;
   maxRetries: number;
   visibilityTimeout: number;
-  deadLetterQueueUrl?: string;
 }
 
 export interface Queue {
@@ -27,16 +25,15 @@ export interface Queue {
 
 export function createQueueConfig(env: string): QueueConfig {
   return {
-    queueUrl: process.env.SQS_QUEUE_URL,
     maxRetries: env === 'prod' ? 5 : 3,
     visibilityTimeout: 30,
-    deadLetterQueueUrl: process.env.SQS_DLQ_URL,
   };
 }
 
 /**
  * In-memory queue for testing only. Not safe for production use.
- * Use a real SQS-backed queue implementation for production.
+ * Production uses pg-boss (Postgres-backed job queue) — no separate
+ * queue service required since Railway Postgres is already provisioned.
  */
 export class InMemoryQueue implements Queue {
   private messages: QueueMessage[] = [];
