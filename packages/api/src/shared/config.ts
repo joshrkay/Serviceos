@@ -1,14 +1,7 @@
 import { z } from 'zod';
 
 const configSchema = z.object({
-  NODE_ENV: z
-    .enum(['dev', 'staging', 'prod', 'development', 'production', 'test'])
-    .default('dev')
-    .transform((v) => {
-      if (v === 'development') return 'dev';
-      if (v === 'production') return 'prod';
-      return v as 'dev' | 'staging' | 'prod' | 'test';
-    }),
+  NODE_ENV: z.enum(['dev', 'staging', 'prod']).default('dev'),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1).optional(),
   DB_HOST: z.string().default('localhost'),
@@ -18,15 +11,9 @@ const configSchema = z.object({
   DB_PASSWORD: z.string().default(''),
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
-  CLERK_WEBHOOK_SECRET: z.string().optional(),
-  CLERK_JWKS_URL: z.string().url().optional(),
   AWS_REGION: z.string().default('us-east-1'),
   S3_BUCKET: z.string().default('serviceos-uploads-dev'),
   SQS_QUEUE_URL: z.string().optional(),
-  SQS_DLQ_URL: z.string().optional(),
-  AI_PROVIDER_API_KEY: z.string().min(1).optional(),
-  AI_PROVIDER_BASE_URL: z.string().url().default('https://api.openai.com/v1'),
-  AI_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
   SENTRY_DSN: z.string().optional(),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   WEBHOOK_SIGNING_SECRET: z.string().optional(),

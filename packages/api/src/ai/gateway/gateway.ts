@@ -1,110 +1,151 @@
-import type { LLMProvider, ChatRequest, ChatResponse, GatewayConfig, ChatMessage } from './types';
-import { DEFAULT_GATEWAY_CONFIG } from './routing-config';
+import { v4 as uuidv4 } from 'uuid';
+import { AppError, ValidationError } from '../../shared/errors';
 
-export interface GatewayLogger {
-  info(msg: string, meta?: Record<string, unknown>): void;
-  warn(msg: string, meta?: Record<string, unknown>): void;
-  error(msg: string, meta?: Record<string, unknown>): void;
+export interface LLMMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
 }
 
-const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
-const MAX_RETRIES = 2;
-const BASE_RETRY_DELAY_MS = 500;
+export interface LLMRequest {
+  taskType: string;
+  model?: string;
+  messages: LLMMessage[];
+  temperature?: number;
+  maxTokens?: number;
+  responseFormat?: 'text' | 'json';
+  metadata?: Record<string, unknown>;
+}
 
-function isRetryableError(err: unknown): boolean {
-  if (err instanceof Error) {
-    const status = (err as { status?: number }).status;
-    if (status && RETRYABLE_STATUS_CODES.has(status)) return true;
-    if (err.message.includes('rate limit') || err.message.includes('timeout')) return true;
+export interface LLMResponse {
+  content: string;
+  model: string;
+  provider: string;
+  tokenUsage: { input: number; output: number; total: number };
+  latencyMs: number;
+  cached?: boolean;
+}
+
+export interface LLMProvider {
+  name: string;
+  complete(request: LLMRequest): Promise<LLMResponse>;
+  isAvailable(): Promise<boolean>;
+}
+
+export interface LLMGatewayConfig {
+  defaultProvider: string;
+  taskRouting?: Record<string, string>; // taskType -> providerName
+  defaultModel?: string;
+  taskModels?: Record<string, string>; // taskType -> model
+}
+
+export interface LLMGatewayLogger {
+  info(message: string, meta?: Record<string, unknown>): void;
+  error(message: string, meta?: Record<string, unknown>): void;
+}
+
+export function validateLLMRequest(request: LLMRequest): string[] {
+  const errors: string[] = [];
+  if (!request.taskType) errors.push('taskType is required');
+  if (!request.messages || !Array.isArray(request.messages) || request.messages.length === 0) {
+    errors.push('messages must be a non-empty array');
   }
-  return false;
-}
-
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  if (request.temperature !== undefined && (request.temperature < 0 || request.temperature > 2)) {
+    errors.push('temperature must be between 0 and 2');
+  }
+  if (request.maxTokens !== undefined && request.maxTokens <= 0) {
+    errors.push('maxTokens must be a positive number');
+  }
+  if (request.responseFormat !== undefined && request.responseFormat !== 'text' && request.responseFormat !== 'json') {
+    errors.push('responseFormat must be "text" or "json"');
+  }
+  return errors;
 }
 
 export class LLMGateway {
-  private readonly provider: LLMProvider;
-  private readonly config: GatewayConfig;
-  private readonly logger?: GatewayLogger;
+  private readonly config: LLMGatewayConfig;
+  private readonly providers: Map<string, LLMProvider>;
+  private readonly logger?: LLMGatewayLogger;
 
-  constructor(provider: LLMProvider, config?: Partial<GatewayConfig>, logger?: GatewayLogger) {
-    this.provider = provider;
-    this.config = { ...DEFAULT_GATEWAY_CONFIG, ...config };
+  constructor(
+    config: LLMGatewayConfig,
+    providers: Map<string, LLMProvider>,
+    logger?: LLMGatewayLogger
+  ) {
+    this.config = config;
+    this.providers = providers;
     this.logger = logger;
   }
 
-  async chat(request: ChatRequest): Promise<ChatResponse> {
-    const route = this.config.routes[request.taskType];
-    const model = request.modelOverride ?? route?.model ?? this.config.defaultModel;
-    const temperature = request.temperature ?? route?.temperature ?? 0.2;
-    const maxTokens = request.maxTokens ?? route?.maxTokens;
-
-    // Prepend system prompt from route config if not already present
-    const messages: ChatMessage[] = [...request.messages];
-    if (route?.systemPrompt && messages[0]?.role !== 'system') {
-      messages.unshift({ role: 'system', content: route.systemPrompt });
+  async complete(request: LLMRequest): Promise<LLMResponse> {
+    const validationErrors = validateLLMRequest(request);
+    if (validationErrors.length > 0) {
+      throw new ValidationError('Invalid LLM request', { errors: validationErrors });
     }
 
-    this.logger?.info('llm.request', {
-      taskType: request.taskType,
-      model,
-      messageCount: messages.length,
-      correlationId: request.correlationId,
-      tenantId: request.tenantId,
-    });
-
-    let lastError: unknown;
-
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      if (attempt > 0) {
-        const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-        this.logger?.warn('llm.retry', {
-          attempt,
-          delay,
-          taskType: request.taskType,
-          correlationId: request.correlationId,
-        });
-        await sleep(delay);
-      }
-
-      try {
-        const response = await this.provider.chat(messages, model, { temperature, maxTokens });
-
-        this.logger?.info('llm.response', {
-          taskType: request.taskType,
-          model: response.model,
-          durationMs: response.durationMs,
-          tokens: response.tokenUsage,
-          correlationId: request.correlationId,
-          tenantId: request.tenantId,
-        });
-
-        return response;
-      } catch (err) {
-        lastError = err;
-        if (!isRetryableError(err) || attempt === MAX_RETRIES) break;
-      }
+    const providerName = this.resolveProvider(request.taskType);
+    const provider = this.providers.get(providerName);
+    if (!provider) {
+      throw new AppError('PROVIDER_NOT_FOUND', `Provider not found: ${providerName}`, 500);
     }
 
-    this.logger?.error('llm.failed', {
-      taskType: request.taskType,
-      model,
-      error: lastError instanceof Error ? lastError.message : String(lastError),
-      correlationId: request.correlationId,
-    });
+    const resolvedModel = this.resolveModel(request);
+    const resolvedRequest: LLMRequest = { ...request, model: resolvedModel };
 
-    throw lastError;
+    const startTime = Date.now();
+
+    try {
+      const response = await provider.complete(resolvedRequest);
+      const latencyMs = Date.now() - startTime;
+
+      const result: LLMResponse = {
+        ...response,
+        latencyMs,
+      };
+
+      this.logger?.info('LLM completion succeeded', {
+        taskType: request.taskType,
+        provider: providerName,
+        model: resolvedModel,
+        latencyMs,
+        tokenUsage: result.tokenUsage,
+      });
+
+      return result;
+    } catch (err) {
+      const latencyMs = Date.now() - startTime;
+      this.logger?.error('LLM completion failed', {
+        taskType: request.taskType,
+        provider: providerName,
+        model: resolvedModel,
+        latencyMs,
+        error: err instanceof Error ? err.message : String(err),
+      });
+
+      if (err instanceof AppError) {
+        throw err;
+      }
+
+      throw new AppError(
+        'LLM_PROVIDER_ERROR',
+        `Provider ${providerName} failed: ${err instanceof Error ? err.message : String(err)}`,
+        502,
+        { provider: providerName, taskType: request.taskType }
+      );
+    }
   }
 
-  /** Convenience: send a single user message */
-  async ask(taskType: string, userMessage: string, tenantId?: string): Promise<string> {
-    const response = await this.chat({
-      taskType,
-      messages: [{ role: 'user', content: userMessage }],
-      tenantId,
-    });
-    return response.content;
+  private resolveProvider(taskType: string): string {
+    if (this.config.taskRouting && this.config.taskRouting[taskType]) {
+      return this.config.taskRouting[taskType];
+    }
+    return this.config.defaultProvider;
+  }
+
+  private resolveModel(request: LLMRequest): string {
+    if (request.model) return request.model;
+    if (this.config.taskModels && this.config.taskModels[request.taskType]) {
+      return this.config.taskModels[request.taskType];
+    }
+    return this.config.defaultModel || 'default';
   }
 }

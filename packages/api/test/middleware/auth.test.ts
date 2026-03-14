@@ -22,7 +22,7 @@ function mockReqRes(auth?: AuthenticatedRequest['auth'], params?: Record<string,
       return resObj;
     },
   };
-  const next = jest.fn();
+  const next = vi.fn();
   return { req, res: resObj as Response, next };
 }
 

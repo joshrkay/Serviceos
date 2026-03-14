@@ -20,20 +20,6 @@ export interface DatabaseClient {
 }
 
 export function createDatabaseConfig(env: string): DatabaseConfig {
-  // Railway (and most PaaS) inject DATABASE_URL — prefer it over individual vars
-  if (process.env.DATABASE_URL) {
-    const url = new URL(process.env.DATABASE_URL);
-    return {
-      host: url.hostname,
-      port: parseInt(url.port || '5432', 10),
-      database: url.pathname.replace(/^\//, ''),
-      user: url.username,
-      password: decodeURIComponent(url.password),
-      ssl: url.searchParams.get('sslmode') !== 'disable',
-      maxConnections: env === 'prod' ? 50 : env === 'staging' ? 20 : 10,
-    };
-  }
-
   const configs: Record<string, DatabaseConfig> = {
     dev: {
       host: process.env.DB_HOST || 'localhost',
@@ -47,7 +33,7 @@ export function createDatabaseConfig(env: string): DatabaseConfig {
     staging: {
       host: process.env.DB_HOST || 'localhost',
       port: parseInt(process.env.DB_PORT || '5432', 10),
-      database: process.env.DB_NAME || 'serviceos_staging',
+      database: 'serviceos_staging',
       user: process.env.DB_USER || 'serviceos',
       password: process.env.DB_PASSWORD || '',
       ssl: true,
@@ -56,7 +42,7 @@ export function createDatabaseConfig(env: string): DatabaseConfig {
     prod: {
       host: process.env.DB_HOST || 'localhost',
       port: parseInt(process.env.DB_PORT || '5432', 10),
-      database: process.env.DB_NAME || 'serviceos_prod',
+      database: 'serviceos_prod',
       user: process.env.DB_USER || 'serviceos',
       password: process.env.DB_PASSWORD || '',
       ssl: true,

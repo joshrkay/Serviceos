@@ -1,10 +1,10 @@
+# Railway build config — api stage targets the Node.js production image
 [build]
-builder = "dockerfile"
-dockerfilePath = "packages/api/Dockerfile"
+dockerfilePath = "Dockerfile"
+dockerfileTarget = "api"
 
 [deploy]
-startCommand = "node packages/api/dist/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
-restartPolicyType = "on_failure"
+restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3

@@ -1,0 +1,14 @@
+{
+  "id": "transcript-003",
+  "type": "inbound_call",
+  "duration_seconds": 150,
+  "service_type": "hvac",
+  "transcript": "Customer: This is Mike Anderson calling about my furnace. It keeps cycling on and off every few minutes. The house is cold. Dispatcher: That sounds urgent, Mike. Is this at your home address we have on file, 321 Elm Boulevard? Customer: Yes, that's correct. Dispatcher: We can get an emergency technician out today within 2 hours. Customer: Please, that would be great. It's 25 degrees outside.",
+  "expected_entities": {
+    "customer_name": "Mike Anderson",
+    "issue": "Furnace short cycling - turning on and off every few minutes",
+    "address": "321 Elm Boulevard",
+    "priority": "urgent",
+    "appointment_window": "Today, within 2 hours"
+  }
+}

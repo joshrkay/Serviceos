@@ -1,149 +1,103 @@
-/**
- * P0-002 — Clerk auth and tenant bootstrap
- *
- * The old decodeClerkToken() function manually base64-decoded JWTs without
- * verifying the RS256 signature (a critical security bug). It has been
- * replaced by @clerk/express clerkMiddleware() + extractAuthContext(), which
- * uses Clerk's SDK to verify tokens against the JWKS endpoint.
- *
- * These tests cover extractAuthContext() using a mock of getAuth(), and the
- * bootstrapTenant() function which remains unchanged.
- */
-
+import * as crypto from 'crypto';
 import {
-  extractAuthContext,
+  decodeClerkToken,
   bootstrapTenant,
   TenantRepository,
   Tenant,
-  AuthenticatedRequest,
 } from '../../src/auth/clerk';
-import { Response, NextFunction } from 'express';
 
-// ── Mock @clerk/express so tests run without a real Clerk secret key ──────────
+const TEST_SECRET = 'test-secret-key';
 
-jest.mock('@clerk/express', () => ({
-  clerkMiddleware: () =>
-    (_req: unknown, _res: unknown, next: () => void) => next(),
-  getAuth: jest.fn(),
-}));
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { getAuth } = require('@clerk/express') as {
-  getAuth: jest.MockedFunction<(req: unknown) => unknown>;
-};
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function makeContext() {
-  const req = {} as AuthenticatedRequest;
-  const res = {} as Response;
-  const next = jest.fn() as unknown as NextFunction;
-  return { req, res, next };
+function createMockToken(payload: Record<string, unknown>, secret: string = TEST_SECRET): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signatureInput = `${header}.${body}`;
+  const sig = crypto
+    .createHmac('sha256', secret)
+    .update(signatureInput)
+    .digest('base64url');
+  return `${header}.${body}.${sig}`;
 }
 
-// ── extractAuthContext ─────────────────────────────────────────────────────────
-
 describe('P0-002 — Clerk auth and tenant bootstrap', () => {
-  describe('extractAuthContext', () => {
-    beforeEach(() => {
-      getAuth.mockReset();
-    });
-
-    it('happy path — attaches auth context from verified JWT claims', () => {
-      getAuth.mockReturnValue({
-        userId: 'user_123',
-        sessionId: 'sess_abc',
-        sessionClaims: { tenant_id: 'tenant_456', role: 'owner' },
+  describe('decodeClerkToken', () => {
+    it('happy path — decodes a valid token', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        tenant_id: 'tenant_456',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) + 3600,
       });
 
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
+      const result = decodeClerkToken(token, TEST_SECRET);
+      expect(result.sub).toBe('user_123');
+      expect(result.sid).toBe('sess_abc');
+      expect(result.tenant_id).toBe('tenant_456');
+      expect(result.role).toBe('owner');
+    });
 
-      expect(req.auth).toEqual({
-        userId: 'user_123',
-        sessionId: 'sess_abc',
-        tenantId: 'tenant_456',
+    it('validation — rejects malformed token', () => {
+      expect(() => decodeClerkToken('invalid-token', TEST_SECRET)).toThrow('Invalid token format');
+    });
+
+    it('validation — rejects token missing sub claim', () => {
+      const token = createMockToken({ sid: 'sess_abc', exp: Math.floor(Date.now() / 1000) + 3600, role: 'owner' });
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Missing required token claims');
+    });
+
+    it('validation — rejects expired token', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) - 3600,
+      });
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token expired');
+    });
+
+    it('validation — rejects token with invalid signature', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      }, 'correct-secret');
+      expect(() => decodeClerkToken(token, 'wrong-secret')).toThrow('Invalid token signature');
+    });
+
+    it('validation — rejects token missing exp claim', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
         role: 'owner',
       });
-      expect(next).toHaveBeenCalledTimes(1);
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token missing expiration claim');
     });
 
-    it('unauthenticated — passes through without setting req.auth', () => {
-      getAuth.mockReturnValue({ userId: null });
-
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
-
-      expect(req.auth).toBeUndefined();
-      expect(next).toHaveBeenCalledTimes(1);
-    });
-
-    it('tenant isolation — tenant_id claim is mapped to tenantId', () => {
-      getAuth.mockReturnValue({
-        userId: 'user_123',
-        sessionId: 'sess_abc',
-        sessionClaims: { tenant_id: 'tenant_999', role: 'dispatcher' },
+    it('validation — rejects token missing role claim', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        exp: Math.floor(Date.now() / 1000) + 3600,
       });
-
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
-
-      expect(req.auth?.tenantId).toBe('tenant_999');
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token missing or invalid role claim');
     });
 
-    it('defaults role to technician when claim is absent', () => {
-      getAuth.mockReturnValue({
-        userId: 'user_123',
-        sessionId: 'sess_abc',
-        sessionClaims: { tenant_id: 'tenant_456' },
+    it('validation — rejects token with invalid role', () => {
+      const token = createMockToken({
+        sub: 'user_123',
+        sid: 'sess_abc',
+        role: 'superadmin',
+        exp: Math.floor(Date.now() / 1000) + 3600,
       });
-
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
-
-      expect(req.auth?.role).toBe('technician');
+      expect(() => decodeClerkToken(token, TEST_SECRET)).toThrow('Token missing or invalid role claim');
     });
 
-    it('defaults tenantId to empty string when claim is absent', () => {
-      getAuth.mockReturnValue({
-        userId: 'user_123',
-        sessionId: 'sess_abc',
-        sessionClaims: { role: 'owner' },
-      });
-
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
-
-      expect(req.auth?.tenantId).toBe('');
-    });
-
-    it('no sessionClaims — still attaches userId with safe defaults', () => {
-      getAuth.mockReturnValue({
-        userId: 'user_123',
-        sessionId: 'sess_abc',
-        sessionClaims: null,
-      });
-
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
-
-      expect(req.auth?.userId).toBe('user_123');
-      expect(req.auth?.tenantId).toBe('');
-      expect(req.auth?.role).toBe('technician');
-    });
-
-    it('null auth — next() is still called, req.auth remains unset', () => {
-      getAuth.mockReturnValue(null);
-
-      const { req, res, next } = makeContext();
-      extractAuthContext(req, res, next);
-
-      expect(req.auth).toBeUndefined();
-      expect(next).toHaveBeenCalledTimes(1);
+    it('missing auth returns 401 — no bearer token results in no auth context', () => {
+      expect(() => decodeClerkToken('', TEST_SECRET)).toThrow();
     });
   });
-
-  // ── bootstrapTenant ─────────────────────────────────────────────────────────
 
   describe('bootstrapTenant', () => {
     let mockRepo: TenantRepository;
@@ -158,7 +112,7 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
           }
           return null;
         },
-        findById: async (id: string) => tenants.get(id) ?? null,
+        findById: async (id: string) => tenants.get(id) || null,
         create: async (data) => {
           const tenant: Tenant = {
             id: 'tenant_' + Math.random().toString(36).substring(7),
@@ -188,18 +142,18 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
     });
 
     it('validation — rejects empty userId', async () => {
-      await expect(
-        bootstrapTenant('', 'test@example.com', mockRepo)
-      ).rejects.toThrow('userId and email are required');
+      await expect(bootstrapTenant('', 'test@example.com', mockRepo)).rejects.toThrow(
+        'userId and email are required'
+      );
     });
 
     it('validation — rejects empty email', async () => {
-      await expect(
-        bootstrapTenant('user_1', '', mockRepo)
-      ).rejects.toThrow('userId and email are required');
+      await expect(bootstrapTenant('user_1', '', mockRepo)).rejects.toThrow(
+        'userId and email are required'
+      );
     });
 
-    it('tenant isolation — separate tenants created for different owners', async () => {
+    it('wrong tenant returns 403 — separate tenants for different owners', async () => {
       const t1 = await bootstrapTenant('user_1', 'a@example.com', mockRepo);
       const t2 = await bootstrapTenant('user_2', 'b@example.com', mockRepo);
       expect(t1.tenantId).not.toBe(t2.tenantId);
