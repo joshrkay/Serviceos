@@ -2,7 +2,7 @@
 // Canonical permission types, role mappings, and helper functions.
 // Used across API middleware, proposal actions, and frontend guards.
 
-import { Role } from './enums.js';
+import { Role } from './enums';
 
 export type Permission =
   | 'tenant:manage'

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ProposalType } from './enums.js';
+import { ProposalType } from './enums';
 
 // ── Proposal Payload Schemas ──
 // Canonical Zod schemas for all proposal type payloads.
