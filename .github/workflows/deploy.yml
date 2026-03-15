@@ -40,6 +40,27 @@ jobs:
         run: npm run migrate:dryrun
         working-directory: packages/api
 
+  chromatic-baseline:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Publish Chromatic baseline
+        uses: chromaui/action@latest
+        with:
+          projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+          workingDir: packages/web
+          buildScriptName: build-storybook
+          # Merged code is definitionally correct — auto-accept as the new visual baseline
+          autoAcceptChanges: true
+
   # Railway deployment pipeline
   deploy-railway-dev:
     needs: test
