@@ -11,8 +11,24 @@ import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNorma
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
+import { customers } from '../../data/mock-data';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+
+interface EstCompat {
+  id: string;
+  estimateNumber: string;
+  customer: string;
+  customerId: string;
+  description: string;
+  lineItems: LineItem[];
+  status: EstimateStatus;
+  createdDate: string;
+  sentDate?: string;
+  viewedDate?: string;
+  approvedDate?: string;
+  validUntil?: string;
+}
 
 interface ApiLineItem {
   id?: string;
@@ -108,7 +124,7 @@ const HINT_STYLE = {
 const HINT_ICON = { ok: CheckCircle2, tip: TrendingUp, warn: AlertTriangle };
 
 // ─── Approval Stepper ─────────────────────────────────────────────────────
-function ApprovalStepper({ est }: { est: Estimate }) {
+function ApprovalStepper({ est }: { est: EstCompat }) {
   const steps = [
     { label: 'Created', date: est.createdDate,  done: true },
     { label: 'Sent',    date: est.sentDate,     done: !!est.sentDate },
@@ -312,7 +328,7 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
 
 // ─── Document Preview Modal ───────────────────────────────────────────────
 function EstimateDocPreview({ est, lineItems, onClose }: {
-  est: Estimate; lineItems: LineItem[]; onClose: () => void;
+  est: EstCompat; lineItems: LineItem[]; onClose: () => void;
 }) {
   const customer = customers.find(c => c.id === est.customerId);
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
@@ -413,7 +429,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 
 // ─── Send Estimate Sheet ──────────────────────────────────────────────────
 function SendEstimateSheet({ est, total, onClose, onSent }: {
-  est: Estimate; total: number; onClose: () => void; onSent: () => void;
+  est: EstCompat; total: number; onClose: () => void; onSent: () => void;
 }) {
   const customer = customers.find(c => c.id === est.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');

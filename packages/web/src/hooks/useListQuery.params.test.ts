@@ -18,13 +18,13 @@ function mockFetch(body: unknown = []) {
   );
 }
 
-function getLastUrl(spy: ReturnType<typeof vi.spyOn>): string {
+function getLastUrl(spy: ReturnType<typeof mockFetch>): string {
   const calls = spy.mock.calls;
   return String(calls[calls.length - 1][0]);
 }
 
 describe('useListQuery — URL parameter generation', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let fetchSpy: ReturnType<typeof mockFetch>;
 
   beforeEach(() => {
     fetchSpy = mockFetch([]);
@@ -168,7 +168,7 @@ describe('useListQuery — URL parameter generation', () => {
 });
 
 describe('useDetailQuery — URL construction', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let fetchSpy: ReturnType<typeof mockFetch>;
 
   beforeEach(() => {
     fetchSpy = mockFetch({ id: 'job-1', summary: 'Test' });
@@ -206,7 +206,7 @@ describe('useDetailQuery — URL construction', () => {
 });
 
 describe('useMutation — HTTP method and body', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let fetchSpy: ReturnType<typeof mockFetch>;
 
   beforeEach(() => {
     fetchSpy = mockFetch({ id: 'job-1', status: 'scheduled' });

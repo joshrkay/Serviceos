@@ -10,8 +10,22 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+import { customers } from '../../data/mock-data';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
+
+interface InvCompat {
+  id: string;
+  invoiceNumber: string;
+  customer: string;
+  customerId: string;
+  description: string;
+  lineItems: LineItem[];
+  status: InvoiceStatus;
+  dueDate?: string;
+  sentDate?: string;
+  paidDate?: string;
+}
 
 interface ApiLineItem {
   id?: string;
@@ -79,7 +93,7 @@ function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus) {
 type LineItem = { description: string; qty: number; rate: number };
 
 // ─── Payment Journey Timeline ─────────────────────────────────────────────
-function PaymentTimeline({ inv }: { inv: Invoice }) {
+function PaymentTimeline({ inv }: { inv: InvCompat }) {
   const steps = [
     { label: 'Draft',     date: null,           done: true,                              active: inv.status === 'Draft' },
     { label: 'Sent',      date: inv.sentDate,   done: !!inv.sentDate,                   active: inv.status === 'Sent' },
@@ -303,7 +317,7 @@ function InvoiceLineItems({ items, editable, onChange }: {
 
 // ─── Send Payment Sheet ────────────────────────────────────────────────────
 function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
-  inv: Invoice; total: number; paymentLink: string;
+  inv: InvCompat; total: number; paymentLink: string;
   onClose: () => void; onSent: () => void;
 }) {
   const customer = customers.find(c => c.id === inv.customerId);
@@ -434,7 +448,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
 
 // ─── Mark Paid Sheet ──────────────────────────────────────────────────────
 function MarkPaidSheet({ inv, total, onClose, onPaid }: {
-  inv: Invoice; total: number; onClose: () => void; onPaid: () => void;
+  inv: InvCompat; total: number; onClose: () => void; onPaid: () => void;
 }) {
   const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('card');
   const [saving, setSaving] = useState(false);

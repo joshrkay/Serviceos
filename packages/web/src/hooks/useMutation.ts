@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 
-export interface MutationResult<TResult> {
-  mutate: (body: unknown) => Promise<TResult>;
+export interface MutationResult<TBody, TResult> {
+  mutate: (body: TBody) => Promise<TResult>;
   isLoading: boolean;
   error: string | null;
 }
@@ -9,7 +9,7 @@ export interface MutationResult<TResult> {
 export function useMutation<TBody, TResult>(
   method: 'POST' | 'PUT' | 'PATCH',
   path: string
-): MutationResult<TResult> {
+): MutationResult<TBody, TResult> {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

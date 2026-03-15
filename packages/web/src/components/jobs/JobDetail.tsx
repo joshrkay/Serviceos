@@ -940,12 +940,8 @@ export function JobDetailView({ id }: { id: string }) {
     name: [apiJob.technician.firstName, apiJob.technician.lastName].filter(Boolean).join(' '),
     initials: [apiJob.technician.firstName?.[0], apiJob.technician.lastName?.[0]].filter(Boolean).join(''),
     color: apiJob.technician.color ?? '#94a3b8',
-    role: 'technician',
     phone: '',
-    email: '',
-    status: 'active',
-    skills: [],
-    jobsToday: 0,
+    activeJobs: 0,
   } : undefined;
 
   const [modal,         setModal]         = useState<Modal>(null);

@@ -29,7 +29,7 @@ function mockFetchOnce(body: unknown, status = 200) {
   );
 }
 
-function getCalledUrls(spy: ReturnType<typeof vi.spyOn>): string[] {
+function getCalledUrls(spy: ReturnType<typeof mockFetchOnce>): string[] {
   return spy.mock.calls.map((call) => String(call[0]));
 }
 
