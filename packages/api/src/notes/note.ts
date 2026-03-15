@@ -51,6 +51,9 @@ export async function createNote(
   input: CreateNoteInput,
   repository: NoteRepository
 ): Promise<InternalNote> {
+  const errors = validateNoteInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const note: InternalNote = {
     id: uuidv4(),
     tenantId: input.tenantId,

@@ -41,6 +41,9 @@ export async function linkConversation(
   input: CreateLinkInput,
   repository: ConversationLinkRepository
 ): Promise<ConversationLink> {
+  const errors = validateLinkInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const link: ConversationLink = {
     id: uuidv4(),
     tenantId: input.tenantId,
