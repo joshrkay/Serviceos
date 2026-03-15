@@ -9,6 +9,7 @@ COPY package.json package-lock.json ./
 # Copy package manifests for workspace resolution
 COPY packages/api/package.json ./packages/api/
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/web/package.json ./packages/web/
 
 # Install all deps including devDeps (need tsc)
 RUN npm ci --include=dev
@@ -33,6 +34,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/api/package.json ./packages/api/
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/web/package.json ./packages/web/
 
 # Production deps only
 RUN npm ci --omit=dev
