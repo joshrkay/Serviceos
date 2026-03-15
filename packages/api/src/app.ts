@@ -50,7 +50,9 @@ export function createApp() {
   app.use(express.json());
 
   // CORS
-  const corsOrigin = process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? false : true);
+  // Allow explicit origin override, or fall back to allowing all origins.
+  // Credentials require an explicit origin (not '*'), so in prod set CORS_ORIGIN to the web URL.
+  const corsOrigin = process.env.CORS_ORIGIN || true;
   app.use(cors({
     origin: corsOrigin,
     credentials: true,
@@ -101,20 +103,20 @@ export function createApp() {
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
 
   // Mount API routes
-  app.use('/api/v1/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/v1/locations', createLocationRouter(locationRepo));
-  app.use('/api/v1/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo));
-  app.use('/api/v1/appointments', createAppointmentRouter(appointmentRepo));
-  app.use('/api/v1/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo));
-  app.use('/api/v1/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo));
-  app.use('/api/v1/payments', createPaymentRouter(paymentRepo, invoiceRepo));
-  app.use('/api/v1/notes', createNoteRouter(noteRepo));
-  app.use('/api/v1/conversations', createConversationRouter(conversationRepo));
-  app.use('/api/v1/settings', createSettingsRouter(settingsRepo));
-  app.use('/api/v1/verticals', createVerticalRouter(verticalPackRepo));
-  app.use('/api/v1/templates', createTemplateRouter(templateRepo));
-  app.use('/api/v1/bundles', createBundleRouter(bundleRepo));
-  app.use('/api/v1/quality', createQualityRouter(qualityMetricsRepo));
+  app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/locations', createLocationRouter(locationRepo));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo));
+  app.use('/api/appointments', createAppointmentRouter(appointmentRepo));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo));
+  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
+  app.use('/api/notes', createNoteRouter(noteRepo));
+  app.use('/api/conversations', createConversationRouter(conversationRepo));
+  app.use('/api/settings', createSettingsRouter(settingsRepo));
+  app.use('/api/verticals', createVerticalRouter(verticalPackRepo));
+  app.use('/api/templates', createTemplateRouter(templateRepo));
+  app.use('/api/bundles', createBundleRouter(bundleRepo));
+  app.use('/api/quality', createQualityRouter(qualityMetricsRepo));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
