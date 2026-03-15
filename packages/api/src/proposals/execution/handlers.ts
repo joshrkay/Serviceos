@@ -1,6 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
+import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
+import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
+import { CancelAppointmentExecutionHandler } from './cancellation-handler';
+import { AppointmentRepository } from '../../appointments/appointment';
+import { AssignmentRepository } from '../../appointments/assignment';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -102,7 +107,10 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
   }
 }
 
-export function createExecutionHandlerRegistry(): Map<ProposalType, ExecutionHandler> {
+export function createExecutionHandlerRegistry(deps?: {
+  appointmentRepo?: AppointmentRepository;
+  assignmentRepo?: AssignmentRepository;
+}): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(),
@@ -111,6 +119,9 @@ export function createExecutionHandlerRegistry(): Map<ProposalType, ExecutionHan
     new DraftEstimateExecutionHandler(),
     new UpdateEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
+    new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
   ];
 
   const registry = new Map<ProposalType, ExecutionHandler>();

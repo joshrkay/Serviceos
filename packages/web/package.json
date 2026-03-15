@@ -9,12 +9,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit",
-    "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build",
-    "chromatic": "chromatic --project-token=$CHROMATIC_PROJECT_TOKEN"
+    "lint": "tsc --noEmit && eslint src/"
   },
   "dependencies": {
+    "@ai-service-os/shared": "*",
     "react": "^18.3.0",
     "react-dom": "^18.3.0"
   },

@@ -53,7 +53,12 @@ export type Permission =
   | 'notes:update'
   | 'notes:delete'
   | 'settings:view'
-  | 'settings:update';
+  | 'settings:update'
+  // Phase 6 permissions
+  | 'dispatch:view'
+  | 'dispatch:manage'
+  | 'availability:view'
+  | 'availability:manage';
 
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: [
@@ -109,6 +114,11 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'notes:delete',
     'settings:view',
     'settings:update',
+    // Phase 6
+    'dispatch:view',
+    'dispatch:manage',
+    'availability:view',
+    'availability:manage',
   ],
   dispatcher: [
     'users:list',
@@ -148,6 +158,11 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'notes:view',
     'notes:update',
     'settings:view',
+    // Phase 6
+    'dispatch:view',
+    'dispatch:manage',
+    'availability:view',
+    'availability:manage',
   ],
   technician: [
     'jobs:view',
@@ -166,6 +181,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'appointments:view',
     'notes:create',
     'notes:view',
+    // Phase 6
+    'availability:view',
   ],
 };
 
@@ -177,12 +194,12 @@ export function hasPermission(role: Role, permission: Permission): boolean {
   return permissions.includes(permission);
 }
 
-export function getPermissions(role: Role): Permission[] {
-  return ROLE_PERMISSIONS[role] || [];
+export function isValidRole(role: string): role is Role {
+  return role === 'owner' || role === 'dispatcher' || role === 'technician';
 }
 
-export function isValidRole(role: string): role is Role {
-  return ['owner', 'dispatcher', 'technician'].includes(role);
+export function getPermissions(role: Role | string): Permission[] {
+  return ROLE_PERMISSIONS[role as Role] || [];
 }
 
 export interface PermissionContract {
@@ -191,7 +208,7 @@ export interface PermissionContract {
 }
 
 export function getPermissionContract(): PermissionContract[] {
-  return (Object.keys(ROLE_PERMISSIONS) as Role[]).map((role) => ({
+  return (['owner', 'dispatcher', 'technician'] as Role[]).map((role) => ({
     role,
     permissions: ROLE_PERMISSIONS[role],
   }));

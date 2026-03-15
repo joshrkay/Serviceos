@@ -4,6 +4,7 @@ dockerfilePath = "Dockerfile"
 dockerfileTarget = "api"
 
 [deploy]
+startCommand = "node packages/api/dist/src/db/migrate.js && node packages/api/dist/src/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

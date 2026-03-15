@@ -23,6 +23,8 @@ export interface UserRow extends BaseEntity {
 }
 
 export const MIGRATIONS = {
+  // Platform & Auth
+
   '001_create_tenants': `
     CREATE TABLE IF NOT EXISTS tenants (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -76,6 +78,8 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_audit ON audit_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Storage & Messaging
 
   '004_create_files': `
     CREATE TABLE IF NOT EXISTS files (
@@ -164,6 +168,8 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_voice ON voice_recordings
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // AI Foundations
 
   '008_create_ai_runs': `
     CREATE TABLE IF NOT EXISTS ai_runs (
@@ -270,7 +276,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_webhook_status ON webhook_events(status);
   `,
 
-  // Phase 1 — Core Business Entity Migrations
+  // Business Core
 
   '013_create_tenant_settings': `
     CREATE TABLE IF NOT EXISTS tenant_settings (
@@ -550,18 +556,101 @@ export const MIGRATIONS = {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE INDEX IF NOT EXISTS idx_invoices_tenant ON invoices(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_job ON invoices(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_number ON invoices(tenant_id, invoice_number);
+    CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(tenant_id, status);
+    ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_invoices ON invoices
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '025_create_invoice_line_items': `
+    CREATE TABLE IF NOT EXISTS invoice_line_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      description TEXT NOT NULL,
+      category TEXT CHECK (category IN ('labor', 'material', 'equipment', 'other')),
+      quantity NUMERIC NOT NULL,
+      unit_price_cents INTEGER NOT NULL,
+      total_cents INTEGER NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      taxable BOOLEAN NOT NULL DEFAULT true
+    );
+    CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_line_items(invoice_id);
+    ALTER TABLE invoice_line_items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_inv_items ON invoice_line_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '026_create_payments': `
+    CREATE TABLE IF NOT EXISTS payments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      invoice_id UUID NOT NULL REFERENCES invoices(id),
+      amount_cents INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'refunded')),
+      payment_method TEXT NOT NULL DEFAULT 'stripe'
+        CHECK (payment_method IN ('stripe', 'cash', 'check', 'other')),
+      stripe_payment_intent_id TEXT,
+      stripe_payment_link_id TEXT,
+      reference_number TEXT,
+      notes TEXT,
+      paid_at TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_payments_tenant ON payments(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(tenant_id, status);
+    CREATE INDEX IF NOT EXISTS idx_payments_stripe_intent ON payments(stripe_payment_intent_id)
+      WHERE stripe_payment_intent_id IS NOT NULL;
+    ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_payments ON payments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Proposal Engine
+
+  '027_create_proposals': `
+    CREATE TABLE IF NOT EXISTS proposals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      proposal_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'approved_with_edits', 'rejected', 'expired', 'execution_failed')),
+      payload JSONB NOT NULL DEFAULT '{}',
+      confidence_score NUMERIC,
+      target_entity_type TEXT,
+      target_entity_id TEXT,
+      ai_run_id UUID REFERENCES ai_runs(id),
+      conversation_id UUID REFERENCES conversations(id),
+      idempotency_key TEXT NOT NULL,
+      expires_at TIMESTAMPTZ,
+      reviewed_by TEXT,
+      reviewed_at TIMESTAMPTZ,
+      rejection_reason TEXT,
+      execution_error TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
     CREATE INDEX IF NOT EXISTS idx_proposals_tenant ON proposals(tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
-    CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(proposal_type);
+    CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(tenant_id, status);
+    CREATE INDEX IF NOT EXISTS idx_proposals_type ON proposals(tenant_id, proposal_type);
     CREATE INDEX IF NOT EXISTS idx_proposals_ai_run ON proposals(ai_run_id);
-    CREATE INDEX IF NOT EXISTS idx_proposals_idempotency ON proposals(idempotency_key);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_idempotency ON proposals(tenant_id, idempotency_key);
     CREATE INDEX IF NOT EXISTS idx_proposals_target ON proposals(target_entity_type, target_entity_id);
     ALTER TABLE proposals ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposals FORCE ROW LEVEL SECURITY;
     CREATE POLICY tenant_isolation_proposals ON proposals
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '014_create_proposal_analytics': `
+  '028_create_proposal_analytics': `
     CREATE TABLE IF NOT EXISTS proposal_analytics (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -581,7 +670,7 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '015_create_evaluation_snapshots': `
+  '029_create_evaluation_snapshots': `
     CREATE TABLE IF NOT EXISTS evaluation_snapshots (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -600,7 +689,9 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '016_create_llm_cache': `
+  // LLM Gateway
+
+  '030_create_llm_cache': `
     CREATE TABLE IF NOT EXISTS llm_cache (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       cache_key TEXT NOT NULL UNIQUE,
@@ -617,7 +708,7 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '017_create_provider_health': `
+  '031_create_provider_health': `
     CREATE TABLE IF NOT EXISTS provider_health (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       provider_name TEXT NOT NULL,
@@ -629,9 +720,9 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_health_recorded ON provider_health(recorded_at);
   `,
 
-  // Phase 4 — Vertical Packs + Estimate Intelligence
+  // Vertical Packs & Intelligence
 
-  '025_create_vertical_packs': `
+  '032_create_vertical_packs': `
     CREATE TABLE IF NOT EXISTS vertical_packs (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       type TEXT NOT NULL UNIQUE CHECK (type IN ('hvac', 'plumbing')),
@@ -648,7 +739,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_vp_active ON vertical_packs(is_active);
   `,
 
-  '026_create_estimate_templates': `
+  '033_create_estimate_templates': `
     CREATE TABLE IF NOT EXISTS estimate_templates (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -675,7 +766,7 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '027_create_service_bundles': `
+  '034_create_service_bundles': `
     CREATE TABLE IF NOT EXISTS service_bundles (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -698,7 +789,7 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '028_create_wording_preferences': `
+  '035_create_wording_preferences': `
     CREATE TABLE IF NOT EXISTS wording_preferences (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -721,7 +812,7 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '029_create_quality_metrics': `
+  '036_create_quality_metrics': `
     CREATE TABLE IF NOT EXISTS quality_metrics (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
