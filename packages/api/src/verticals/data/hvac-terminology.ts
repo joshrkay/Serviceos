@@ -1,0 +1,28 @@
+import { TerminologyEntry } from '../terminology-map';
+
+export const hvacTerminologyEntries: TerminologyEntry[] = [
+  { term: 'SEER', aliases: ['seer rating', 'seasonal energy efficiency ratio'], definition: 'A measure of cooling efficiency over a typical cooling season, calculated by dividing cooling output by energy input.', category: 'efficiency' },
+  { term: 'SEER2', aliases: ['seer2 rating'], definition: 'Updated SEER testing procedure using the M1 blower-door testing method for more realistic efficiency ratings.', category: 'efficiency' },
+  { term: 'BTU', aliases: ['british thermal unit', 'btus'], definition: 'A unit of heat energy. One BTU is the amount of energy needed to raise the temperature of one pound of water by one degree Fahrenheit.', category: 'measurement' },
+  { term: 'Ton', aliases: ['ton of cooling', 'tonnage'], definition: 'A unit of cooling capacity equal to 12,000 BTUs per hour.', category: 'measurement' },
+  { term: 'AFUE', aliases: ['annual fuel utilization efficiency'], definition: 'A measure of a gas furnace\'s efficiency in converting fuel to energy over a typical year.', category: 'efficiency' },
+  { term: 'HSPF', aliases: ['heating seasonal performance factor'], definition: 'A measure of a heat pump\'s heating efficiency over a heating season.', category: 'efficiency' },
+  { term: 'Condenser', aliases: ['condenser unit', 'outdoor unit', 'condensing unit'], definition: 'The outdoor component of a split HVAC system that releases or collects heat.', category: 'equipment' },
+  { term: 'Evaporator Coil', aliases: ['evap coil', 'indoor coil', 'a-coil'], definition: 'The indoor coil that absorbs heat from indoor air in cooling mode.', category: 'equipment' },
+  { term: 'Air Handler', aliases: ['air handling unit', 'AHU', 'blower'], definition: 'The indoor unit that circulates conditioned air through ductwork.', category: 'equipment' },
+  { term: 'Compressor', aliases: ['compressor unit'], definition: 'The component that pressurizes refrigerant to facilitate heat transfer between indoor and outdoor coils.', category: 'equipment' },
+  { term: 'Refrigerant', aliases: ['freon', 'R-410A', 'R-22', 'R-454B', 'coolant'], definition: 'The chemical compound used in HVAC systems to transfer heat through phase changes.', category: 'materials' },
+  { term: 'Ductwork', aliases: ['ducts', 'duct system', 'ducting'], definition: 'The network of tubes that distributes conditioned air throughout a building.', category: 'infrastructure' },
+  { term: 'Thermostat', aliases: ['t-stat', 'smart thermostat', 'programmable thermostat'], definition: 'The control device that regulates HVAC system operation based on temperature settings.', category: 'controls' },
+  { term: 'Heat Pump', aliases: ['mini split', 'mini-split', 'ductless'], definition: 'A system that transfers heat between indoor and outdoor environments, providing both heating and cooling.', category: 'equipment' },
+  { term: 'Furnace', aliases: ['gas furnace', 'electric furnace', 'heating unit'], definition: 'A heating appliance that generates warm air by burning fuel or using electric resistance.', category: 'equipment' },
+  { term: 'Capacitor', aliases: ['run capacitor', 'start capacitor', 'cap'], definition: 'An electrical component that stores and releases energy to start and run HVAC motors.', category: 'parts' },
+  { term: 'Contactor', aliases: ['relay', 'contactor relay'], definition: 'An electrically controlled switch used to start and stop the compressor and condenser fan motor.', category: 'parts' },
+  { term: 'TXV', aliases: ['thermostatic expansion valve', 'expansion valve', 'metering device'], definition: 'A valve that regulates the flow of refrigerant into the evaporator coil.', category: 'parts' },
+  { term: 'Zoning', aliases: ['zone system', 'zone control', 'multi-zone'], definition: 'A system that divides a building into separate areas with independent temperature control.', category: 'controls' },
+  { term: 'Load Calculation', aliases: ['manual j', 'heat load', 'cooling load'], definition: 'The process of determining the heating and cooling requirements for a space based on its characteristics.', category: 'design' },
+  { term: 'Plenum', aliases: ['supply plenum', 'return plenum'], definition: 'An enclosed space used for air distribution, typically connecting the air handler to the ductwork.', category: 'infrastructure' },
+  { term: 'Condensate Drain', aliases: ['condensate line', 'drain line', 'condensate pump'], definition: 'The system that removes moisture collected during the cooling process.', category: 'infrastructure' },
+  { term: 'Filter', aliases: ['air filter', 'MERV filter', 'HEPA filter'], definition: 'A device that removes particulates from air flowing through the HVAC system.', category: 'parts' },
+  { term: 'Coil Cleaning', aliases: ['coil wash', 'evaporator cleaning', 'condenser cleaning'], definition: 'The maintenance process of removing dirt and debris from evaporator or condenser coils.', category: 'maintenance' },
+];

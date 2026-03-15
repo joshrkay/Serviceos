@@ -88,3 +88,101 @@ export const createDiffAnalysisSchema = z.object({
   fromRevisionId: z.string().uuid(),
   toRevisionId: z.string().uuid(),
 });
+
+// Vertical Packs (P4-001A)
+export const verticalPackSchema = z.object({
+  slug: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  description: z.string().min(1),
+  terminologyMapId: z.string().min(1),
+  taxonomyId: z.string().min(1),
+  templateIds: z.array(z.string()).optional(),
+  isActive: z.boolean().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+export const createVerticalPackSchema = z.object({
+  slug: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  description: z.string().min(1),
+  terminologyMapId: z.string().min(1),
+  taxonomyId: z.string().min(1),
+  templateIds: z.array(z.string()).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+// Terminology (P4-002A/003A)
+export const terminologyEntrySchema = z.object({
+  term: z.string().min(1),
+  aliases: z.array(z.string()),
+  definition: z.string().min(1),
+  category: z.string().optional(),
+});
+
+export const createTerminologyMapSchema = z.object({
+  verticalSlug: z.string().min(1),
+  version: z.string().min(1),
+  entries: z.array(terminologyEntrySchema),
+});
+
+// Taxonomy (P4-002B/003B)
+export const serviceCategorySchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  parentId: z.string().optional(),
+  description: z.string().min(1),
+  tags: z.array(z.string()),
+  sortOrder: z.number().int(),
+});
+
+export const createServiceTaxonomySchema = z.object({
+  verticalSlug: z.string().min(1),
+  version: z.string().min(1),
+  categories: z.array(serviceCategorySchema),
+});
+
+// Vertical Activation (P4-001B)
+export const createVerticalActivationSchema = z.object({
+  verticalPackId: z.string().min(1),
+  verticalSlug: z.string().min(1),
+  config: z.record(z.unknown()).optional(),
+});
+
+// Estimate Templates (P4-004A)
+export const lineItemTemplateSchema = z.object({
+  description: z.string().min(1),
+  defaultQuantity: z.number().optional(),
+  defaultUnitPrice: z.number().optional(),
+  category: z.string().optional(),
+  isOptional: z.boolean(),
+  sortOrder: z.number().int(),
+});
+
+export const createEstimateTemplateSchema = z.object({
+  verticalSlug: z.string().min(1),
+  categoryId: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().min(1),
+  lineItemTemplates: z.array(lineItemTemplateSchema),
+  promptHints: z.array(z.string()).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+// Wording Preferences (P4-007A)
+export const createWordingPreferenceSchema = z.object({
+  verticalSlug: z.string().min(1),
+  originalPhrase: z.string().min(1),
+  preferredPhrase: z.string().min(1),
+  source: z.enum(['manual', 'learned']),
+});
+
+// Settings (P4-010B)
+export const terminologyPreferenceUpdateSchema = z.object({
+  verticalSlug: z.string().min(1),
+  preferences: z.array(z.object({
+    originalPhrase: z.string().min(1),
+    preferredPhrase: z.string().min(1),
+  })),
+});
