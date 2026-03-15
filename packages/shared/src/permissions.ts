@@ -1,4 +1,8 @@
-export type Role = 'owner' | 'dispatcher' | 'technician';
+// ── RBAC Permissions ──
+// Canonical permission types, role mappings, and helper functions.
+// Used across API middleware, proposal actions, and frontend guards.
+
+import { Role } from './enums';
 
 export type Permission =
   | 'tenant:manage'
@@ -23,8 +27,6 @@ export type Permission =
   | 'proposals:approve'
   | 'proposals:edit'
   | 'proposals:view'
-  | 'proposals:edit'
-  // Phase 1 permissions
   | 'customers:create'
   | 'customers:view'
   | 'customers:update'
@@ -53,15 +55,10 @@ export type Permission =
   | 'notes:update'
   | 'notes:delete'
   | 'settings:view'
-  | 'settings:update'
-  // Phase 6 permissions
-  | 'dispatch:view'
-  | 'dispatch:manage'
-  | 'availability:view'
-  | 'availability:manage';
+  | 'settings:update';
 
-const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
-  owner: [
+const ROLE_PERMISSIONS: Record<string, Permission[]> = {
+  [Role.OWNER]: [
     'tenant:manage',
     'users:invite',
     'users:remove',
@@ -84,7 +81,6 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'proposals:approve',
     'proposals:edit',
     'proposals:view',
-    // Phase 1
     'customers:create',
     'customers:view',
     'customers:update',
@@ -114,13 +110,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'notes:delete',
     'settings:view',
     'settings:update',
-    // Phase 6
-    'dispatch:view',
-    'dispatch:manage',
-    'availability:view',
-    'availability:manage',
   ],
-  dispatcher: [
+  [Role.DISPATCHER]: [
     'users:list',
     'jobs:create',
     'jobs:assign',
@@ -136,7 +127,6 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'proposals:approve',
     'proposals:edit',
     'proposals:view',
-    // Phase 1
     'customers:create',
     'customers:view',
     'customers:update',
@@ -158,13 +148,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'notes:view',
     'notes:update',
     'settings:view',
-    // Phase 6
-    'dispatch:view',
-    'dispatch:manage',
-    'availability:view',
-    'availability:manage',
   ],
-  technician: [
+  [Role.TECHNICIAN]: [
     'jobs:view',
     'jobs:update',
     'conversations:view',
@@ -172,7 +157,6 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'files:upload',
     'files:view',
     'proposals:view',
-    // Phase 1
     'customers:view',
     'locations:view',
     'estimates:view',
@@ -181,12 +165,10 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'appointments:view',
     'notes:create',
     'notes:view',
-    // Phase 6
-    'availability:view',
   ],
 };
 
-export function hasPermission(role: Role, permission: Permission): boolean {
+export function hasPermission(role: Role | string, permission: Permission): boolean {
   const permissions = ROLE_PERMISSIONS[role];
   if (!permissions) {
     return false;
@@ -194,12 +176,12 @@ export function hasPermission(role: Role, permission: Permission): boolean {
   return permissions.includes(permission);
 }
 
-export function isValidRole(role: string): role is Role {
-  return role === 'owner' || role === 'dispatcher' || role === 'technician';
+export function getPermissions(role: Role | string): Permission[] {
+  return ROLE_PERMISSIONS[role] || [];
 }
 
-export function getPermissions(role: Role | string): Permission[] {
-  return ROLE_PERMISSIONS[role as Role] || [];
+export function isValidRole(role: string): role is Role {
+  return Object.values(Role).includes(role as Role);
 }
 
 export interface PermissionContract {
@@ -208,7 +190,7 @@ export interface PermissionContract {
 }
 
 export function getPermissionContract(): PermissionContract[] {
-  return (['owner', 'dispatcher', 'technician'] as Role[]).map((role) => ({
+  return Object.values(Role).map((role) => ({
     role,
     permissions: ROLE_PERMISSIONS[role],
   }));
