@@ -5,7 +5,9 @@ import {
   AlertTriangle, FileText, Briefcase, ArrowLeft,
   User, Phone, Mail,
 } from 'lucide-react';
-import { customers, ServiceType } from '../../data/mock-data';
+import type { ServiceType } from '../../data/mock-data';
+import { useListQuery } from '../../hooks/useListQuery';
+import { useMutation } from '../../hooks/useMutation';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { NewJobFlow } from '../jobs/NewJobFlow';
 
@@ -16,10 +18,26 @@ const SVC_CHIP: Record<ServiceType, string> = {
 };
 const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
-// collect all unique service types across all locations of a customer
-function customerServiceTypes(c: typeof customers[0]): ServiceType[] {
-  const all = c.locations.flatMap(l => l.serviceTypes);
-  return [...new Set(all)] as ServiceType[];
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  openJobs?: number;
+  tags?: string[];
+  lastService?: string;
+  locations?: Array<{ id: string; street1?: string; city?: string; state?: string; serviceTypes?: ServiceType[] }>;
+}
+
+function customerDisplayName(c: ApiCustomer): string {
+  return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Unknown';
+}
+
+function customerServiceTypes(c: ApiCustomer): ServiceType[] {
+  const all = (c.locations ?? []).flatMap(l => l.serviceTypes ?? []);
+  return [...new Set(all)];
 }
 
 // ── Add Customer Sheet ───────────────────────────────────────────
@@ -33,10 +51,13 @@ interface AddCustomerSheetProps {
   onClose: () => void;
   onNewEstimate: () => void;
   onNewJob: () => void;
+  existingCustomers: ApiCustomer[];
+  onCreate: () => void;
 }
 
-function AddCustomerSheet({ onClose, onNewEstimate, onNewJob }: AddCustomerSheetProps) {
+function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers, onCreate }: AddCustomerSheetProps) {
   const navigate = useNavigate();
+  const { mutate: createCustomer } = useMutation<Record<string, unknown>, ApiCustomer>('POST', '/api/customers');
 
   const [step, setStep] = useState<SheetStep>('contact');
   const [form, setForm] = useState({
@@ -49,11 +70,11 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob }: AddCustomerSheet
   // ── Live duplicate detection ─────────────────────────────────────
   const phoneDigits = normalizePhone(form.phone);
   const phoneMatch = !dismissedDupe && phoneDigits.length >= 10
-    ? customers.find(c => normalizePhone(c.phone) === phoneDigits)
+    ? existingCustomers.find(c => normalizePhone(c.primaryPhone ?? '') === phoneDigits)
     : null;
   const emailNorm  = form.email.toLowerCase().trim();
   const emailMatch = !dismissedDupe && emailNorm.length >= 5 && emailNorm.includes('@')
-    ? customers.find(c => c.email.toLowerCase() === emailNorm)
+    ? existingCustomers.find(c => (c.email ?? '').toLowerCase() === emailNorm)
     : null;
   const duplicate = phoneMatch ?? emailMatch;
   const matchReason = phoneMatch ? 'Same phone number' : 'Same email address';
@@ -186,11 +207,11 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob }: AddCustomerSheet
                   {/* Matched customer card */}
                   <div className="flex items-center gap-3 bg-white rounded-xl border border-amber-200 px-3.5 py-3">
                     <span className="flex size-9 items-center justify-center rounded-full bg-slate-800 text-white text-xs shrink-0">
-                      {duplicate.name.split(' ').map(n => n[0]).join('')}
+                      {customerDisplayName(duplicate).split(' ').map(n => n[0]).join('')}
                     </span>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm text-slate-800">{duplicate.name}</p>
-                      <p className="text-xs text-slate-400 mt-0.5 truncate">{duplicate.phone} · {duplicate.address}</p>
+                      <p className="text-sm text-slate-800">{customerDisplayName(duplicate)}</p>
+                      <p className="text-xs text-slate-400 mt-0.5 truncate">{duplicate.primaryPhone}</p>
                     </div>
                   </div>
 
@@ -199,7 +220,7 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob }: AddCustomerSheet
                       onClick={() => { navigate(`/customers/${duplicate.id}`); onClose(); }}
                       className="flex-1 rounded-xl border border-amber-300 bg-white text-amber-800 py-2.5 text-sm hover:bg-amber-50 transition-colors"
                     >
-                      View {duplicate.name.split(' ')[0]}
+                      View {customerDisplayName(duplicate).split(' ')[0]}
                     </button>
                     <button
                       onClick={() => setDismissedDupe(true)}
@@ -273,7 +294,17 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob }: AddCustomerSheet
               </div>
 
               <button
-                onClick={() => setStep('done')}
+                onClick={async () => {
+                  const nameParts = form.name.trim().split(' ');
+                  await createCustomer({
+                    firstName: nameParts[0],
+                    lastName: nameParts.slice(1).join(' ') || undefined,
+                    primaryPhone: form.phone || undefined,
+                    email: form.email || undefined,
+                  });
+                  onCreate();
+                  setStep('done');
+                }}
                 disabled={!canSave}
                 className="w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors mt-1"
               >
@@ -366,23 +397,19 @@ type Filter = 'All' | ServiceType;
 
 export function CustomersPage() {
   const navigate = useNavigate();
-  const [search,       setSearch]       = useState('');
   const [filter,       setFilter]       = useState<Filter>('All');
   const [showAdd,      setShowAdd]      = useState(false);
   const [showEstimate, setShowEstimate] = useState(false);
   const [showJob,      setShowJob]      = useState(false);
 
-  const filtered = customers.filter(c => {
-    const matchSearch = !search
-      || c.name.toLowerCase().includes(search.toLowerCase())
-      || c.address.toLowerCase().includes(search.toLowerCase())
-      || c.phone.includes(search);
-    const svcTypes = customerServiceTypes(c);
-    const matchFilter = filter === 'All' || svcTypes.includes(filter);
-    return matchSearch && matchFilter;
-  });
+  const { data, total, isLoading, error, setSearch, refetch } = useListQuery<ApiCustomer>('/api/customers');
 
-  const totalLocations = customers.reduce((n, c) => n + c.locations.length, 0);
+  // Client-side service type filter (API doesn't support this filter)
+  const filtered = filter === 'All'
+    ? data
+    : data.filter(c => customerServiceTypes(c).includes(filter));
+
+  const totalLocations = data.reduce((n, c) => n + (c.locations?.length ?? 0), 0);
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-6">
@@ -393,7 +420,7 @@ export function CustomersPage() {
           <div>
             <h1 className="text-slate-900">Customers</h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              {customers.length} customers · {totalLocations} locations
+              {total} customers · {totalLocations} locations
             </p>
           </div>
           <button
@@ -407,16 +434,10 @@ export function CustomersPage() {
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 mt-4">
           <Search size={15} className="text-slate-400 shrink-0" />
           <input
-            value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Search name, address, phone…"
             className="flex-1 text-sm text-slate-700 placeholder-slate-400 outline-none bg-transparent"
           />
-          {search && (
-            <button onClick={() => setSearch('')} className="text-slate-400 hover:text-slate-600">
-              <X size={13} />
-            </button>
-          )}
         </div>
 
         {/* filter chips */}
@@ -435,68 +456,76 @@ export function CustomersPage() {
         </div>
 
         {/* list */}
-        <div className="flex flex-col gap-2.5 mt-4">
-          {filtered.map(c => {
-            const svcTypes = customerServiceTypes(c);
-            const locCount = c.locations.length;
+        {isLoading && (
+          <div className="flex items-center justify-center py-16">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+          </div>
+        )}
+        {error && (
+          <div className="flex flex-col items-center py-12 gap-2 text-center">
+            <p className="text-sm text-red-500">Failed to load customers</p>
+            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
+          </div>
+        )}
+        {!isLoading && !error && (
+          <div className="flex flex-col gap-2.5 mt-4">
+            {filtered.map(c => {
+              const svcTypes = customerServiceTypes(c);
+              const locCount = c.locations?.length ?? 0;
+              const name = customerDisplayName(c);
 
-            return (
-              <button
-                key={c.id}
-                onClick={() => navigate(`/customers/${c.id}`)}
-                className="flex items-center gap-3.5 rounded-2xl bg-white border border-slate-200 px-4 py-3.5 text-left hover:border-slate-300 hover:shadow-sm transition-all active:scale-[0.99]"
-              >
-                <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">
-                  {c.name.split(' ').map(n => n[0]).join('')}
-                </span>
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => navigate(`/customers/${c.id}`)}
+                  className="flex items-center gap-3.5 rounded-2xl bg-white border border-slate-200 px-4 py-3.5 text-left hover:border-slate-300 hover:shadow-sm transition-all active:scale-[0.99]"
+                >
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">
+                    {name.split(' ').map(n => n[0]).join('')}
+                  </span>
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm text-slate-900">{c.name}</p>
-                    {c.tags?.includes('VIP') && (
-                      <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">VIP</span>
-                    )}
-                    {c.openJobs > 0 && (
-                      <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2 py-0.5">
-                        {c.openJobs} open
-                      </span>
-                    )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm text-slate-900">{name}</p>
+                      {c.tags?.includes('VIP') && (
+                        <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">VIP</span>
+                      )}
+                      {(c.openJobs ?? 0) > 0 && (
+                        <span className="text-xs bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2 py-0.5">
+                          {c.openJobs} open
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <MapPin size={10} className="text-slate-400 shrink-0" />
+                      <p className="text-xs text-slate-400 truncate">
+                        {locCount > 1 ? `${locCount} locations` : (c.locations?.[0]?.street1 ?? '')}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                      {svcTypes.map(s => (
+                        <span key={s} className={`text-xs border rounded-full px-2 py-0.5 ${SVC_CHIP[s]}`}>
+                          {SVC_ICON[s]} {s}
+                        </span>
+                      ))}
+                      {c.lastService && (
+                        <span className="text-xs text-slate-400 ml-auto shrink-0">{c.lastService}</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <MapPin size={10} className="text-slate-400 shrink-0" />
-                    <p className="text-xs text-slate-400 truncate">
-                      {locCount > 1 ? `${locCount} locations · ${c.address}` : c.address}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                    {svcTypes.map(s => (
-                      <span key={s} className={`text-xs border rounded-full px-2 py-0.5 ${SVC_CHIP[s]}`}>
-                        {SVC_ICON[s]} {s}
-                      </span>
-                    ))}
-                    {c.lastService && (
-                      <span className="text-xs text-slate-400 ml-auto shrink-0">{c.lastService}</span>
-                    )}
-                  </div>
-                </div>
 
-                <ChevronRight size={15} className="shrink-0 text-slate-300" />
-              </button>
-            );
-          })}
-
-          {filtered.length === 0 && (
-            <div className="flex flex-col items-center py-16 gap-2 text-center">
-              <p className="text-slate-400 text-sm">No customers found</p>
-              {search && (
-                <button onClick={() => { setSearch(''); setFilter('All'); }}
-                  className="text-xs text-blue-500 hover:underline">
-                  Clear search
+                  <ChevronRight size={15} className="shrink-0 text-slate-300" />
                 </button>
-              )}
-            </div>
-          )}
-        </div>
+              );
+            })}
+
+            {filtered.length === 0 && (
+              <div className="flex flex-col items-center py-16 gap-2 text-center">
+                <p className="text-slate-400 text-sm">No customers found</p>
+              </div>
+            )}
+          </div>
+        )}
 
       </div>
 
@@ -505,6 +534,8 @@ export function CustomersPage() {
           onClose={() => setShowAdd(false)}
           onNewEstimate={() => { setShowAdd(false); setShowEstimate(true); }}
           onNewJob={() => { setShowAdd(false); setShowJob(true); }}
+          existingCustomers={data}
+          onCreate={refetch}
         />
       )}
 

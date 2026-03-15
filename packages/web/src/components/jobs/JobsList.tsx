@@ -1,31 +1,55 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
-  Search, Plus, ChevronRight, Camera, Clock, User,
+  Search, Plus, ChevronRight, Camera, Clock,
   AlertCircle, AlertTriangle, Zap, Mic,
 } from 'lucide-react';
-import { jobs, technicians } from '../../data/mock-data';
+import { useListQuery } from '../../hooks/useListQuery';
+import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewJobFlow } from './NewJobFlow';
-import type { JobStatus } from '../../data/mock-data';
+
+type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
+
+interface ApiJob {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  status: string;
+  priority?: string;
+  customerId?: string;
+  assignedTechnicianId?: string;
+  scheduledStart?: string;
+  createdAt?: string;
+  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
+  technician?: { id: string; firstName?: string; lastName?: string; color?: string };
+  serviceType?: string;
+}
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
-const STATUS_BORDER: Partial<Record<JobStatus, string>> = {
-  'Active':       'border-l-green-500',
+const STATUS_BORDER: Partial<Record<string, string>> = {
+  'New':          'border-l-slate-300',
   'In Progress':  'border-l-indigo-500',
   'Scheduled':    'border-l-blue-400',
-  'Unscheduled':  'border-l-slate-300',
   'Completed':    'border-l-slate-200',
   'Canceled':     'border-l-red-300',
-  'No Show':      'border-l-orange-400',
+};
+
+// UI tab label → API status value
+const TAB_API_STATUS: Record<string, string> = {
+  'New':        'new',
+  'Scheduled':  'scheduled',
+  'In Progress':'in_progress',
+  'Completed':  'completed',
+  'Canceled':   'canceled',
 };
 
 const TABS: { label: string; value: JobStatus | 'All' }[] = [
   { label: 'All',         value: 'All' },
-  { label: 'Active',      value: 'Active' },
+  { label: 'New',         value: 'New' },
   { label: 'Scheduled',   value: 'Scheduled' },
-  { label: 'Unscheduled', value: 'Unscheduled' },
+  { label: 'In Progress', value: 'In Progress' },
   { label: 'Completed',   value: 'Completed' },
   { label: 'Canceled',    value: 'Canceled' },
 ];
@@ -33,23 +57,25 @@ const TABS: { label: string; value: JobStatus | 'All' }[] = [
 export function JobsList() {
   const navigate = useNavigate();
   const [tab,     setTab]     = useState<JobStatus | 'All'>('All');
-  const [search,  setSearch]  = useState('');
   const [showNew, setShowNew] = useState(false);
 
-  const filtered = jobs.filter(j => {
-    const matchTab    = tab === 'All' || j.status === tab;
-    const matchSearch = !search ||
-      j.customer.toLowerCase().includes(search.toLowerCase()) ||
-      j.description.toLowerCase().includes(search.toLowerCase()) ||
-      j.jobNumber.includes(search);
-    return matchTab && matchSearch;
-  });
+  const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<ApiJob>('/api/jobs');
 
-  // Stats
-  const active    = jobs.filter(j => j.status === 'Active' || j.status === 'In Progress').length;
-  const scheduled = jobs.filter(j => j.status === 'Scheduled').length;
-  const completed = jobs.filter(j => j.status === 'Completed').length;
-  const issues    = jobs.filter(j => j.status === 'Canceled' || j.status === 'No Show').length;
+  const normalizedData = data.map(j => ({
+    ...j,
+    uiStatus: normalizeJobStatus(j.status),
+  }));
+
+  // Client-side tab filter (status already filtered server-side when tab !== All)
+  const filtered = tab === 'All'
+    ? normalizedData
+    : normalizedData.filter(j => j.uiStatus === tab);
+
+  // Stats from all loaded data
+  const active    = normalizedData.filter(j => j.uiStatus === 'In Progress' || j.uiStatus === 'New').length;
+  const scheduled = normalizedData.filter(j => j.uiStatus === 'Scheduled').length;
+  const completed = normalizedData.filter(j => j.uiStatus === 'Completed').length;
+  const issues    = normalizedData.filter(j => j.uiStatus === 'Canceled').length;
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -87,14 +113,10 @@ export function JobsList() {
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 mb-3 shadow-sm">
           <Search size={15} className="text-slate-400 shrink-0" />
           <input
-            value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Search by customer, description, or job #…"
             className="flex-1 text-sm text-slate-700 placeholder-slate-400 outline-none bg-transparent"
           />
-          {search && (
-            <button onClick={() => setSearch('')} className="text-slate-300 hover:text-slate-500 transition-colors">✕</button>
-          )}
         </div>
 
         {/* Tab filter */}
@@ -102,7 +124,14 @@ export function JobsList() {
           {TABS.map(t => (
             <button
               key={t.value}
-              onClick={() => setTab(t.value)}
+              onClick={() => {
+                setTab(t.value);
+                if (t.value !== 'All') {
+                  setFilters({ status: TAB_API_STATUS[t.value] ?? t.value.toLowerCase() });
+                } else {
+                  setFilters({});
+                }
+              }}
               className={`shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value
                   ? 'bg-slate-900 text-white'
@@ -112,134 +141,134 @@ export function JobsList() {
               {t.label}
               <span className="ml-1.5 text-xs opacity-60">
                 {t.value === 'All'
-                  ? jobs.length
-                  : jobs.filter(j => j.status === t.value).length}
+                  ? normalizedData.length
+                  : normalizedData.filter(j => j.uiStatus === t.value).length}
               </span>
             </button>
           ))}
         </div>
 
+        {/* Loading / Error */}
+        {isLoading && (
+          <div className="flex items-center justify-center py-16">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+          </div>
+        )}
+        {error && (
+          <div className="flex flex-col items-center gap-3 py-16">
+            <p className="text-sm text-red-500">Failed to load jobs</p>
+            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
+          </div>
+        )}
+
         {/* Job cards */}
-        <div className="flex flex-col gap-2">
-          {filtered.map(job => {
-            const tech = technicians.find(t => t.name === job.assignedTech);
-            const isMuted = job.status === 'Canceled' || job.status === 'Completed';
-            const isIssue = job.status === 'Canceled' || job.status === 'No Show';
+        {!isLoading && !error && (
+          <div className="flex flex-col gap-2">
+            {filtered.map(job => {
+              const uiStatus = job.uiStatus;
+              const isMuted = uiStatus === 'Canceled' || uiStatus === 'Completed';
+              const isCanceled = uiStatus === 'Canceled';
+              const customerName = job.customer
+                ? (job.customer.displayName || [job.customer.firstName, job.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+                : 'Customer';
+              const techName = job.technician
+                ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
+                : null;
+              const techColor = job.technician?.color ?? '#94a3b8';
+              const techInitials = techName ? techName.split(' ').map(n => n[0]).join('') : null;
 
-            return (
-              <div
-                key={job.id}
-                onClick={() => navigate(`/jobs/${job.id}`)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={e => e.key === 'Enter' && navigate(`/jobs/${job.id}`)}
-                className={`flex items-start gap-3 rounded-xl bg-white border border-slate-200 border-l-4 px-4 py-3.5 text-left hover:shadow-sm hover:border-slate-300 transition-all cursor-pointer ${STATUS_BORDER[job.status] ?? 'border-l-slate-200'} ${isMuted ? 'opacity-75' : ''}`}
-              >
-                {/* Service icon */}
-                <span className="text-xl shrink-0 mt-0.5">{SERVICE_ICON[job.serviceType]}</span>
+              return (
+                <div
+                  key={job.id}
+                  onClick={() => navigate(`/jobs/${job.id}`)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={e => e.key === 'Enter' && navigate(`/jobs/${job.id}`)}
+                  className={`flex items-start gap-3 rounded-xl bg-white border border-slate-200 border-l-4 px-4 py-3.5 text-left hover:shadow-sm hover:border-slate-300 transition-all cursor-pointer ${STATUS_BORDER[uiStatus] ?? 'border-l-slate-200'} ${isMuted ? 'opacity-75' : ''}`}
+                >
+                  {/* Service icon */}
+                  <span className="text-xl shrink-0 mt-0.5">{SERVICE_ICON[job.serviceType ?? ''] ?? '🔧'}</span>
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2 mb-1">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <p className="text-sm text-slate-900 truncate">{job.customer}</p>
-                        {job.priority === 'Urgent' && (
-                          <AlertCircle size={12} className="text-red-500 shrink-0" />
-                        )}
-                        {job.duplicateWarning && (
-                          <span title="Possible duplicate" className="shrink-0">
-                            <AlertTriangle size={12} className="text-amber-500" />
-                          </span>
-                        )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2 mb-1">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-sm text-slate-900 truncate">{customerName}</p>
+                          {job.priority === 'urgent' && (
+                            <AlertCircle size={12} className="text-red-500 shrink-0" />
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          #{job.jobNumber}
+                        </p>
                       </div>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        #{job.jobNumber} · {job.serviceType}
-                      </p>
+                      <StatusBadge status={uiStatus} size="sm" />
                     </div>
-                    <StatusBadge status={job.status} size="sm" />
-                  </div>
 
-                  <p className="text-xs text-slate-500 line-clamp-1 mb-2">{job.description}</p>
+                    <p className="text-xs text-slate-500 line-clamp-1 mb-2">{job.summary}</p>
 
-                  {/* Footer row */}
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {/* Tech avatar */}
-                    {tech && (
-                      <span className="flex items-center gap-1.5">
-                        <span
-                          className="flex size-4 items-center justify-center rounded-full text-white shrink-0"
-                          style={{ fontSize: 7, background: tech.color }}
-                        >
-                          {tech.initials}
+                    {/* Footer row */}
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {/* Tech avatar */}
+                      {techName && techInitials && (
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className="flex size-4 items-center justify-center rounded-full text-white shrink-0"
+                            style={{ fontSize: 7, background: techColor }}
+                          >
+                            {techInitials}
+                          </span>
+                          <span className="text-xs text-slate-400">{techName.split(' ')[0]}</span>
                         </span>
-                        <span className="text-xs text-slate-400">{tech.name.split(' ')[0]}</span>
-                      </span>
-                    )}
+                      )}
 
-                    {/* Schedule */}
-                    {job.scheduledDate && (
-                      <span className="flex items-center gap-1 text-xs text-slate-400">
-                        <Clock size={11} />
-                        {job.scheduledDate}{job.scheduledTime ? ` ${job.scheduledTime}` : ''}
-                      </span>
-                    )}
+                      {/* Schedule */}
+                      {job.scheduledStart && (
+                        <span className="flex items-center gap-1 text-xs text-slate-400">
+                          <Clock size={11} />
+                          {new Date(job.scheduledStart).toLocaleDateString()}
+                        </span>
+                      )}
 
-                    {/* Photos count */}
-                    {job.photos && job.photos > 0 ? (
-                      <span className="flex items-center gap-1 text-xs text-slate-400">
-                        <Camera size={11} /> {job.photos}
-                      </span>
-                    ) : null}
+                      {/* Cancel reason */}
+                      {isCanceled && (
+                        <span className="text-xs rounded-full px-2 py-0.5 bg-red-50 text-red-600">
+                          Canceled
+                        </span>
+                      )}
 
-                    {/* Materials */}
-                    {job.materials && job.materials.length > 0 && (
-                      <span className="flex items-center gap-1 text-xs text-amber-600 bg-amber-50 rounded-full px-1.5 py-0.5">
-                        🔩 {job.materials.length}
-                      </span>
-                    )}
-
-                    {/* Cancel/noshow reason */}
-                    {isIssue && (
-                      <span className={`text-xs rounded-full px-2 py-0.5 ${
-                        job.status === 'Canceled'
-                          ? 'bg-red-50 text-red-600'
-                          : 'bg-orange-50 text-orange-600'
-                      }`}>
-                        {job.status === 'No Show' ? 'No-show' : 'Canceled'}
-                      </span>
-                    )}
-
-                    {/* Field view shortcut for active jobs */}
-                    {tech && (job.status === 'Active' || job.status === 'Scheduled' || job.status === 'In Progress') && (
-                      <button
-                        onClick={e => { e.stopPropagation(); navigate(`/jobs/${job.id}?view=tech`); }}
-                        className="ml-auto flex items-center gap-1 text-xs bg-indigo-50 text-indigo-600 border border-indigo-200 rounded-full px-2 py-0.5 hover:bg-indigo-100 transition-colors shrink-0"
-                      >
-                        <Mic size={9} /> Field
-                      </button>
-                    )}
+                      {/* Field view shortcut for active jobs */}
+                      {techName && (uiStatus === 'Scheduled' || uiStatus === 'In Progress') && (
+                        <button
+                          onClick={e => { e.stopPropagation(); navigate(`/jobs/${job.id}?view=tech`); }}
+                          className="ml-auto flex items-center gap-1 text-xs bg-indigo-50 text-indigo-600 border border-indigo-200 rounded-full px-2 py-0.5 hover:bg-indigo-100 transition-colors shrink-0"
+                        >
+                          <Mic size={9} /> Field
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  <ChevronRight size={14} className="shrink-0 text-slate-300 mt-1" />
                 </div>
+              );
+            })}
 
-                <ChevronRight size={14} className="shrink-0 text-slate-300 mt-1" />
+            {filtered.length === 0 && (
+              <div className="flex flex-col items-center gap-3 py-16">
+                <div className="size-12 rounded-full bg-slate-100 flex items-center justify-center">
+                  <Zap size={18} className="text-slate-300" />
+                </div>
+                <p className="text-sm text-slate-400">No jobs match your filter</p>
               </div>
-            );
-          })}
-
-          {filtered.length === 0 && (
-            <div className="flex flex-col items-center gap-3 py-16">
-              <div className="size-12 rounded-full bg-slate-100 flex items-center justify-center">
-                <Zap size={18} className="text-slate-300" />
-              </div>
-              <p className="text-sm text-slate-400">No jobs match your filter</p>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
       {showNew && (
         <NewJobFlow
           onClose={() => setShowNew(false)}
-          onCreated={() => setShowNew(false)}
+          onCreated={() => { setShowNew(false); refetch(); }}
         />
       )}
     </div>

@@ -8,6 +8,28 @@ import {
 import { useSearchParams } from 'react-router';
 import { initialMessages, type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
+
+interface ApiMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+}
+
+interface ApiConversation {
+  id: string;
+  messages: ApiMessage[];
+}
+
+function mapApiMessage(msg: ApiMessage): Message {
+  return {
+    id: msg.id,
+    role: msg.role,
+    content: msg.content,
+    time: new Date(msg.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+  };
+}
 
 // ─── Unique ID ─────────────────────────────────────────────────
 let msgId = 200;
@@ -476,7 +498,7 @@ function AttachmentPicker({ onSelect, onClose }: {
 
 // ─── Main Page ──────────────────────────────────────────────────
 export function AssistantPage() {
-  const [messages, setMessages]       = useState<Message[]>(initialMessages);
+  const [messages, setMessages]       = useState<Message[]>([]);
   const [input, setInput]             = useState('');
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
@@ -489,6 +511,21 @@ export function AssistantPage() {
   const inputRef  = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Derive conversationId from URL param or localStorage
+  const conversationId = searchParams.get('conversationId') || localStorage.getItem('conversationId') || null;
+  const { data: conversation, isLoading: convLoading, error: convError } =
+    useDetailQuery<ApiConversation>('/api/conversations', conversationId);
+
+  // Seed messages from API or fall back to mock initialMessages
+  useEffect(() => {
+    if (convLoading) return;
+    if (conversation?.messages?.length) {
+      setMessages(conversation.messages.map(mapApiMessage));
+    } else {
+      setMessages(initialMessages);
+    }
+  }, [convLoading, conversation, convError]);
 
   // Auto-submit from voice bar ?q= param
   useEffect(() => {

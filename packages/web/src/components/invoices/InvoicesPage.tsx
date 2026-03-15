@@ -5,9 +5,76 @@ import {
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
   ExternalLink, Lock, Building2, Smartphone,
 } from 'lucide-react';
-import { invoices, customers, calcInvoiceTotal } from '../../data/mock-data';
+import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { useMutation } from '../../hooks/useMutation';
+import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
-import type { InvoiceStatus, Invoice } from '../../data/mock-data';
+
+type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
+
+interface ApiLineItem {
+  id?: string;
+  description: string;
+  quantity: number;
+  unitPriceCents: number;
+  totalCents: number;
+}
+
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+}
+
+interface ApiInvoice {
+  id: string;
+  invoiceNumber: string;
+  status: string;
+  jobId?: string;
+  totalCents: number;
+  subtotalCents: number;
+  amountDueCents?: number;
+  amountPaidCents?: number;
+  discountCents?: number;
+  dueDate?: string;
+  issuedAt?: string;
+  lineItems?: ApiLineItem[];
+  createdAt?: string;
+  customer?: ApiCustomer;
+  customerId?: string;
+}
+
+/** Convert ApiLineItem to UI LineItem */
+function apiLineToUi(item: ApiLineItem): LineItem {
+  return {
+    description: item.description,
+    qty: item.quantity,
+    rate: item.unitPriceCents / 100,
+  };
+}
+
+/** Build an invoice-compat object for sub-components */
+function buildInvCompat(inv: ApiInvoice, uiStatus: InvoiceStatus) {
+  const customerName = inv.customer
+    ? (inv.customer.displayName || [inv.customer.firstName, inv.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+    : 'Customer';
+  return {
+    id: inv.id,
+    invoiceNumber: inv.invoiceNumber,
+    customer: customerName,
+    customerId: inv.customerId ?? inv.customer?.id ?? '',
+    description: '',
+    status: uiStatus,
+    lineItems: (inv.lineItems ?? []).map(apiLineToUi),
+    dueDate: inv.dueDate,
+    sentDate: inv.issuedAt ? new Date(inv.issuedAt).toLocaleDateString() : undefined,
+    paidDate: undefined as string | undefined,
+  };
+}
 
 type LineItem = { description: string; qty: number; rate: number };
 
@@ -442,17 +509,43 @@ function MarkPaidSheet({ inv, total, onClose, onPaid }: {
 }
 
 // ─── Invoice Detail ───────────────────────────────────────────────────────
-function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () => void }) {
-  const [lineItems, setLineItems] = useState<LineItem[]>(inv.lineItems);
+function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
+  const { data: inv, isLoading, error } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
+  const { mutate: transitionInvoice } = useMutation<{ status: string }, ApiInvoice>('POST', `/api/invoices/${invoiceId}/transition`);
+
+  const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sendOpen,  setSendOpen]  = useState(false);
   const [markOpen,  setMarkOpen]  = useState(false);
   const [paid,      setPaid]      = useState(false);
 
-  const total      = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
-  const customer   = customers.find(c => c.id === inv.customerId);
-  const status: InvoiceStatus = paid ? 'Paid' : inv.status;
+  if (isLoading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (error || !inv) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-3">
+        <p className="text-sm text-red-500">Failed to load invoice</p>
+        <button onClick={onBack} className="text-xs text-blue-500 hover:underline">Go back</button>
+      </div>
+    );
+  }
+
+  const apiStatus   = paid ? 'paid' : inv.status;
+  const uiStatus    = normalizeInvoiceStatus(apiStatus) as InvoiceStatus;
+  const invCompat   = buildInvCompat(inv, uiStatus);
+  const apiLineItems = inv.lineItems ?? [];
+  const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
+
+  const total      = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  const customer   = inv.customer;
+  const status: InvoiceStatus = uiStatus;
   const editable   = status === 'Draft';
-  const paymentLink = `pay.fieldly.app/${inv.invoiceNumber.toLowerCase().replace('-', '-')}`;
+  const paymentLink = `pay.fieldly.app/${inv.invoiceNumber.toLowerCase()}`;
 
   return (
     <>
@@ -466,8 +559,8 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
           {/* Header */}
           <div className="flex items-start justify-between gap-3 mb-5">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>{inv.customer}</h1>
-              <p className="text-sm text-slate-400 mt-0.5">{inv.invoiceNumber} · {inv.description}</p>
+              <h1 className="text-slate-900" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>{invCompat.customer}</h1>
+              <p className="text-sm text-slate-400 mt-0.5">{inv.invoiceNumber}</p>
               {inv.dueDate && (
                 <p className={`text-xs mt-1 flex items-center gap-1 ${status === 'Overdue' ? 'text-red-500' : 'text-slate-400'}`}>
                   <Clock size={10} /> Due {inv.dueDate}
@@ -488,7 +581,7 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
               </div>
               <div>
                 <p className="text-sm text-green-800">Payment received</p>
-                <p className="text-xs text-green-600 mt-0.5">{paid ? 'Just now' : inv.paidDate} · ${total.toLocaleString()}</p>
+                <p className="text-xs text-green-600 mt-0.5">{paid ? 'Just now' : ''} · ${total.toLocaleString()}</p>
               </div>
             </div>
           )}
@@ -519,7 +612,7 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
             {/* Left column */}
             <div className="flex flex-col gap-4">
               <InvoiceLineItems
-                items={lineItems}
+                items={uiLineItems}
                 editable={editable}
                 onChange={setLineItems}
               />
@@ -530,20 +623,24 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
 
             {/* Right rail */}
             <div className="flex flex-col gap-4">
-              <PaymentTimeline inv={inv} />
+              <PaymentTimeline inv={invCompat} />
 
               {/* Customer card */}
               {customer && (
                 <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
                   <p className="text-xs text-slate-400 mb-2">Billed to</p>
-                  <p className="text-sm text-slate-900">{customer.name}</p>
+                  <p className="text-sm text-slate-900">{invCompat.customer}</p>
                   <div className="flex flex-col gap-1.5 mt-2">
-                    <a href={`tel:${customer.phone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
-                      <Phone size={11} /> {customer.phone}
-                    </a>
-                    <a href={`mailto:${customer.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
-                      <Mail size={11} /> {customer.email}
-                    </a>
+                    {customer.primaryPhone && (
+                      <a href={`tel:${customer.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
+                        <Phone size={11} /> {customer.primaryPhone}
+                      </a>
+                    )}
+                    {customer.email && (
+                      <a href={`mailto:${customer.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
+                        <Mail size={11} /> {customer.email}
+                      </a>
+                    )}
                   </div>
                 </div>
               )}
@@ -560,7 +657,7 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
                   </p>
                 )}
                 {status === 'Paid' && (
-                  <p className="text-xs text-green-200">{paid ? 'Just now' : inv.paidDate}</p>
+                  <p className="text-xs text-green-200">{paid ? 'Just now' : ''}</p>
                 )}
               </div>
 
@@ -599,7 +696,7 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
 
       {sendOpen && (
         <SendPaymentSheet
-          inv={inv}
+          inv={invCompat}
           total={total}
           paymentLink={paymentLink}
           onClose={() => setSendOpen(false)}
@@ -608,10 +705,13 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
       )}
       {markOpen && (
         <MarkPaidSheet
-          inv={inv}
+          inv={invCompat}
           total={total}
           onClose={() => setMarkOpen(false)}
-          onPaid={() => setPaid(true)}
+          onPaid={async () => {
+            setPaid(true);
+            await transitionInvoice({ status: 'paid' });
+          }}
         />
       )}
     </>
@@ -619,6 +719,13 @@ function InvoiceDetail({ invoice: inv, onBack }: { invoice: Invoice; onBack: () 
 }
 
 // ─── Invoices List ────────────────────────────────────────────────────────
+const API_STATUS_FOR_TAB: Record<string, string> = {
+  Draft:   'draft',
+  Unpaid:  'open',
+  Overdue: 'open',
+  Paid:    'paid',
+};
+
 const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
   { label: 'All',     value: 'All'     },
   { label: 'Draft',   value: 'Draft'   },
@@ -631,16 +738,24 @@ export function InvoicesPage() {
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(null);
 
-  const filtered  = invoices.filter(i => tab === 'All' || i.status === tab);
-  const invoice   = invoices.find(i => i.id === selected);
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
 
-  if (selected && invoice) {
-    return <InvoiceDetail invoice={invoice} onBack={() => setSelected(null)} />;
+  if (selected) {
+    return <InvoiceDetail invoiceId={selected} onBack={() => setSelected(null)} />;
   }
 
-  const totalUnpaid = invoices.filter(i => i.status === 'Unpaid' || i.status === 'Overdue').reduce((s, i) => s + calcInvoiceTotal(i), 0);
-  const totalPaid   = invoices.filter(i => i.status === 'Paid').reduce((s, i) => s + calcInvoiceTotal(i), 0);
-  const overdueCount = invoices.filter(i => i.status === 'Overdue').length;
+  const normalizedData = data.map(i => ({
+    ...i,
+    uiStatus: normalizeInvoiceStatus(i.status) as InvoiceStatus,
+  }));
+
+  const filtered = tab === 'All'
+    ? normalizedData
+    : normalizedData.filter(i => i.uiStatus === tab);
+
+  const totalUnpaid  = normalizedData.filter(i => i.uiStatus === 'Unpaid' || i.uiStatus === 'Overdue').reduce((s, i) => s + i.totalCents, 0);
+  const totalPaid    = normalizedData.filter(i => i.uiStatus === 'Paid').reduce((s, i) => s + i.totalCents, 0);
+  const overdueCount = normalizedData.filter(i => i.uiStatus === 'Overdue').length;
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -659,7 +774,7 @@ export function InvoicesPage() {
               <DollarSign size={12} className="text-amber-600" />
               <p className="text-xs text-amber-700">Outstanding</p>
             </div>
-            <p className="text-sm text-amber-800">${totalUnpaid.toLocaleString()}</p>
+            <p className="text-sm text-amber-800">{centsToDisplay(totalUnpaid)}</p>
             {overdueCount > 0 && <p className="text-xs text-red-600 mt-0.5">{overdueCount} overdue</p>}
           </div>
           <div className="rounded-xl border border-green-100 bg-green-50 px-3 py-3">
@@ -667,7 +782,7 @@ export function InvoicesPage() {
               <CheckCircle size={12} className="text-green-600" />
               <p className="text-xs text-green-700">Collected</p>
             </div>
-            <p className="text-sm text-green-800">${totalPaid.toLocaleString()}</p>
+            <p className="text-sm text-green-800">{centsToDisplay(totalPaid)}</p>
             <p className="text-xs text-green-600 mt-0.5">this week</p>
           </div>
           <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
@@ -675,7 +790,7 @@ export function InvoicesPage() {
               <FileText size={12} className="text-slate-500" />
               <p className="text-xs text-slate-600">Total</p>
             </div>
-            <p className="text-sm text-slate-700">{invoices.length} invoices</p>
+            <p className="text-sm text-slate-700">{total} invoices</p>
             <p className="text-xs text-slate-400 mt-0.5">this month</p>
           </div>
         </div>
@@ -685,7 +800,15 @@ export function InvoicesPage() {
           {TABS.map(t => (
             <button
               key={t.value}
-              onClick={() => setTab(t.value)}
+              onClick={() => {
+                setTab(t.value);
+                if (t.value !== 'All') {
+                  const apiStatus = API_STATUS_FOR_TAB[t.value];
+                  if (apiStatus) setFilters({ status: apiStatus });
+                } else {
+                  setFilters({});
+                }
+              }}
               className={`shrink-0 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
               }`}
@@ -696,67 +819,80 @@ export function InvoicesPage() {
           ))}
         </div>
 
+        {/* Loading / Error */}
+        {isLoading && (
+          <div className="flex items-center justify-center py-16">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+          </div>
+        )}
+        {error && (
+          <div className="flex flex-col items-center py-12 gap-2 text-center">
+            <p className="text-sm text-red-500">Failed to load invoices</p>
+            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
+          </div>
+        )}
+
         {/* List */}
-        <div className="flex flex-col gap-2">
-          {filtered.map(inv => {
-            const total = calcInvoiceTotal(inv);
-            return (
-              <button
-                key={inv.id}
-                onClick={() => setSelected(inv.id)}
-                className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-4 text-left hover:border-slate-300 hover:shadow-sm transition-all group"
-              >
-                <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
-                  inv.status === 'Paid'    ? 'bg-green-50' :
-                  inv.status === 'Overdue' ? 'bg-red-50'   : 'bg-slate-100'
-                }`}>
-                  {inv.status === 'Paid'
-                    ? <CheckCircle size={16} className="text-green-500" />
-                    : inv.status === 'Overdue'
-                    ? <AlertCircle size={16} className="text-red-500" />
-                    : <FileText size={16} className="text-slate-400" />
-                  }
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-sm text-slate-900">{inv.customer}</p>
-                      <p className="text-xs text-slate-400 mt-0.5 truncate">{inv.invoiceNumber} · {inv.description}</p>
+        {!isLoading && !error && (
+          <div className="flex flex-col gap-2">
+            {filtered.map(inv => {
+              const status = inv.uiStatus;
+              const customerName = inv.customer
+                ? (inv.customer.displayName || [inv.customer.firstName, inv.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+                : 'Customer';
+              return (
+                <button
+                  key={inv.id}
+                  onClick={() => setSelected(inv.id)}
+                  className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-4 text-left hover:border-slate-300 hover:shadow-sm transition-all group"
+                >
+                  <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
+                    status === 'Paid'    ? 'bg-green-50' :
+                    status === 'Overdue' ? 'bg-red-50'   : 'bg-slate-100'
+                  }`}>
+                    {status === 'Paid'
+                      ? <CheckCircle size={16} className="text-green-500" />
+                      : status === 'Overdue'
+                      ? <AlertCircle size={16} className="text-red-500" />
+                      : <FileText size={16} className="text-slate-400" />
+                    }
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm text-slate-900">{customerName}</p>
+                        <p className="text-xs text-slate-400 mt-0.5 truncate">{inv.invoiceNumber}</p>
+                      </div>
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <p className="text-sm text-slate-800">{centsToDisplay(inv.totalCents)}</p>
+                        <StatusBadge status={status} size="sm" />
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      <p className="text-sm text-slate-800">${total.toLocaleString()}</p>
-                      <StatusBadge status={inv.status} size="sm" />
+                    <div className="flex items-center gap-3 mt-2">
+                      {inv.dueDate && (
+                        <span className={`flex items-center gap-1 text-xs ${status === 'Overdue' ? 'text-red-500' : 'text-slate-400'}`}>
+                          <Clock size={10} /> Due {inv.dueDate}
+                        </span>
+                      )}
+                      {inv.issuedAt && (
+                        <span className="flex items-center gap-1 text-xs text-slate-400">
+                          <Send size={10} /> Sent {new Date(inv.issuedAt).toLocaleDateString()}
+                        </span>
+                      )}
+                      {status === 'Draft' && (
+                        <span className="text-xs text-slate-400">Not sent yet</span>
+                      )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-3 mt-2">
-                    {inv.dueDate && (
-                      <span className={`flex items-center gap-1 text-xs ${inv.status === 'Overdue' ? 'text-red-500' : 'text-slate-400'}`}>
-                        <Clock size={10} /> Due {inv.dueDate}
-                      </span>
-                    )}
-                    {inv.sentDate && (
-                      <span className="flex items-center gap-1 text-xs text-slate-400">
-                        <Send size={10} /> Sent {inv.sentDate}
-                      </span>
-                    )}
-                    {inv.paidDate && (
-                      <span className="flex items-center gap-1 text-xs text-green-600">
-                        <CheckCircle size={10} /> Paid {inv.paidDate}
-                      </span>
-                    )}
-                    {inv.status === 'Draft' && (
-                      <span className="text-xs text-slate-400">Not sent yet</span>
-                    )}
-                  </div>
-                </div>
-                <ChevronRight size={14} className="shrink-0 text-slate-300 group-hover:text-slate-400 transition-colors" />
-              </button>
-            );
-          })}
-          {filtered.length === 0 && (
-            <p className="py-12 text-center text-sm text-slate-400">No invoices</p>
-          )}
-        </div>
+                  <ChevronRight size={14} className="shrink-0 text-slate-300 group-hover:text-slate-400 transition-colors" />
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <p className="py-12 text-center text-sm text-slate-400">No invoices</p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -5,11 +5,43 @@ import {
   DollarSign, FileText, Zap, Send, Eye, Calendar, Plus,
   CheckCircle2, Mic, TrendingUp,
 } from 'lucide-react';
-import {
-  jobs, estimates, invoices, aiProposals, leads,
-  calcEstimateTotal, calcInvoiceTotal,
-} from '../../data/mock-data';
+import { leads } from '../../data/mock-data';
+import { useListQuery } from '../../hooks/useListQuery';
+import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+
+// ─── API Types ────────────────────────────────────────────────────────────
+interface ApiJob {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  status: string;
+  priority?: string;
+  serviceType?: string;
+  scheduledStart?: string;
+  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
+  technician?: { id: string; firstName?: string; lastName?: string; color?: string };
+}
+
+interface ApiEstimate {
+  id: string;
+  estimateNumber: string;
+  status: string;
+  totalCents: number;
+  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
+  sentAt?: string;
+  viewedAt?: string;
+}
+
+interface ApiInvoice {
+  id: string;
+  invoiceNumber: string;
+  status: string;
+  totalCents: number;
+  amountDueCents?: number;
+  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
+  dueDate?: string;
+}
 
 // ─── Static helpers ───────────────────────────────────────────────────────
 const SVC: Record<string, { emoji: string; color: string }> = {
@@ -18,26 +50,41 @@ const SVC: Record<string, { emoji: string; color: string }> = {
   Painting: { emoji: '🎨', color: 'bg-violet-100' },
 };
 
-const TECH_COLORS: Record<string, string> = {
-  'Carlos Reyes': '#3B82F6',
-  'Marcus Webb':  '#10B981',
-  'Sarah Lin':    '#8B5CF6',
-};
-
 function initials(name: string) {
   return name.split(' ').map(n => n[0]).join('').slice(0, 2);
 }
 
-// Mar 10 = Tue. Today = index 0 in this week strip.
-const WEEK = [
-  { day: 'Tue', date: 'Mar 10', isToday: true  },
-  { day: 'Wed', date: 'Mar 11', isToday: false },
-  { day: 'Thu', date: 'Mar 12', isToday: false },
-  { day: 'Fri', date: 'Mar 13', isToday: false },
-  { day: 'Sat', date: 'Mar 14', isToday: false },
-  { day: 'Sun', date: 'Mar 15', isToday: false },
-  { day: 'Mon', date: 'Mar 16', isToday: false },
-];
+function customerName(c?: ApiJob['customer']): string {
+  if (!c) return 'Customer';
+  return c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer';
+}
+
+function formatTime(iso?: string): string | null {
+  if (!iso) return null;
+  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatDate(iso?: string): string {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function todayIso(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+function buildWeek(): { day: string; date: string; isToday: boolean }[] {
+  const today = new Date();
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(today);
+    d.setDate(today.getDate() + i);
+    return {
+      day: d.toLocaleDateString('en-US', { weekday: 'short' }),
+      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      isToday: i === 0,
+    };
+  });
+}
 
 // ─── Section header ───────────────────────────────────────────────────────
 function SectionHead({
@@ -86,8 +133,16 @@ function AttentionRow({
 }
 
 // ─── Compact job row ──────────────────────────────────────────────────────
-function JobRow({ job, onClick }: { job: typeof jobs[0]; onClick: () => void }) {
-  const svc = SVC[job.serviceType] ?? SVC.HVAC;
+function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
+  const svc = SVC[job.serviceType ?? ''] ?? SVC.HVAC;
+  const name = customerName(job.customer);
+  const uiStatus = normalizeJobStatus(job.status);
+  const techName = job.technician
+    ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
+    : null;
+  const techColor = job.technician?.color ?? '#94a3b8';
+  const scheduledTime = formatTime(job.scheduledStart);
+
   return (
     <button
       onClick={onClick}
@@ -98,24 +153,24 @@ function JobRow({ job, onClick }: { job: typeof jobs[0]; onClick: () => void }) 
       </span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm text-slate-900 truncate">{job.customer}</p>
-          <StatusBadge status={job.status} size="sm" />
+          <p className="text-sm text-slate-900 truncate">{name}</p>
+          <StatusBadge status={uiStatus} size="sm" />
         </div>
         <div className="flex items-center gap-2 mt-0.5">
-          {job.scheduledTime && (
+          {scheduledTime && (
             <span className="flex items-center gap-1 text-xs text-slate-400">
-              <Clock size={10} /> {job.scheduledTime}
+              <Clock size={10} /> {scheduledTime}
             </span>
           )}
-          {job.assignedTech && (
+          {techName && (
             <span
               className="flex size-4 shrink-0 items-center justify-center rounded-full text-white"
-              style={{ backgroundColor: TECH_COLORS[job.assignedTech] ?? '#94a3b8', fontSize: 9 }}
+              style={{ backgroundColor: techColor, fontSize: 9 }}
             >
-              {initials(job.assignedTech)}
+              {initials(techName)}
             </span>
           )}
-          {job.priority === 'Urgent' && (
+          {job.priority === 'urgent' && (
             <span className="flex items-center gap-0.5 text-xs text-red-500">
               <AlertCircle size={10} /> Urgent
             </span>
@@ -128,15 +183,12 @@ function JobRow({ job, onClick }: { job: typeof jobs[0]; onClick: () => void }) 
 }
 
 // ─── This week strip ──────────────────────────────────────────────────────
-function WeekStrip() {
-  const todayCount    = jobs.filter(j => j.scheduledDate === 'Today').length;
-  const tomorrowCount = jobs.filter(j => j.scheduledDate === 'Tomorrow').length;
-  const counts = [todayCount, tomorrowCount, 0, 0, 0, 0, 0];
-
+function WeekStrip({ todayCount }: { todayCount: number }) {
+  const WEEK = buildWeek();
   return (
     <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
       {WEEK.map((d, i) => {
-        const n = counts[i];
+        const n = d.isToday ? todayCount : 0;
         return (
           <div
             key={d.date}
@@ -170,48 +222,47 @@ export function HomePage() {
   const navigate   = useNavigate();
   const [dismissed, setDismiss] = useState<Set<string>>(new Set());
 
-  const todayJobs    = jobs.filter(j => j.scheduledDate === 'Today' && j.status !== 'Canceled' && j.status !== 'No Show');
-  const tomorrowJobs = jobs.filter(j => j.scheduledDate === 'Tomorrow');
-  const unscheduled  = jobs.filter(j => j.status === 'Unscheduled');
-  const pendingEsts  = estimates.filter(e => e.status === 'Sent' || e.status === 'Viewed');
-  const overdueInvs  = invoices.filter(i => i.status === 'Overdue');
-  const unpaidInvs   = invoices.filter(i => i.status === 'Unpaid' || i.status === 'Overdue');
-  const totalOut     = unpaidInvs.reduce((s, i) => s + calcInvoiceTotal(i), 0);
-  const activeCount  = todayJobs.filter(j => j.status === 'Active' || j.status === 'In Progress').length;
+  const today = todayIso();
+  const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
 
-  // Build attention items (all sources, deduplicated)
+  const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
+  const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
+  const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
+
+  const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
+  const pendingEsts  = estimatesQuery.data.filter(e => {
+    const uiStatus = normalizeEstimateStatus(e.status);
+    return uiStatus === 'Sent';
+  });
+  const unpaidInvs   = invoicesQuery.data;
+  const totalOut     = unpaidInvs.reduce((s, i) => s + (i.totalCents ?? 0), 0) / 100;
+  const activeCount  = todayJobs.filter(j => {
+    const s = normalizeJobStatus(j.status);
+    return s === 'In Progress' || s === 'New';
+  }).length;
+
+  const isOverdue = (inv: ApiInvoice) => inv.dueDate ? new Date(inv.dueDate) < todayDate : false;
+  const overdueInvs = unpaidInvs.filter(isOverdue);
+
+  // Build attention items
   const attentionItems = [
     ...overdueInvs.map(i => ({
       id: `inv-${i.id}`, type: 'overdue' as const,
-      message: `${i.customer} — invoice overdue`,
-      sub: `${i.invoiceNumber} · $${calcInvoiceTotal(i).toLocaleString()} · Was due ${i.dueDate}`,
+      message: `${customerName(i.customer)} — invoice overdue`,
+      sub: `${i.invoiceNumber} · ${centsToDisplay(i.totalCents)} · Was due ${i.dueDate ?? ''}`,
       action: 'Remind', to: '/invoices',
     })),
-    ...estimates.filter(e => e.status === 'Sent' && !dismissed.has(`est-${e.id}`)).map(e => ({
+    ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
-      message: `${e.customer} estimate not yet opened`,
-      sub: `${e.estimateNumber} · $${calcEstimateTotal(e).toLocaleString()} · Sent ${e.sentDate}`,
+      message: `${customerName(e.customer)} estimate not yet opened`,
+      sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt)}` : ''}`,
       action: 'Follow up', to: '/estimates',
-    })),
-    ...unscheduled.filter(j => j.estimateId).map(j => ({
-      id: `job-${j.id}`, type: 'schedule' as const,
-      message: `${j.customer} — ready to schedule`,
-      sub: `${j.description} · Estimate approved`,
-      action: 'Schedule', to: `/jobs/${j.id}`,
-    })),
-    ...invoices.filter(i => i.status === 'Draft').map(i => ({
-      id: `draft-${i.id}`, type: 'draft' as const,
-      message: `Draft invoice unsent`,
-      sub: `${i.invoiceNumber} · ${i.customer} · $${calcInvoiceTotal(i).toLocaleString()}`,
-      action: 'Review', to: '/invoices',
     })),
   ].filter(item => !dismissed.has(item.id));
 
   const ATTN_STYLE = {
     overdue:  { icon: AlertCircle,  ic: 'text-red-500',    border: 'border-red-100',   bg: 'bg-red-50'    },
     followup: { icon: Eye,          ic: 'text-violet-500', border: 'border-violet-100',bg: 'bg-violet-50/50' },
-    schedule: { icon: Calendar,     ic: 'text-amber-500',  border: 'border-amber-100', bg: 'bg-amber-50'  },
-    draft:    { icon: FileText,     ic: 'text-slate-400',  border: 'border-slate-200', bg: 'bg-white'     },
   };
 
   return (
@@ -222,7 +273,9 @@ export function HomePage() {
           <div className="flex items-start justify-between">
             <div>
               <h1 className="text-slate-900">Good morning, Mike ☀️</h1>
-              <p className="text-sm text-slate-400 mt-0.5">Tuesday, March 10 · Austin, TX</p>
+              <p className="text-sm text-slate-400 mt-0.5">
+                {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+              </p>
             </div>
             <button
               onClick={() => navigate('/assistant')}
@@ -256,71 +309,26 @@ export function HomePage() {
             {/* Today's jobs */}
             <section className="px-4 md:px-6 py-5">
               <SectionHead label="Today's jobs" count={todayJobs.length} onAll={() => navigate('/jobs')} />
-              {todayJobs.length === 0
-                ? <p className="text-sm text-slate-400 py-4 text-center">No jobs scheduled today</p>
-                : (
-                  <div className="rounded-xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100">
-                    {todayJobs.map(job => (
-                      <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
-                    ))}
-                  </div>
-                )
-              }
-            </section>
-
-            {/* This week */}
-            <section className="px-4 md:px-6 py-5">
-              <SectionHead label="This week" onAll={() => navigate('/schedule')} />
-              <WeekStrip />
-              {tomorrowJobs.length > 0 && (
-                <div className="mt-3 rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-                  {tomorrowJobs.map(job => (
-                    <div key={job.id} className="flex items-center gap-3 px-4 py-3">
-                      <span className={`flex size-7 shrink-0 items-center justify-center rounded-lg text-sm ${SVC[job.serviceType]?.color ?? 'bg-slate-100'}`}>
-                        {SVC[job.serviceType]?.emoji}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800 truncate">{job.customer}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          Tomorrow {job.scheduledTime}
-                          {job.assignedTech && ` · ${job.assignedTech.split(' ')[0]}`}
-                        </p>
-                      </div>
-                      <button onClick={() => navigate(`/jobs/${job.id}`)} className="text-xs text-slate-400 hover:text-slate-600">
-                        <ChevronRight size={13} />
-                      </button>
-                    </div>
+              {jobsQuery.isLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                </div>
+              ) : todayJobs.length === 0 ? (
+                <p className="text-sm text-slate-400 py-4 text-center">No jobs scheduled today</p>
+              ) : (
+                <div className="rounded-xl bg-white border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                  {todayJobs.map(job => (
+                    <JobRow key={job.id} job={job} onClick={() => navigate(`/jobs/${job.id}`)} />
                   ))}
                 </div>
               )}
             </section>
 
-            {/* Unscheduled */}
-            {unscheduled.length > 0 && (
-              <section className="px-4 md:px-6 py-5">
-                <SectionHead label="Unscheduled jobs" count={unscheduled.length} onAll={() => navigate('/jobs')} />
-                <div className="flex flex-col gap-2">
-                  {unscheduled.map(job => (
-                    <button
-                      key={job.id}
-                      onClick={() => navigate(`/jobs/${job.id}`)}
-                      className="flex items-center gap-3 rounded-xl bg-white border border-dashed border-slate-200 px-4 py-3 text-left hover:border-slate-300 hover:bg-slate-50/50 transition-all group"
-                    >
-                      <span className={`flex size-8 shrink-0 items-center justify-center rounded-xl text-base ${SVC[job.serviceType]?.color ?? 'bg-slate-100'}`}>
-                        {SVC[job.serviceType]?.emoji}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800">{job.customer}</p>
-                        <p className="text-xs text-slate-400 mt-0.5 truncate">{job.description}</p>
-                      </div>
-                      <span className="text-xs text-blue-600 shrink-0 group-hover:underline">
-                        Schedule →
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
+            {/* This week */}
+            <section className="px-4 md:px-6 py-5">
+              <SectionHead label="This week" onAll={() => navigate('/schedule')} />
+              <WeekStrip todayCount={todayJobs.length} />
+            </section>
           </div>
 
           {/* ─── Right: Financial & Attention ─── */}
@@ -345,8 +353,8 @@ export function HomePage() {
                   <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
                     <div className="flex divide-x divide-slate-100">
                       {[
-                        { label: 'New', count: leads.filter(l => l.status === 'New').length,           color: 'text-blue-600',  dot: 'bg-blue-500'   },
-                        { label: 'Contacted', count: leads.filter(l => l.status === 'Contacted').length,color: 'text-amber-600', dot: 'bg-amber-500'  },
+                        { label: 'New',       count: leads.filter(l => l.status === 'New').length,           color: 'text-blue-600',   dot: 'bg-blue-500'   },
+                        { label: 'Contacted', count: leads.filter(l => l.status === 'Contacted').length,     color: 'text-amber-600',  dot: 'bg-amber-500'  },
                         { label: 'Est. Sent', count: leads.filter(l => l.status === 'Estimate Sent').length, color: 'text-violet-600', dot: 'bg-violet-500' },
                       ].map(({ label, count, color, dot }) => (
                         <button key={label} onClick={() => navigate('/leads')} className="flex-1 flex flex-col items-center py-3.5 hover:bg-slate-50 transition-colors">
@@ -407,42 +415,43 @@ export function HomePage() {
             )}
 
             {/* Pending estimates */}
-            {pendingEsts.length > 0 && (
+            {(estimatesQuery.isLoading || pendingEsts.length > 0) && (
               <section className="px-4 py-5">
                 <SectionHead label="Pending estimates" count={pendingEsts.length} onAll={() => navigate('/estimates')} />
-                <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-                  {pendingEsts.map(est => (
-                    <button
-                      key={est.id}
-                      onClick={() => navigate('/estimates')}
-                      className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors group"
-                    >
-                      <div className={`flex size-8 items-center justify-center rounded-xl shrink-0 ${
-                        est.status === 'Viewed' ? 'bg-violet-100' : 'bg-blue-100'
-                      }`}>
-                        {est.status === 'Viewed'
-                          ? <Eye size={14} className="text-violet-500" />
-                          : <Send size={14} className="text-blue-500" />
-                        }
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800 truncate">{est.customer}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {est.estimateNumber} · {est.status === 'Viewed' ? `Viewed ${est.viewedDate}` : `Sent ${est.sentDate}`}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-700">${calcEstimateTotal(est).toLocaleString()}</p>
-                        <StatusBadge status={est.status} size="sm" />
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                {estimatesQuery.isLoading ? (
+                  <div className="flex items-center justify-center py-6">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                    {pendingEsts.map(est => (
+                      <button
+                        key={est.id}
+                        onClick={() => navigate('/estimates')}
+                        className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors group"
+                      >
+                        <div className="flex size-8 items-center justify-center rounded-xl shrink-0 bg-blue-100">
+                          <Send size={14} className="text-blue-500" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-slate-800 truncate">{customerName(est.customer)}</p>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {est.estimateNumber}{est.sentAt ? ` · Sent ${formatDate(est.sentAt)}` : ''}
+                          </p>
+                        </div>
+                        <div className="flex flex-col items-end gap-1 shrink-0">
+                          <p className="text-sm text-slate-700">{centsToDisplay(est.totalCents)}</p>
+                          <StatusBadge status={normalizeEstimateStatus(est.status)} size="sm" />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </section>
             )}
 
             {/* Unpaid invoices */}
-            {unpaidInvs.length > 0 && (
+            {(invoicesQuery.isLoading || unpaidInvs.length > 0) && (
               <section className="px-4 py-5">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-2">
@@ -456,32 +465,41 @@ export function HomePage() {
                     </button>
                   </div>
                 </div>
-                <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
-                  {unpaidInvs.map(inv => (
-                    <button
-                      key={inv.id}
-                      onClick={() => navigate('/invoices')}
-                      className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
-                    >
-                      <div className={`flex size-8 items-center justify-center rounded-xl shrink-0 ${
-                        inv.status === 'Overdue' ? 'bg-red-100' : 'bg-amber-100'
-                      }`}>
-                        <DollarSign size={14} className={inv.status === 'Overdue' ? 'text-red-500' : 'text-amber-600'} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-slate-800 truncate">{inv.customer}</p>
-                        <p className={`text-xs mt-0.5 ${inv.status === 'Overdue' ? 'text-red-500' : 'text-slate-400'}`}>
-                          {inv.invoiceNumber}
-                          {inv.status === 'Overdue' ? ` · OVERDUE since ${inv.dueDate}` : inv.dueDate ? ` · Due ${inv.dueDate}` : ''}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-end gap-1 shrink-0">
-                        <p className="text-sm text-slate-700">${calcInvoiceTotal(inv).toLocaleString()}</p>
-                        <StatusBadge status={inv.status} size="sm" />
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                {invoicesQuery.isLoading ? (
+                  <div className="flex items-center justify-center py-6">
+                    <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                    {unpaidInvs.map(inv => {
+                      const overdue = isOverdue(inv);
+                      return (
+                        <button
+                          key={inv.id}
+                          onClick={() => navigate('/invoices')}
+                          className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
+                        >
+                          <div className={`flex size-8 items-center justify-center rounded-xl shrink-0 ${
+                            overdue ? 'bg-red-100' : 'bg-amber-100'
+                          }`}>
+                            <DollarSign size={14} className={overdue ? 'text-red-500' : 'text-amber-600'} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-slate-800 truncate">{customerName(inv.customer)}</p>
+                            <p className={`text-xs mt-0.5 ${overdue ? 'text-red-500' : 'text-slate-400'}`}>
+                              {inv.invoiceNumber}
+                              {overdue ? ` · OVERDUE since ${inv.dueDate ?? ''}` : inv.dueDate ? ` · Due ${inv.dueDate}` : ''}
+                            </p>
+                          </div>
+                          <div className="flex flex-col items-end gap-1 shrink-0">
+                            <p className="text-sm text-slate-700">{centsToDisplay(inv.totalCents)}</p>
+                            <StatusBadge status={overdue ? 'Overdue' : 'Unpaid'} size="sm" />
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </section>
             )}
 
@@ -490,10 +508,10 @@ export function HomePage() {
               <SectionHead label="Quick actions" />
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: 'New job',      icon: Plus,      color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/jobs'      },
-                  { label: 'New estimate', icon: FileText,  color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates' },
-                  { label: 'New invoice',  icon: DollarSign,color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'  },
-                  { label: 'Schedule',     icon: CalendarDays, color: 'text-green-600', bg: 'bg-green-50', to: '/schedule'  },
+                  { label: 'New job',      icon: Plus,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/jobs'      },
+                  { label: 'New estimate', icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates' },
+                  { label: 'New invoice',  icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'  },
+                  { label: 'Schedule',     icon: CalendarDays, color: 'text-green-600',  bg: 'bg-green-50',  to: '/schedule'  },
                 ].map(({ label, icon: Icon, color, bg, to }) => (
                   <button
                     key={label}
@@ -510,7 +528,7 @@ export function HomePage() {
             </section>
 
             {/* All clear */}
-            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && (
+            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && (
               <section className="px-4 py-8 flex flex-col items-center gap-2">
                 <CheckCircle2 size={28} className="text-green-500" />
                 <p className="text-sm text-slate-600">All clear — nothing urgent</p>

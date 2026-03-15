@@ -1,14 +1,76 @@
 import { useState } from 'react';
 import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
-  Eye, FileText, X, Trash2, TrendingUp, AlertTriangle, Info,
+  Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
   CheckCircle2, Copy, Phone, Mail, Sparkles,
 } from 'lucide-react';
-import { estimates, customers, calcEstimateTotal } from '../../data/mock-data';
+import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { useMutation } from '../../hooks/useMutation';
+import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
-import type { EstimateStatus, Estimate } from '../../data/mock-data';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
+
+type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+
+interface ApiLineItem {
+  id?: string;
+  description: string;
+  quantity: number;
+  unitPriceCents: number;
+  totalCents: number;
+  taxable?: boolean;
+  sortOrder?: number;
+}
+
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+}
+
+interface ApiEstimate {
+  id: string;
+  estimateNumber: string;
+  status: string;
+  jobId?: string;
+  subtotalCents: number;
+  taxCents?: number;
+  totalCents: number;
+  discountCents?: number;
+  validUntil?: string;
+  customerMessage?: string;
+  lineItems?: ApiLineItem[];
+  createdAt?: string;
+  updatedAt?: string;
+  customer?: ApiCustomer;
+  customerId?: string;
+}
+
+/** Convert ApiLineItem to UI LineItem for the editor */
+function apiLineToUi(item: ApiLineItem): LineItem {
+  return {
+    description: item.description,
+    qty: item.quantity,
+    rate: item.unitPriceCents / 100,
+  };
+}
+
+/** Convert UI LineItem back to ApiLineItem for saving */
+function uiLineToApi(item: LineItem, sortOrder: number): Partial<ApiLineItem> {
+  return {
+    description: item.description,
+    quantity: item.qty,
+    unitPriceCents: Math.round(item.rate * 100),
+    totalCents: Math.round(item.qty * item.rate * 100),
+    sortOrder,
+    taxable: false,
+  };
+}
 
 type LineItem = { description: string; qty: number; rate: number };
 
@@ -455,17 +517,59 @@ function SendEstimateSheet({ est, total, onClose, onSent }: {
 }
 
 // ─── Estimate Detail ──────────────────────────────────────────────────────
-function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack: () => void }) {
-  const [lineItems,    setLineItems]    = useState<LineItem[]>(est.lineItems);
+function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
+  const { data: est, isLoading, error } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
+  const { mutate: updateEstimate } = useMutation<Record<string, unknown>, ApiEstimate>('PUT', `/api/estimates/${estimateId}`);
+  const { mutate: transitionEstimate } = useMutation<{ status: string }, ApiEstimate>('POST', `/api/estimates/${estimateId}/transition`);
+
+  const [lineItems,    setLineItems]    = useState<LineItem[]>([]);
   const [sendOpen,     setSendOpen]     = useState(false);
   const [previewOpen,  setPreviewOpen]  = useState(false);
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
 
-  const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
-  const customer = customers.find(c => c.id === est.customerId);
-  const status   = wasSent ? 'Sent' : est.status;
+  // Sync lineItems from API data when it loads
+  const apiLineItems = est?.lineItems ?? [];
+  const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
+
+  const total    = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);
+  const customer = est?.customer;
+  const apiStatus = wasSent ? 'sent' : (est?.status ?? 'draft');
+  const status   = normalizeEstimateStatus(apiStatus) as EstimateStatus;
   const editable = status === 'Draft';
+
+  if (isLoading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (error || !est) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-3">
+        <p className="text-sm text-red-500">Failed to load estimate</p>
+        <button onClick={onBack} className="text-xs text-blue-500 hover:underline">Go back</button>
+      </div>
+    );
+  }
+
+  // Build a mock Estimate-like object for the sub-components that still need it
+  const estCompat = {
+    id: est.id,
+    estimateNumber: est.estimateNumber,
+    customer: customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer',
+    customerId: est.customerId ?? customer?.id ?? '',
+    description: est.customerMessage ?? '',
+    status,
+    lineItems: uiLineItems,
+    createdDate: est.createdAt ? new Date(est.createdAt).toLocaleDateString() : '',
+    sentDate: undefined as string | undefined,
+    viewedDate: undefined as string | undefined,
+    approvedDate: undefined as string | undefined,
+    validUntil: est.validUntil,
+  };
 
   return (
     <>
@@ -479,8 +583,8 @@ function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack:
           {/* Header */}
           <div className="flex items-start justify-between gap-3 mb-5">
             <div>
-              <h1 className="text-slate-900" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>{est.customer}</h1>
-              <p className="text-sm text-slate-400 mt-0.5">{est.estimateNumber} · {est.description}</p>
+              <h1 className="text-slate-900" style={{ fontSize: '1.15rem', lineHeight: 1.2 }}>{estCompat.customer}</h1>
+              <p className="text-sm text-slate-400 mt-0.5">{est.estimateNumber} · {estCompat.description}</p>
               {est.validUntil && (
                 <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
                   <Clock size={10} /> Valid until {est.validUntil}
@@ -499,29 +603,36 @@ function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack:
             {/* ── Left column ── */}
             <div className="flex flex-col gap-4">
               <LineItemsEditor
-                items={lineItems}
+                items={uiLineItems}
                 editable={editable}
-                onChange={setLineItems}
+                onChange={async (items) => {
+                  setLineItems(items);
+                  await updateEstimate({ lineItems: items.map((item, i) => uiLineToApi(item, i)) });
+                }}
               />
               <AIPricingSuggestions estimateId={est.id} />
             </div>
 
             {/* ── Right rail ── */}
             <div className="flex flex-col gap-4">
-              <ApprovalStepper est={est} />
+              <ApprovalStepper est={estCompat} />
 
               {/* Customer card */}
               {customer && (
                 <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
                   <p className="text-xs text-slate-400 mb-2">Customer</p>
-                  <p className="text-sm text-slate-900">{customer.name}</p>
+                  <p className="text-sm text-slate-900">{estCompat.customer}</p>
                   <div className="flex flex-col gap-1.5 mt-2">
-                    <a href={`tel:${customer.phone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
-                      <Phone size={11} /> {customer.phone}
-                    </a>
-                    <a href={`mailto:${customer.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
-                      <Mail size={11} /> {customer.email}
-                    </a>
+                    {customer.primaryPhone && (
+                      <a href={`tel:${customer.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
+                        <Phone size={11} /> {customer.primaryPhone}
+                      </a>
+                    )}
+                    {customer.email && (
+                      <a href={`mailto:${customer.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
+                        <Mail size={11} /> {customer.email}
+                      </a>
+                    )}
                   </div>
                 </div>
               )}
@@ -530,7 +641,7 @@ function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack:
               <div className="rounded-xl bg-slate-900 text-white px-4 py-4">
                 <div className="flex items-center justify-between mb-3">
                   <p className="text-sm text-white/60">Estimate total</p>
-                  <p className="text-sm text-white/60">{lineItems.length} items</p>
+                  <p className="text-sm text-white/60">{uiLineItems.length} items</p>
                 </div>
                 <p className="text-3xl text-white mb-1">${total.toLocaleString()}</p>
                 {est.validUntil && <p className="text-xs text-white/40">Valid until {est.validUntil}</p>}
@@ -570,11 +681,11 @@ function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack:
                   <div className="flex items-center gap-2 mb-1">
                     {status === 'Viewed' ? <Eye size={12} className="text-violet-600" /> : <Clock size={12} className="text-amber-600" />}
                     <p className={`text-xs ${status === 'Viewed' ? 'text-violet-700' : 'text-amber-700'}`}>
-                      {status === 'Viewed' ? `${est.customer.split(' ')[0]} viewed this estimate` : 'Awaiting customer review'}
+                      {status === 'Viewed' ? `${estCompat.customer.split(' ')[0]} viewed this estimate` : 'Awaiting customer review'}
                     </p>
                   </div>
                   <p className={`text-xs ${status === 'Viewed' ? 'text-violet-600' : 'text-amber-600'}`}>
-                    {status === 'Viewed' ? `Viewed ${est.viewedDate} — follow up if they have questions` : `Sent ${est.sentDate}`}
+                    {status === 'Viewed' ? 'Follow up if they have questions' : 'Awaiting response'}
                   </p>
                 </div>
               )}
@@ -585,22 +696,25 @@ function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack:
 
       {sendOpen && (
         <SendEstimateSheet
-          est={est}
+          est={estCompat}
           total={total}
           onClose={() => setSendOpen(false)}
-          onSent={() => setWasSent(true)}
+          onSent={async () => {
+            setWasSent(true);
+            await transitionEstimate({ status: 'sent' });
+          }}
         />
       )}
       {previewOpen && (
         <EstimateDocPreview
-          est={est}
-          lineItems={lineItems}
+          est={estCompat}
+          lineItems={uiLineItems}
           onClose={() => setPreviewOpen(false)}
         />
       )}
       {convertOpen && (
         <ConvertToInvoiceSheet
-          est={est}
+          est={estCompat}
           onClose={() => setConvertOpen(false)}
           onConverted={() => setConvertOpen(false)}
         />
@@ -608,6 +722,16 @@ function EstimateDetail({ estimate: est, onBack }: { estimate: Estimate; onBack:
     </>
   );
 }
+
+// ─── API status → UI tab value mapping ───────────────────────────────────
+const API_STATUS_FOR_TAB: Record<EstimateStatus | 'All', string[]> = {
+  All:      [],
+  Draft:    ['draft', 'expired'],
+  Sent:     ['ready_for_review', 'sent'],
+  Viewed:   [],
+  Approved: ['accepted'],
+  Declined: ['rejected'],
+};
 
 // ─── Estimates List ───────────────────────────────────────────────────────
 const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
@@ -623,16 +747,24 @@ export function EstimatesPage() {
   const [selected,         setSelected]      = useState<string | null>(null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
-  const filtered = estimates.filter(e => tab === 'All' || e.status === tab);
-  const estimate = estimates.find(e => e.id === selected);
+  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
 
-  if (selected && estimate) {
-    return <EstimateDetail estimate={estimate} onBack={() => setSelected(null)} />;
+  if (selected) {
+    return <EstimateDetail estimateId={selected} onBack={() => setSelected(null)} />;
   }
 
-  const pendingCount = estimates.filter(e => e.status === 'Sent' || e.status === 'Viewed').length;
-  const approvedCount = estimates.filter(e => e.status === 'Approved').length;
-  const totalValue = estimates.reduce((s, e) => s + calcEstimateTotal(e), 0);
+  const normalizedData = data.map(e => ({
+    ...e,
+    uiStatus: normalizeEstimateStatus(e.status) as EstimateStatus,
+  }));
+
+  const filtered = tab === 'All'
+    ? normalizedData
+    : normalizedData.filter(e => e.uiStatus === tab);
+
+  const pendingCount  = normalizedData.filter(e => e.uiStatus === 'Sent' || e.uiStatus === 'Viewed').length;
+  const approvedCount = normalizedData.filter(e => e.uiStatus === 'Approved').length;
+  const totalValue    = normalizedData.reduce((s, e) => s + e.totalCents, 0);
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -650,9 +782,9 @@ export function EstimatesPage() {
         {/* Summary cards */}
         <div className="grid grid-cols-3 gap-3 mb-5">
           {[
-            { label: 'Pending review', value: pendingCount,           color: 'text-amber-700', bg: 'bg-amber-50 border-amber-100' },
-            { label: 'Approved',       value: approvedCount,          color: 'text-green-700', bg: 'bg-green-50 border-green-100' },
-            { label: 'Total value',    value: `$${totalValue.toLocaleString()}`, color: 'text-blue-700',  bg: 'bg-blue-50 border-blue-100'  },
+            { label: 'Pending review', value: pendingCount,                 color: 'text-amber-700', bg: 'bg-amber-50 border-amber-100' },
+            { label: 'Approved',       value: approvedCount,                color: 'text-green-700', bg: 'bg-green-50 border-green-100' },
+            { label: 'Total value',    value: centsToDisplay(totalValue),   color: 'text-blue-700',  bg: 'bg-blue-50 border-blue-100'   },
           ].map(({ label, value, color, bg }) => (
             <div key={label} className={`rounded-xl border px-3 py-3 ${bg}`}>
               <p className={`text-xs mb-0.5 ${color}`}>{label}</p>
@@ -666,7 +798,15 @@ export function EstimatesPage() {
           {TABS.map(t => (
             <button
               key={t.value}
-              onClick={() => setTab(t.value)}
+              onClick={() => {
+                setTab(t.value);
+                if (t.value !== 'All') {
+                  const apiStatuses = API_STATUS_FOR_TAB[t.value];
+                  if (apiStatuses.length > 0) setFilters({ status: apiStatuses[0] });
+                } else {
+                  setFilters({});
+                }
+              }}
               className={`shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
               }`}
@@ -674,72 +814,77 @@ export function EstimatesPage() {
           ))}
         </div>
 
+        {/* Loading / Error */}
+        {isLoading && (
+          <div className="flex items-center justify-center py-16">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+          </div>
+        )}
+        {error && (
+          <div className="flex flex-col items-center py-12 gap-2 text-center">
+            <p className="text-sm text-red-500">Failed to load estimates</p>
+            <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
+          </div>
+        )}
+
         {/* List */}
-        <div className="flex flex-col gap-2">
-          {filtered.map(est => {
-            const total = calcEstimateTotal(est);
-            return (
-              <button
-                key={est.id}
-                onClick={() => setSelected(est.id)}
-                className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-4 text-left hover:border-slate-300 hover:shadow-sm transition-all group"
-              >
-                <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
-                  est.status === 'Approved' ? 'bg-green-50' :
-                  est.status === 'Viewed'   ? 'bg-violet-50' :
-                  est.status === 'Sent'     ? 'bg-blue-50' : 'bg-slate-100'
-                }`}>
-                  <FileText size={16} className={
-                    est.status === 'Approved' ? 'text-green-500' :
-                    est.status === 'Viewed'   ? 'text-violet-500' :
-                    est.status === 'Sent'     ? 'text-blue-500' : 'text-slate-400'
-                  } />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-sm text-slate-900">{est.customer}</p>
-                      <p className="text-xs text-slate-400 mt-0.5 truncate">{est.estimateNumber} · {est.description}</p>
+        {!isLoading && !error && (
+          <div className="flex flex-col gap-2">
+            {filtered.map(est => {
+              const status = est.uiStatus;
+              const customerName = est.customer
+                ? (est.customer.displayName || [est.customer.firstName, est.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+                : 'Customer';
+              return (
+                <button
+                  key={est.id}
+                  onClick={() => setSelected(est.id)}
+                  className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-4 text-left hover:border-slate-300 hover:shadow-sm transition-all group"
+                >
+                  <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${
+                    status === 'Approved' ? 'bg-green-50' :
+                    status === 'Viewed'   ? 'bg-violet-50' :
+                    status === 'Sent'     ? 'bg-blue-50' : 'bg-slate-100'
+                  }`}>
+                    <FileText size={16} className={
+                      status === 'Approved' ? 'text-green-500' :
+                      status === 'Viewed'   ? 'text-violet-500' :
+                      status === 'Sent'     ? 'text-blue-500' : 'text-slate-400'
+                    } />
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm text-slate-900">{customerName}</p>
+                        <p className="text-xs text-slate-400 mt-0.5 truncate">{est.estimateNumber}</p>
+                      </div>
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <p className="text-sm text-slate-800">{centsToDisplay(est.totalCents)}</p>
+                        <StatusBadge status={status} size="sm" />
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      <p className="text-sm text-slate-800">${total.toLocaleString()}</p>
-                      <StatusBadge status={est.status} size="sm" />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3 mt-2">
-                    <span className="flex items-center gap-1 text-xs text-slate-400">
-                      <Clock size={10} /> {est.createdDate}
-                    </span>
-                    {est.sentDate && (
-                      <span className="flex items-center gap-1 text-xs text-slate-400">
-                        <Send size={10} /> Sent {est.sentDate}
-                      </span>
-                    )}
-                    {est.viewedDate && (
-                      <span className="flex items-center gap-1 text-xs text-violet-500">
-                        <Eye size={10} /> Viewed {est.viewedDate}
-                      </span>
-                    )}
-                    {est.approvedDate && (
-                      <span className="flex items-center gap-1 text-xs text-green-600">
-                        <Check size={10} /> Approved {est.approvedDate}
-                      </span>
+                    {est.createdAt && (
+                      <div className="flex items-center gap-3 mt-2">
+                        <span className="flex items-center gap-1 text-xs text-slate-400">
+                          <Clock size={10} /> {new Date(est.createdAt).toLocaleDateString()}
+                        </span>
+                      </div>
                     )}
                   </div>
-                </div>
-                <ChevronRight size={14} className="shrink-0 text-slate-300 group-hover:text-slate-400 transition-colors" />
-              </button>
-            );
-          })}
-          {filtered.length === 0 && (
-            <p className="py-12 text-center text-sm text-slate-400">No estimates</p>
-          )}
-        </div>
+                  <ChevronRight size={14} className="shrink-0 text-slate-300 group-hover:text-slate-400 transition-colors" />
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <p className="py-12 text-center text-sm text-slate-400">No estimates</p>
+            )}
+          </div>
+        )}
       </div>
       {newEstimateOpen && (
         <NewEstimateFlow
           onClose={() => setNewEstimate(false)}
-          onCreated={() => setNewEstimate(false)}
+          onCreated={() => { setNewEstimate(false); refetch(); }}
         />
       )}
     </div>

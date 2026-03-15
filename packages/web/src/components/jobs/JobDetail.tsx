@@ -8,8 +8,86 @@ import {
   CheckCircle2, Circle, MoreHorizontal, Zap, Calendar, User, Clock,
   ChevronDown,
 } from 'lucide-react';
-import { jobs, technicians, customers, calcMaterialsTotal, estimates, calcEstimateTotal } from '../../data/mock-data';
+import { calcMaterialsTotal, calcEstimateTotal, estimates } from '../../data/mock-data';
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { useMutation } from '../../hooks/useMutation';
+import { normalizeJobStatus } from '../../utils/statusNormalize';
+
+interface ApiJobDetail {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  problemDescription?: string;
+  status: string;
+  priority?: string;
+  customerId?: string;
+  assignedTechnicianId?: string;
+  scheduledStart?: string;
+  createdAt?: string;
+  serviceType?: string;
+  customer?: {
+    id: string;
+    displayName?: string;
+    firstName?: string;
+    lastName?: string;
+    primaryPhone?: string;
+    email?: string;
+    locations?: Array<{ street1?: string; city?: string; state?: string; postalCode?: string }>;
+  };
+  technician?: {
+    id: string;
+    firstName?: string;
+    lastName?: string;
+    color?: string;
+  };
+  lineItems?: Array<{ description: string; quantity: number; unitPriceCents: number; totalCents: number }>;
+}
+
+function buildJobCompat(api: ApiJobDetail): Job {
+  const techName = api.technician
+    ? [api.technician.firstName, api.technician.lastName].filter(Boolean).join(' ')
+    : undefined;
+  const customerName = api.customer
+    ? (api.customer.displayName || [api.customer.firstName, api.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+    : 'Customer';
+  const primaryLocation = api.customer?.locations?.[0];
+  const address = primaryLocation
+    ? [primaryLocation.street1, primaryLocation.city, primaryLocation.state, primaryLocation.postalCode].filter(Boolean).join(', ')
+    : '';
+
+  return {
+    id: api.id,
+    jobNumber: api.jobNumber,
+    customer: customerName,
+    customerId: api.customerId ?? api.customer?.id ?? '',
+    address,
+    serviceType: (api.serviceType ?? 'HVAC') as 'HVAC' | 'Plumbing' | 'Painting',
+    status: normalizeJobStatus(api.status) as Job['status'],
+    assignedTech: techName,
+    description: api.summary,
+    priority: api.priority === 'urgent' ? 'Urgent' : 'Normal',
+    statusHistory: [],
+    activity: [],
+    materials: [],
+  };
+}
+
+function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefined {
+  if (!api) return undefined;
+  const name = api.displayName || [api.firstName, api.lastName].filter(Boolean).join(' ') || 'Customer';
+  return {
+    id: api.id,
+    name,
+    phone: api.primaryPhone ?? '',
+    email: api.email ?? '',
+    address: api.locations?.[0]?.street1 ?? '',
+    serviceType: 'HVAC',
+    locations: [],
+    jobCount: 0,
+    openJobs: 0,
+  };
+}
 import { StatusBadge } from '../shared/StatusBadge';
 import { ActivityTimeline } from './ActivityTimeline';
 import { AddEntrySheet } from './AddEntrySheet';
@@ -852,25 +930,47 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
 export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
 
-  const job      = jobs.find(j => j.id === id);
-  const tech     = technicians.find(t => t.name === job?.assignedTech);
-  const customer = customers.find(c => c.id === job?.customerId);
+  const { data: apiJob, isLoading, error } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
+  const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
+
+  const job      = apiJob ? buildJobCompat(apiJob) : null;
+  const customer = apiJob?.customer ? buildCustomerCompat(apiJob.customer) : undefined;
+  const tech: Technician | undefined = apiJob?.technician ? {
+    id: apiJob.technician.id,
+    name: [apiJob.technician.firstName, apiJob.technician.lastName].filter(Boolean).join(' '),
+    initials: [apiJob.technician.firstName?.[0], apiJob.technician.lastName?.[0]].filter(Boolean).join(''),
+    color: apiJob.technician.color ?? '#94a3b8',
+    role: 'technician',
+    phone: '',
+    email: '',
+    status: 'active',
+    skills: [],
+    jobsToday: 0,
+  } : undefined;
 
   const [modal,         setModal]         = useState<Modal>(null);
   const [cameraOpen,    setCameraOpen]    = useState(false);
   const [jobMedia,      setJobMedia]      = useState<CapturedMedia[]>([]);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const [activities,    setActivities]    = useState<JobActivity[]>(job?.activity ?? []);
-  const [materials,     setMaterials]     = useState<MaterialItem[]>(job?.materials ?? []);
-  const [showDuplicate, setShowDuplicate] = useState(!!job?.duplicateWarning);
+  const [activities,    setActivities]    = useState<JobActivity[]>([]);
+  const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
+  const [showDuplicate, setShowDuplicate] = useState(false);
 
-  if (!job) {
+  if (isLoading) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (error || !job) {
     return (
       <div className="h-full overflow-y-auto pb-20 p-6">
         <button onClick={() => navigate('/jobs')} className="flex items-center gap-2 text-sm text-slate-500 mb-4">
           <ArrowLeft size={14} /> Back
         </button>
-        <p className="text-slate-400">Job not found.</p>
+        <p className="text-slate-400">{error ? 'Failed to load job.' : 'Job not found.'}</p>
       </div>
     );
   }
