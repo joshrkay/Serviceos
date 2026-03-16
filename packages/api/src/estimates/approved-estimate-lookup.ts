@@ -1,9 +1,10 @@
-import { ApprovedEstimateMetadata, ApprovedEstimateMetadataRepository } from './approved-estimate-metadata';
+import { ApprovedEstimateMetadata, ApprovedEstimateMetadataRepository, ApprovedEstimateFilters } from './approved-estimate-metadata';
+import { VerticalType, ServiceCategory } from '../shared/vertical-types';
 
 export interface ApprovedEstimateLookupOptions {
   tenantId: string;
-  verticalSlug?: string;
-  categoryId?: string;
+  verticalType?: VerticalType;
+  serviceCategory?: ServiceCategory;
   minDate?: Date;
   maxDate?: Date;
   limit?: number;
@@ -21,20 +22,23 @@ export async function lookupApprovedEstimates(
 ): Promise<ApprovedEstimateLookupResult[]> {
   let records: ApprovedEstimateMetadata[];
 
-  if (options.verticalSlug && options.categoryId) {
-    records = await repo.findByVerticalAndCategory(options.tenantId, options.verticalSlug, options.categoryId);
+  const filters: ApprovedEstimateFilters = {};
+  if (options.verticalType) filters.verticalType = options.verticalType;
+  if (options.serviceCategory) filters.serviceCategory = options.serviceCategory;
+  if (options.minDate && options.maxDate) {
+    filters.dateRange = { from: options.minDate, to: options.maxDate };
+  }
+
+  if (options.verticalType || options.serviceCategory) {
+    records = await repo.findByFilters(options.tenantId, filters);
   } else {
     records = await repo.findByTenant(options.tenantId);
   }
 
-  if (options.verticalSlug && !options.categoryId) {
-    records = records.filter((r) => r.verticalSlug === options.verticalSlug);
-  }
-
-  if (options.minDate) {
+  if (options.minDate && !options.maxDate) {
     records = records.filter((r) => r.approvedAt >= options.minDate!);
   }
-  if (options.maxDate) {
+  if (options.maxDate && !options.minDate) {
     records = records.filter((r) => r.approvedAt <= options.maxDate!);
   }
 
@@ -55,8 +59,8 @@ export function scoreRelevance(
 ): number {
   let score = 0;
 
-  if (options.verticalSlug && metadata.verticalSlug === options.verticalSlug) score += 0.3;
-  if (options.categoryId && metadata.categoryId === options.categoryId) score += 0.3;
+  if (options.verticalType && metadata.verticalType === options.verticalType) score += 0.3;
+  if (options.serviceCategory && metadata.serviceCategory === options.serviceCategory) score += 0.3;
 
   // Recency boost
   const daysSinceApproval = (Date.now() - metadata.approvedAt.getTime()) / (1000 * 60 * 60 * 24);
@@ -65,8 +69,9 @@ export function scoreRelevance(
 
   // Search term matching
   if (options.searchTerms && options.searchTerms.length > 0) {
+    const searchContent = (metadata.lineItemSummary || []).join(' ').toLowerCase();
     const matchedTerms = options.searchTerms.filter((term) =>
-      metadata.searchableContent.includes(term.toLowerCase())
+      searchContent.includes(term.toLowerCase())
     );
     score += (matchedTerms.length / options.searchTerms.length) * 0.2;
   }

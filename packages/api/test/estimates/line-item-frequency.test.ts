@@ -4,6 +4,7 @@ import {
   detectFrequentItems,
   InMemoryLineItemFrequencyRepository,
 } from '../../src/estimates/line-item-frequency';
+import { buildLineItem } from '../../src/shared/billing-engine';
 
 describe('P4-008A — Repeatedly added line-item detection', () => {
   it('happy path — normalizeLineItemDescription normalizes text', () => {
@@ -14,7 +15,7 @@ describe('P4-008A — Repeatedly added line-item detection', () => {
   it('happy path — trackLineItemOccurrence creates new frequency', async () => {
     const repo = new InMemoryLineItemFrequencyRepository();
     const freq = await trackLineItemOccurrence(
-      { id: 'li-1', description: 'Capacitor', quantity: 1, unitPrice: 250, total: 250 },
+      buildLineItem('li-1', 'Capacitor', 1, 25000, 1, true),
       'tenant-1', 'hvac', 'hvac-repair', repo
     );
     expect(freq.occurrenceCount).toBe(1);
@@ -24,28 +25,28 @@ describe('P4-008A — Repeatedly added line-item detection', () => {
   it('happy path — trackLineItemOccurrence increments existing', async () => {
     const repo = new InMemoryLineItemFrequencyRepository();
     await trackLineItemOccurrence(
-      { id: 'li-1', description: 'Capacitor', quantity: 1, unitPrice: 250, total: 250 },
+      buildLineItem('li-1', 'Capacitor', 1, 25000, 1, true),
       'tenant-1', 'hvac', 'hvac-repair', repo
     );
     const freq = await trackLineItemOccurrence(
-      { id: 'li-2', description: 'Capacitor', quantity: 2, unitPrice: 200, total: 400 },
+      buildLineItem('li-2', 'Capacitor', 2, 20000, 1, true),
       'tenant-1', 'hvac', 'hvac-repair', repo
     );
     expect(freq.occurrenceCount).toBe(2);
     expect(freq.avgQuantity).toBe(1.5);
-    expect(freq.avgUnitPrice).toBe(225);
+    expect(freq.avgUnitPrice).toBe(22500);
   });
 
   it('validation — detectFrequentItems filters by threshold', async () => {
     const repo = new InMemoryLineItemFrequencyRepository();
     for (let i = 0; i < 5; i++) {
       await trackLineItemOccurrence(
-        { id: `li-${i}`, description: 'Capacitor', quantity: 1, unitPrice: 250, total: 250 },
+        buildLineItem(`li-${i}`, 'Capacitor', 1, 25000, 1, true),
         'tenant-1', 'hvac', undefined, repo
       );
     }
     await trackLineItemOccurrence(
-      { id: 'li-rare', description: 'Rare item', quantity: 1, unitPrice: 500, total: 500 },
+      buildLineItem('li-rare', 'Rare item', 1, 50000, 1, true),
       'tenant-1', 'hvac', undefined, repo
     );
 
@@ -57,7 +58,7 @@ describe('P4-008A — Repeatedly added line-item detection', () => {
   it('mock provider test — repository isolates tenants', async () => {
     const repo = new InMemoryLineItemFrequencyRepository();
     await trackLineItemOccurrence(
-      { id: 'li-1', description: 'Test', quantity: 1, unitPrice: 100, total: 100 },
+      buildLineItem('li-1', 'Test', 1, 10000, 1, true),
       'tenant-1', 'hvac', undefined, repo
     );
 

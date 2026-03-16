@@ -1,30 +1,23 @@
 import { v4 as uuidv4 } from 'uuid';
+import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
-export type EstimateStatus = 'draft' | 'pending_review' | 'approved' | 'rejected' | 'sent';
-export type RevisionSource = 'manual' | 'ai_generated' | 'ai_revised';
+export { LineItem } from '../shared/billing-engine';
 
-export interface LineItem {
-  id: string;
-  description: string;
-  quantity: number;
-  unitPrice: number;
-  total: number;
-  category?: string;
-  bundleId?: string;
-  metadata?: Record<string, unknown>;
-}
+export type EstimateStatus = 'draft' | 'ready_for_review' | 'sent' | 'accepted' | 'rejected' | 'expired';
+
+export const ESTIMATE_STATUS_TRANSITIONS: Record<EstimateStatus, EstimateStatus[]> = {
+  draft: ['ready_for_review', 'sent'],
+  ready_for_review: ['sent', 'draft'],
+  sent: ['accepted', 'rejected', 'expired'],
+  accepted: [],
+  rejected: ['draft'],
+  expired: ['draft'],
+};
 
 export interface Estimate {
   id: string;
   tenantId: string;
-  verticalId?: string;
-  categoryId?: string;
-  status: EstimateStatus;
-  lineItems: LineItem[];
-  snapshot: Record<string, unknown>;
-  source: RevisionSource;
-  approvedAt?: Date;
-  approvedBy?: string;
   jobId: string;
   estimateNumber: string;
   status: EstimateStatus;
@@ -40,30 +33,42 @@ export interface Estimate {
 
 export interface CreateEstimateInput {
   tenantId: string;
-  verticalId?: string;
-  categoryId?: string;
+  jobId: string;
+  estimateNumber: string;
   lineItems: LineItem[];
-  snapshot: Record<string, unknown>;
-  source: RevisionSource;
+  discountCents?: number;
+  taxRateBps?: number;
+  validUntil?: Date;
+  customerMessage?: string;
+  internalNotes?: string;
   createdBy: string;
+}
+
+export interface UpdateEstimateInput {
+  lineItems?: LineItem[];
+  discountCents?: number;
+  taxRateBps?: number;
+  validUntil?: Date;
+  customerMessage?: string;
+  internalNotes?: string;
 }
 
 export interface EstimateRepository {
   create(estimate: Estimate): Promise<Estimate>;
   findById(tenantId: string, id: string): Promise<Estimate | null>;
+  findByJob(tenantId: string, jobId: string): Promise<Estimate[]>;
   findByTenant(tenantId: string): Promise<Estimate[]>;
-  findApproved(tenantId: string): Promise<Estimate[]>;
-  updateStatus(tenantId: string, id: string, status: EstimateStatus): Promise<Estimate | null>;
+  update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null>;
 }
 
 export function validateEstimateInput(input: CreateEstimateInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
+  if (!input.jobId) errors.push('jobId is required');
+  if (!input.estimateNumber) errors.push('estimateNumber is required');
   if (!input.createdBy) errors.push('createdBy is required');
-  if (!input.source) errors.push('source is required');
-  if (!Array.isArray(input.lineItems)) errors.push('lineItems must be an array');
-  if (!input.snapshot || typeof input.snapshot !== 'object') {
-    errors.push('snapshot must be a non-null object');
+  if (!Array.isArray(input.lineItems) || input.lineItems.length === 0) {
+    errors.push('At least one line item is required');
   }
   return errors;
 }

@@ -30,10 +30,8 @@ export function buildMissingItemContextBlock(
 ): ContextBlock {
   const lines = ['Potentially missing items based on historical patterns:'];
   for (const signal of signals) {
-    const price = signal.suggestedUnitPrice ? ` (typical price: $${signal.suggestedUnitPrice})` : '';
-    lines.push(`- ${signal.lineItem.normalizedDescription}${price}`);
-    lines.push(`  Reason: ${signal.reason}`);
-    lines.push(`  Confidence: ${(signal.confidence * 100).toFixed(0)}%`);
+    lines.push(`- ${signal.description} (frequency: ${signal.frequency})`);
+    lines.push(`  Recency score: ${(signal.recencyScore * 100).toFixed(0)}%`);
   }
   return createContextBlock('missing_items', 'learning', lines.join('\n'), 5);
 }
@@ -66,9 +64,9 @@ export function formatApprovedHistoryForPrompt(
   const lines = [`${results.length} similar approved estimate(s) found:`];
   for (const result of results.slice(0, 5)) {
     const m = result.metadata;
-    lines.push(`\n- Estimate ${m.estimateId} (${m.verticalSlug}/${m.categoryId})`);
-    lines.push(`  Items: ${m.lineItemCount}, Total: $${m.totalAmount.toFixed(2)}`);
-    lines.push(`  Approved by: ${m.approvedBy} on ${m.approvedAt.toISOString().split('T')[0]}`);
+    lines.push(`\n- Estimate ${m.estimateId} (${m.verticalType || 'unknown'}/${m.serviceCategory || 'unknown'})`);
+    lines.push(`  Items: ${m.lineItemCount}, Total: $${(m.totalCents / 100).toFixed(2)}`);
+    lines.push(`  Approved on ${m.approvedAt.toISOString().split('T')[0]}`);
     lines.push(`  Relevance: ${(result.relevanceScore * 100).toFixed(0)}%`);
   }
   return lines.join('\n');

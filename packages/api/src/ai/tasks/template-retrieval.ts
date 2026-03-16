@@ -1,4 +1,5 @@
-import { EstimateTemplate, EstimateTemplateRepository } from './estimate-template';
+import { EstimateTemplate, EstimateTemplateRepository, TemplateLineItem } from './estimate-template';
+import { VerticalType, ServiceCategory } from '../../shared/vertical-types';
 
 export interface TemplateMatch {
   template: EstimateTemplate;
@@ -7,8 +8,8 @@ export interface TemplateMatch {
 }
 
 export interface TemplateRetrievalOptions {
-  verticalSlug: string;
-  categoryId?: string;
+  verticalType: VerticalType;
+  serviceCategory?: ServiceCategory;
   searchTerms?: string[];
   limit?: number;
 }
@@ -19,10 +20,11 @@ export async function findMatchingTemplates(
 ): Promise<TemplateMatch[]> {
   let templates: EstimateTemplate[];
 
-  if (options.categoryId) {
-    templates = await repo.findByVerticalAndCategory(options.verticalSlug, options.categoryId);
+  if (options.serviceCategory) {
+    const exact = await repo.findByVerticalAndCategory(options.verticalType, options.serviceCategory);
+    templates = exact ? [exact] : [];
   } else {
-    templates = await repo.findActive(options.verticalSlug);
+    templates = await repo.findByVertical(options.verticalType);
   }
 
   const matches = templates.map((template) => ({
@@ -43,15 +45,14 @@ export function scoreTemplateMatch(
 ): number {
   let score = 0;
 
-  if (template.verticalSlug === options.verticalSlug) score += 0.3;
-  if (options.categoryId && template.categoryId === options.categoryId) score += 0.4;
+  if (template.verticalType === options.verticalType) score += 0.3;
+  if (options.serviceCategory && template.serviceCategory === options.serviceCategory) score += 0.4;
 
   if (options.searchTerms && options.searchTerms.length > 0) {
     const templateText = [
       template.name,
-      template.description,
-      ...template.lineItemTemplates.map((li) => li.description),
-      ...template.promptHints,
+      template.defaultNotes || '',
+      ...template.defaultLineItems.map((li: TemplateLineItem) => li.description),
     ].join(' ').toLowerCase();
 
     const matchedTerms = options.searchTerms.filter((term) =>
@@ -73,8 +74,8 @@ export async function getBestTemplate(
 
 function buildMatchReason(template: EstimateTemplate, options: TemplateRetrievalOptions): string {
   const reasons: string[] = [];
-  if (template.verticalSlug === options.verticalSlug) reasons.push('vertical match');
-  if (options.categoryId && template.categoryId === options.categoryId) reasons.push('category match');
+  if (template.verticalType === options.verticalType) reasons.push('vertical match');
+  if (options.serviceCategory && template.serviceCategory === options.serviceCategory) reasons.push('category match');
   if (options.searchTerms) reasons.push('search terms evaluated');
   return reasons.join(', ') || 'default';
 }

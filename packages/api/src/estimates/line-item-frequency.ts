@@ -42,7 +42,7 @@ export async function trackLineItemOccurrence(
   const match = existing.find((f) => f.normalizedDescription === normalized);
 
   if (match) {
-    const updated = await repo.incrementOccurrence(tenantId, match.id, lineItem.quantity, lineItem.unitPrice);
+    const updated = await repo.incrementOccurrence(tenantId, match.id, lineItem.quantity, lineItem.unitPriceCents);
     return updated!;
   }
 
@@ -55,7 +55,7 @@ export async function trackLineItemOccurrence(
     normalizedDescription: normalized,
     occurrenceCount: 1,
     avgQuantity: lineItem.quantity,
-    avgUnitPrice: lineItem.unitPrice,
+    avgUnitPrice: lineItem.unitPriceCents,
     lastSeenAt: now,
     createdAt: now,
   };

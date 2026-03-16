@@ -1,68 +1,66 @@
 import {
-  createEstimateTemplate,
-  validateEstimateTemplateInput,
+  createTemplate,
+  validateTemplateInput,
   InMemoryEstimateTemplateRepository,
 } from '../../../src/ai/tasks/estimate-template';
 
 describe('P4-004A — Vertical estimate template schema', () => {
-  it('happy path — creates template with all fields', () => {
-    const template = createEstimateTemplate({
-      tenantId: 'tenant-1',
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+  it('happy path — creates template with all fields', async () => {
+    const repo = new InMemoryEstimateTemplateRepository();
+    const template = await createTemplate({
+      packId: 'pack-1',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
       name: 'AC Repair Template',
-      description: 'Standard AC repair estimate template',
-      lineItemTemplates: [
-        { description: 'Diagnostic fee', defaultQuantity: 1, defaultUnitPrice: 89, isOptional: false, sortOrder: 1 },
-        { description: 'Capacitor replacement', defaultQuantity: 1, defaultUnitPrice: 250, isOptional: true, sortOrder: 2, category: 'parts' },
+      defaultNotes: 'Standard AC repair estimate template',
+      defaultLineItems: [
+        { description: 'Diagnostic fee', quantity: 1, unitPriceCents: 8900, taxable: true, sortOrder: 1 },
+        { description: 'Capacitor replacement', quantity: 1, unitPriceCents: 25000, taxable: true, sortOrder: 2, category: 'material' },
       ],
-      promptHints: ['Include diagnostic fee', 'Check for capacitor issues'],
-    });
+    }, repo);
 
     expect(template.id).toBeTruthy();
-    expect(template.version).toBe(1);
-    expect(template.isActive).toBe(true);
-    expect(template.lineItemTemplates).toHaveLength(2);
-    expect(template.promptHints).toHaveLength(2);
+    expect(template.defaultLineItems).toHaveLength(2);
   });
 
-  it('happy path — global template has null tenantId', () => {
-    const template = createEstimateTemplate({
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-maintenance',
+  it('happy path — template has verticalType and serviceCategory', async () => {
+    const repo = new InMemoryEstimateTemplateRepository();
+    const template = await createTemplate({
+      packId: 'pack-1',
+      verticalType: 'hvac',
+      serviceCategory: 'maintenance',
       name: 'Global Maintenance',
-      description: 'Global template',
-      lineItemTemplates: [],
-    });
+      defaultLineItems: [],
+    }, repo);
 
-    expect(template.tenantId).toBeNull();
+    expect(template.verticalType).toBe('hvac');
+    expect(template.serviceCategory).toBe('maintenance');
   });
 
   it('validation — rejects missing required fields', () => {
-    const errors = validateEstimateTemplateInput({
-      verticalSlug: '',
-      categoryId: '',
+    const errors = validateTemplateInput({
+      packId: '',
+      verticalType: '' as any,
+      serviceCategory: '' as any,
       name: '',
-      description: '',
-      lineItemTemplates: null as any,
+      defaultLineItems: [],
     });
-    expect(errors).toContain('verticalSlug is required');
-    expect(errors).toContain('categoryId is required');
+    expect(errors).toContain('packId is required');
+    expect(errors).toContain('verticalType is required');
+    expect(errors).toContain('serviceCategory is required');
     expect(errors).toContain('name is required');
-    expect(errors).toContain('description is required');
-    expect(errors).toContain('lineItemTemplates must be an array');
+    expect(errors).toContain('At least one default line item is required');
   });
 
   it('mock provider test — repository stores and retrieves', async () => {
     const repo = new InMemoryEstimateTemplateRepository();
-    const template = createEstimateTemplate({
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+    const template = await createTemplate({
+      packId: 'pack-1',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
       name: 'Test',
-      description: 'Test',
-      lineItemTemplates: [],
-    });
-    await repo.create(template);
+      defaultLineItems: [{ description: 'Item', quantity: 1, unitPriceCents: 1000, taxable: true, sortOrder: 1 }],
+    }, repo);
 
     const found = await repo.findById(template.id);
     expect(found).not.toBeNull();
@@ -71,26 +69,24 @@ describe('P4-004A — Vertical estimate template schema', () => {
 
   it('mock provider test — findByVerticalAndCategory filters correctly', async () => {
     const repo = new InMemoryEstimateTemplateRepository();
-    const t1 = createEstimateTemplate({ verticalSlug: 'hvac', categoryId: 'hvac-repair', name: 'T1', description: 'd', lineItemTemplates: [] });
-    const t2 = createEstimateTemplate({ verticalSlug: 'hvac', categoryId: 'hvac-install', name: 'T2', description: 'd', lineItemTemplates: [] });
-    const t3 = createEstimateTemplate({ verticalSlug: 'plumbing', categoryId: 'plumb-repair', name: 'T3', description: 'd', lineItemTemplates: [] });
-    await repo.create(t1);
-    await repo.create(t2);
-    await repo.create(t3);
+    await createTemplate({ packId: 'p1', verticalType: 'hvac', serviceCategory: 'repair', name: 'T1', defaultLineItems: [{ description: 'a', quantity: 1, unitPriceCents: 100, taxable: true, sortOrder: 1 }] }, repo);
+    await createTemplate({ packId: 'p1', verticalType: 'hvac', serviceCategory: 'install', name: 'T2', defaultLineItems: [{ description: 'b', quantity: 1, unitPriceCents: 100, taxable: true, sortOrder: 1 }] }, repo);
+    await createTemplate({ packId: 'p2', verticalType: 'plumbing', serviceCategory: 'repair', name: 'T3', defaultLineItems: [{ description: 'c', quantity: 1, unitPriceCents: 100, taxable: true, sortOrder: 1 }] }, repo);
 
-    const results = await repo.findByVerticalAndCategory('hvac', 'hvac-repair');
-    expect(results).toHaveLength(1);
-    expect(results[0].name).toBe('T1');
+    const result = await repo.findByVerticalAndCategory('hvac', 'repair');
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe('T1');
   });
 
-  it('malformed AI output handled gracefully — defaults promptHints to empty', () => {
-    const template = createEstimateTemplate({
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+  it('malformed AI output handled gracefully — defaults empty arrays', async () => {
+    const repo = new InMemoryEstimateTemplateRepository();
+    const template = await createTemplate({
+      packId: 'pack-1',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
       name: 'Test',
-      description: 'Test',
-      lineItemTemplates: [],
-    });
-    expect(template.promptHints).toEqual([]);
+      defaultLineItems: [{ description: 'min', quantity: 1, unitPriceCents: 100, taxable: true, sortOrder: 1 }],
+    }, repo);
+    expect(template.defaultLineItems).toHaveLength(1);
   });
 });

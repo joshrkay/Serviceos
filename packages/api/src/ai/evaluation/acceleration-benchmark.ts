@@ -33,7 +33,7 @@ export function calculateAccelerationMetrics(
   estimates: Estimate[],
   qualityMetrics: VerticalQualityMetric[]
 ): AccelerationMetrics {
-  const approved = estimates.filter((e) => e.status === 'approved');
+  const approved = estimates.filter((e) => e.status === 'accepted');
   const approvalRate = calculateApprovalRate(estimates);
   const avgEditDistance = calculateAvgEditDistance(estimates);
   const qualityScoreAvg = qualityMetrics.length > 0
@@ -71,7 +71,7 @@ export function createAccelerationBenchmark(
 
 export function calculateApprovalRate(estimates: Estimate[]): number {
   if (estimates.length === 0) return 0;
-  const approved = estimates.filter((e) => e.status === 'approved').length;
+  const approved = estimates.filter((e) => e.status === 'accepted').length;
   return approved / estimates.length;
 }
 
@@ -79,11 +79,10 @@ export function calculateAvgEditDistance(estimates: Estimate[]): number {
   if (estimates.length === 0) return 0;
   // Approximation: estimates that went from ai_generated and got approved
   // have lower edit distance than those that were rejected
-  const aiGenerated = estimates.filter((e) => e.source === 'ai_generated');
-  if (aiGenerated.length === 0) return 0;
-  const approved = aiGenerated.filter((e) => e.status === 'approved').length;
+  // Approximation based on approval rate
+  const accepted = estimates.filter((e) => e.status === 'accepted').length;
   // Lower edit distance correlates with higher approval rate
-  return 1 - (approved / aiGenerated.length);
+  return 1 - (accepted / estimates.length);
 }
 
 export function calculateQualityTrend(metrics: VerticalQualityMetric[]): number {

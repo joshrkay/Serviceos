@@ -6,19 +6,30 @@ import {
   calculateQualityTrend,
   InMemoryAccelerationBenchmarkRepository,
 } from '../../../src/ai/evaluation/acceleration-benchmark';
-import { createEstimate, approveEstimate } from '../../../src/estimates/estimate';
+import { Estimate, InMemoryEstimateRepository, createEstimate } from '../../../src/estimates/estimate';
+import { buildLineItem } from '../../../src/shared/billing-engine';
 import { VerticalQualityMetric } from '../../../src/ai/evaluation/vertical-quality-metrics';
 
 describe('P4-012 — Estimate-acceleration beta benchmark', () => {
-  function makeEstimates() {
-    const e1 = approveEstimate(createEstimate({ tenantId: 't', lineItems: [], snapshot: {}, source: 'ai_generated', createdBy: 'u' }), 'mgr');
-    const e2 = createEstimate({ tenantId: 't', lineItems: [], snapshot: {}, source: 'ai_generated', createdBy: 'u' });
-    const e3 = approveEstimate(createEstimate({ tenantId: 't', lineItems: [], snapshot: {}, source: 'manual', createdBy: 'u' }), 'mgr');
-    return [e1, e2, e3];
+  async function makeEstimates(): Promise<Estimate[]> {
+    const repo = new InMemoryEstimateRepository();
+    const lineItems = [buildLineItem('li-1', 'Test item', 1, 10000, 1, true)];
+    const e1 = await createEstimate({ tenantId: 't', jobId: 'j1', estimateNumber: 'E-001', lineItems, createdBy: 'u' }, repo);
+    const e2 = await createEstimate({ tenantId: 't', jobId: 'j2', estimateNumber: 'E-002', lineItems, createdBy: 'u' }, repo);
+    const e3 = await createEstimate({ tenantId: 't', jobId: 'j3', estimateNumber: 'E-003', lineItems, createdBy: 'u' }, repo);
+    // Transition e1 and e3 to accepted
+    await repo.update('t', e1.id, { status: 'ready_for_review' });
+    await repo.update('t', e1.id, { status: 'sent' });
+    await repo.update('t', e1.id, { status: 'accepted' });
+    await repo.update('t', e3.id, { status: 'ready_for_review' });
+    await repo.update('t', e3.id, { status: 'sent' });
+    await repo.update('t', e3.id, { status: 'accepted' });
+    const all = await repo.findByTenant('t');
+    return all;
   }
 
-  it('happy path — calculates acceleration metrics', () => {
-    const estimates = makeEstimates();
+  it('happy path — calculates acceleration metrics', async () => {
+    const estimates = await makeEstimates();
     const metrics = calculateAccelerationMetrics(estimates, []);
     expect(metrics.estimatesGenerated).toBe(3);
     expect(metrics.estimatesApproved).toBe(2);
@@ -40,10 +51,10 @@ describe('P4-012 — Estimate-acceleration beta benchmark', () => {
 
   it('mock provider test — calculateQualityTrend detects improvement', () => {
     const metrics: VerticalQualityMetric[] = [
-      { id: '1', tenantId: 't', estimateId: 'e1', metricType: 'q', score: 0.5, evaluatedAt: new Date('2024-01-01'), verticalSlug: 'hvac' },
-      { id: '2', tenantId: 't', estimateId: 'e2', metricType: 'q', score: 0.6, evaluatedAt: new Date('2024-01-15'), verticalSlug: 'hvac' },
-      { id: '3', tenantId: 't', estimateId: 'e3', metricType: 'q', score: 0.8, evaluatedAt: new Date('2024-02-01'), verticalSlug: 'hvac' },
-      { id: '4', tenantId: 't', estimateId: 'e4', metricType: 'q', score: 0.9, evaluatedAt: new Date('2024-02-15'), verticalSlug: 'hvac' },
+      { id: '1', tenantId: 't', estimateId: 'e1', metricType: 'q', score: 0.5, evaluatedAt: new Date('2024-01-01'), verticalType: 'hvac' },
+      { id: '2', tenantId: 't', estimateId: 'e2', metricType: 'q', score: 0.6, evaluatedAt: new Date('2024-01-15'), verticalType: 'hvac' },
+      { id: '3', tenantId: 't', estimateId: 'e3', metricType: 'q', score: 0.8, evaluatedAt: new Date('2024-02-01'), verticalType: 'hvac' },
+      { id: '4', tenantId: 't', estimateId: 'e4', metricType: 'q', score: 0.9, evaluatedAt: new Date('2024-02-15'), verticalType: 'hvac' },
     ];
     const trend = calculateQualityTrend(metrics);
     expect(trend).toBeGreaterThan(0);

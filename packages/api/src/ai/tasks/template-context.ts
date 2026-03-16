@@ -1,6 +1,7 @@
 import { ContextBlock, createContextBlock } from '../context-assembly';
-import { EstimateTemplate } from './estimate-template';
-import { ServiceTaxonomy, ServiceCategory, findCategoryById, getCategoryPath } from '../../verticals/service-taxonomy';
+import { EstimateTemplate, EstimateTemplateRepository, TemplateLineItem } from './estimate-template';
+import { VerticalType, ServiceCategory } from '../../shared/vertical-types';
+import { ServiceTaxonomy, ServiceCategory as TaxonomyCategory, findCategoryById, getCategoryPath } from '../../verticals/service-taxonomy';
 
 export function buildCategoryContextBlock(taxonomy: ServiceTaxonomy, categoryId: string): ContextBlock {
   const path = getCategoryPath(taxonomy, categoryId);
@@ -10,26 +11,26 @@ export function buildCategoryContextBlock(taxonomy: ServiceTaxonomy, categoryId:
 
 export function buildTemplateContextBlock(template: EstimateTemplate): ContextBlock {
   const content = formatTemplateForPrompt(template);
-  return createContextBlock('estimate_template', template.verticalSlug, content, 9);
+  return createContextBlock('estimate_template', template.verticalType, content, 9);
 }
 
 export async function assembleTemplateContext(
   tenantId: string,
-  verticalSlug: string,
-  categoryId: string,
-  templateRepo: { findByVerticalAndCategory(verticalSlug: string, categoryId: string): Promise<EstimateTemplate[]> },
+  verticalType: VerticalType,
+  serviceCategory: ServiceCategory,
+  templateRepo: EstimateTemplateRepository,
   taxonomyRepo: { findLatestByVertical(verticalSlug: string): Promise<ServiceTaxonomy | null> }
 ): Promise<ContextBlock[]> {
   const blocks: ContextBlock[] = [];
 
-  const taxonomy = await taxonomyRepo.findLatestByVertical(verticalSlug);
+  const taxonomy = await taxonomyRepo.findLatestByVertical(verticalType);
   if (taxonomy) {
-    blocks.push(buildCategoryContextBlock(taxonomy, categoryId));
+    blocks.push(buildCategoryContextBlock(taxonomy, serviceCategory));
   }
 
-  const templates = await templateRepo.findByVerticalAndCategory(verticalSlug, categoryId);
-  if (templates.length > 0) {
-    blocks.push(buildTemplateContextBlock(templates[0]));
+  const template = await templateRepo.findByVerticalAndCategory(verticalType, serviceCategory);
+  if (template) {
+    blocks.push(buildTemplateContextBlock(template));
   }
 
   return blocks;
@@ -38,30 +39,21 @@ export async function assembleTemplateContext(
 export function formatTemplateForPrompt(template: EstimateTemplate): string {
   const lines = [
     `Template: ${template.name}`,
-    `Description: ${template.description}`,
-    `Category: ${template.categoryId}`,
+    `Description: ${template.defaultNotes || template.name}`,
+    `Category: ${template.serviceCategory}`,
     '',
     'Line item structure:',
   ];
 
-  for (const li of template.lineItemTemplates) {
-    const optional = li.isOptional ? ' (optional)' : '';
-    const price = li.defaultUnitPrice ? ` @ $${li.defaultUnitPrice}` : '';
-    lines.push(`  ${li.sortOrder}. ${li.description}${price}${optional}`);
-  }
-
-  if (template.promptHints.length > 0) {
-    lines.push('');
-    lines.push('Hints:');
-    for (const hint of template.promptHints) {
-      lines.push(`  - ${hint}`);
-    }
+  for (const li of template.defaultLineItems) {
+    const price = li.unitPriceCents ? ` @ $${(li.unitPriceCents / 100).toFixed(2)}` : '';
+    lines.push(`  ${li.sortOrder}. ${li.description}${price}`);
   }
 
   return lines.join('\n');
 }
 
-export function formatCategoryPathForPrompt(path: ServiceCategory[]): string {
+export function formatCategoryPathForPrompt(path: TaxonomyCategory[]): string {
   if (path.length === 0) return 'Unknown category';
   return `Service category: ${path.map((c) => c.name).join(' > ')}\nDescription: ${path[path.length - 1].description}`;
 }

@@ -1,5 +1,6 @@
 import { evaluateVerticalQuality, evaluateTerminologyAccuracy, evaluateCategoryAlignment, calculateWeightedScore } from '../../../src/ai/evaluation/vertical-quality-metrics';
-import { createEstimate } from '../../../src/estimates/estimate';
+import { Estimate, InMemoryEstimateRepository, createEstimate } from '../../../src/estimates/estimate';
+import { buildLineItem } from '../../../src/shared/billing-engine';
 import { createVerticalPack } from '../../../src/verticals/vertical-pack';
 import { createTerminologyMap } from '../../../src/verticals/terminology-map';
 import { createServiceTaxonomy } from '../../../src/verticals/service-taxonomy';
@@ -15,36 +16,37 @@ describe('P4-011A — Vertical-aware estimate quality metric model', () => {
     return { pack, terminology, taxonomy };
   }
 
-  it('happy path — evaluates quality with all dimensions', () => {
+  it('happy path — evaluates quality with all dimensions', async () => {
     const loaded = makeLoadedPack();
-    const estimate = createEstimate({
+    const repo = new InMemoryEstimateRepository();
+    const estimate = await createEstimate({
       tenantId: 'tenant-1',
-      categoryId: 'hvac-repair',
+      jobId: 'j1',
+      estimateNumber: 'E-001',
       lineItems: [
-        { id: '1', description: 'Capacitor replacement', quantity: 1, unitPrice: 250, total: 250, category: 'parts' },
-        { id: '2', description: 'Diagnostic fee', quantity: 1, unitPrice: 89, total: 89, category: 'labor' },
+        buildLineItem('1', 'Capacitor replacement', 1, 25000, 1, true, 'material'),
+        buildLineItem('2', 'Diagnostic fee', 1, 8900, 2, true, 'labor'),
       ],
-      snapshot: {},
-      source: 'ai_generated',
       createdBy: 'user-1',
-    });
+    }, repo);
 
     const metric = evaluateVerticalQuality(estimate, loaded);
-    expect(metric.verticalSlug).toBe('hvac');
+    expect(metric.verticalType).toBe('hvac');
     expect(metric.score).toBeGreaterThanOrEqual(0);
     expect(metric.score).toBeLessThanOrEqual(1);
     expect(metric.details).toHaveProperty('dimensions');
   });
 
-  it('happy path — evaluateTerminologyAccuracy scores based on term matches', () => {
+  it('happy path — evaluateTerminologyAccuracy scores based on term matches', async () => {
     const loaded = makeLoadedPack();
-    const estimate = createEstimate({
+    const repo = new InMemoryEstimateRepository();
+    const estimate = await createEstimate({
       tenantId: 't',
-      lineItems: [{ id: '1', description: 'SEER rated Condenser unit', quantity: 1, unitPrice: 1000, total: 1000 }],
-      snapshot: {},
-      source: 'ai_generated',
+      jobId: 'j1',
+      estimateNumber: 'E-001',
+      lineItems: [buildLineItem('1', 'SEER rated Condenser unit', 1, 100000, 1, true)],
       createdBy: 'u',
-    });
+    }, repo);
     const score = evaluateTerminologyAccuracy(estimate, loaded.terminology);
     expect(score).toBeGreaterThan(0);
   });
@@ -57,22 +59,32 @@ describe('P4-011A — Vertical-aware estimate quality metric model', () => {
     expect(score).toBe(0.75);
   });
 
-  it('mock provider test — evaluateCategoryAlignment scores based on tags', () => {
+  it('mock provider test — evaluateCategoryAlignment scores based on tags', async () => {
     const loaded = makeLoadedPack();
-    const estimate = createEstimate({
+    const repo = new InMemoryEstimateRepository();
+    const estimate = await createEstimate({
       tenantId: 't',
-      lineItems: [{ id: '1', description: 'Repair electrical wiring', quantity: 1, unitPrice: 200, total: 200 }],
-      snapshot: {},
-      source: 'ai_generated',
+      jobId: 'j1',
+      estimateNumber: 'E-001',
+      lineItems: [buildLineItem('1', 'Repair electrical wiring', 1, 20000, 1, true)],
       createdBy: 'u',
-    });
+    }, repo);
     const score = evaluateCategoryAlignment(estimate, loaded.taxonomy, 'hvac-repair-electrical');
     expect(score).toBeGreaterThanOrEqual(0);
   });
 
-  it('malformed AI output handled gracefully — empty line items score 0', () => {
+  it('malformed AI output handled gracefully — empty line items score 0', async () => {
     const loaded = makeLoadedPack();
-    const estimate = createEstimate({ tenantId: 't', lineItems: [], snapshot: {}, source: 'ai_generated', createdBy: 'u' });
+    const repo = new InMemoryEstimateRepository();
+    const estimate = await createEstimate({
+      tenantId: 't',
+      jobId: 'j1',
+      estimateNumber: 'E-001',
+      lineItems: [buildLineItem('1', 'placeholder', 1, 100, 1, true)],
+      createdBy: 'u',
+    }, repo);
+    // Override lineItems to empty for this test
+    (estimate as any).lineItems = [];
     const metric = evaluateVerticalQuality(estimate, loaded);
     expect(metric.score).toBe(0);
   });

@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid';
 import { Estimate } from '../../estimates/estimate';
 import { EstimateQualityMetric } from '../../estimates/estimate-quality';
 import { LoadedVerticalPack } from '../../verticals/vertical-loader';
@@ -5,8 +6,8 @@ import { TerminologyMap, lookupTerm } from '../../verticals/terminology-map';
 import { ServiceTaxonomy, findCategoryById } from '../../verticals/service-taxonomy';
 
 export interface VerticalQualityMetric extends EstimateQualityMetric {
-  verticalSlug: string;
-  categoryId?: string;
+  verticalType: string;
+  serviceCategory?: string;
 }
 
 export interface VerticalQualityDimension {
@@ -18,7 +19,7 @@ export interface VerticalQualityDimension {
 export function evaluateVerticalQuality(estimate: Estimate, pack: LoadedVerticalPack): VerticalQualityMetric {
   const dimensions = [
     { dimension: 'terminology_accuracy', score: evaluateTerminologyAccuracy(estimate, pack.terminology), weight: 0.4 },
-    { dimension: 'category_alignment', score: evaluateCategoryAlignment(estimate, pack.taxonomy, estimate.categoryId || ''), weight: 0.3 },
+    { dimension: 'category_alignment', score: evaluateCategoryAlignment(estimate, pack.taxonomy, ''), weight: 0.3 },
     { dimension: 'completeness', score: evaluateCompleteness(estimate), weight: 0.3 },
   ];
 
@@ -34,8 +35,7 @@ export function evaluateVerticalQuality(estimate: Estimate, pack: LoadedVertical
       dimensions: dimensions.map((d) => ({ dimension: d.dimension, score: d.score, weight: d.weight })),
     },
     evaluatedAt: new Date(),
-    verticalSlug: pack.pack.slug,
-    categoryId: estimate.categoryId,
+    verticalType: pack.pack.slug,
   };
 }
 
@@ -95,8 +95,8 @@ function evaluateCompleteness(estimate: Estimate): number {
     let itemScore = 0;
     if (li.description.length > 0) itemScore += 0.4;
     if (li.quantity > 0) itemScore += 0.2;
-    if (li.unitPrice > 0) itemScore += 0.2;
-    if (li.total > 0) itemScore += 0.2;
+    if (li.unitPriceCents > 0) itemScore += 0.2;
+    if (li.totalCents > 0) itemScore += 0.2;
     score += itemScore;
   }
 

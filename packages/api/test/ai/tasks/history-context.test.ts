@@ -4,8 +4,9 @@ import { ApprovedEstimateLookupResult } from '../../../src/estimates/approved-es
 describe('P4-009C — History- and signal-aware context assembly', () => {
   const mockLookupResult: ApprovedEstimateLookupResult = {
     metadata: {
-      id: 'm1', tenantId: 't1', estimateId: 'est-1', verticalSlug: 'hvac', categoryId: 'hvac-repair',
-      approvedAt: new Date(), approvedBy: 'mgr', lineItemCount: 3, totalAmount: 450, tags: ['parts'], searchableContent: 'test',
+      id: 'm1', tenantId: 't1', estimateId: 'est-1', verticalType: 'hvac', serviceCategory: 'repair',
+      approvalOutcome: 'approved', approvedAt: new Date(), lineItemCount: 3, totalCents: 45000,
+      lineItemSummary: ['Diagnostic fee', 'Capacitor replacement', 'Labor'],
     },
     relevanceScore: 0.85,
   };
@@ -33,15 +34,13 @@ describe('P4-009C — History- and signal-aware context assembly', () => {
 
   it('happy path — builds missing item context block', () => {
     const block = buildMissingItemContextBlock([{
-      lineItem: {
-        id: '1', tenantId: 't', verticalSlug: 'hvac', normalizedDescription: 'capacitor',
-        occurrenceCount: 8, avgQuantity: 1, avgUnitPrice: 250, lastSeenAt: new Date(), createdAt: new Date(),
-      },
-      reason: 'Frequently included', confidence: 0.8, suggestedUnitPrice: 250,
+      id: 'sig-1', tenantId: 't', verticalType: 'hvac', serviceCategory: 'repair',
+      description: 'Capacitor', normalizedDescription: 'capacitor',
+      frequency: 8, recencyScore: 0.8, lastSeenAt: new Date(),
     }]);
     expect(block.type).toBe('missing_items');
-    expect(block.content).toContain('capacitor');
-    expect(block.content).toContain('$250');
+    expect(block.content).toContain('Capacitor');
+    expect(block.content).toContain('frequency: 8');
   });
 
   it('validation — assembleHistoryContext returns only non-empty blocks', async () => {

@@ -5,6 +5,7 @@ import {
   validateWordingPreferenceInput,
   InMemoryWordingPreferenceRepository,
 } from '../../src/estimates/wording-preference';
+import { buildLineItem } from '../../src/shared/billing-engine';
 
 describe('P4-007A — Tenant wording preference capture', () => {
   it('happy path — creates wording preference', () => {
@@ -30,8 +31,8 @@ describe('P4-007A — Tenant wording preference capture', () => {
   });
 
   it('happy path — learnWordingFromEdits detects changes', () => {
-    const original = [{ id: '1', description: 'Fix AC unit', quantity: 1, unitPrice: 100, total: 100 }];
-    const edited = [{ id: '1', description: 'Repair air conditioning system', quantity: 1, unitPrice: 100, total: 100 }];
+    const original = [buildLineItem('1', 'Fix AC unit', 1, 10000, 1, true)];
+    const edited = [buildLineItem('1', 'Repair air conditioning system', 1, 10000, 1, true)];
     const prefs = learnWordingFromEdits(original, edited, 'tenant-1', 'hvac');
     expect(prefs).toHaveLength(1);
     expect(prefs[0].originalPhrase).toBe('Fix AC unit');

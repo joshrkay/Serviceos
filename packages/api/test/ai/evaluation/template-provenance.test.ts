@@ -4,7 +4,7 @@ import {
   validateTemplateProvenanceInput,
   InMemoryTemplateProvenanceRepository,
 } from '../../../src/ai/evaluation/template-provenance';
-import { createEstimateTemplate } from '../../../src/ai/tasks/estimate-template';
+import { createTemplate, InMemoryEstimateTemplateRepository } from '../../../src/ai/tasks/estimate-template';
 
 describe('P4-004C — Template provenance tagging', () => {
   it('happy path — creates provenance tag', () => {
@@ -12,9 +12,8 @@ describe('P4-004C — Template provenance tagging', () => {
       tenantId: 'tenant-1',
       estimateId: 'est-1',
       templateId: 'tmpl-1',
-      templateVersion: 1,
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
     });
 
     expect(tag.id).toBeTruthy();
@@ -22,18 +21,18 @@ describe('P4-004C — Template provenance tagging', () => {
     expect(tag.taggedAt).toBeInstanceOf(Date);
   });
 
-  it('happy path — tagEstimateWithTemplate creates tag from template', () => {
-    const template = createEstimateTemplate({
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+  it('happy path — tagEstimateWithTemplate creates tag from template', async () => {
+    const repo = new InMemoryEstimateTemplateRepository();
+    const template = await createTemplate({
+      packId: 'pack-1',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
       name: 'Test',
-      description: 'Test',
-      lineItemTemplates: [],
-    });
+      defaultLineItems: [],
+    }, repo);
     const tag = tagEstimateWithTemplate('est-1', template, 'tenant-1');
     expect(tag.templateId).toBe(template.id);
-    expect(tag.verticalSlug).toBe('hvac');
-    expect(tag.templateVersion).toBe(1);
+    expect(tag.verticalType).toBe('hvac');
   });
 
   it('validation — rejects missing required fields', () => {
@@ -41,15 +40,14 @@ describe('P4-004C — Template provenance tagging', () => {
       tenantId: '',
       estimateId: '',
       templateId: '',
-      templateVersion: 1,
-      verticalSlug: '',
-      categoryId: '',
+      verticalType: '',
+      serviceCategory: '',
     });
     expect(errors).toContain('tenantId is required');
     expect(errors).toContain('estimateId is required');
     expect(errors).toContain('templateId is required');
-    expect(errors).toContain('verticalSlug is required');
-    expect(errors).toContain('categoryId is required');
+    expect(errors).toContain('verticalType is required');
+    expect(errors).toContain('serviceCategory is required');
   });
 
   it('mock provider test — repository stores and retrieves by estimate', async () => {
@@ -58,9 +56,8 @@ describe('P4-004C — Template provenance tagging', () => {
       tenantId: 'tenant-1',
       estimateId: 'est-1',
       templateId: 'tmpl-1',
-      templateVersion: 1,
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
     });
     await repo.create(tag);
 
@@ -74,9 +71,8 @@ describe('P4-004C — Template provenance tagging', () => {
       tenantId: 'tenant-1',
       estimateId: 'est-1',
       templateId: 'tmpl-1',
-      templateVersion: 1,
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
     });
     await repo.create(tag);
 
@@ -84,16 +80,17 @@ describe('P4-004C — Template provenance tagging', () => {
     expect(found).toHaveLength(0);
   });
 
-  it('malformed AI output handled gracefully — handles template with no metadata', () => {
-    const template = createEstimateTemplate({
-      verticalSlug: 'hvac',
-      categoryId: 'hvac-repair',
+  it('malformed AI output handled gracefully — handles template with no metadata', async () => {
+    const repo = new InMemoryEstimateTemplateRepository();
+    const template = await createTemplate({
+      packId: 'pack-1',
+      verticalType: 'hvac',
+      serviceCategory: 'repair',
       name: 'Minimal',
-      description: 'Minimal template',
-      lineItemTemplates: [],
-    });
+      defaultLineItems: [],
+    }, repo);
     const tag = tagEstimateWithTemplate('est-1', template, 'tenant-1');
     expect(tag.templateId).toBeTruthy();
-    expect(tag.categoryId).toBe('hvac-repair');
+    expect(tag.serviceCategory).toBe('repair');
   });
 });

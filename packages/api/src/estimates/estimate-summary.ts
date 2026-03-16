@@ -33,7 +33,7 @@ export function createEstimateSummary(
   categoryId: string
 ): EstimateSummarySnapshot {
   const lineItemSummaries = summarizeLineItems(estimate.lineItems);
-  const totalAmount = estimate.lineItems.reduce((sum, li) => sum + li.total, 0);
+  const totalAmount = estimate.lineItems.reduce((sum, li) => sum + li.totalCents, 0);
 
   return {
     id: uuidv4(),
@@ -53,7 +53,7 @@ export function summarizeLineItems(lineItems: LineItem[]): LineItemSummary[] {
   return lineItems.map((li) => ({
     description: li.description,
     quantity: li.quantity,
-    unitPrice: li.unitPrice,
+    unitPrice: li.unitPriceCents,
     category: li.category,
   }));
 }

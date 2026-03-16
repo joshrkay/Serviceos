@@ -6,9 +6,9 @@ export interface TemplateProvenanceTag {
   tenantId: string;
   estimateId: string;
   templateId: string;
-  templateVersion: number;
-  verticalSlug: string;
-  categoryId: string;
+  templateVersion?: number;
+  verticalType: string;
+  serviceCategory: string;
   taggedAt: Date;
 }
 
@@ -16,9 +16,9 @@ export interface CreateTemplateProvenanceInput {
   tenantId: string;
   estimateId: string;
   templateId: string;
-  templateVersion: number;
-  verticalSlug: string;
-  categoryId: string;
+  templateVersion?: number;
+  verticalType: string;
+  serviceCategory: string;
 }
 
 export interface TemplateProvenanceRepository {
@@ -32,8 +32,8 @@ export function validateTemplateProvenanceInput(input: CreateTemplateProvenanceI
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.estimateId) errors.push('estimateId is required');
   if (!input.templateId) errors.push('templateId is required');
-  if (!input.verticalSlug) errors.push('verticalSlug is required');
-  if (!input.categoryId) errors.push('categoryId is required');
+  if (!input.verticalType) errors.push('verticalType is required');
+  if (!input.serviceCategory) errors.push('serviceCategory is required');
   return errors;
 }
 
@@ -44,8 +44,8 @@ export function createTemplateProvenanceTag(input: CreateTemplateProvenanceInput
     estimateId: input.estimateId,
     templateId: input.templateId,
     templateVersion: input.templateVersion,
-    verticalSlug: input.verticalSlug,
-    categoryId: input.categoryId,
+    verticalType: input.verticalType,
+    serviceCategory: input.serviceCategory,
     taggedAt: new Date(),
   };
 }
@@ -59,9 +59,8 @@ export function tagEstimateWithTemplate(
     tenantId,
     estimateId,
     templateId: template.id,
-    templateVersion: template.version,
-    verticalSlug: template.verticalSlug,
-    categoryId: template.categoryId,
+    verticalType: template.verticalType,
+    serviceCategory: template.serviceCategory,
   });
 }
 
