@@ -44,7 +44,7 @@ export const createConversationSchema = z.object({
 
 export const createMessageSchema = z.object({
   conversationId: z.string().uuid(),
-  messageType: z.enum(['text', 'transcript', 'system_event', 'note']),
+  messageType: z.enum(['text', 'transcript', 'system_event', 'note', 'clarification', 'proposal']),
   content: z.string().optional(),
   fileId: z.string().uuid().optional(),
   source: z.string().optional(),
@@ -89,100 +89,169 @@ export const createDiffAnalysisSchema = z.object({
   toRevisionId: z.string().uuid(),
 });
 
-// Vertical Packs (P4-001A)
-export const verticalPackSchema = z.object({
-  slug: z.string().min(1),
-  name: z.string().min(1),
-  version: z.string().min(1),
-  description: z.string().min(1),
-  terminologyMapId: z.string().min(1),
-  taxonomyId: z.string().min(1),
-  templateIds: z.array(z.string()).optional(),
-  isActive: z.boolean().optional(),
-  metadata: z.record(z.unknown()).optional(),
+export const triggerEvaluationSchema = z.object({
+  workflowType: z.string().min(1),
+  hasTranscript: z.boolean(),
+  hasExistingProposal: z.boolean(),
+  userRole: z.string().min(1),
 });
 
-export const createVerticalPackSchema = z.object({
-  slug: z.string().min(1),
-  name: z.string().min(1),
-  version: z.string().min(1),
-  description: z.string().min(1),
-  terminologyMapId: z.string().min(1),
-  taxonomyId: z.string().min(1),
-  templateIds: z.array(z.string()).optional(),
-  metadata: z.record(z.unknown()).optional(),
+export const estimateLinkInputSchema = z.object({
+  conversationId: z.string().uuid(),
+  messageId: z.string().uuid().optional(),
+  proposalRevisionId: z.string().uuid(),
+  estimateId: z.string().uuid(),
 });
 
-// Terminology (P4-002A/003A)
-export const terminologyEntrySchema = z.object({
-  term: z.string().min(1),
-  aliases: z.array(z.string()),
-  definition: z.string().min(1),
-  category: z.string().optional(),
-});
 
-export const createTerminologyMapSchema = z.object({
-  verticalSlug: z.string().min(1),
-  version: z.string().min(1),
-  entries: z.array(terminologyEntrySchema),
-});
-
-// Taxonomy (P4-002B/003B)
-export const serviceCategorySchema = z.object({
+const lineItemSchema = z.object({
   id: z.string().min(1),
-  name: z.string().min(1),
-  parentId: z.string().optional(),
   description: z.string().min(1),
-  tags: z.array(z.string()),
+  category: z.enum(['labor', 'material', 'equipment', 'other']).optional(),
+  quantity: z.number().nonnegative(),
+  unitPriceCents: z.number().int().nonnegative(),
+  totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
+  taxable: z.boolean(),
 });
 
-export const createServiceTaxonomySchema = z.object({
-  verticalSlug: z.string().min(1),
-  version: z.string().min(1),
-  categories: z.array(serviceCategorySchema),
+export const createCustomerSchema = z.object({
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  companyName: z.string().min(1).optional(),
+  primaryPhone: z.string().min(1).optional(),
+  secondaryPhone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+  preferredChannel: z.enum(['phone', 'email', 'sms', 'none']).optional(),
+  smsConsent: z.boolean().optional(),
+  communicationNotes: z.string().optional(),
 });
 
-// Vertical Activation (P4-001B)
-export const createVerticalActivationSchema = z.object({
-  verticalPackId: z.string().min(1),
-  verticalSlug: z.string().min(1),
-  config: z.record(z.unknown()).optional(),
+export const createServiceLocationSchema = z.object({
+  customerId: z.string().min(1),
+  label: z.string().optional(),
+  street1: z.string().min(1),
+  street2: z.string().optional(),
+  city: z.string().min(1),
+  state: z.string().min(1),
+  postalCode: z.string().min(1),
+  country: z.string().min(1).optional(),
+  latitude: z.number().optional(),
+  longitude: z.number().optional(),
+  accessNotes: z.string().optional(),
+  isPrimary: z.boolean().optional(),
 });
 
-// Estimate Templates (P4-004A)
-export const lineItemTemplateSchema = z.object({
+export const createJobSchema = z.object({
+  customerId: z.string().min(1),
+  locationId: z.string().min(1),
+  summary: z.string().min(1),
+  problemDescription: z.string().optional(),
+  priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+});
+
+export const createEstimateSchema = z.object({
+  jobId: z.string().min(1),
+  estimateNumber: z.string().min(1),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  validUntil: z.string().datetime().optional(),
+  customerMessage: z.string().optional(),
+  internalNotes: z.string().optional(),
+});
+
+export const createInvoiceSchema = z.object({
+  jobId: z.string().min(1),
+  estimateId: z.string().optional(),
+  invoiceNumber: z.string().min(1),
+  lineItems: z.array(lineItemSchema).min(1),
+  discountCents: z.number().int().nonnegative().optional(),
+  taxRateBps: z.number().int().min(0).max(10000).optional(),
+  customerMessage: z.string().optional(),
+});
+
+export const recordPaymentSchema = z.object({
+  invoiceId: z.string().min(1),
+  amountCents: z.number().int().positive(),
+  method: z.enum(['cash', 'check', 'credit_card', 'bank_transfer', 'other']),
+  providerReference: z.string().optional(),
+  note: z.string().optional(),
+});
+
+export const createAppointmentSchema = z.object({
+  jobId: z.string().min(1),
+  scheduledStart: z.string().datetime(),
+  scheduledEnd: z.string().datetime(),
+  arrivalWindowStart: z.string().datetime().optional(),
+  arrivalWindowEnd: z.string().datetime().optional(),
+  timezone: z.string().min(1),
+  notes: z.string().optional(),
+});
+
+export const createNoteSchema = z.object({
+  entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
+  entityId: z.string().min(1),
+  content: z.string().min(1),
+  isPinned: z.boolean().optional(),
+});
+
+export const updateSettingsSchema = z.object({
+  businessName: z.string().min(1).optional(),
+  businessPhone: z.string().optional(),
+  businessEmail: z.string().email().optional(),
+  timezone: z.string().optional(),
+  estimatePrefix: z.string().min(1).optional(),
+  invoicePrefix: z.string().min(1).optional(),
+  defaultPaymentTermDays: z.number().int().nonnegative().optional(),
+  terminologyPreferences: z.record(z.string()).optional(),
+});
+
+export const conversationAccessSchema = z.object({
+  userId: z.string().min(1),
+  role: z.enum(['owner', 'dispatcher', 'technician']),
+  tenantId: z.string().min(1),
+});
+
+// Phase 4 — Vertical Packs + Estimate Intelligence
+
+export const verticalTypeSchema = z.enum(['hvac', 'plumbing']);
+
+const lineItemTemplateSchema = z.object({
   description: z.string().min(1),
-  defaultQuantity: z.number().optional(),
-  defaultUnitPrice: z.number().optional(),
-  category: z.string().optional(),
+  category: z.enum(['labor', 'material', 'equipment', 'other']),
+  defaultQuantity: z.number().min(0),
+  defaultUnitPriceCents: z.number().int().min(0),
+  taxable: z.boolean(),
+  sortOrder: z.number().int().min(0),
   isOptional: z.boolean(),
-  sortOrder: z.number().int(),
 });
 
-export const createEstimateTemplateSchema = z.object({
-  verticalSlug: z.string().min(1),
+export const createTemplateSchema = z.object({
+  verticalType: verticalTypeSchema,
   categoryId: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().min(1),
-  lineItemTemplates: z.array(lineItemTemplateSchema),
-  promptHints: z.array(z.string()).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  name: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  lineItemTemplates: z.array(lineItemTemplateSchema).min(1),
+  defaultDiscountCents: z.number().int().min(0).optional(),
+  defaultTaxRateBps: z.number().int().min(0).max(10000).optional(),
+  defaultCustomerMessage: z.string().max(2000).optional(),
 });
 
-// Wording Preferences (P4-007A)
+export const createBundleSchema = z.object({
+  verticalType: verticalTypeSchema,
+  name: z.string().min(1).max(255),
+  description: z.string().max(1000).optional(),
+  categoryIds: z.array(z.string().min(1)).min(1),
+  lineItemTemplates: z.array(lineItemTemplateSchema).min(1),
+  triggerKeywords: z.array(z.string().min(1)).min(1),
+});
+
 export const createWordingPreferenceSchema = z.object({
-  verticalSlug: z.string().min(1),
-  originalPhrase: z.string().min(1),
-  preferredPhrase: z.string().min(1),
-  source: z.enum(['manual', 'learned']),
-});
-
-// Settings (P4-010B)
-export const terminologyPreferenceUpdateSchema = z.object({
-  verticalSlug: z.string().min(1),
-  preferences: z.array(z.object({
-    originalPhrase: z.string().min(1),
-    preferredPhrase: z.string().min(1),
-  })),
+  verticalType: verticalTypeSchema.optional(),
+  scope: z.enum(['line_item_description', 'customer_message', 'internal_note', 'estimate_header', 'estimate_footer']),
+  key: z.string().min(1).max(100),
+  preferredWording: z.string().min(1).max(500),
+  avoidWordings: z.array(z.string().min(1)).optional(),
+  context: z.string().max(500).optional(),
 });

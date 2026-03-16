@@ -1,47 +1,62 @@
-import { hvacTerminologyEntries } from '../../src/verticals/data/hvac-terminology';
-import { createTerminologyMap, lookupTerm } from '../../src/verticals/terminology-map';
+import { HVAC_TERMINOLOGY, validateTerminologyMap } from '../../src/verticals/hvac/terminology';
 
 describe('P4-002A — HVAC terminology map', () => {
-  const map = createTerminologyMap({
-    verticalSlug: 'hvac',
-    version: '1.0.0',
-    entries: hvacTerminologyEntries,
+  it('happy path — HVAC terminology has expected equipment entries', () => {
+    expect(HVAC_TERMINOLOGY.furnace).toBeDefined();
+    expect(HVAC_TERMINOLOGY.ac_unit).toBeDefined();
+    expect(HVAC_TERMINOLOGY.heat_pump).toBeDefined();
+    expect(HVAC_TERMINOLOGY.ductwork).toBeDefined();
+    expect(HVAC_TERMINOLOGY.thermostat).toBeDefined();
+    expect(HVAC_TERMINOLOGY.compressor).toBeDefined();
+    expect(HVAC_TERMINOLOGY.condenser).toBeDefined();
+    expect(HVAC_TERMINOLOGY.evaporator_coil).toBeDefined();
   });
 
-  it('happy path — terminology map has entries', () => {
-    expect(map.entries.length).toBeGreaterThanOrEqual(20);
-    expect(map.verticalSlug).toBe('hvac');
+  it('happy path — HVAC terminology has action entries', () => {
+    expect(HVAC_TERMINOLOGY.diagnostic).toBeDefined();
+    expect(HVAC_TERMINOLOGY.repair).toBeDefined();
+    expect(HVAC_TERMINOLOGY.maintenance).toBeDefined();
+    expect(HVAC_TERMINOLOGY.install).toBeDefined();
+    expect(HVAC_TERMINOLOGY.replacement).toBeDefined();
   });
 
-  it('happy path — lookupTerm finds by exact term', () => {
-    const entry = lookupTerm(map, 'SEER');
-    expect(entry).not.toBeNull();
-    expect(entry!.term).toBe('SEER');
-    expect(entry!.category).toBe('efficiency');
+  it('happy path — HVAC terminology has qualifier entries', () => {
+    expect(HVAC_TERMINOLOGY.emergency).toBeDefined();
+    expect(HVAC_TERMINOLOGY.seasonal).toBeDefined();
+    expect(HVAC_TERMINOLOGY.warranty).toBeDefined();
   });
 
-  it('happy path — lookupTerm finds by alias (case-insensitive)', () => {
-    const entry = lookupTerm(map, 'outdoor unit');
-    expect(entry).not.toBeNull();
-    expect(entry!.term).toBe('Condenser');
-  });
-
-  it('validation — all entries have required fields', () => {
-    for (const entry of hvacTerminologyEntries) {
-      expect(entry.term).toBeTruthy();
-      expect(entry.definition).toBeTruthy();
+  it('happy path — each entry has all required fields', () => {
+    for (const [key, entry] of Object.entries(HVAC_TERMINOLOGY)) {
+      expect(entry.canonical).toBeTruthy();
+      expect(entry.displayLabel).toBeTruthy();
+      expect(entry.promptHint).toBeTruthy();
       expect(Array.isArray(entry.aliases)).toBe(true);
+      expect(entry.aliases.length).toBeGreaterThan(0);
     }
   });
 
-  it('mock provider test — lookupTerm is case-insensitive', () => {
-    expect(lookupTerm(map, 'seer')).not.toBeNull();
-    expect(lookupTerm(map, 'SEER')).not.toBeNull();
-    expect(lookupTerm(map, 'Seer')).not.toBeNull();
+  it('happy path — validates the HVAC terminology map', () => {
+    const errors = validateTerminologyMap(HVAC_TERMINOLOGY);
+    expect(errors).toHaveLength(0);
   });
 
-  it('malformed AI output handled gracefully — lookupTerm returns null for unknown', () => {
-    const result = lookupTerm(map, 'nonexistent-term-xyz');
-    expect(result).toBeNull();
+  it('validation — rejects empty terminology map', () => {
+    const errors = validateTerminologyMap({});
+    expect(errors).toContain('Terminology map must have at least one entry');
+  });
+
+  it('validation — rejects entry missing canonical', () => {
+    const errors = validateTerminologyMap({
+      test: { canonical: '', displayLabel: 'Test', promptHint: 'Test hint', aliases: ['t'] },
+    });
+    expect(errors).toContain('Entry "test" is missing canonical');
+  });
+
+  it('validation — rejects entry missing displayLabel', () => {
+    const errors = validateTerminologyMap({
+      test: { canonical: 'test', displayLabel: '', promptHint: 'hint', aliases: ['t'] },
+    });
+    expect(errors).toContain('Entry "test" is missing displayLabel');
   });
 });

@@ -1,66 +1,62 @@
-import { lookupApprovedEstimates, scoreRelevance } from '../../src/estimates/approved-estimate-lookup';
-import { createApprovedEstimateMetadata, InMemoryApprovedEstimateMetadataRepository } from '../../src/estimates/approved-estimate-metadata';
-import { createEstimate, approveEstimate } from '../../src/estimates/estimate';
+import {
+  InMemoryApprovedEstimateMetadataRepository,
+  createApprovedEstimateMetadata,
+  lookupApprovedEstimates,
+} from '../../src/estimates/approved-estimate-metadata';
 
 describe('P4-005B — Tenant-scoped approved-estimate lookup', () => {
-  function makeMetadata(overrides: { tenantId?: string; verticalSlug?: string; categoryId?: string } = {}) {
-    const est = createEstimate({
-      tenantId: overrides.tenantId || 'tenant-1',
-      lineItems: [{ id: 'li-1', description: 'Test item', quantity: 1, unitPrice: 100, total: 100 }],
-      snapshot: {},
-      source: 'ai_generated',
-      createdBy: 'user-1',
-    });
-    const approved = approveEstimate(est, 'mgr');
-    return createApprovedEstimateMetadata(approved, overrides.verticalSlug || 'hvac', overrides.categoryId || 'hvac-repair');
-  }
+  let repo: InMemoryApprovedEstimateMetadataRepository;
 
-  it('happy path — retrieves matching estimates', async () => {
-    const repo = new InMemoryApprovedEstimateMetadataRepository();
-    await repo.create(makeMetadata());
-    await repo.create(makeMetadata({ verticalSlug: 'plumbing', categoryId: 'plumb-repair' }));
-
-    const results = await lookupApprovedEstimates({ tenantId: 'tenant-1', verticalSlug: 'hvac', categoryId: 'hvac-repair' }, repo);
-    expect(results).toHaveLength(1);
-    expect(results[0].metadata.verticalSlug).toBe('hvac');
+  beforeEach(async () => {
+    repo = new InMemoryApprovedEstimateMetadataRepository();
+    await createApprovedEstimateMetadata({
+      tenantId: 't1', estimateId: 'est-1', verticalType: 'hvac', serviceCategory: 'diagnostic',
+      approvalOutcome: 'approved', approvedAt: new Date('2024-01-15'),
+      lineItemCount: 2, totalCents: 15000, lineItemSummary: ['Diagnostic fee', 'Inspection'],
+    }, repo);
+    await createApprovedEstimateMetadata({
+      tenantId: 't1', estimateId: 'est-2', verticalType: 'hvac', serviceCategory: 'repair',
+      approvalOutcome: 'approved_with_edits', approvedAt: new Date('2024-02-10'),
+      lineItemCount: 3, totalCents: 35000, lineItemSummary: ['Repair labor', 'Parts', 'Disposal'],
+    }, repo);
+    await createApprovedEstimateMetadata({
+      tenantId: 't1', estimateId: 'est-3', verticalType: 'plumbing', serviceCategory: 'drain',
+      approvalOutcome: 'approved', approvedAt: new Date('2024-03-05'),
+      lineItemCount: 1, totalCents: 12000, lineItemSummary: ['Drain cleaning'],
+    }, repo);
+    await createApprovedEstimateMetadata({
+      tenantId: 't2', estimateId: 'est-4', verticalType: 'hvac', serviceCategory: 'diagnostic',
+      approvalOutcome: 'approved', approvedAt: new Date('2024-01-20'),
+      lineItemCount: 1, totalCents: 8000, lineItemSummary: ['Diagnostic'],
+    }, repo);
   });
 
-  it('happy path — results sorted by relevance score', async () => {
-    const repo = new InMemoryApprovedEstimateMetadataRepository();
-    await repo.create(makeMetadata({ verticalSlug: 'hvac', categoryId: 'hvac-repair' }));
-    await repo.create(makeMetadata({ verticalSlug: 'hvac', categoryId: 'hvac-install' }));
-
-    const results = await lookupApprovedEstimates({ tenantId: 'tenant-1', verticalSlug: 'hvac', categoryId: 'hvac-repair' }, repo);
-    expect(results[0].relevanceScore).toBeGreaterThanOrEqual(results[results.length - 1].relevanceScore);
+  it('happy path — looks up all approved for a tenant', async () => {
+    const results = await lookupApprovedEstimates('t1', {}, repo);
+    expect(results).toHaveLength(3);
   });
 
-  it('validation — scoreRelevance rewards matching vertical and category', () => {
-    const metadata = makeMetadata({ verticalSlug: 'hvac', categoryId: 'hvac-repair' });
-    const score = scoreRelevance(metadata, { tenantId: 'tenant-1', verticalSlug: 'hvac', categoryId: 'hvac-repair' });
-    expect(score).toBeGreaterThan(0.5);
-  });
-
-  it('mock provider test — respects limit option', async () => {
-    const repo = new InMemoryApprovedEstimateMetadataRepository();
-    for (let i = 0; i < 5; i++) {
-      await repo.create(makeMetadata());
-    }
-
-    const results = await lookupApprovedEstimates({ tenantId: 'tenant-1', limit: 2 }, repo);
+  it('happy path — filters by verticalType', async () => {
+    const results = await lookupApprovedEstimates('t1', { verticalType: 'hvac' }, repo);
     expect(results).toHaveLength(2);
   });
 
-  it('mock provider test — isolates tenants', async () => {
-    const repo = new InMemoryApprovedEstimateMetadataRepository();
-    await repo.create(makeMetadata({ tenantId: 'tenant-1' }));
-
-    const results = await lookupApprovedEstimates({ tenantId: 'other-tenant' }, repo);
-    expect(results).toHaveLength(0);
+  it('happy path — filters by serviceCategory', async () => {
+    const results = await lookupApprovedEstimates('t1', { serviceCategory: 'drain' }, repo);
+    expect(results).toHaveLength(1);
+    expect(results[0].estimateId).toBe('est-3');
   });
 
-  it('malformed AI output handled gracefully — handles empty results', async () => {
-    const repo = new InMemoryApprovedEstimateMetadataRepository();
-    const results = await lookupApprovedEstimates({ tenantId: 'no-data' }, repo);
-    expect(results).toEqual([]);
+  it('happy path — filters by date range', async () => {
+    const results = await lookupApprovedEstimates('t1', {
+      dateRange: { from: new Date('2024-02-01'), to: new Date('2024-03-31') },
+    }, repo);
+    expect(results).toHaveLength(2);
+  });
+
+  it('tenant isolation — only returns specified tenant', async () => {
+    const results = await lookupApprovedEstimates('t2', {}, repo);
+    expect(results).toHaveLength(1);
+    expect(results[0].estimateId).toBe('est-4');
   });
 });

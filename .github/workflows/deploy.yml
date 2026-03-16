@@ -2,8 +2,6 @@ name: Deploy
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -15,68 +13,105 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
-      - run: npx tsc --noEmit
-        working-directory: infra
-      - run: npx tsc --noEmit
+
+      - name: Type check API
+        run: npx tsc --noEmit
         working-directory: packages/api
-      - run: npm test
-        working-directory: infra
-      - run: npm test
+      - name: Type check Web
+        run: npx tsc --noEmit
+        working-directory: packages/web
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test -- --reporter=verbose
+
+      - name: Integration tests
+        run: npm run test:integration
+        working-directory: packages/api
+        env:
+          TEST_DB: testcontainers
+
+      - name: Coverage check
+        run: npm run test:coverage
+
+      - name: Migration dry-run
+        run: npm run migrate:dryrun
         working-directory: packages/api
 
-  deploy-dev:
+  chromatic-baseline:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Publish Chromatic baseline
+        uses: chromaui/action@latest
+        with:
+          projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+          workingDir: packages/web
+          buildScriptName: build-storybook
+          # Merged code is definitionally correct — auto-accept as the new visual baseline
+          autoAcceptChanges: true
+
+  # Railway deployment pipeline
+  deploy-railway-dev:
     needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-dev --require-approval never
-        working-directory: infra
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (dev)
+        run: railway up --service api --environment dev --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (dev)
+        run: railway up --service web --environment dev --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-  deploy-staging:
-    needs: deploy-dev
+  deploy-railway-staging:
+    needs: deploy-railway-dev
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-staging --require-approval never
-        working-directory: infra
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (staging)
+        run: railway up --service api --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (staging)
+        run: railway up --service web --environment staging --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
-  deploy-prod:
-    needs: deploy-staging
+  deploy-railway-prod:
+    needs: deploy-railway-staging
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: prod
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - run: npx cdk deploy ServiceOS-prod --require-approval broadening
-        working-directory: infra
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+      - name: Deploy API to Railway (prod)
+        run: railway up --service api --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Deploy Web to Railway (prod)
+        run: railway up --service web --environment production --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

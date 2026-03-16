@@ -1,45 +1,54 @@
-import { plumbingTerminologyEntries } from '../../src/verticals/data/plumbing-terminology';
-import { createTerminologyMap, lookupTerm } from '../../src/verticals/terminology-map';
+import { PLUMBING_TERMINOLOGY, validateTerminologyMap } from '../../src/verticals/plumbing/terminology';
 
 describe('P4-003A — Plumbing terminology map', () => {
-  const map = createTerminologyMap({
-    verticalSlug: 'plumbing',
-    version: '1.0.0',
-    entries: plumbingTerminologyEntries,
+  it('happy path — plumbing terminology has expected component entries', () => {
+    expect(PLUMBING_TERMINOLOGY.pipe).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.fitting).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.valve).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.fixture).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.drain).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.sewer).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.water_heater).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.sump_pump).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.backflow_preventer).toBeDefined();
   });
 
-  it('happy path — terminology map has entries', () => {
-    expect(map.entries.length).toBeGreaterThanOrEqual(20);
-    expect(map.verticalSlug).toBe('plumbing');
+  it('happy path — plumbing terminology has action entries', () => {
+    expect(PLUMBING_TERMINOLOGY.diagnostic).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.repair).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.install).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.replacement).toBeDefined();
   });
 
-  it('happy path — lookupTerm finds by exact term', () => {
-    const entry = lookupTerm(map, 'PEX');
-    expect(entry).not.toBeNull();
-    expect(entry!.term).toBe('PEX');
-    expect(entry!.category).toBe('materials');
+  it('happy path — plumbing terminology has qualifier entries', () => {
+    expect(PLUMBING_TERMINOLOGY.emergency).toBeDefined();
+    expect(PLUMBING_TERMINOLOGY.warranty).toBeDefined();
   });
 
-  it('happy path — lookupTerm finds by alias', () => {
-    const entry = lookupTerm(map, 'sewer camera');
-    expect(entry).not.toBeNull();
-    expect(entry!.term).toBe('Sewer Scope');
-  });
-
-  it('validation — all entries have required fields', () => {
-    for (const entry of plumbingTerminologyEntries) {
-      expect(entry.term).toBeTruthy();
-      expect(entry.definition).toBeTruthy();
+  it('happy path — each entry has all required fields', () => {
+    for (const [key, entry] of Object.entries(PLUMBING_TERMINOLOGY)) {
+      expect(entry.canonical).toBeTruthy();
+      expect(entry.displayLabel).toBeTruthy();
+      expect(entry.promptHint).toBeTruthy();
       expect(Array.isArray(entry.aliases)).toBe(true);
+      expect(entry.aliases.length).toBeGreaterThan(0);
     }
   });
 
-  it('mock provider test — lookupTerm is case-insensitive', () => {
-    expect(lookupTerm(map, 'pex')).not.toBeNull();
-    expect(lookupTerm(map, 'PEX')).not.toBeNull();
+  it('happy path — validates the plumbing terminology map', () => {
+    const errors = validateTerminologyMap(PLUMBING_TERMINOLOGY);
+    expect(errors).toHaveLength(0);
   });
 
-  it('malformed AI output handled gracefully — lookupTerm returns null for unknown', () => {
-    expect(lookupTerm(map, 'nonexistent-plumbing-term')).toBeNull();
+  it('validation — rejects empty terminology map', () => {
+    const errors = validateTerminologyMap({});
+    expect(errors).toContain('Terminology map must have at least one entry');
+  });
+
+  it('validation — rejects entry missing promptHint', () => {
+    const errors = validateTerminologyMap({
+      test: { canonical: 'test', displayLabel: 'Test', promptHint: '', aliases: ['t'] },
+    });
+    expect(errors).toContain('Entry "test" is missing promptHint');
   });
 });

@@ -1,102 +1,93 @@
-import { LineItem } from './estimate';
-import { LineItemFrequency, LineItemFrequencyRepository, normalizeLineItemDescription } from './line-item-frequency';
-import { LineItemBundle, LineItemBundleRepository } from './line-item-bundle';
+import { v4 as uuidv4 } from 'uuid';
+import { VerticalType, ServiceCategory } from '../shared/vertical-types';
+import { RepeatedItemSignal } from './repeated-item-detection';
+
+const RECENCY_DIVISOR = 10;
 
 export interface MissingItemSignal {
-  lineItem: LineItemFrequency;
-  reason: string;
-  confidence: number;
-  suggestedQuantity?: number;
-  suggestedUnitPrice?: number;
-}
-
-export interface MissingItemDetectionOptions {
+  id: string;
   tenantId: string;
-  verticalSlug: string;
-  categoryId?: string;
-  currentLineItems: LineItem[];
-  frequencyThreshold?: number;
+  verticalType?: VerticalType;
+  serviceCategory?: ServiceCategory;
+  description: string;
+  normalizedDescription: string;
+  frequency: number;
+  recencyScore: number;
+  lastSeenAt: Date;
 }
 
-export async function detectMissingItems(
-  options: MissingItemDetectionOptions,
-  frequencyRepo: LineItemFrequencyRepository,
-  bundleRepo: LineItemBundleRepository
+export interface MissingItemFilters {
+  verticalType?: VerticalType;
+  serviceCategory?: ServiceCategory;
+  minFrequency?: number;
+}
+
+export interface MissingItemSignalRepository {
+  create(signal: MissingItemSignal): Promise<MissingItemSignal>;
+  findByTenant(tenantId: string): Promise<MissingItemSignal[]>;
+  findByFilters(tenantId: string, filters: MissingItemFilters): Promise<MissingItemSignal[]>;
+}
+
+export function validateMissingItemSignal(signal: Partial<MissingItemSignal>): string[] {
+  const errors: string[] = [];
+  if (!signal.tenantId) errors.push('tenantId is required');
+  if (!signal.description) errors.push('description is required');
+  if (signal.frequency !== undefined && signal.frequency < 1) errors.push('frequency must be at least 1');
+  if (signal.recencyScore !== undefined && (signal.recencyScore < 0 || signal.recencyScore > 1)) {
+    errors.push('recencyScore must be between 0 and 1');
+  }
+  return errors;
+}
+
+export function storeMissingItemSignal(
+  repeatedItems: RepeatedItemSignal[],
+  maxAge: Date = new Date()
+): MissingItemSignal[] {
+  return repeatedItems.map((item) => ({
+    id: uuidv4(),
+    tenantId: item.tenantId,
+    verticalType: item.verticalType,
+    serviceCategory: item.serviceCategory,
+    description: item.description,
+    normalizedDescription: item.normalizedDescription,
+    frequency: item.frequency,
+    recencyScore: Math.min(1, item.frequency / RECENCY_DIVISOR),
+    lastSeenAt: maxAge,
+  }));
+}
+
+export async function getMissingItemSignals(
+  tenantId: string,
+  filters: MissingItemFilters,
+  repository: MissingItemSignalRepository
 ): Promise<MissingItemSignal[]> {
-  const threshold = options.frequencyThreshold || 3;
-  const frequentItems = await frequencyRepo.findAboveThreshold(options.tenantId, threshold);
-  const filteredFrequent = frequentItems.filter((f) => f.verticalSlug === options.verticalSlug);
-
-  const bundles = await bundleRepo.findByVerticalAndCategory(
-    options.tenantId,
-    options.verticalSlug,
-    options.categoryId
-  );
-
-  const fromFrequency = compareWithFrequentItems(options.currentLineItems, filteredFrequent);
-  const fromBundles = compareWithBundles(options.currentLineItems, bundles);
-
-  const allSignals = [...fromFrequency, ...fromBundles];
-  const seen = new Set<string>();
-  const unique = allSignals.filter((s) => {
-    const key = s.lineItem.normalizedDescription;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  unique.sort((a, b) => b.confidence - a.confidence);
-  return unique;
+  const signals = await repository.findByFilters(tenantId, filters);
+  return signals.sort((a, b) => b.recencyScore - a.recencyScore || b.frequency - a.frequency);
 }
 
-export function compareWithFrequentItems(
-  currentItems: LineItem[],
-  frequentItems: LineItemFrequency[]
-): MissingItemSignal[] {
-  const currentNormalized = currentItems.map((li) => normalizeLineItemDescription(li.description));
+export class InMemoryMissingItemSignalRepository implements MissingItemSignalRepository {
+  private signals: Map<string, MissingItemSignal> = new Map();
 
-  return frequentItems
-    .filter((fi) => !currentNormalized.includes(fi.normalizedDescription))
-    .map((fi) => ({
-      lineItem: fi,
-      reason: `Frequently included item (${fi.occurrenceCount} times) not in current estimate`,
-      confidence: Math.min(fi.occurrenceCount / 10, 1),
-      suggestedQuantity: fi.avgQuantity,
-      suggestedUnitPrice: fi.avgUnitPrice,
-    }));
-}
-
-export function compareWithBundles(
-  currentItems: LineItem[],
-  bundles: LineItemBundle[]
-): MissingItemSignal[] {
-  const currentNormalized = currentItems.map((li) => normalizeLineItemDescription(li.description));
-  const signals: MissingItemSignal[] = [];
-
-  for (const bundle of bundles) {
-    for (const item of bundle.items) {
-      const normalized = normalizeLineItemDescription(item.description);
-      if (!currentNormalized.includes(normalized) && item.isRequired) {
-        signals.push({
-          lineItem: {
-            id: '',
-            tenantId: '',
-            verticalSlug: '',
-            normalizedDescription: normalized,
-            occurrenceCount: bundle.frequency,
-            avgQuantity: item.typicalQuantity || 1,
-            avgUnitPrice: item.typicalUnitPrice || 0,
-            lastSeenAt: bundle.lastSeenAt,
-            createdAt: bundle.createdAt,
-          },
-          reason: `Required item in bundle "${bundle.name}" is missing`,
-          confidence: bundle.confidence,
-          suggestedQuantity: item.typicalQuantity,
-          suggestedUnitPrice: item.typicalUnitPrice,
-        });
-      }
-    }
+  async create(signal: MissingItemSignal): Promise<MissingItemSignal> {
+    this.signals.set(signal.id, { ...signal });
+    return { ...signal };
   }
 
-  return signals;
+  async findByTenant(tenantId: string): Promise<MissingItemSignal[]> {
+    return Array.from(this.signals.values())
+      .filter((s) => s.tenantId === tenantId)
+      .map((s) => ({ ...s }));
+  }
+
+  async findByFilters(tenantId: string, filters: MissingItemFilters): Promise<MissingItemSignal[]> {
+    return Array.from(this.signals.values())
+      .filter((s) => {
+        if (s.tenantId !== tenantId) return false;
+        if (filters.verticalType && s.verticalType !== filters.verticalType) return false;
+        if (filters.serviceCategory && s.serviceCategory !== filters.serviceCategory) return false;
+        if (filters.minFrequency && s.frequency < filters.minFrequency) return false;
+        return true;
+      })
+      .map((s) => ({ ...s }));
+  }
 }

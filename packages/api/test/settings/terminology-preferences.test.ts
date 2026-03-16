@@ -1,58 +1,69 @@
-import { applyTerminologyPreferences, getTerminologyPreferences, validateTerminologyPreferenceUpdate } from '../../src/settings/terminology-preferences';
-import { createWordingPreference, InMemoryWordingPreferenceRepository } from '../../src/estimates/wording-preference';
+import {
+  InMemorySettingsRepository,
+  createSettings,
+  updateTerminologyPreferences,
+  validateTerminologyPreferences,
+} from '../../src/settings/settings';
 
 describe('P4-010B — Terminology preference controls', () => {
-  it('happy path — applies new preferences', async () => {
-    const repo = new InMemoryWordingPreferenceRepository();
-    const results = await applyTerminologyPreferences({
-      tenantId: 'tenant-1',
-      verticalSlug: 'hvac',
-      preferences: [
-        { originalPhrase: 'AC unit', preferredPhrase: 'air conditioning system' },
-      ],
+  let repo: InMemorySettingsRepository;
+
+  beforeEach(async () => {
+    repo = new InMemorySettingsRepository();
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'HVAC Pro',
+      activeVerticalPacks: ['hvac-v1'],
     }, repo);
-    expect(results).toHaveLength(1);
-    expect(results[0].preferredPhrase).toBe('air conditioning system');
   });
 
-  it('happy path — updates existing preference', async () => {
-    const repo = new InMemoryWordingPreferenceRepository();
-    const existing = createWordingPreference({ tenantId: 'tenant-1', verticalSlug: 'hvac', originalPhrase: 'AC unit', preferredPhrase: 'old phrase', source: 'manual' });
-    await repo.create(existing);
-
-    const results = await applyTerminologyPreferences({
-      tenantId: 'tenant-1',
-      verticalSlug: 'hvac',
-      preferences: [{ originalPhrase: 'AC unit', preferredPhrase: 'new phrase' }],
+  it('happy path — updates terminology preferences', async () => {
+    const updated = await updateTerminologyPreferences('t1', {
+      furnace: 'Heating Unit',
+      ac_unit: 'Cooling System',
     }, repo);
-    expect(results[0].preferredPhrase).toBe('new phrase');
-    expect(results[0].occurrenceCount).toBe(2);
-  });
 
-  it('validation — rejects invalid input', () => {
-    const errors = validateTerminologyPreferenceUpdate({
-      tenantId: '',
-      verticalSlug: '',
-      preferences: [{ originalPhrase: '', preferredPhrase: '' }],
+    expect(updated).not.toBeNull();
+    expect(updated!.terminologyPreferences).toEqual({
+      furnace: 'Heating Unit',
+      ac_unit: 'Cooling System',
     });
-    expect(errors).toContain('tenantId is required');
-    expect(errors).toContain('verticalSlug is required');
-    expect(errors).toContain('each preference must have an originalPhrase');
-    expect(errors).toContain('each preference must have a preferredPhrase');
   });
 
-  it('mock provider test — getTerminologyPreferences retrieves by vertical', async () => {
-    const repo = new InMemoryWordingPreferenceRepository();
-    const pref = createWordingPreference({ tenantId: 'tenant-1', verticalSlug: 'hvac', originalPhrase: 'AC', preferredPhrase: 'Air Conditioning', source: 'manual' });
-    await repo.create(pref);
-
-    const found = await getTerminologyPreferences('tenant-1', 'hvac', repo);
-    expect(found).toHaveLength(1);
+  it('happy path — validates terminology preferences', () => {
+    const errors = validateTerminologyPreferences({
+      furnace: 'Heating Unit',
+    });
+    expect(errors).toHaveLength(0);
   });
 
-  it('malformed AI output handled gracefully — empty preferences array', async () => {
-    const repo = new InMemoryWordingPreferenceRepository();
-    const results = await applyTerminologyPreferences({ tenantId: 't', verticalSlug: 'v', preferences: [] }, repo);
-    expect(results).toEqual([]);
+  it('validation — rejects empty value', () => {
+    const errors = validateTerminologyPreferences({
+      furnace: '',
+    });
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('validation — rejects unrecognized key when validKeys provided', () => {
+    const errors = validateTerminologyPreferences(
+      { unknown_term: 'Some value' },
+      ['furnace', 'ac_unit', 'thermostat']
+    );
+    expect(errors).toContain('terminologyPreferences key "unknown_term" is not a recognized term for the active vertical');
+  });
+
+  it('validation — accepts recognized keys', () => {
+    const errors = validateTerminologyPreferences(
+      { furnace: 'Heater', ac_unit: 'Air Conditioner' },
+      ['furnace', 'ac_unit', 'thermostat']
+    );
+    expect(errors).toHaveLength(0);
+  });
+
+  it('happy path — overrides previous preferences', async () => {
+    await updateTerminologyPreferences('t1', { furnace: 'Heater' }, repo);
+    const updated = await updateTerminologyPreferences('t1', { ac_unit: 'Cooler' }, repo);
+
+    expect(updated!.terminologyPreferences).toEqual({ ac_unit: 'Cooler' });
   });
 });

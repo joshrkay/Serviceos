@@ -1,112 +1,109 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Estimate } from './estimate';
+import { ApprovalStatus } from './approval';
+import { VerticalType, ServiceCategory } from '../shared/vertical-types';
 
 export interface ApprovedEstimateMetadata {
   id: string;
   tenantId: string;
   estimateId: string;
-  verticalSlug: string;
-  categoryId: string;
+  verticalType?: VerticalType;
+  serviceCategory?: ServiceCategory;
+  approvalOutcome: ApprovalStatus;
   approvedAt: Date;
-  approvedBy: string;
   lineItemCount: number;
-  totalAmount: number;
-  tags: string[];
-  searchableContent: string;
+  totalCents: number;
+  lineItemSummary: string[];
+  tags?: string[];
 }
 
 export interface CreateApprovedEstimateMetadataInput {
   tenantId: string;
   estimateId: string;
-  verticalSlug: string;
-  categoryId: string;
+  verticalType?: VerticalType;
+  serviceCategory?: ServiceCategory;
+  approvalOutcome: ApprovalStatus;
   approvedAt: Date;
-  approvedBy: string;
   lineItemCount: number;
-  totalAmount: number;
-  tags: string[];
-  searchableContent: string;
+  totalCents: number;
+  lineItemSummary: string[];
+  tags?: string[];
 }
 
-export interface ApprovedEstimateMetadataRepository {
-  create(metadata: ApprovedEstimateMetadata): Promise<ApprovedEstimateMetadata>;
-  findByTenant(tenantId: string): Promise<ApprovedEstimateMetadata[]>;
-  findByVerticalAndCategory(tenantId: string, verticalSlug: string, categoryId: string): Promise<ApprovedEstimateMetadata[]>;
-  findRecent(tenantId: string, limit: number): Promise<ApprovedEstimateMetadata[]>;
+export interface ApprovedEstimateFilters {
+  verticalType?: VerticalType;
+  serviceCategory?: ServiceCategory;
+  dateRange?: { from: Date; to: Date };
 }
 
 export function validateApprovedEstimateMetadataInput(input: CreateApprovedEstimateMetadataInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.estimateId) errors.push('estimateId is required');
-  if (!input.verticalSlug) errors.push('verticalSlug is required');
-  if (!input.categoryId) errors.push('categoryId is required');
-  if (!input.approvedBy) errors.push('approvedBy is required');
+  if (!input.approvalOutcome) errors.push('approvalOutcome is required');
+  if (input.lineItemCount < 0) errors.push('lineItemCount must be non-negative');
+  if (input.totalCents < 0) errors.push('totalCents must be non-negative');
   return errors;
 }
 
-export function createApprovedEstimateMetadata(
-  estimate: Estimate,
-  verticalSlug: string,
-  categoryId: string
-): ApprovedEstimateMetadata {
-  return {
+export interface ApprovedEstimateMetadataRepository {
+  create(metadata: ApprovedEstimateMetadata): Promise<ApprovedEstimateMetadata>;
+  findByTenant(tenantId: string): Promise<ApprovedEstimateMetadata[]>;
+  findByFilters(tenantId: string, filters: ApprovedEstimateFilters): Promise<ApprovedEstimateMetadata[]>;
+  findByEstimate(tenantId: string, estimateId: string): Promise<ApprovedEstimateMetadata | null>;
+}
+
+export async function createApprovedEstimateMetadata(
+  input: CreateApprovedEstimateMetadataInput,
+  repository: ApprovedEstimateMetadataRepository
+): Promise<ApprovedEstimateMetadata> {
+  const metadata: ApprovedEstimateMetadata = {
     id: uuidv4(),
-    tenantId: estimate.tenantId,
-    estimateId: estimate.id,
-    verticalSlug,
-    categoryId,
-    approvedAt: estimate.approvedAt || new Date(),
-    approvedBy: estimate.approvedBy || 'unknown',
-    lineItemCount: estimate.lineItems.length,
-    totalAmount: estimate.lineItems.reduce((sum, li) => sum + li.total, 0),
-    tags: extractTags(estimate),
-    searchableContent: buildSearchableContent(estimate),
+    ...input,
   };
+  return repository.create(metadata);
 }
 
-export function buildSearchableContent(estimate: Estimate): string {
-  const parts: string[] = [];
-  for (const li of estimate.lineItems) {
-    parts.push(li.description);
-    if (li.category) parts.push(li.category);
-  }
-  return parts.join(' ').toLowerCase();
-}
-
-function extractTags(estimate: Estimate): string[] {
-  const tags = new Set<string>();
-  for (const li of estimate.lineItems) {
-    if (li.category) tags.add(li.category);
-  }
-  return Array.from(tags);
+// P4-005B: Tenant-scoped approved-estimate lookup
+export async function lookupApprovedEstimates(
+  tenantId: string,
+  filters: ApprovedEstimateFilters,
+  repository: ApprovedEstimateMetadataRepository
+): Promise<ApprovedEstimateMetadata[]> {
+  return repository.findByFilters(tenantId, filters);
 }
 
 export class InMemoryApprovedEstimateMetadataRepository implements ApprovedEstimateMetadataRepository {
   private records: Map<string, ApprovedEstimateMetadata> = new Map();
 
   async create(metadata: ApprovedEstimateMetadata): Promise<ApprovedEstimateMetadata> {
-    this.records.set(metadata.id, { ...metadata });
-    return { ...metadata };
+    this.records.set(metadata.id, { ...metadata, lineItemSummary: [...metadata.lineItemSummary] });
+    return { ...metadata, lineItemSummary: [...metadata.lineItemSummary] };
   }
 
   async findByTenant(tenantId: string): Promise<ApprovedEstimateMetadata[]> {
     return Array.from(this.records.values())
-      .filter((r) => r.tenantId === tenantId)
-      .map((r) => ({ ...r }));
+      .filter((m) => m.tenantId === tenantId)
+      .map((m) => ({ ...m, lineItemSummary: [...m.lineItemSummary] }));
   }
 
-  async findByVerticalAndCategory(tenantId: string, verticalSlug: string, categoryId: string): Promise<ApprovedEstimateMetadata[]> {
+  async findByFilters(tenantId: string, filters: ApprovedEstimateFilters): Promise<ApprovedEstimateMetadata[]> {
     return Array.from(this.records.values())
-      .filter((r) => r.tenantId === tenantId && r.verticalSlug === verticalSlug && r.categoryId === categoryId)
-      .map((r) => ({ ...r }));
+      .filter((m) => {
+        if (m.tenantId !== tenantId) return false;
+        if (filters.verticalType && m.verticalType !== filters.verticalType) return false;
+        if (filters.serviceCategory && m.serviceCategory !== filters.serviceCategory) return false;
+        if (filters.dateRange) {
+          if (m.approvedAt < filters.dateRange.from || m.approvedAt > filters.dateRange.to) return false;
+        }
+        return true;
+      })
+      .map((m) => ({ ...m, lineItemSummary: [...m.lineItemSummary] }));
   }
 
-  async findRecent(tenantId: string, limit: number): Promise<ApprovedEstimateMetadata[]> {
-    return Array.from(this.records.values())
-      .filter((r) => r.tenantId === tenantId)
-      .sort((a, b) => b.approvedAt.getTime() - a.approvedAt.getTime())
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
+  async findByEstimate(tenantId: string, estimateId: string): Promise<ApprovedEstimateMetadata | null> {
+    const found = Array.from(this.records.values()).find(
+      (m) => m.tenantId === tenantId && m.estimateId === estimateId
+    );
+    return found ? { ...found, lineItemSummary: [...found.lineItemSummary] } : null;
   }
 }

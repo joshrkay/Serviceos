@@ -1,0 +1,28 @@
+{
+  "id": "context-001",
+  "description": "Conversation context for generating an estimate from a service call",
+  "conversation": {
+    "id": "conv-fixture-001",
+    "messages": [
+      {
+        "message_type": "transcript",
+        "content": "Customer called about AC not cooling. Carrier unit, 5 years old. Located at 456 Oak Ave.",
+        "sender_role": "system"
+      },
+      {
+        "message_type": "text",
+        "content": "I've dispatched Tech Mike for tomorrow 8-10 AM. Can you draft an estimate?",
+        "sender_role": "dispatcher"
+      }
+    ],
+    "entity_type": "job",
+    "entity_id": "job-fixture-001"
+  },
+  "job_context": {
+    "summary": "AC unit not cooling",
+    "customer_name": "Sarah Johnson",
+    "location": "456 Oak Avenue, Springfield, IL",
+    "equipment_notes": "Carrier 5-ton split system"
+  },
+  "expected_proposal_type": "draft_estimate"
+}

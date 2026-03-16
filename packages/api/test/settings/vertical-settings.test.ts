@@ -1,63 +1,74 @@
-import { getVerticalSettings, formatVerticalSettingsForApi } from '../../src/settings/vertical-settings';
-import { createVerticalActivation, InMemoryVerticalActivationRepository } from '../../src/settings/vertical-activation';
-import { createVerticalPack, InMemoryVerticalPackRepository } from '../../src/verticals/vertical-pack';
+import {
+  InMemorySettingsRepository,
+  createSettings,
+  updateSettings,
+  getSettings,
+} from '../../src/settings/settings';
 
 describe('P4-010A — Active vertical settings in tenant config', () => {
-  async function setup() {
-    const activationRepo = new InMemoryVerticalActivationRepository();
-    const packRepo = new InMemoryVerticalPackRepository();
+  let repo: InMemorySettingsRepository;
 
-    const pack = createVerticalPack({ slug: 'hvac', name: 'HVAC', version: '1.0.0', description: 'd', terminologyMapId: 't', taxonomyId: 'x' });
-    await packRepo.create(pack);
-
-    const activation = createVerticalActivation({ tenantId: 'tenant-1', verticalPackId: pack.id, verticalSlug: 'hvac', activatedBy: 'admin' });
-    await activationRepo.create(activation);
-
-    return { activationRepo, packRepo, pack };
-  }
-
-  it('happy path — returns settings view with active verticals', async () => {
-    const { activationRepo, packRepo } = await setup();
-    const view = await getVerticalSettings('tenant-1', activationRepo, packRepo);
-    expect(view.tenantId).toBe('tenant-1');
-    expect(view.activeVerticals).toHaveLength(1);
-    expect(view.activeVerticals[0].verticalSlug).toBe('hvac');
-    expect(view.availablePacks.length).toBeGreaterThanOrEqual(1);
+  beforeEach(() => {
+    repo = new InMemorySettingsRepository();
   });
 
-  it('happy path — formatVerticalSettingsForApi formats correctly', async () => {
-    const { activationRepo, packRepo } = await setup();
-    const view = await getVerticalSettings('tenant-1', activationRepo, packRepo);
-    const formatted = formatVerticalSettingsForApi(view);
-    expect(formatted.tenantId).toBe('tenant-1');
-    expect(Array.isArray(formatted.activeVerticals)).toBe(true);
+  it('happy path — creates settings with active vertical packs', async () => {
+    const settings = await createSettings({
+      tenantId: 't1',
+      businessName: 'HVAC Pro',
+      activeVerticalPacks: ['hvac-v1'],
+    }, repo);
+
+    expect(settings.activeVerticalPacks).toEqual(['hvac-v1']);
   });
 
-  it('validation — empty tenant returns no active verticals', async () => {
-    const { activationRepo, packRepo } = await setup();
-    const view = await getVerticalSettings('no-verticals', activationRepo, packRepo);
-    expect(view.activeVerticals).toHaveLength(0);
+  it('happy path — updates active packs', async () => {
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'Service Co',
+    }, repo);
+
+    const updated = await updateSettings('t1', {
+      activeVerticalPacks: ['hvac-v1', 'plumbing-v1'],
+    }, repo);
+
+    expect(updated).not.toBeNull();
+    expect(updated!.activeVerticalPacks).toEqual(['hvac-v1', 'plumbing-v1']);
   });
 
-  it('mock provider test — available packs listed even if none active', async () => {
-    const activationRepo = new InMemoryVerticalActivationRepository();
-    const packRepo = new InMemoryVerticalPackRepository();
-    const pack = createVerticalPack({ slug: 'hvac', name: 'HVAC', version: '1.0.0', description: 'd', terminologyMapId: 't', taxonomyId: 'x' });
-    await packRepo.create(pack);
+  it('happy path — retrieves settings with packs', async () => {
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'Service Co',
+      activeVerticalPacks: ['plumbing-v1'],
+    }, repo);
 
-    const view = await getVerticalSettings('tenant-no-activations', activationRepo, packRepo);
-    expect(view.activeVerticals).toHaveLength(0);
-    expect(view.availablePacks).toHaveLength(1);
+    const settings = await getSettings('t1', repo);
+    expect(settings).not.toBeNull();
+    expect(settings!.activeVerticalPacks).toEqual(['plumbing-v1']);
   });
 
-  it('malformed AI output handled gracefully — handles missing pack for activation', async () => {
-    const activationRepo = new InMemoryVerticalActivationRepository();
-    const packRepo = new InMemoryVerticalPackRepository();
-    const activation = createVerticalActivation({ tenantId: 'tenant-1', verticalPackId: 'nonexistent', verticalSlug: 'hvac', activatedBy: 'admin' });
-    await activationRepo.create(activation);
+  it('happy path — settings without packs default to undefined', async () => {
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'Service Co',
+    }, repo);
 
-    const view = await getVerticalSettings('tenant-1', activationRepo, packRepo);
-    expect(view.activeVerticals).toHaveLength(1);
-    expect(view.activeVerticals[0].packName).toBe('hvac');
+    const settings = await getSettings('t1', repo);
+    expect(settings!.activeVerticalPacks).toBeUndefined();
+  });
+
+  it('validation — can clear active packs', async () => {
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'Service Co',
+      activeVerticalPacks: ['hvac-v1'],
+    }, repo);
+
+    const updated = await updateSettings('t1', {
+      activeVerticalPacks: [],
+    }, repo);
+
+    expect(updated!.activeVerticalPacks).toEqual([]);
   });
 });

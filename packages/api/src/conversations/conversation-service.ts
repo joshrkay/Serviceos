@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 
 export type ConversationStatus = 'open' | 'closed' | 'archived';
-export type MessageType = 'text' | 'transcript' | 'system_event' | 'note';
+export type MessageType = 'text' | 'transcript' | 'system_event' | 'note' | 'clarification' | 'proposal';
 
 export interface Conversation {
   id: string;
@@ -11,6 +11,7 @@ export interface Conversation {
   entityId?: string;
   status: ConversationStatus;
   createdBy: string;
+  assignedUserIds?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -55,6 +56,7 @@ export interface ConversationRepository {
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<Conversation[]>;
   addMessage(input: CreateMessageInput): Promise<Message>;
   getMessages(tenantId: string, conversationId: string): Promise<Message[]>;
+  updateMessageMetadata(tenantId: string, messageId: string, metadata: Record<string, unknown>): Promise<Message | null>;
 }
 
 export function validateCreateConversation(input: CreateConversationInput): string[] {
@@ -69,7 +71,7 @@ export function validateCreateMessage(input: CreateMessageInput): string[] {
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.conversationId) errors.push('conversationId is required');
   if (!input.messageType) errors.push('messageType is required');
-  if (!['text', 'transcript', 'system_event', 'note'].includes(input.messageType)) {
+  if (!['text', 'transcript', 'system_event', 'note', 'clarification', 'proposal'].includes(input.messageType)) {
     errors.push('Invalid messageType');
   }
   if (!input.senderId) errors.push('senderId is required');
@@ -134,5 +136,19 @@ export class InMemoryConversationRepository implements ConversationRepository {
     return this.messages.filter(
       (m) => m.tenantId === tenantId && m.conversationId === conversationId
     );
+  }
+
+  async updateMessageMetadata(
+    tenantId: string,
+    messageId: string,
+    metadata: Record<string, unknown>
+  ): Promise<Message | null> {
+    const idx = this.messages.findIndex((m) => m.id === messageId && m.tenantId === tenantId);
+    if (idx === -1) return null;
+    this.messages[idx] = {
+      ...this.messages[idx],
+      metadata: { ...this.messages[idx].metadata, ...metadata },
+    };
+    return { ...this.messages[idx] };
   }
 }

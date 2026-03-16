@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Service OS — Third-Party Service Setup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+
+  header { background: #1a1d27; border-bottom: 1px solid #2d3148; padding: 24px 32px; }
+  header h1 { font-size: 20px; font-weight: 700; color: #f8fafc; }
+  header p { font-size: 13px; color: #64748b; margin-top: 4px; }
+
+  .main { max-width: 1100px; margin: 0 auto; padding: 32px; }
+
+  /* Service nav */
+  .nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 36px; }
+  .nav a { background: #1a1d27; border: 1px solid #2d3148; border-radius: 6px; padding: 6px 14px; font-size: 12px; color: #94a3b8; text-decoration: none; transition: all 0.15s; }
+  .nav a:hover { border-color: #3d4268; color: #e2e8f0; }
+
+  /* Service card */
+  .service { background: #1a1d27; border: 1px solid #2d3148; border-radius: 12px; margin-bottom: 28px; overflow: hidden; }
+  .service-header { display: flex; align-items: center; gap: 16px; padding: 20px 24px; border-bottom: 1px solid #2d3148; }
+  .service-icon { width: 42px; height: 42px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+  .service-title { flex: 1; }
+  .service-title h2 { font-size: 16px; font-weight: 700; color: #f1f5f9; }
+  .service-title p { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .status-pill { font-size: 11px; padding: 4px 10px; border-radius: 20px; font-weight: 600; flex-shrink: 0; }
+  .status-stub { background: #451a03; color: #fb923c; border: 1px solid #7c2d12; }
+  .status-partial { background: #1c1a03; color: #fbbf24; border: 1px solid #713f12; }
+  .status-wired { background: #042f2e; color: #34d399; border: 1px solid #065f46; }
+
+  .service-body { padding: 20px 24px; }
+
+  /* Steps */
+  .steps { display: flex; flex-direction: column; gap: 14px; }
+  .step { display: flex; gap: 14px; align-items: flex-start; }
+  .step-num { width: 24px; height: 24px; border-radius: 50%; background: #1e293b; border: 1px solid #334155; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #60a5fa; flex-shrink: 0; margin-top: 1px; }
+  .step-content { flex: 1; }
+  .step-content strong { font-size: 13px; color: #f1f5f9; display: block; margin-bottom: 3px; }
+  .step-content p { font-size: 12px; color: #94a3b8; line-height: 1.6; }
+  .step-content a { color: #60a5fa; text-decoration: none; }
+  .step-content a:hover { text-decoration: underline; }
+
+  /* Env vars */
+  .env-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid #1e2235; }
+  .env-section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #475569; font-weight: 600; margin-bottom: 12px; }
+  .env-vars { display: flex; flex-direction: column; gap: 8px; }
+  .env-row { display: flex; align-items: flex-start; gap: 12px; background: #0f1117; border: 1px solid #1e2235; border-radius: 6px; padding: 10px 12px; }
+  .env-key { font-family: monospace; font-size: 12px; color: #60a5fa; flex-shrink: 0; min-width: 240px; }
+  .env-desc { font-size: 11px; color: #64748b; flex: 1; line-height: 1.5; }
+  .env-required { font-size: 10px; padding: 1px 6px; border-radius: 3px; flex-shrink: 0; margin-top: 1px; }
+  .req { background: #3b0764; color: #c084fc; }
+  .opt { background: #0f2b1a; color: #4ade80; }
+
+  /* Warning / notes */
+  .note { background: #0f1d35; border: 1px solid #1d3461; border-radius: 8px; padding: 12px 16px; font-size: 12px; color: #93c5fd; line-height: 1.6; margin-top: 16px; }
+  .warn { background: #1c1105; border: 1px solid #713f12; border-radius: 8px; padding: 12px 16px; font-size: 12px; color: #fbbf24; line-height: 1.6; margin-top: 16px; }
+  .error { background: #1a0a0a; border: 1px solid #7f1d1d; border-radius: 8px; padding: 12px 16px; font-size: 12px; color: #f87171; line-height: 1.6; margin-top: 16px; }
+  .note strong, .warn strong, .error strong { font-weight: 700; display: block; margin-bottom: 4px; }
+
+  /* Two col */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; padding-top: 20px; border-top: 1px solid #1e2235; }
+  .col-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #475569; font-weight: 600; margin-bottom: 10px; }
+  .check-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .check-list li { font-size: 12px; color: #94a3b8; display: flex; gap: 8px; align-items: flex-start; line-height: 1.5; }
+  .check-list li.done::before { content: '✓'; color: #34d399; font-weight: 700; flex-shrink: 0; }
+  .check-list li.missing::before { content: '○'; color: #475569; flex-shrink: 0; }
+  .check-list li.warn::before { content: '⚠'; color: #fbbf24; flex-shrink: 0; }
+
+  code { font-family: monospace; font-size: 11px; background: #0f1117; border: 1px solid #1e2235; padding: 1px 5px; border-radius: 3px; color: #c084fc; }
+
+  .divider { border: none; border-top: 1px solid #1e2235; margin: 8px 0; }
+
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 3px; font-weight: 500; }
+  .tag-phase0 { background: #0c1a2e; color: #60a5fa; }
+  .tag-later { background: #1a1d27; color: #475569; border: 1px solid #2d3148; }
+
+  /* Summary table */
+  .summary-table { width: 100%; border-collapse: collapse; margin-bottom: 28px; font-size: 12px; }
+  .summary-table th { background: #1a1d27; color: #475569; text-align: left; padding: 10px 14px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; border-bottom: 1px solid #2d3148; }
+  .summary-table td { padding: 10px 14px; border-bottom: 1px solid #1e2235; color: #94a3b8; }
+  .summary-table tr:hover td { background: #1e2235; }
+  .svc-name { font-weight: 600; color: #f1f5f9; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Third-Party Service Setup — AI Service OS</h1>
+  <p>Everything you need to sign up for, configure, and wire into the codebase · Phase 0</p>
+</header>
+
+<div class="main">
+
+  <!-- Nav -->
+  <div class="nav">
+    <a href="#aws">☁️ AWS</a>
+    <a href="#clerk">🔐 Clerk</a>
+    <a href="#sentry">🐛 Sentry</a>
+    <a href="#openai">🤖 OpenAI</a>
+    <a href="#stripe">💳 Stripe</a>
+    <a href="#twilio">📱 Twilio</a>
+    <a href="#quickbooks">📊 QuickBooks</a>
+    <a href="#envfile">📄 .env Template</a>
+  </div>
+
+  <!-- Summary -->
+  <table class="summary-table">
+    <thead>
+      <tr><th>Service</th><th>Purpose</th><th>Phase 0 Scope</th><th>Code Status</th><th>Account Needed Now?</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="svc-name">AWS</td><td>Infra, DB, Storage, Queues, Logs</td><td>All of it — ECS, RDS, S3, SQS, ECR, Secrets Manager, CloudWatch</td><td><span class="status-pill status-partial">Partial</span></td><td>✅ Yes</td></tr>
+      <tr><td class="svc-name">Clerk</td><td>Auth + tenant bootstrap</td><td>Sign-up, sign-in, JWT, webhooks</td><td><span class="status-pill status-partial">Partial</span></td><td>✅ Yes</td></tr>
+      <tr><td class="svc-name">Sentry</td><td>Error tracking</td><td>DSN + SDK integration</td><td><span class="status-pill status-stub">Stub</span></td><td>✅ Yes</td></tr>
+      <tr><td class="svc-name">OpenAI</td><td>Transcription (Whisper) + LLM gateway</td><td>Whisper for voice pipeline (P0-012)</td><td><span class="status-pill status-stub">Stub</span></td><td>✅ Yes</td></tr>
+      <tr><td class="svc-name">Stripe</td><td>Payments</td><td>Webhook handler stub only</td><td><span class="status-pill status-stub">Stub</span></td><td>⏸ Phase 5</td></tr>
+      <tr><td class="svc-name">Twilio</td><td>SMS</td><td>Webhook handler stub only</td><td><span class="status-pill status-stub">Stub</span></td><td>⏸ Phase 3</td></tr>
+      <tr><td class="svc-name">QuickBooks</td><td>Invoice sync</td><td>Not in Phase 0</td><td><span class="status-pill status-stub">Stub</span></td><td>⏸ Phase 5</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ─── AWS ─── -->
+  <div class="service" id="aws">
+    <div class="service-header">
+      <div class="service-icon" style="background:#1a1208;">🟠</div>
+      <div class="service-title">
+        <h2>AWS — Amazon Web Services</h2>
+        <p>ECS/Fargate · RDS Postgres · S3 · SQS · ECR · Secrets Manager · CloudWatch</p>
+      </div>
+      <span class="status-pill status-partial">Partial — CDK missing 4 stacks</span>
+    </div>
+    <div class="service-body">
+
+      <div class="two-col">
+        <div>
+          <div class="col-label">What's in CDK today</div>
+          <ul class="check-list">
+            <li class="done">VPC (public/private/isolated subnets, 2 AZs)</li>
+            <li class="done">ECS Cluster + Fargate task definition</li>
+            <li class="done">ECR repository (per env)</li>
+            <li class="done">ALB + HTTP listener + health check</li>
+            <li class="done">CloudWatch log groups (/serviceos/{env}/api)</li>
+            <li class="done">CDK app deploys dev/staging/prod stacks</li>
+          </ul>
+        </div>
+        <div>
+          <div class="col-label">What's missing from CDK</div>
+          <ul class="check-list">
+            <li class="missing">RDS Postgres (no database stack at all)</li>
+            <li class="missing">S3 bucket (no file storage stack)</li>
+            <li class="missing">SQS queues + DLQs (no queue stack)</li>
+            <li class="missing">Secrets Manager placeholders</li>
+            <li class="missing">HTTPS on ALB (only HTTP today — security issue)</li>
+            <li class="missing">ECR image scanning enabled</li>
+            <li class="missing">Auto-scaling policy for ECS service</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="steps" style="margin-top:20px; padding-top:20px; border-top:1px solid #1e2235;">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <strong>Create / log into AWS account</strong>
+            <p>Use <a href="https://aws.amazon.com">aws.amazon.com</a>. For a new account, set up MFA on root immediately and create an IAM admin user for day-to-day use. Enable billing alerts.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <strong>Create a deployment IAM role for GitHub Actions</strong>
+            <p>The CI/CD workflow uses <code>secrets.AWS_ROLE_ARN</code> via OIDC (no long-lived keys). Create an IAM role with a trust policy for <code>token.actions.githubusercontent.com</code> and permissions for CDK deploy (CloudFormation, ECS, ECR, S3, RDS, SQS, SecretsManager, IAM). Add the role ARN to GitHub repo → Settings → Secrets → <code>AWS_ROLE_ARN</code>.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <strong>Bootstrap CDK in each region</strong>
+            <p>Run once per AWS account/region: <code>npx cdk bootstrap aws://ACCOUNT_ID/us-east-1</code>. Sets up CDK toolkit stack (S3 bucket for assets, IAM roles).</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <strong>Add missing CDK stacks (RDS, S3, SQS, Secrets)</strong>
+            <p>The current <code>platform-stack.ts</code> is missing these. They need to be added before any deploy will work end-to-end. Add to <code>infra/src/stacks/</code>: <code>data-stack.ts</code> (RDS + S3), <code>queue-stack.ts</code> (SQS + DLQs), <code>secrets-stack.ts</code> (Secrets Manager placeholders).</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">5</div>
+          <div class="step-content">
+            <strong>Add AWS account IDs to infra/src/config.ts</strong>
+            <p>The <code>account</code> field in <code>EnvironmentConfig</code> is optional and unset. Each environment needs its AWS account ID: <code>account: '123456789012'</code>. Dev/staging/prod can share one account or be separate accounts.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">6</div>
+          <div class="step-content">
+            <strong>Fix HTTPS on the ALB</strong>
+            <p>Currently only HTTP port 80. Before users touch it, add an ACM certificate + HTTPS listener (port 443) and redirect HTTP → HTTPS. Register a domain (Route 53 or external) and request a cert via ACM.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="env-section">
+        <h3>Environment Variables</h3>
+        <div class="env-vars">
+          <div class="env-row"><span class="env-key">AWS_REGION</span><span class="env-desc">AWS region for all services. Default: <code>us-east-1</code></span><span class="env-required opt">optional</span></div>
+          <div class="env-row"><span class="env-key">DB_HOST</span><span class="env-desc">RDS endpoint (output from CDK data stack)</span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">DB_PORT</span><span class="env-desc">Postgres port. Default: <code>5432</code></span><span class="env-required opt">optional</span></div>
+          <div class="env-row"><span class="env-key">DB_NAME</span><span class="env-desc">Database name. e.g. <code>serviceos_prod</code></span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">DB_USER</span><span class="env-desc">Postgres username — store in Secrets Manager, inject at runtime</span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">DB_PASSWORD</span><span class="env-desc">Postgres password — NEVER in .env for staging/prod. Secrets Manager only.</span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">S3_BUCKET</span><span class="env-desc">S3 bucket name for file uploads. e.g. <code>serviceos-uploads-prod</code></span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">SQS_QUEUE_URL</span><span class="env-desc">Main SQS queue URL (output from CDK queue stack)</span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">SQS_DLQ_URL</span><span class="env-desc">Dead-letter queue URL (output from CDK queue stack)</span><span class="env-required opt">optional</span></div>
+        </div>
+      </div>
+
+      <div class="warn"><strong>⚠️ 4 CDK stacks need to be written before first deploy:</strong> RDS, S3, SQS, and Secrets Manager. Without these, the API will start but can't connect to a database, store files, or process async jobs.</div>
+    </div>
+  </div>
+
+  <!-- ─── Clerk ─── -->
+  <div class="service" id="clerk">
+    <div class="service-header">
+      <div class="service-icon" style="background:#1a0f2e;">🔐</div>
+      <div class="service-title">
+        <h2>Clerk</h2>
+        <p>Authentication · Session management · Tenant bootstrap webhooks</p>
+      </div>
+      <span class="status-pill status-partial">Partial — JWT verify is a stub</span>
+    </div>
+    <div class="service-body">
+
+      <div class="two-col">
+        <div>
+          <div class="col-label">What's wired up</div>
+          <ul class="check-list">
+            <li class="done">Token parsing + payload extraction</li>
+            <li class="done">Tenant ID + role read from JWT claims</li>
+            <li class="done">Tenant bootstrap logic (idempotent)</li>
+            <li class="done">Auth middleware (requireAuth, requirePermission)</li>
+            <li class="done">RBAC role/permission model complete</li>
+          </ul>
+        </div>
+        <div>
+          <div class="col-label">What's missing / needs fixing</div>
+          <ul class="check-list">
+            <li class="warn">JWT signature NOT verified — critical security bug</li>
+            <li class="missing">JWT template with <code>tenant_id</code> + <code>role</code> claims not configured in Clerk dashboard</li>
+            <li class="missing">Webhook handler for <code>user.created</code> event</li>
+            <li class="missing">Clerk webhook signing secret not wired</li>
+            <li class="missing">Frontend: ClerkProvider + sign-in/up components</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="steps" style="margin-top:20px; padding-top:20px; border-top:1px solid #1e2235;">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <strong>Create Clerk account + application</strong>
+            <p>Sign up at <a href="https://clerk.com">clerk.com</a>. Create an application called "ServiceOS". Create separate dev and prod instances (Clerk gives you one per environment).</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <strong>Grab your API keys</strong>
+            <p>Dashboard → API Keys. Copy <strong>Secret key</strong> (<code>sk_live_...</code> or <code>sk_test_...</code>) and <strong>Publishable key</strong> (<code>pk_live_...</code> / <code>pk_test_...</code>). The secret key goes in Secrets Manager. The publishable key is safe in env vars / frontend.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <strong>Configure a JWT template with custom claims</strong>
+            <p>Dashboard → JWT Templates → New template → "Blank". Add two custom claims that the API reads from every token: <code>tenant_id</code> (from user public metadata) and <code>role</code> (from user public metadata). The API currently reads these as <code>payload.tenant_id</code> and <code>payload.role</code>. Without this, every authenticated user will have no tenant context.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <strong>Configure webhook endpoint</strong>
+            <p>Dashboard → Webhooks → Add endpoint. URL: <code>https://your-api-domain/webhooks/clerk</code>. Subscribe to: <code>user.created</code>, <code>user.updated</code>. Copy the <strong>Signing secret</strong> — this goes in Secrets Manager as <code>CLERK_WEBHOOK_SECRET</code>. This triggers the tenant bootstrap flow.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">5</div>
+          <div class="step-content">
+            <strong>Fix JWT signature verification in code</strong>
+            <p>The current <code>decodeClerkToken()</code> in <code>auth/clerk.ts</code> decodes but never verifies the signature — the <code>_secretKey</code> parameter is unused. Must be fixed to use Clerk's JWKS endpoint (<code>https://&lt;your-clerk-domain&gt;/.well-known/jwks.json</code>) to verify the RS256 signature before trusting any claim.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="env-section">
+        <h3>Environment Variables</h3>
+        <div class="env-vars">
+          <div class="env-row"><span class="env-key">CLERK_SECRET_KEY</span><span class="env-desc">Backend secret key (<code>sk_live_...</code>). Secrets Manager in staging/prod. Never expose client-side.</span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">CLERK_PUBLISHABLE_KEY</span><span class="env-desc">Frontend publishable key (<code>pk_live_...</code>). Safe to include in frontend bundle.</span><span class="env-required req">required</span></div>
+          <div class="env-row"><span class="env-key">CLERK_WEBHOOK_SECRET</span><span class="env-desc">Webhook signing secret — needed to verify <code>user.created</code> events that trigger tenant bootstrap. Not yet in config schema — needs to be added.</span><span class="env-required req">required</span></div>
+        </div>
+      </div>
+
+      <div class="error"><strong>🚨 Critical fix required before any production use:</strong> <code>auth/clerk.ts decodeClerkToken()</code> does not verify JWT signatures. Any attacker can craft a token with any <code>tenant_id</code> or <code>role</code> claim and it will be accepted. Must implement JWKS-based RS256 verification.</div>
+    </div>
+  </div>
+
+  <!-- ─── Sentry ─── -->
+  <div class="service" id="sentry">
+    <div class="service-header">
+      <div class="service-icon" style="background:#1a0810;">🐛</div>
+      <div class="service-title">
+        <h2>Sentry</h2>
+        <p>Error tracking · Exception monitoring · Performance tracing</p>
+      </div>
+      <span class="status-pill status-stub">Stub — console fallback only</span>
+    </div>
+    <div class="service-body">
+
+      <div class="two-col">
+        <div>
+          <div class="col-label">What's wired up</div>
+          <ul class="check-list">
+            <li class="done">SentryClient interface + initSentry() function</li>
+            <li class="done">No-op client when DSN is absent (safe for dev)</li>
+            <li class="done">captureException / captureMessage signatures ready</li>
+          </ul>
+        </div>
+        <div>
+          <div class="col-label">What's missing</div>
+          <ul class="check-list">
+            <li class="missing">Actual <code>@sentry/node</code> SDK not initialized</li>
+            <li class="missing">DSN not yet stored or injected</li>
+            <li class="missing">No PII scrubbing configured</li>
+            <li class="missing">Express request handler middleware not added</li>
+            <li class="missing">No release/version tagging</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="steps" style="margin-top:20px; padding-top:20px; border-top:1px solid #1e2235;">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <strong>Create Sentry account + project</strong>
+            <p>Sign up at <a href="https://sentry.io">sentry.io</a>. Create a new project → Platform: <strong>Node.js / Express</strong>. Name: <code>serviceos-api</code>.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <strong>Copy DSN</strong>
+            <p>Settings → Projects → serviceos-api → Client Keys (DSN). Looks like <code>https://abc123@o456.ingest.sentry.io/789</code>. Create separate projects (and DSNs) for dev/staging/prod or use environments within one project.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <strong>Replace the stub with real SDK initialization</strong>
+            <p>In <code>monitoring/sentry.ts</code>, replace the logging fallback with <code>Sentry.init({ dsn, environment, release, tracesSampleRate: 0.1 })</code>. Add <code>Sentry.requestHandler()</code> middleware before routes and <code>Sentry.errorHandler()</code> after. <code>@sentry/node</code> is already in dependencies.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <strong>Configure PII scrubbing</strong>
+            <p>In Sentry init, add <code>beforeSend</code> to strip phone numbers, email addresses, and tenant-identifying data from error payloads. HVAC customer data must not appear in Sentry.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="env-section">
+        <h3>Environment Variables</h3>
+        <div class="env-vars">
+          <div class="env-row"><span class="env-key">SENTRY_DSN</span><span class="env-desc">Project DSN from Sentry dashboard. Optional — if absent, Sentry is silently disabled (no-op client).</span><span class="env-required opt">optional</span></div>
+        </div>
+      </div>
+
+      <div class="note"><strong>Note:</strong> Sentry is optional for local dev. Set <code>SENTRY_DSN</code> in staging and prod Secrets Manager. Leaving it empty causes the no-op client to be used — no errors, just silence.</div>
+    </div>
+  </div>
+
+  <!-- ─── OpenAI ─── -->
+  <div class="service" id="openai">
+    <div class="service-header">
+      <div class="service-icon" style="background:#0a1a0a;">🤖</div>
+      <div class="service-title">
+        <h2>OpenAI</h2>
+        <p>Whisper (voice transcription) · GPT models (LLM gateway — Phase 1+)</p>
+      </div>
+      <span class="status-pill status-stub">Stub — TranscriptionProvider not implemented</span>
+    </div>
+    <div class="service-body">
+
+      <div class="two-col">
+        <div>
+          <div class="col-label">What's wired up</div>
+          <ul class="check-list">
+            <li class="done">TranscriptionProvider interface defined</li>
+            <li class="done">Transcription worker calls provider.transcribe()</li>
+            <li class="done">AiTaskType enum includes all task types</li>
+            <li class="done">ai_runs table ready to log provider calls</li>
+          </ul>
+        </div>
+        <div>
+          <div class="col-label">What's missing</div>
+          <ul class="check-list">
+            <li class="missing">Concrete OpenAI Whisper implementation of TranscriptionProvider</li>
+            <li class="missing">OPENAI_API_KEY not in config schema</li>
+            <li class="missing">LLM gateway (Phase 1) — only needed after P0</li>
+            <li class="missing">Model tier routing config (lightweight/standard/complex)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="steps" style="margin-top:20px; padding-top:20px; border-top:1px solid #1e2235;">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <strong>Create OpenAI account + get API key</strong>
+            <p>Go to <a href="https://platform.openai.com">platform.openai.com</a> → API keys → Create new key. Name it <code>serviceos-prod</code>. Store in AWS Secrets Manager — never in .env for staging/prod.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <strong>Set up usage limits + billing</strong>
+            <p>Platform → Billing → Set a monthly spend limit (e.g. $50 dev, $500 staging) to prevent runaway costs during development. Enable usage alerts.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <strong>Implement OpenAITranscriptionProvider</strong>
+            <p>Create <code>voice/openai-transcription.ts</code> implementing <code>TranscriptionProvider</code>. Call <code>POST https://api.openai.com/v1/audio/transcriptions</code> with model <code>whisper-1</code>. The audio URL from S3 needs to be fetched and streamed — Whisper accepts file uploads, not URLs directly.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <strong>Add OPENAI_API_KEY to config schema</strong>
+            <p>Currently missing from <code>shared/config.ts</code>. Add: <code>OPENAI_API_KEY: z.string().min(1).optional()</code>. Make it required in staging/prod via the secrets resolver.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="env-section">
+        <h3>Environment Variables</h3>
+        <div class="env-vars">
+          <div class="env-row"><span class="env-key">OPENAI_API_KEY</span><span class="env-desc">OpenAI API key. Used for Whisper transcription (Phase 0) and GPT models (Phase 1+). Secrets Manager in staging/prod. Not yet in config schema — needs to be added.</span><span class="env-required req">required</span></div>
+        </div>
+      </div>
+
+      <div class="note"><strong>Alternative for transcription:</strong> AWS Transcribe is another option that would keep everything within AWS (no extra vendor). Downside is higher latency and lower accuracy vs Whisper. If you go AWS Transcribe, you can skip this service account entirely for Phase 0 — it uses your existing AWS IAM role.</div>
+    </div>
+  </div>
+
+  <!-- ─── Stripe ─── -->
+  <div class="service" id="stripe">
+    <div class="service-header">
+      <div class="service-icon" style="background:#0a0a2e;">💳</div>
+      <div class="service-title">
+        <h2>Stripe</h2>
+        <p>Payment links · Invoice payments</p>
+      </div>
+      <span class="status-pill status-stub">Phase 5 — webhook stub only for now</span>
+    </div>
+    <div class="service-body">
+
+      <div class="note"><strong>Phase 0 scope:</strong> Only the webhook ingestion base handler needs to exist. Stripe functionality (payment links, collecting payment) is Phase 5. You do not need a Stripe account yet.</div>
+
+      <div class="steps" style="margin-top:16px; padding-top:16px; border-top:1px solid #1e2235;">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <strong>When ready (Phase 5): Create Stripe account</strong>
+            <p>Go to <a href="https://stripe.com">stripe.com</a>. Complete business verification. Use test mode for dev/staging. The webhook signing secret and secret key will go in Secrets Manager at that time.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <strong>For now: add STRIPE_WEBHOOK_SECRET to config schema</strong>
+            <p>The webhook handler uses a generic <code>WEBHOOK_SIGNING_SECRET</code> but Stripe and Twilio have separate secrets. Add <code>STRIPE_WEBHOOK_SECRET</code> and <code>TWILIO_WEBHOOK_SECRET</code> as distinct optional env vars so they can be configured independently.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="env-section">
+        <h3>Environment Variables (add to schema now, populate at Phase 5)</h3>
+        <div class="env-vars">
+          <div class="env-row"><span class="env-key">STRIPE_SECRET_KEY</span><span class="env-desc">Stripe API key. Not needed until Phase 5.</span><span class="env-required opt">optional</span></div>
+          <div class="env-row"><span class="env-key">STRIPE_WEBHOOK_SECRET</span><span class="env-desc">Webhook signing secret (<code>whsec_...</code>). Separate from Twilio. Not needed until Phase 5.</span><span class="env-required opt">optional</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Twilio ─── -->
+  <div class="service" id="twilio">
+    <div class="service-header">
+      <div class="service-icon" style="background:#1a0808;">📱</div>
+      <div class="service-title">
+        <h2>Twilio</h2>
+        <p>SMS operational messages</p>
+      </div>
+      <span class="status-pill status-stub">Phase 3 — webhook stub only for now</span>
+    </div>
+    <div class="service-body">
+      <div class="note"><strong>Phase 0 scope:</strong> Same as Stripe — only the webhook base handler pattern exists. Actual SMS sending is Phase 3. No Twilio account needed yet.</div>
+
+      <div class="env-section" style="margin-top:16px; padding-top:16px; border-top:1px solid #1e2235;">
+        <h3>Environment Variables (add to schema now, populate at Phase 3)</h3>
+        <div class="env-vars">
+          <div class="env-row"><span class="env-key">TWILIO_ACCOUNT_SID</span><span class="env-desc">Twilio account SID. Not needed until Phase 3.</span><span class="env-required opt">optional</span></div>
+          <div class="env-row"><span class="env-key">TWILIO_AUTH_TOKEN</span><span class="env-desc">Twilio auth token. Not needed until Phase 3.</span><span class="env-required opt">optional</span></div>
+          <div class="env-row"><span class="env-key">TWILIO_WEBHOOK_SECRET</span><span class="env-desc">Twilio uses its own signing mechanism — distinct from Stripe.</span><span class="env-required opt">optional</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── QuickBooks ─── -->
+  <div class="service" id="quickbooks">
+    <div class="service-header">
+      <div class="service-icon" style="background:#0a1a0a;">📊</div>
+      <div class="service-title">
+        <h2>QuickBooks Online</h2>
+        <p>One-way invoice sync</p>
+      </div>
+      <span class="status-pill status-stub">Phase 5 — nothing to do now</span>
+    </div>
+    <div class="service-body">
+      <div class="note"><strong>Phase 0 scope:</strong> Nothing. QuickBooks integration is Phase 5 (invoice sync). No account or keys needed yet. When the time comes, it requires OAuth 2.0 authorization per tenant — each HVAC business authorizes their own QBO account.</div>
+    </div>
+  </div>
+
+  <!-- ─── .env Template ─── -->
+  <div class="service" id="envfile">
+    <div class="service-header">
+      <div class="service-icon" style="background:#0c1520;">📄</div>
+      <div class="service-title">
+        <h2>Local .env Template</h2>
+        <p>Copy this to .env for local development — never commit the actual .env file</p>
+      </div>
+    </div>
+    <div class="service-body">
+      <pre style="background:#0f1117; border:1px solid #1e2235; border-radius:8px; padding:20px; font-family:monospace; font-size:12px; color:#e2e8f0; line-height:1.8; overflow-x:auto;"># ── App ──
+NODE_ENV=dev
+PORT=3000
+LOG_LEVEL=debug
+
+# ── Database (local Postgres via Docker) ──
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=serviceos_dev
+DB_USER=serviceos
+DB_PASSWORD=dev_password
+
+# ── Clerk ──
+CLERK_SECRET_KEY=sk_test_...
+CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_WEBHOOK_SECRET=whsec_...
+
+# ── AWS ──
+AWS_REGION=us-east-1
+S3_BUCKET=serviceos-uploads-dev
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/serviceos-dev
+SQS_DLQ_URL=https://sqs.us-east-1.amazonaws.com/ACCOUNT_ID/serviceos-dev-dlq
+
+# ── OpenAI (for Whisper transcription) ──
+OPENAI_API_KEY=sk-...
+
+# ── Sentry (optional for dev) ──
+SENTRY_DSN=
+
+# ── Webhooks (generic — will be split per provider) ──
+WEBHOOK_SIGNING_SECRET=
+
+# ── Stripe (Phase 5 — leave blank for now) ──
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+
+# ── Twilio (Phase 3 — leave blank for now) ──
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_WEBHOOK_SECRET=</pre>
+
+      <div class="warn" style="margin-top:16px;"><strong>⚠️ Make sure .env is in .gitignore.</strong> The repo has a .gitignore — verify it includes <code>.env</code>, <code>.env.local</code>, and <code>.env.*</code>. DB passwords, API keys, and webhook secrets must never be committed.</div>
+    </div>
+  </div>
+
+  <!-- Priority order -->
+  <div style="background:#0f1d35; border:1px solid #1d3461; border-radius:10px; padding:20px 24px; margin-top:4px;">
+    <div style="font-size:13px; font-weight:700; color:#bfdbfe; margin-bottom:14px;">✅ Setup Order — Do These First</div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px; font-size:12px; color:#93c5fd; line-height:2;">
+      <div>
+        <strong style="color:#bfdbfe; display:block; margin-bottom:4px;">Today (blockers for any deploy)</strong>
+        1. AWS account + IAM OIDC role for GitHub Actions<br>
+        2. CDK bootstrap<br>
+        3. Clerk account → keys → JWT template with custom claims<br>
+        4. OpenAI account → API key → spending limit<br>
+        5. Fix JWT verification bug in code<br>
+        6. Write missing CDK stacks (RDS, S3, SQS, Secrets)<br>
+      </div>
+      <div>
+        <strong style="color:#bfdbfe; display:block; margin-bottom:4px;">Before first real users</strong>
+        7. Sentry account → DSN → replace stub with real SDK<br>
+        8. ACM certificate + HTTPS on ALB<br>
+        9. Clerk webhook endpoint configured<br>
+        10. All secrets into AWS Secrets Manager<br>
+        11. SQL injection fix in RLS context setter<br>
+        12. Add OPENAI_API_KEY + CLERK_WEBHOOK_SECRET to config schema
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,103 +1,143 @@
 import { v4 as uuidv4 } from 'uuid';
+import { VerticalType, ServiceCategory } from '../../shared/vertical-types';
+import { LineItemCategory } from '../../shared/billing-engine';
 
-export interface LineItemTemplate {
+export interface TemplateLineItem {
   description: string;
-  defaultQuantity?: number;
-  defaultUnitPrice?: number;
-  category?: string;
-  isOptional: boolean;
+  category?: LineItemCategory;
+  quantity: number;
+  unitPriceCents: number;
+  taxable: boolean;
   sortOrder: number;
 }
 
 export interface EstimateTemplate {
   id: string;
-  tenantId: string | null;
-  verticalSlug: string;
-  categoryId: string;
+  packId: string;
+  verticalType: VerticalType;
+  serviceCategory: ServiceCategory;
   name: string;
-  description: string;
-  version: number;
-  lineItemTemplates: LineItemTemplate[];
-  promptHints: string[];
+  defaultLineItems: TemplateLineItem[];
+  defaultNotes?: string;
+  sortOrder: number;
   metadata?: Record<string, unknown>;
-  isActive: boolean;
   createdAt: Date;
 }
 
-export interface CreateEstimateTemplateInput {
-  tenantId?: string;
-  verticalSlug: string;
-  categoryId: string;
+export interface CreateTemplateInput {
+  packId: string;
+  verticalType: VerticalType;
+  serviceCategory: ServiceCategory;
   name: string;
-  description: string;
-  lineItemTemplates: LineItemTemplate[];
-  promptHints?: string[];
+  defaultLineItems: TemplateLineItem[];
+  defaultNotes?: string;
+  sortOrder?: number;
   metadata?: Record<string, unknown>;
 }
 
-export interface EstimateTemplateRepository {
-  create(template: EstimateTemplate): Promise<EstimateTemplate>;
-  findById(id: string): Promise<EstimateTemplate | null>;
-  findByVerticalAndCategory(verticalSlug: string, categoryId: string): Promise<EstimateTemplate[]>;
-  findActive(verticalSlug: string): Promise<EstimateTemplate[]>;
-  findByTenant(tenantId: string): Promise<EstimateTemplate[]>;
-}
-
-export function validateEstimateTemplateInput(input: CreateEstimateTemplateInput): string[] {
+export function validateTemplateInput(input: CreateTemplateInput): string[] {
   const errors: string[] = [];
-  if (!input.verticalSlug) errors.push('verticalSlug is required');
-  if (!input.categoryId) errors.push('categoryId is required');
+  if (!input.packId) errors.push('packId is required');
+  if (!input.verticalType) errors.push('verticalType is required');
+  if (!input.serviceCategory) errors.push('serviceCategory is required');
   if (!input.name) errors.push('name is required');
-  if (!input.description) errors.push('description is required');
-  if (!Array.isArray(input.lineItemTemplates)) errors.push('lineItemTemplates must be an array');
+  if (!input.defaultLineItems || input.defaultLineItems.length === 0) {
+    errors.push('At least one default line item is required');
+  } else {
+    for (let i = 0; i < input.defaultLineItems.length; i++) {
+      const item = input.defaultLineItems[i];
+      if (!item.description) errors.push(`Line item ${i} is missing description`);
+      if (item.quantity === undefined || item.quantity < 0) errors.push(`Line item ${i} has invalid quantity`);
+      if (item.unitPriceCents === undefined || item.unitPriceCents < 0) errors.push(`Line item ${i} has invalid unitPriceCents`);
+      if (item.category && !['labor', 'material', 'equipment', 'other'].includes(item.category)) {
+        errors.push(`Line item ${i} has invalid category`);
+      }
+    }
+  }
   return errors;
 }
 
-export function createEstimateTemplate(input: CreateEstimateTemplateInput): EstimateTemplate {
-  return {
+/**
+ * Template repository is intentionally NOT tenant-scoped.
+ * Templates belong to vertical packs and are shared across all tenants
+ * that activate a given pack. Access control is enforced at the
+ * pack-activation layer (see pack-activation.ts).
+ */
+export interface EstimateTemplateRepository {
+  create(template: EstimateTemplate): Promise<EstimateTemplate>;
+  findById(id: string): Promise<EstimateTemplate | null>;
+  findByVerticalAndCategory(verticalType: VerticalType, category: ServiceCategory): Promise<EstimateTemplate | null>;
+  findByVertical(verticalType: VerticalType): Promise<EstimateTemplate[]>;
+  list(): Promise<EstimateTemplate[]>;
+}
+
+export async function createTemplate(
+  input: CreateTemplateInput,
+  repository: EstimateTemplateRepository
+): Promise<EstimateTemplate> {
+  const template: EstimateTemplate = {
     id: uuidv4(),
-    tenantId: input.tenantId || null,
-    verticalSlug: input.verticalSlug,
-    categoryId: input.categoryId,
+    packId: input.packId,
+    verticalType: input.verticalType,
+    serviceCategory: input.serviceCategory,
     name: input.name,
-    description: input.description,
-    version: 1,
-    lineItemTemplates: input.lineItemTemplates,
-    promptHints: input.promptHints || [],
+    defaultLineItems: input.defaultLineItems,
+    defaultNotes: input.defaultNotes,
+    sortOrder: input.sortOrder ?? 0,
     metadata: input.metadata,
-    isActive: true,
     createdAt: new Date(),
   };
+
+  return repository.create(template);
+}
+
+export async function findTemplate(
+  verticalType: VerticalType,
+  serviceCategory: ServiceCategory,
+  repository: EstimateTemplateRepository
+): Promise<EstimateTemplate | null> {
+  // Exact match: verticalType + serviceCategory
+  const exact = await repository.findByVerticalAndCategory(verticalType, serviceCategory);
+  if (exact) return exact;
+
+  // Fallback: lowest-sortOrder template for the vertical (vertical-only default)
+  const verticalTemplates = await repository.findByVertical(verticalType);
+  if (verticalTemplates.length > 0) {
+    const sorted = verticalTemplates.sort((a, b) => a.sortOrder - b.sortOrder);
+    return sorted[0];
+  }
+
+  return null;
 }
 
 export class InMemoryEstimateTemplateRepository implements EstimateTemplateRepository {
   private templates: Map<string, EstimateTemplate> = new Map();
 
   async create(template: EstimateTemplate): Promise<EstimateTemplate> {
-    this.templates.set(template.id, { ...template });
-    return { ...template };
+    this.templates.set(template.id, { ...template, defaultLineItems: template.defaultLineItems.map(li => ({ ...li })) });
+    return { ...template, defaultLineItems: template.defaultLineItems.map(li => ({ ...li })) };
   }
 
   async findById(id: string): Promise<EstimateTemplate | null> {
-    const template = this.templates.get(id);
-    return template ? { ...template } : null;
+    const t = this.templates.get(id);
+    return t ? { ...t, defaultLineItems: t.defaultLineItems.map(li => ({ ...li })) } : null;
   }
 
-  async findByVerticalAndCategory(verticalSlug: string, categoryId: string): Promise<EstimateTemplate[]> {
-    return Array.from(this.templates.values())
-      .filter((t) => t.verticalSlug === verticalSlug && t.categoryId === categoryId && t.isActive)
-      .map((t) => ({ ...t }));
+  async findByVerticalAndCategory(verticalType: VerticalType, category: ServiceCategory): Promise<EstimateTemplate | null> {
+    const found = Array.from(this.templates.values()).find(
+      (t) => t.verticalType === verticalType && t.serviceCategory === category
+    );
+    return found ? { ...found, defaultLineItems: found.defaultLineItems.map(li => ({ ...li })) } : null;
   }
 
-  async findActive(verticalSlug: string): Promise<EstimateTemplate[]> {
+  async findByVertical(verticalType: VerticalType): Promise<EstimateTemplate[]> {
     return Array.from(this.templates.values())
-      .filter((t) => t.verticalSlug === verticalSlug && t.isActive)
-      .map((t) => ({ ...t }));
+      .filter((t) => t.verticalType === verticalType)
+      .map((t) => ({ ...t, defaultLineItems: t.defaultLineItems.map(li => ({ ...li })) }));
   }
 
-  async findByTenant(tenantId: string): Promise<EstimateTemplate[]> {
+  async list(): Promise<EstimateTemplate[]> {
     return Array.from(this.templates.values())
-      .filter((t) => t.tenantId === tenantId)
-      .map((t) => ({ ...t }));
+      .map((t) => ({ ...t, defaultLineItems: t.defaultLineItems.map(li => ({ ...li })) }));
   }
 }
