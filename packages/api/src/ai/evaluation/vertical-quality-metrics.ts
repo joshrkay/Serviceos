@@ -25,7 +25,7 @@ export function evaluateVerticalQuality(estimate: Estimate, pack: LoadedVertical
   const weightedScore = calculateWeightedScore(dimensions);
 
   return {
-    id: '',
+    id: uuidv4(),
     tenantId: estimate.tenantId,
     estimateId: estimate.id,
     metricType: 'vertical_quality',
