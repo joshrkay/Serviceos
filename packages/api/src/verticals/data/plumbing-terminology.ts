@@ -1,0 +1,26 @@
+import { TerminologyEntry } from '../terminology-map';
+
+export const plumbingTerminologyEntries: TerminologyEntry[] = [
+  { term: 'PEX', aliases: ['pex pipe', 'pex tubing', 'cross-linked polyethylene'], definition: 'Flexible plastic piping commonly used for water supply lines, known for resistance to scale and chlorine.', category: 'materials' },
+  { term: 'Copper Repiping', aliases: ['copper repipe', 'whole house repipe', 'repiping'], definition: 'Complete replacement of existing water supply lines with new copper piping.', category: 'services' },
+  { term: 'Sewer Scope', aliases: ['sewer camera', 'camera inspection', 'sewer inspection', 'video inspection'], definition: 'Video camera inspection of sewer and drain lines to identify blockages, damage, or deterioration.', category: 'diagnostic' },
+  { term: 'Backflow Preventer', aliases: ['backflow device', 'RPZ', 'reduced pressure zone', 'backflow valve'], definition: 'A device that prevents contaminated water from flowing back into the potable water supply.', category: 'equipment' },
+  { term: 'Water Heater', aliases: ['hot water heater', 'tank water heater', 'tankless water heater', 'water tank'], definition: 'An appliance that heats and stores or on-demand heats water for domestic use.', category: 'equipment' },
+  { term: 'Tankless', aliases: ['tankless water heater', 'on-demand', 'instant hot water'], definition: 'A water heating system that heats water on demand without a storage tank.', category: 'equipment' },
+  { term: 'Sump Pump', aliases: ['sump', 'basement pump', 'ejector pump'], definition: 'A pump used to remove water that accumulates in a sump basin, typically in a basement.', category: 'equipment' },
+  { term: 'Garbage Disposal', aliases: ['disposal', 'food disposal', 'disposer', 'insinkerator'], definition: 'An electrically powered device installed under a kitchen sink to shred food waste.', category: 'equipment' },
+  { term: 'P-Trap', aliases: ['p trap', 'drain trap', 'trap'], definition: 'A curved pipe section that retains water to prevent sewer gases from entering a building.', category: 'parts' },
+  { term: 'Shutoff Valve', aliases: ['shut-off valve', 'stop valve', 'isolation valve', 'gate valve', 'ball valve'], definition: 'A valve used to stop the flow of water to a specific fixture or section of plumbing.', category: 'parts' },
+  { term: 'Hydro Jetting', aliases: ['hydrojetting', 'water jetting', 'high-pressure jetting', 'jet cleaning'], definition: 'High-pressure water cleaning method used to clear severe drain and sewer line blockages.', category: 'services' },
+  { term: 'Drain Snake', aliases: ['drain auger', 'plumbing snake', 'cable machine', 'rooter'], definition: 'A flexible auger used to clear clogs from drain pipes.', category: 'equipment' },
+  { term: 'PRV', aliases: ['pressure reducing valve', 'pressure regulator', 'water pressure regulator'], definition: 'A valve that reduces incoming water pressure to a safe level for household plumbing.', category: 'parts' },
+  { term: 'Flange', aliases: ['toilet flange', 'closet flange', 'floor flange'], definition: 'A fitting that connects the toilet to the drain pipe and secures it to the floor.', category: 'parts' },
+  { term: 'Supply Line', aliases: ['supply hose', 'water supply', 'feed line'], definition: 'The pipe or hose that delivers water from the shutoff valve to a fixture.', category: 'infrastructure' },
+  { term: 'Waste Line', aliases: ['drain line', 'waste pipe', 'sewer line', 'drain pipe'], definition: 'Piping that carries wastewater from fixtures to the sewer or septic system.', category: 'infrastructure' },
+  { term: 'Cleanout', aliases: ['clean-out', 'cleanout plug', 'sewer cleanout'], definition: 'An access point in the drain system for clearing blockages and performing maintenance.', category: 'infrastructure' },
+  { term: 'Fixture', aliases: ['plumbing fixture', 'faucet', 'sink', 'toilet', 'shower'], definition: 'Any device connected to the plumbing system that delivers or drains water.', category: 'equipment' },
+  { term: 'Soldering', aliases: ['sweating', 'sweat fitting', 'solder joint'], definition: 'The process of joining copper pipes and fittings using heat and solder.', category: 'techniques' },
+  { term: 'Rough-In', aliases: ['rough in', 'roughing in', 'rough plumbing'], definition: 'The initial phase of plumbing installation where pipes are run through walls and floors before fixtures are installed.', category: 'techniques' },
+  { term: 'ABS', aliases: ['abs pipe', 'acrylonitrile butadiene styrene'], definition: 'A rigid black plastic pipe commonly used for drain, waste, and vent lines.', category: 'materials' },
+  { term: 'PVC', aliases: ['pvc pipe', 'polyvinyl chloride', 'schedule 40'], definition: 'A rigid white plastic pipe used for drain, waste, vent, and some pressure applications.', category: 'materials' },
+];
