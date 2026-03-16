@@ -2,18 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
-export { LineItem } from '../shared/billing-engine';
-
 export type EstimateStatus = 'draft' | 'ready_for_review' | 'sent' | 'accepted' | 'rejected' | 'expired';
-
-export const ESTIMATE_STATUS_TRANSITIONS: Record<EstimateStatus, EstimateStatus[]> = {
-  draft: ['ready_for_review', 'sent'],
-  ready_for_review: ['sent', 'draft'],
-  sent: ['accepted', 'rejected', 'expired'],
-  accepted: [],
-  rejected: ['draft'],
-  expired: ['draft'],
-};
 
 export interface Estimate {
   id: string;
@@ -61,13 +50,22 @@ export interface EstimateRepository {
   update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null>;
 }
 
+export const ESTIMATE_STATUS_TRANSITIONS: Record<EstimateStatus, EstimateStatus[]> = {
+  draft: ['ready_for_review', 'sent'],
+  ready_for_review: ['sent', 'draft'],
+  sent: ['accepted', 'rejected', 'expired'],
+  accepted: [],
+  rejected: ['draft'],
+  expired: ['draft'],
+};
+
 export function validateEstimateInput(input: CreateEstimateInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.jobId) errors.push('jobId is required');
   if (!input.estimateNumber) errors.push('estimateNumber is required');
   if (!input.createdBy) errors.push('createdBy is required');
-  if (!Array.isArray(input.lineItems) || input.lineItems.length === 0) {
+  if (!input.lineItems || input.lineItems.length === 0) {
     errors.push('At least one line item is required');
   }
   return errors;
