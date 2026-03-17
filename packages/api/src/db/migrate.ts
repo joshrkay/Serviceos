@@ -16,11 +16,17 @@ function isDuplicatePolicyError(err: unknown): err is PgLikeError {
 async function runMigrations(): Promise<void> {
   if (!process.env.DATABASE_URL) {
     console.log('DATABASE_URL not set — skipping migrations');
-    return; // let event loop drain; process exits 0 naturally
+    return;
   }
   const pool = createPool();
+  const client = await pool.connect();
   try {
-    await pool.query(getMigrationSQL());
+    // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS and
+    // CREATE POLICY acquire ACCESS EXCLUSIVE locks. If the previous deployment
+    // still has open connections, these will queue indefinitely without timeouts.
+    await client.query("SET lock_timeout = '5s'");
+    await client.query("SET statement_timeout = '25s'");
+    await client.query(getMigrationSQL());
     console.log('Migrations completed successfully');
   } catch (err) {
     if (isDuplicatePolicyError(err)) {
@@ -30,9 +36,8 @@ async function runMigrations(): Promise<void> {
       process.exitCode = 1;
     }
   } finally {
-    // pool.end() can hang indefinitely on Railway's PostgreSQL.
-    // Race it against a 5-second timeout so the process always exits cleanly
-    // and the shell chain can proceed to start index.js.
+    client.release();
+    // pool.end() can hang; race it against a 5-second timeout.
     await Promise.race([
       pool.end(),
       new Promise<void>(resolve => setTimeout(resolve, 5_000)),
