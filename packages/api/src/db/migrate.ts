@@ -21,9 +21,9 @@ async function runMigrations(): Promise<void> {
   const pool = createPool();
   const client = await pool.connect();
   try {
-    // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS and
-    // CREATE POLICY acquire ACCESS EXCLUSIVE locks. If the previous deployment
-    // still has open connections, these will queue indefinitely without timeouts.
+    // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS
+    // and CREATE POLICY acquire ACCESS EXCLUSIVE locks that can queue if the
+    // previous deployment still holds open connections.
     await client.query("SET lock_timeout = '5s'");
     await client.query("SET statement_timeout = '25s'");
     await client.query(getMigrationSQL());
@@ -37,11 +37,15 @@ async function runMigrations(): Promise<void> {
     }
   } finally {
     client.release();
-    // pool.end() can hang; race it against a 5-second timeout.
+    // pool.end() can hang indefinitely. Race it against a 5-second timeout.
+    // IMPORTANT: after the race we must call process.exit() explicitly —
+    // if the timer wins, pool.end() is still pending in the event loop and
+    // will keep the process alive forever, preventing index.js from starting.
     await Promise.race([
       pool.end(),
       new Promise<void>(resolve => setTimeout(resolve, 5_000)),
     ]);
+    process.exit(process.exitCode ?? 0);
   }
 }
 
