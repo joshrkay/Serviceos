@@ -4,7 +4,8 @@ dockerfilePath = "Dockerfile"
 dockerfileTarget = "api"
 
 [deploy]
-startCommand = "timeout 30 node packages/api/dist/src/db/migrate.js || true; node packages/api/dist/src/index.js"
+preDeployCommand = "node packages/api/dist/src/db/migrate.js || true"
+startCommand = "node packages/api/dist/src/index.js"
 healthcheckPath = "/ready"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
