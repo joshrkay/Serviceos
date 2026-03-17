@@ -13,31 +13,30 @@ function isDuplicatePolicyError(err: unknown): err is PgLikeError {
   return maybePgError.code === '42710' && maybePgError.routine === 'CreatePolicy';
 }
 
-// Hard kill after 30 s — prevents pool.end() or a slow query from hanging the
-// shell chain and blocking index.js from starting.
-const killTimer = setTimeout(() => {
-  console.error('migrate.js: timed out after 30 s — forcing exit');
-  process.exit(0);
-}, 30_000);
-killTimer.unref(); // don't keep the event loop alive for this alone
-
 async function runMigrations(): Promise<void> {
   if (!process.env.DATABASE_URL) {
     console.log('DATABASE_URL not set — skipping migrations');
-    process.exit(0);
+    return; // let event loop drain; process exits 0 naturally
   }
   const pool = createPool();
   try {
     await pool.query(getMigrationSQL());
     console.log('Migrations completed successfully');
-    process.exit(0); // skip pool.end() — it can hang; the process is ending anyway
   } catch (err) {
     if (isDuplicatePolicyError(err)) {
       console.warn('Migration warning: duplicate policy detected, continuing startup');
-      process.exit(0);
+    } else {
+      console.error('Migration failed:', err);
+      process.exitCode = 1;
     }
-    console.error('Migration failed:', err);
-    process.exit(1);
+  } finally {
+    // pool.end() can hang indefinitely on Railway's PostgreSQL.
+    // Race it against a 5-second timeout so the process always exits cleanly
+    // and the shell chain can proceed to start index.js.
+    await Promise.race([
+      pool.end(),
+      new Promise<void>(resolve => setTimeout(resolve, 5_000)),
+    ]);
   }
 }
 
