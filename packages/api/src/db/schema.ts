@@ -296,6 +296,7 @@ export const MIGRATIONS = {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE tenant_settings ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_settings FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_settings ON tenant_settings;
     CREATE POLICY tenant_isolation_settings ON tenant_settings
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -326,6 +327,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(tenant_id, email);
     CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(tenant_id, primary_phone);
     ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customers FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_customers ON customers;
     CREATE POLICY tenant_isolation_customers ON customers
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -355,6 +357,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_locations_tenant ON service_locations(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_locations_customer ON service_locations(customer_id);
     ALTER TABLE service_locations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_locations FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_locations ON service_locations;
     CREATE POLICY tenant_isolation_locations ON service_locations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -381,6 +384,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(tenant_id, status);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_number ON jobs(tenant_id, job_number);
     ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE jobs FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_jobs ON jobs;
     CREATE POLICY tenant_isolation_jobs ON jobs
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -403,6 +407,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_timeline_job ON job_timeline_events(job_id);
     CREATE INDEX IF NOT EXISTS idx_timeline_tenant ON job_timeline_events(tenant_id);
     ALTER TABLE job_timeline_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_timeline_events FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_timeline ON job_timeline_events;
     CREATE POLICY tenant_isolation_timeline ON job_timeline_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -428,6 +433,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_appointments_job ON appointments(job_id);
     CREATE INDEX IF NOT EXISTS idx_appointments_schedule ON appointments(tenant_id, scheduled_start);
     ALTER TABLE appointments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE appointments FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_appointments ON appointments;
     CREATE POLICY tenant_isolation_appointments ON appointments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -446,6 +452,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_assignments_appointment ON appointment_assignments(appointment_id);
     CREATE INDEX IF NOT EXISTS idx_assignments_technician ON appointment_assignments(technician_id);
     ALTER TABLE appointment_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_assignments FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_assignments ON appointment_assignments;
     CREATE POLICY tenant_isolation_assignments ON appointment_assignments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -475,6 +482,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_estimates_job ON estimates(job_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_estimates_number ON estimates(tenant_id, estimate_number);
     ALTER TABLE estimates ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE estimates FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_estimates ON estimates;
     CREATE POLICY tenant_isolation_estimates ON estimates
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -495,6 +503,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_est_items_estimate ON estimate_line_items(estimate_id);
     ALTER TABLE estimate_line_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE estimate_line_items FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_est_items ON estimate_line_items;
     CREATE POLICY tenant_isolation_est_items ON estimate_line_items
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -516,6 +525,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_provenance_estimate ON estimate_provenance(estimate_id);
     ALTER TABLE estimate_provenance ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE estimate_provenance FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_provenance ON estimate_provenance;
     CREATE POLICY tenant_isolation_provenance ON estimate_provenance
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -539,6 +549,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_approvals_estimate ON estimate_approvals(estimate_id);
     ALTER TABLE estimate_approvals ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE estimate_approvals FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_approvals ON estimate_approvals;
     CREATE POLICY tenant_isolation_approvals ON estimate_approvals
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -572,6 +583,7 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_number ON invoices(tenant_id, invoice_number);
     CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(tenant_id, status);
     ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoices FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_invoices ON invoices;
     CREATE POLICY tenant_isolation_invoices ON invoices
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -592,6 +604,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_line_items(invoice_id);
     ALTER TABLE invoice_line_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE invoice_line_items FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_inv_items ON invoice_line_items;
     CREATE POLICY tenant_isolation_inv_items ON invoice_line_items
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -622,6 +635,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_payments_stripe_intent ON payments(stripe_payment_intent_id)
       WHERE stripe_payment_intent_id IS NOT NULL;
     ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE payments FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_payments ON payments;
     CREATE POLICY tenant_isolation_payments ON payments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -680,6 +694,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_analytics_type ON proposal_analytics(proposal_type);
     CREATE INDEX IF NOT EXISTS idx_analytics_outcome ON proposal_analytics(outcome);
     ALTER TABLE proposal_analytics ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_analytics FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_analytics ON proposal_analytics;
     CREATE POLICY tenant_isolation_analytics ON proposal_analytics
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -700,6 +715,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_eval_tenant ON evaluation_snapshots(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_eval_task ON evaluation_snapshots(task_type);
     ALTER TABLE evaluation_snapshots ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE evaluation_snapshots FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_eval ON evaluation_snapshots;
     CREATE POLICY tenant_isolation_eval ON evaluation_snapshots
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -720,6 +736,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_cache_key ON llm_cache(cache_key);
     CREATE INDEX IF NOT EXISTS idx_cache_tenant ON llm_cache(tenant_id);
     ALTER TABLE llm_cache ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE llm_cache FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_cache ON llm_cache;
     CREATE POLICY tenant_isolation_cache ON llm_cache
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
