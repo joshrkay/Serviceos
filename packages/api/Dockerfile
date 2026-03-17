@@ -9,6 +9,7 @@ COPY package.json package-lock.json ./
 # Copy package manifests for workspace resolution
 COPY packages/api/package.json ./packages/api/
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/web/package.json ./packages/web/
 
 # Install all deps including devDeps (need tsc)
 RUN npm ci --include=dev
@@ -20,12 +21,10 @@ COPY tsconfig.json tsconfig.base.json ./
 COPY packages/api/src ./packages/api/src
 COPY packages/api/tsconfig.json ./packages/api/tsconfig.json
 
-# Compile — exclude test files to avoid jest type issues
-RUN cd packages/api && npx tsc --outDir dist --rootDir src \
-    --module commonjs --target ES2022 \
-    --esModuleInterop true --skipLibCheck true \
-    --resolveJsonModule true --declaration false --declarationMap false \
-    --noEmit false
+# Compile using tsconfig.build.json — rootDir="." keeps src/ prefix in output
+# so dist/src/index.js matches the root Dockerfile and railway.toml startCommand
+COPY packages/api/tsconfig.build.json ./packages/api/tsconfig.build.json
+RUN cd packages/api && npx tsc --project tsconfig.build.json
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM node:20-alpine AS runtime
@@ -35,6 +34,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/api/package.json ./packages/api/
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/web/package.json ./packages/web/
 
 # Production deps only
 RUN npm ci --omit=dev
@@ -46,4 +46,4 @@ EXPOSE 3000
 
 ENV NODE_ENV=production
 
-CMD ["node", "packages/api/dist/index.js"]
+CMD ["node", "packages/api/dist/src/index.js"]
