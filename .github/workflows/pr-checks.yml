@@ -39,6 +39,8 @@ jobs:
 
   chromatic:
     runs-on: ubuntu-latest
+    # Skip if CHROMATIC_PROJECT_TOKEN secret is not configured
+    if: ${{ secrets.CHROMATIC_PROJECT_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
