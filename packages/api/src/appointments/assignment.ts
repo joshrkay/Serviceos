@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { JobRepository } from '../jobs/job';
+import { ValidationError } from '../shared/errors';
 
 export interface AppointmentAssignment {
   id: string;
@@ -44,7 +45,7 @@ export async function assignTechnician(
   repository: AssignmentRepository
 ): Promise<AppointmentAssignment> {
   const errors = validateAssignmentInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const assignment: AppointmentAssignment = {
     id: uuidv4(),

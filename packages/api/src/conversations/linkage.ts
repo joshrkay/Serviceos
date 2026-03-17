@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
 
 export type LinkableEntityType = 'customer' | 'job' | 'estimate' | 'invoice';
 
@@ -42,7 +43,7 @@ export async function linkConversation(
   repository: ConversationLinkRepository
 ): Promise<ConversationLink> {
   const errors = validateLinkInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const link: ConversationLink = {
     id: uuidv4(),

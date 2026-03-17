@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
 
 export type NoteEntityType = 'customer' | 'location' | 'job' | 'estimate' | 'invoice';
 
@@ -52,7 +53,7 @@ export async function createNote(
   repository: NoteRepository
 ): Promise<InternalNote> {
   const errors = validateNoteInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const note: InternalNote = {
     id: uuidv4(),

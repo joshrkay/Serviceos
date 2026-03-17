@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ValidationError } from '../shared/errors';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -94,7 +95,7 @@ export async function createInvoice(
   auditRepo?: AuditRepository
 ): Promise<Invoice> {
   const errors = validateInvoiceInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,
@@ -179,7 +180,7 @@ export async function issueInvoice(
   if (!invoice) return null;
 
   if (!isValidInvoiceTransition(invoice.status, 'open')) {
-    throw new Error(`Invalid transition from ${invoice.status} to open`);
+    throw new ValidationError(`Invalid transition from ${invoice.status} to open`);
   }
 
   const issuedAt = new Date();
@@ -203,7 +204,7 @@ export async function transitionInvoiceStatus(
   if (!invoice) return null;
 
   if (!isValidInvoiceTransition(invoice.status, newStatus)) {
-    throw new Error(`Invalid transition from ${invoice.status} to ${newStatus}`);
+    throw new ValidationError(`Invalid transition from ${invoice.status} to ${newStatus}`);
   }
 
   return repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
