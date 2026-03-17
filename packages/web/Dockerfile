@@ -15,5 +15,10 @@ FROM nginx:alpine
 # hasn't been explicitly configured. Overridden by the Railway service variable.
 ENV API_URL=http://localhost:3000
 COPY --from=builder /app/packages/web/dist /usr/share/nginx/html
-COPY packages/web/nginx.conf.template /etc/nginx/templates/default.conf.template
+# Copy template to a non-auto-processed location. We run envsubst manually
+# with a restricted variable list ('$PORT $API_URL') so nginx's own runtime
+# variables ($uri, $http_host, $remote_addr, etc.) are left intact and not
+# replaced with empty strings.
+COPY packages/web/nginx.conf.template /etc/nginx/nginx.conf.template
 EXPOSE 80
+CMD ["sh", "-c", "envsubst '$PORT $API_URL' < /etc/nginx/nginx.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
