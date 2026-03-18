@@ -79,6 +79,11 @@ export async function createAppointment(
   const errors = validateAppointmentInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
+  const timeValidation = validateAppointmentTimes(input);
+  if (timeValidation.errors.length > 0) {
+    throw new Error(`Validation failed: ${timeValidation.errors.join(', ')}`);
+  }
+
   const appointment: Appointment = {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -94,6 +99,11 @@ export async function createAppointment(
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+
+  // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
+  }
 
   return repository.create(appointment);
 }

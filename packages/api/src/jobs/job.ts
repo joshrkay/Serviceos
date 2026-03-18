@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ValidationError } from '../shared/errors';
 
 export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
@@ -72,6 +73,9 @@ export async function createJob(
   repository: JobRepository,
   auditRepo?: AuditRepository
 ): Promise<Job> {
+  const errors = validateJobInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const jobNumber = await repository.getNextJobNumber(input.tenantId);
 
   const job: Job = {
