@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { isValidTimezone } from '../shared/timezone';
 import { toUtcDate } from './time';
+import { validateAppointmentTimes } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -97,14 +98,27 @@ export async function createAppointment(
   const errors = validateAppointmentInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
+  const normalizedScheduledStart = toUtcDate(input.scheduledStart);
+  const normalizedScheduledEnd = toUtcDate(input.scheduledEnd);
+  const normalizedArrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
+  const normalizedArrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
+
+  const { errors: timeErrors } = validateAppointmentTimes({
+    scheduledStart: normalizedScheduledStart,
+    scheduledEnd: normalizedScheduledEnd,
+    arrivalWindowStart: normalizedArrivalWindowStart,
+    arrivalWindowEnd: normalizedArrivalWindowEnd,
+  });
+  if (timeErrors.length > 0) throw new Error(`Validation failed: ${timeErrors.join(', ')}`);
+
   const appointment: Appointment = {
     id: uuidv4(),
     tenantId: input.tenantId,
     jobId: input.jobId,
-    scheduledStart: toUtcDate(input.scheduledStart),
-    scheduledEnd: toUtcDate(input.scheduledEnd),
-    arrivalWindowStart: input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined,
-    arrivalWindowEnd: input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined,
+    scheduledStart: normalizedScheduledStart,
+    scheduledEnd: normalizedScheduledEnd,
+    arrivalWindowStart: normalizedArrivalWindowStart,
+    arrivalWindowEnd: normalizedArrivalWindowEnd,
     timezone: input.timezone,
     status: 'scheduled',
     notes: input.notes,
@@ -134,7 +148,25 @@ export async function updateAppointment(
     throw new Error('Validation failed: Invalid timezone');
   }
 
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
   const normalizedTimeUpdates = normalizeAppointmentTimeUpdates(input);
+
+  const scheduledStart = normalizedTimeUpdates.scheduledStart ?? existing.scheduledStart;
+  const scheduledEnd = normalizedTimeUpdates.scheduledEnd ?? existing.scheduledEnd;
+  const arrivalWindowStart =
+    'arrivalWindowStart' in normalizedTimeUpdates ? normalizedTimeUpdates.arrivalWindowStart : existing.arrivalWindowStart;
+  const arrivalWindowEnd =
+    'arrivalWindowEnd' in normalizedTimeUpdates ? normalizedTimeUpdates.arrivalWindowEnd : existing.arrivalWindowEnd;
+
+  const { errors: timeErrors } = validateAppointmentTimes({
+    scheduledStart,
+    scheduledEnd,
+    arrivalWindowStart,
+    arrivalWindowEnd,
+  });
+  if (timeErrors.length > 0) throw new Error(`Validation failed: ${timeErrors.join(', ')}`);
 
   return repository.update(tenantId, id, {
     ...input,

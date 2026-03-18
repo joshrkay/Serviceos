@@ -172,6 +172,48 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(updated!.timezone).toBe('America/Los_Angeles');
   });
 
+
+  it('validation — rejects invalid scheduling ranges during create', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: new Date('2026-04-02T12:00:00.000Z'),
+          scheduledEnd: new Date('2026-04-02T10:00:00.000Z'),
+          timezone: 'UTC',
+          createdBy: 'user-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — rejects invalid scheduling ranges during update', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-04-03T10:00:00.000Z'),
+        scheduledEnd: new Date('2026-04-03T12:00:00.000Z'),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        {
+          scheduledStart: new Date('2026-04-03T13:00:00.000Z'),
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
+  });
+
   it('validation — rejects invalid timezone values', async () => {
     await expect(
       createAppointment(
