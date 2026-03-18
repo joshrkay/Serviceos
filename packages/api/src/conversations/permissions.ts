@@ -42,16 +42,17 @@ export function canAccessConversation(
     return true;
   }
 
-  // 'assigned' scope: user must be the creator or in the assigned list
+  // 'assigned' scope: role-specific behavior
+  if (context.role === 'technician') {
+    return conversation.assignedUserIds?.includes(context.userId) ?? false;
+  }
+
+  // Fallback for non-technician roles that may use assigned scope in the future.
   if (conversation.createdBy === context.userId) {
     return true;
   }
 
-  if (conversation.assignedUserIds?.includes(context.userId)) {
-    return true;
-  }
-
-  return false;
+  return conversation.assignedUserIds?.includes(context.userId) ?? false;
 }
 
 export function filterVisibleConversations(
