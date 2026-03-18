@@ -103,19 +103,17 @@ export function createApp() {
   const conversationRepo = new InMemoryConversationRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
-  const verticalPackRepo = new InMemoryVerticalPackRepository();
-  const verticalPackRegistry = new InMemoryVerticalPackRegistry();
+  // Legacy vertical routes still use the P4 repository shape.
+  const verticalCatalogRepo = new InMemoryVerticalPackRepository();
+  // Pack activation + pack-config-loader share the canonical registry shape.
+  const canonicalPackRegistry = new InMemoryVerticalPackRegistry();
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
   const packActivationRepo = new InMemoryPackActivationRepository();
 
   // Canonical vertical packs are required for pack config loading and activation workflows
-  seedCanonicalVerticalPacks(verticalPackRegistry).catch(err => {
-    // A proper logger should be used in a production environment.
-    console.error('Failed to seed canonical vertical packs on startup:', err);
-    process.exit(1);
-  });
+  seedCanonicalVerticalPacks(canonicalPackRegistry);
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
@@ -128,8 +126,8 @@ export function createApp() {
   app.use('/api/notes', createNoteRouter(noteRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
-  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, verticalPackRegistry));
-  app.use('/api/verticals', createVerticalRouter(verticalPackRepo));
+  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
+  app.use('/api/verticals', createVerticalRouter(verticalCatalogRepo));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter(qualityMetricsRepo));

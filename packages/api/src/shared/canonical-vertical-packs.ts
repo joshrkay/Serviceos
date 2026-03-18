@@ -25,23 +25,22 @@ function buildCanonicalPack(
   };
 }
 
-export function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): Promise<[VerticalPack, VerticalPack]> {
-  return Promise.all([
-    registry.register(
-      buildCanonicalPack(
-        'hvac-v1',
-        'hvac',
-        'HVAC Pack',
-        'Canonical HVAC pack with terminology and categories for estimating.'
-      )
-    ),
-    registry.register(
-      buildCanonicalPack(
-        'plumbing-v1',
-        'plumbing',
-        'Plumbing Pack',
-        'Canonical plumbing pack with terminology and categories for estimating.'
-      )
-    ),
-  ]);
+export function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): void {
+  void registry.register(
+    buildCanonicalPack(
+      'hvac-v1',
+      'hvac',
+      'HVAC Pack',
+      'Canonical HVAC pack with terminology and categories for estimating.'
+    )
+  );
+
+  void registry.register(
+    buildCanonicalPack(
+      'plumbing-v1',
+      'plumbing',
+      'Plumbing Pack',
+      'Canonical plumbing pack with terminology and categories for estimating.'
+    )
+  );
 }
