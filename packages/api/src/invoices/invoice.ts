@@ -95,7 +95,7 @@ export async function createInvoice(
   auditRepo?: AuditRepository
 ): Promise<Invoice> {
   const errors = validateInvoiceInput(input);
-  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,

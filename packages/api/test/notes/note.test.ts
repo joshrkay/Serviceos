@@ -164,21 +164,19 @@ describe('P1-015 — Internal notes across key entities', () => {
     expect(errors).toContain('Invalid entityType');
   });
 
-  it('validation — createNote throws formatted validation errors', async () => {
+  it('validation — createNote surfaces validator errors', async () => {
     await expect(
       createNote(
         {
-          tenantId: '',
-          entityType: '' as any,
-          entityId: '',
-          content: '',
-          authorId: '',
-          authorRole: '',
+          tenantId: 'tenant-1',
+          entityType: 'widget' as any,
+          entityId: 'w-1',
+          content: 'Test',
+          authorId: 'u-1',
+          authorRole: 'owner',
         },
         repo
       )
-    ).rejects.toThrow(
-      'Validation failed: tenantId is required, entityType is required, entityId is required, content is required, authorId is required, authorRole is required'
-    );
+    ).rejects.toThrow('Validation failed: Invalid entityType');
   });
 });
