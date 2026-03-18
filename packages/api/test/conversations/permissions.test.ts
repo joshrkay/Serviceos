@@ -115,4 +115,52 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
     };
     expect(canAccessConversation(ownerContext, crossTenantConv)).toBe(false);
   });
+
+  it('middleware returns 403 when conversation exists under another tenant', async () => {
+    const getConv = async (tenantId: string, conversationId: string) => {
+      if (tenantId === 'tenant-1' && conversationId === 'conv-3') {
+        return null;
+      }
+      return null;
+    };
+
+    const getConvById = async (conversationId: string) => {
+      if (conversationId === 'conv-3') {
+        return {
+          id: 'conv-3',
+          tenantId: 'tenant-other',
+          createdBy: 'dispatcher-other',
+          assignedUserIds: [],
+          status: 'open',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        } satisfies Conversation;
+      }
+      return null;
+    };
+
+    const middleware = requireConversationAccess(getConv, getConvById);
+
+    const req = {
+      auth: {
+        userId: 'owner-1',
+        role: 'owner',
+        tenantId: 'tenant-1',
+      },
+      params: { conversationId: 'conv-3' },
+    } as any;
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
+    } as any;
+    const next = vi.fn();
+
+    await middleware(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'FORBIDDEN',
+      message: 'Conversation belongs to another tenant',
+    });
+    expect(next).not.toHaveBeenCalled();
+  });
 });
