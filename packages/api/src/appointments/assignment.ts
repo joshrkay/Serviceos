@@ -44,7 +44,7 @@ export async function assignTechnician(
   repository: AssignmentRepository
 ): Promise<AppointmentAssignment> {
   const errors = validateAssignmentInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const assignment: AppointmentAssignment = {
     id: uuidv4(),
