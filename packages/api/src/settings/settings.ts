@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 
+import { isValidTimezone } from '../shared/timezone';
+
 export interface TenantSettings {
   id: string;
   tenantId: string;
@@ -51,17 +53,12 @@ export interface SettingsRepository {
   incrementInvoiceNumber(tenantId: string): Promise<number>;
 }
 
-const VALID_TIMEZONES = [
-  'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-  'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'America/Detroit',
-  'America/Indiana/Indianapolis', 'America/Boise', 'UTC',
-];
 
 export function validateSettingsInput(input: CreateSettingsInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.businessName) errors.push('businessName is required');
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+  if (input.timezone && !isValidTimezone(input.timezone)) {
     errors.push('Invalid timezone');
   }
   if (input.estimatePrefix !== undefined && input.estimatePrefix.length === 0) {
