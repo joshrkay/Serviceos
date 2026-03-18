@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
 
 export interface TenantSettings {
   id: string;
@@ -85,7 +86,7 @@ export async function createSettings(
 
   const existing = await repository.findByTenant(input.tenantId);
   if (existing) {
-    throw new Error('Settings already exist for this tenant');
+    throw new ValidationError('Settings already exist for this tenant');
   }
 
   const settings: TenantSettings = {
@@ -129,7 +130,7 @@ export async function getNextEstimateNumber(
   repository: SettingsRepository
 ): Promise<string> {
   const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new Error('Tenant settings not found');
+  if (!settings) throw new ValidationError('Tenant settings not found');
   const num = await repository.incrementEstimateNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.estimatePrefix}${String(num).padStart(4, '0')}`;
@@ -140,7 +141,7 @@ export async function getNextInvoiceNumber(
   repository: SettingsRepository
 ): Promise<string> {
   const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new Error('Tenant settings not found');
+  if (!settings) throw new ValidationError('Tenant settings not found');
   const num = await repository.incrementInvoiceNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
@@ -204,7 +205,7 @@ export class InMemorySettingsRepository implements SettingsRepository {
 
   async incrementEstimateNumber(tenantId: string): Promise<number> {
     const s = this.settings.get(tenantId);
-    if (!s) throw new Error('Settings not found');
+    if (!s) throw new ValidationError('Settings not found');
     const num = s.nextEstimateNumber;
     s.nextEstimateNumber += 1;
     this.settings.set(tenantId, s);
@@ -213,7 +214,7 @@ export class InMemorySettingsRepository implements SettingsRepository {
 
   async incrementInvoiceNumber(tenantId: string): Promise<number> {
     const s = this.settings.get(tenantId);
-    if (!s) throw new Error('Settings not found');
+    if (!s) throw new ValidationError('Settings not found');
     const num = s.nextInvoiceNumber;
     s.nextInvoiceNumber += 1;
     this.settings.set(tenantId, s);

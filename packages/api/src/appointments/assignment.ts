@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { JobRepository } from '../jobs/job';
+import { ValidationError } from '../shared/errors';
 
 export interface AppointmentAssignment {
   id: string;

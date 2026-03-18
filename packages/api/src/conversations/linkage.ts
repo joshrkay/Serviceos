@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
 
 export type LinkableEntityType = 'customer' | 'job' | 'estimate' | 'invoice';
 
