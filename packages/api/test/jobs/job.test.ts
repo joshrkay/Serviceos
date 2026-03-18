@@ -153,6 +153,22 @@ describe('P1-005 — Job entity + CRUD', () => {
     } satisfies Partial<ValidationError>);
   });
 
+  it('validation — createJob surfaces validator errors', async () => {
+    await expect(
+      createJob(
+        {
+          tenantId: 't-1',
+          customerId: 'c-1',
+          locationId: 'l-1',
+          summary: 'Test',
+          priority: 'critical' as any,
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Invalid priority');
+  });
+
   it('tenant isolation — cross-tenant data inaccessible', async () => {
     const job = await createJob(
       { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Test', createdBy: 'u-1' },
