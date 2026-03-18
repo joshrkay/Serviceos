@@ -100,6 +100,11 @@ export async function createAppointment(
     updatedAt: new Date(),
   };
 
+  // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
+  }
+
   return repository.create(appointment);
 }
 

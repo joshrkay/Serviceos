@@ -18,6 +18,14 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS messages');
   });
 
+
+  it('idempotency — migration SQL drops policies before creating them', () => {
+    const sql = getMigrationSQL();
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_isolation_users ON users');
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_isolation_audit ON audit_events');
+    expect(sql).toContain('CREATE POLICY tenant_isolation_users ON users');
+  });
+
   it('tenant isolation — RLS is enabled on tenant-scoped tables', () => {
     const sql = getMigrationSQL();
     expect(sql).toContain('ENABLE ROW LEVEL SECURITY');
@@ -26,6 +34,12 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(sql).toContain('tenant_isolation_files');
     expect(sql).toContain('tenant_isolation_conversations');
     expect(sql).toContain('tenant_isolation_messages');
+  });
+
+  it('tenant isolation — policy creation is idempotent', () => {
+    const sql = getMigrationSQL();
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_isolation_users ON users;');
+    expect(sql).toContain('CREATE POLICY tenant_isolation_users ON users');
   });
 
   it('happy path — setTenantContext generates correct SQL', () => {
