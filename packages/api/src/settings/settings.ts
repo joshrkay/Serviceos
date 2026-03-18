@@ -80,6 +80,9 @@ export async function createSettings(
   input: CreateSettingsInput,
   repository: SettingsRepository
 ): Promise<TenantSettings> {
+  const errors = validateSettingsInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const existing = await repository.findByTenant(input.tenantId);
   if (existing) {
     throw new Error('Settings already exist for this tenant');
