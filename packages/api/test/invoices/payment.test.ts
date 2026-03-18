@@ -151,6 +151,16 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(errors).toContain('invoiceId is required');
   });
 
+  it('validation — recordPayment surfaces validator errors before invoice lookup', async () => {
+    await expect(
+      recordPayment(
+        { tenantId: '', invoiceId: 'missing-invoice', amountCents: 1000, method: 'cash', processedBy: 'u-1' },
+        invoiceRepo,
+        paymentRepo
+      )
+    ).rejects.toThrow('Validation failed: tenantId is required');
+  });
+
   it('validation — rejects payment on draft invoice', async () => {
     // Create a new invoice but do NOT issue it (stays in draft)
     const draftInvoice = await createInvoice(
