@@ -93,6 +93,9 @@ export async function createInvoice(
   repository: InvoiceRepository,
   auditRepo?: AuditRepository
 ): Promise<Invoice> {
+  const errors = validateInvoiceInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const totals = calculateDocumentTotals(
     input.lineItems,
     input.discountCents || 0,
