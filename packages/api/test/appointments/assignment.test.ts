@@ -103,6 +103,23 @@ describe('P1-008 — Technician assignment model', () => {
     expect(errors).toContain('assignedBy is required');
   });
 
+  it('validation — assignTechnician throws formatted validation errors', async () => {
+    await expect(
+      assignTechnician(
+        {
+          tenantId: '',
+          appointmentId: '',
+          technicianId: '',
+          technicianRole: 'dispatcher',
+          assignedBy: '',
+        },
+        assignmentRepo
+      )
+    ).rejects.toThrow(
+      'Validation failed: tenantId is required, appointmentId is required, technicianId is required, assignedBy is required, Assigned user must have technician role'
+    );
+  });
+
   it('edge case — syncJobAssignment clears stale technician when no primary', async () => {
     const job = await createJob(
       { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Test', createdBy: 'u-1' },

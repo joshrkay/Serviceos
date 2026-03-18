@@ -151,6 +151,24 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(errors).toContain('invoiceId is required');
   });
 
+  it('validation — recordPayment throws formatted validation errors', async () => {
+    await expect(
+      recordPayment(
+        {
+          tenantId: '',
+          invoiceId: '',
+          amountCents: 0,
+          method: '' as any,
+          processedBy: '',
+        },
+        invoiceRepo,
+        paymentRepo
+      )
+    ).rejects.toThrow(
+      'Validation failed: tenantId is required, invoiceId is required, amountCents must be positive, method is required, processedBy is required'
+    );
+  });
+
   it('validation — rejects payment on draft invoice', async () => {
     // Create a new invoice but do NOT issue it (stays in draft)
     const draftInvoice = await createInvoice(

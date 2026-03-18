@@ -130,6 +130,23 @@ describe('P1-005 — Job entity + CRUD', () => {
     expect(errors).toContain('Invalid priority');
   });
 
+  it('validation — createJob throws formatted validation errors', async () => {
+    await expect(
+      createJob(
+        {
+          tenantId: '',
+          customerId: '',
+          locationId: '',
+          summary: '',
+          createdBy: '',
+        },
+        repo
+      )
+    ).rejects.toThrow(
+      'Validation failed: tenantId is required, customerId is required, locationId is required, summary is required, createdBy is required'
+    );
+  });
+
   it('tenant isolation — cross-tenant data inaccessible', async () => {
     const job = await createJob(
       { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Test', createdBy: 'u-1' },

@@ -89,8 +89,8 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
   });
 
   it('missing auth returns 401', async () => {
-    const getConv = async (_conversationId: string) => conversation;
-    const middleware = requireConversationAccess(getConv);
+    const getConversationById = async (_conversationId: string) => conversation;
+    const middleware = requireConversationAccess({ getConversationById });
 
     const req = { auth: undefined, params: { conversationId: 'conv-1' } } as any;
     const res = {
@@ -126,11 +126,11 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
       updatedAt: new Date(),
     };
 
-    const getConv = async (conversationId: string) => {
+    const getConversationById = async (conversationId: string) => {
       if (conversationId === 'conv-3') return crossTenantConv;
       return null;
     };
-    const middleware = requireConversationAccess(getConv);
+    const middleware = requireConversationAccess({ getConversationById });
 
     const req = {
       auth: { userId: 'owner-1', role: 'owner', tenantId: 'tenant-1' },
@@ -152,8 +152,8 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
   });
 
   it('middleware returns 404 only when conversation does not exist', async () => {
-    const getConv = async (_conversationId: string) => null;
-    const middleware = requireConversationAccess(getConv);
+    const getConversationById = async (_conversationId: string) => null;
+    const middleware = requireConversationAccess({ getConversationById });
 
     const req = {
       auth: { userId: 'owner-1', role: 'owner', tenantId: 'tenant-1' },
