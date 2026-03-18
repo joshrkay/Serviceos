@@ -95,6 +95,118 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(results).toHaveLength(1);
   });
 
+
+  it('validation — create rejects scheduledStart >= scheduledEnd', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrowEnd,
+          scheduledEnd: tomorrow,
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — create rejects partial arrival window', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          arrivalWindowStart: arrivalStart,
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Both arrivalWindowStart and arrivalWindowEnd must be provided together');
+  });
+
+  it('validation — create rejects arrival window start after scheduled start', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          arrivalWindowStart: new Date(tomorrow.getTime() + 30 * 60 * 1000),
+          arrivalWindowEnd: new Date(tomorrow.getTime() + 90 * 60 * 1000),
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: arrivalWindowStart must be at or before scheduledStart');
+  });
+
+  it('validation — create rejects duration greater than 24h', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: new Date(tomorrow.getTime() + 25 * 60 * 60 * 1000),
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Appointment duration cannot exceed 24 hours');
+  });
+
+  it('validation — update validates merged schedule values', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'UTC',
+        createdBy: 'u-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        {
+          scheduledStart: new Date(tomorrowEnd.getTime() + 60 * 1000),
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — create returns warnings in metadata on successful write', async () => {
+    const pastStart = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const pastEnd = new Date(Date.now() - 60 * 60 * 1000);
+
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: pastStart,
+        scheduledEnd: pastEnd,
+        timezone: 'UTC',
+        createdBy: 'u-1',
+      },
+      repo
+    );
+
+    expect(apt.validationWarnings).toContain('Appointment is scheduled in the past');
+  });
+
   it('validation — rejects missing required fields', () => {
     const errors = validateAppointmentInput({
       tenantId: '',

@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { validateAppointmentTimes } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -48,6 +49,14 @@ export interface AppointmentRepository {
   update(tenantId: string, id: string, updates: Partial<Appointment>): Promise<Appointment | null>;
 }
 
+export interface AppointmentWriteResult extends Appointment {
+  /**
+   * Non-blocking scheduling warnings returned by validateAppointmentTimes.
+   * Write operations persist successfully even when warnings are present.
+   */
+  validationWarnings?: string[];
+}
+
 export function validateAppointmentInput(input: CreateAppointmentInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
@@ -62,9 +71,14 @@ export function validateAppointmentInput(input: CreateAppointmentInput): string[
 export async function createAppointment(
   input: CreateAppointmentInput,
   repository: AppointmentRepository
-): Promise<Appointment> {
+): Promise<AppointmentWriteResult> {
   const errors = validateAppointmentInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
+  const timeValidation = validateAppointmentTimes(input);
+  if (timeValidation.errors.length > 0) {
+    throw new Error(`Validation failed: ${timeValidation.errors.join(', ')}`);
+  }
 
   const appointment: Appointment = {
     id: uuidv4(),
@@ -82,7 +96,11 @@ export async function createAppointment(
     updatedAt: new Date(),
   };
 
-  return repository.create(appointment);
+  const created = await repository.create(appointment);
+  if (timeValidation.warnings.length > 0) {
+    return { ...created, validationWarnings: timeValidation.warnings };
+  }
+  return created;
 }
 
 export async function getAppointment(
@@ -98,8 +116,28 @@ export async function updateAppointment(
   id: string,
   input: UpdateAppointmentInput,
   repository: AppointmentRepository
-): Promise<Appointment | null> {
-  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+): Promise<AppointmentWriteResult | null> {
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  const effectiveSchedule = {
+    scheduledStart: input.scheduledStart ?? existing.scheduledStart,
+    scheduledEnd: input.scheduledEnd ?? existing.scheduledEnd,
+    arrivalWindowStart: input.arrivalWindowStart ?? existing.arrivalWindowStart,
+    arrivalWindowEnd: input.arrivalWindowEnd ?? existing.arrivalWindowEnd,
+  };
+
+  const timeValidation = validateAppointmentTimes(effectiveSchedule);
+  if (timeValidation.errors.length > 0) {
+    throw new Error(`Validation failed: ${timeValidation.errors.join(', ')}`);
+  }
+
+  const updated = await repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  if (!updated) return null;
+  if (timeValidation.warnings.length > 0) {
+    return { ...updated, validationWarnings: timeValidation.warnings };
+  }
+  return updated;
 }
 
 export async function listByJob(
