@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { TranscriptMessage } from '../../components/voice/TranscriptMessage';
 import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
-import { TranscriptionStatus, Proposal } from '../../types/conversation';
+import { TranscriptionStatus } from '../../types/conversation';
 
 export interface JobContext {
   jobId: string;
@@ -12,12 +12,18 @@ export interface JobContext {
 
 export interface VoiceUpdateProps {
   jobContext: JobContext | null;
+  workflowMode?: 'automatic' | 'manual' | 'semi-automatic';
   onUploadRecording: (jobId: string, blob: Blob) => Promise<string>;
+  onGenerateProposal: (context: {
+    jobId: string;
+    appointmentId?: string;
+    recordingId?: string;
+    transcript?: string;
+  }) => void;
   onRetryTranscription?: (recordingId: string) => void;
   transcriptionStatus?: TranscriptionStatus;
   transcript?: string;
   transcriptionError?: string;
-  proposal?: Proposal;
 }
 
 export function validateJobContext(context: JobContext | null): string | null {
@@ -32,7 +38,9 @@ export function validateJobContext(context: JobContext | null): string | null {
 
 export function VoiceUpdate({
   jobContext,
+  workflowMode = 'automatic',
   onUploadRecording,
+  onGenerateProposal,
   onRetryTranscription,
   transcriptionStatus,
   transcript,
@@ -59,12 +67,30 @@ export function VoiceUpdate({
       try {
         const id = await onUploadRecording(jobContext.jobId, blob);
         setRecordingId(id);
+        if (workflowMode === 'automatic') {
+          onGenerateProposal({
+            jobId: jobContext.jobId,
+            appointmentId: jobContext.appointmentId,
+            recordingId: id,
+            transcript,
+          });
+        }
       } catch (err) {
         setError('Upload failed. Please try again.');
         throw err;
       }
     });
-  }, [jobContext, onUploadRecording, recorder.upload]);
+  }, [jobContext, onGenerateProposal, onUploadRecording, recorder.upload, transcript, workflowMode]);
+
+  const handleGenerateProposal = useCallback(() => {
+    if (!jobContext) return;
+    onGenerateProposal({
+      jobId: jobContext.jobId,
+      appointmentId: jobContext.appointmentId,
+      recordingId: recordingId ?? undefined,
+      transcript,
+    });
+  }, [jobContext, onGenerateProposal, recordingId, transcript]);
 
   return (
     <div className="voice-update" data-testid="voice-update">
@@ -96,6 +122,18 @@ export function VoiceUpdate({
         onReRecord={recorder.reRecord}
         onUpload={handleUpload}
       />
+
+      {(workflowMode === 'manual' || workflowMode === 'semi-automatic') && (
+        <button
+          type="button"
+          className="voice-update-generate-proposal-btn"
+          data-testid="generate-proposal-button"
+          disabled={!jobContext || !recordingId}
+          onClick={handleGenerateProposal}
+        >
+          Generate Proposal
+        </button>
+      )}
 
       {transcriptionStatus && (
         <TranscriptMessage
