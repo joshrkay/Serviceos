@@ -100,6 +100,19 @@ export function requireConversationAccess({ getConversationById }: ConversationA
     }
 
     if (!conversation) {
+      if (getConversationById) {
+        try {
+          const anyTenantConversation = await getConversationById(conversationId);
+          if (anyTenantConversation && anyTenantConversation.tenantId !== req.auth.tenantId) {
+            res.status(403).json({ error: 'FORBIDDEN', message: 'Conversation belongs to another tenant' });
+            return;
+          }
+        } catch (err) {
+          res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to check conversation access' });
+          return;
+        }
+      }
+
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
       return;
     }
