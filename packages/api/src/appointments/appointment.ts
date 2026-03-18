@@ -3,6 +3,10 @@ import { validateAppointmentTimes } from './validation';
 
 import { isValidTimezone } from '../shared/timezone';
 import { toUtcDate } from './time';
+import { validateAppointmentTimes } from './validation';
+
+import { isValidTimezone } from '../shared/timezone';
+import { toUtcDate } from './time';
 import { validateAppointmentTimes as validateAppointmentDateRanges } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
@@ -104,7 +108,7 @@ export async function createAppointment(
   const normalizedArrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
   const normalizedArrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
 
-  const { errors: timeErrors } = validateAppointmentDateRanges({
+  const { errors: timeErrors } = validateAppointmentTimes({
     scheduledStart: normalizedScheduledStart,
     scheduledEnd: normalizedScheduledEnd,
     arrivalWindowStart: normalizedArrivalWindowStart,
@@ -166,7 +170,7 @@ export async function updateAppointment(
   const arrivalWindowEnd =
     'arrivalWindowEnd' in normalizedTimeUpdates ? normalizedTimeUpdates.arrivalWindowEnd : existing.arrivalWindowEnd;
 
-  const { errors: timeErrors } = validateAppointmentDateRanges({
+  const { errors: timeErrors } = validateAppointmentTimes({
     scheduledStart,
     scheduledEnd,
     arrivalWindowStart,
