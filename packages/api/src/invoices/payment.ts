@@ -55,6 +55,9 @@ export async function recordPayment(
   invoiceRepo: InvoiceRepository,
   paymentRepo: PaymentRepository
 ): Promise<{ payment: Payment; invoice: Invoice }> {
+  const errors = validatePaymentInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const invoice = await invoiceRepo.findById(input.tenantId, input.invoiceId);
   if (!invoice) throw new Error('Invoice not found');
 
