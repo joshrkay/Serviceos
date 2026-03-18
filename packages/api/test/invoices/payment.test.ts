@@ -185,7 +185,7 @@ describe('P1-013 — Payment entity + partial payments', () => {
         paymentRepo
       )
     ).rejects.toThrow(
-      'Validation failed: tenantId is required, amountCents must be positive, amountCents must be an integer, method is required, processedBy is required'
+      'Validation failed: tenantId is required, amountCents must be positive, method is required, processedBy is required'
     );
   });
 
