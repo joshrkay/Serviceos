@@ -14,6 +14,10 @@ export interface ConversationVisibilityRule {
   scope: 'all' | 'assigned';
 }
 
+export interface ConversationAccessLookup {
+  getConversationById: (conversationId: string) => Promise<Conversation | null>;
+}
+
 const VISIBILITY_RULES: ConversationVisibilityRule[] = [
   { role: 'owner', scope: 'all' },
   { role: 'dispatcher', scope: 'all' },
@@ -69,9 +73,7 @@ export function validateAccessContext(context: Partial<ConversationAccessContext
   return errors;
 }
 
-export function requireConversationAccess(
-  getConversation: (tenantId: string, conversationId: string) => Promise<Conversation | null>
-) {
+export function requireConversationAccess({ getConversationById }: ConversationAccessLookup) {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> => {
     if (!req.auth) {
       res.status(401).json({ error: 'UNAUTHORIZED', message: 'Authentication required' });
@@ -91,7 +93,7 @@ export function requireConversationAccess(
 
     let conversation: Conversation | null;
     try {
-      conversation = await getConversation(req.auth.tenantId, conversationId);
+      conversation = await getConversationById(conversationId);
     } catch (err) {
       res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Failed to check conversation access' });
       return;
@@ -99,6 +101,11 @@ export function requireConversationAccess(
 
     if (!conversation) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
+      return;
+    }
+
+    if (conversation.tenantId !== req.auth.tenantId) {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'Cross-tenant conversation access is forbidden' });
       return;
     }
 

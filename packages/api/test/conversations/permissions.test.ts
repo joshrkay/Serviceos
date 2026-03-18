@@ -89,8 +89,8 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
   });
 
   it('missing auth returns 401', async () => {
-    const getConv = async () => conversation;
-    const middleware = requireConversationAccess(getConv);
+    const getConversationById = async (_conversationId: string) => conversation;
+    const middleware = requireConversationAccess({ getConversationById });
 
     const req = { auth: undefined, params: { conversationId: 'conv-1' } } as any;
     const res = {
@@ -114,5 +114,63 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
       updatedAt: new Date(),
     };
     expect(canAccessConversation(ownerContext, crossTenantConv)).toBe(false);
+  });
+
+  it('middleware returns 403 for cross-tenant conversation access', async () => {
+    const crossTenantConv: Conversation = {
+      id: 'conv-3',
+      tenantId: 'tenant-other',
+      createdBy: 'user-x',
+      status: 'open',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const getConversationById = async (conversationId: string) => {
+      if (conversationId === 'conv-3') return crossTenantConv;
+      return null;
+    };
+    const middleware = requireConversationAccess({ getConversationById });
+
+    const req = {
+      auth: { userId: 'owner-1', role: 'owner', tenantId: 'tenant-1' },
+      params: { conversationId: 'conv-3' },
+    } as any;
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
+    } as any;
+    const next = vi.fn();
+
+    await middleware(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'FORBIDDEN',
+      message: 'Cross-tenant conversation access is forbidden',
+    });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('middleware returns 404 only when conversation does not exist', async () => {
+    const getConversationById = async (_conversationId: string) => null;
+    const middleware = requireConversationAccess({ getConversationById });
+
+    const req = {
+      auth: { userId: 'owner-1', role: 'owner', tenantId: 'tenant-1' },
+      params: { conversationId: 'missing-conversation' },
+    } as any;
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
+    } as any;
+    const next = vi.fn();
+
+    await middleware(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'NOT_FOUND',
+      message: 'Conversation not found',
+    });
+    expect(next).not.toHaveBeenCalled();
   });
 });
