@@ -39,6 +39,8 @@ import { InMemoryVerticalPackRepository } from './verticals/registry';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
+import { InMemoryVerticalPackRegistry as InMemorySharedVerticalPackRegistry } from './shared/vertical-pack-registry';
+import { InMemoryPackActivationRepository } from './settings/pack-activation';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -101,6 +103,8 @@ export function createApp() {
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
+  const sharedVerticalPackRegistry = new InMemorySharedVerticalPackRegistry();
+  const packActivationRepo = new InMemoryPackActivationRepository();
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
@@ -112,7 +116,10 @@ export function createApp() {
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
-  app.use('/api/settings', createSettingsRouter(settingsRepo));
+  app.use('/api/settings', createSettingsRouter(settingsRepo, {
+    activationRepo: packActivationRepo,
+    verticalPackRegistry: sharedVerticalPackRegistry,
+  }));
   app.use('/api/verticals', createVerticalRouter(verticalPackRepo));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
