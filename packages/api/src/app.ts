@@ -101,12 +101,12 @@ export function createApp() {
   const conversationRepo = new InMemoryConversationRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
-  const verticalPackRegistry = new InMemoryVerticalPackRegistry();
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
   const sharedVerticalPackRegistry = new InMemorySharedVerticalPackRegistry();
   const packActivationRepo = new InMemoryPackActivationRepository();
+  const verticalPackRepo = new InMemoryVerticalPackRepository();
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
