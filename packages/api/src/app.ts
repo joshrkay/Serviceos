@@ -76,7 +76,9 @@ export function createApp() {
           await pool.query('SELECT 1');
           return { status: 'ok' };
         } catch {
-          return { status: 'down', message: 'Database connection failed' };
+          // Treat database outages as degraded on /health so platform liveness checks
+          // do not force restart loops while dependencies recover.
+          return { status: 'degraded', message: 'Database connection failed' };
         }
       },
     });
