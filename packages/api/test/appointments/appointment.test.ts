@@ -95,6 +95,100 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(results).toHaveLength(1);
   });
 
+  it('utc persistence — normalizes incoming Date objects and stores stable UTC instants on create', async () => {
+    const baseStart = new Date('2026-04-01T13:00:00.000Z');
+    const baseEnd = new Date('2026-04-01T15:00:00.000Z');
+
+    const ny = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-ny',
+        scheduledStart: new Date(baseStart.getTime()),
+        scheduledEnd: new Date(baseEnd.getTime()),
+        arrivalWindowStart: new Date(baseStart.getTime() - 30 * 60 * 1000),
+        arrivalWindowEnd: new Date(baseStart.getTime() + 30 * 60 * 1000),
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const utc = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-utc',
+        scheduledStart: new Date(baseStart.getTime()),
+        scheduledEnd: new Date(baseEnd.getTime()),
+        arrivalWindowStart: new Date(baseStart.getTime() - 30 * 60 * 1000),
+        arrivalWindowEnd: new Date(baseStart.getTime() + 30 * 60 * 1000),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    expect(ny.scheduledStart.getTime()).toBe(utc.scheduledStart.getTime());
+    expect(ny.scheduledEnd.getTime()).toBe(utc.scheduledEnd.getTime());
+    expect(ny.arrivalWindowStart!.getTime()).toBe(utc.arrivalWindowStart!.getTime());
+    expect(ny.arrivalWindowEnd!.getTime()).toBe(utc.arrivalWindowEnd!.getTime());
+
+    // Ensure persistence stores clones rather than caller-owned Date references.
+    const foundNy = await getAppointment('tenant-1', ny.id, repo);
+    expect(foundNy!.scheduledStart).not.toBe(baseStart);
+    expect(foundNy!.scheduledEnd).not.toBe(baseEnd);
+  });
+
+  it('utc persistence — update flow normalizes incoming Date fields consistently', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-04-01T10:00:00.000Z'),
+        scheduledEnd: new Date('2026-04-01T12:00:00.000Z'),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const updatedStart = new Date('2026-04-01T14:00:00.000Z');
+    const updatedEnd = new Date('2026-04-01T16:00:00.000Z');
+
+    const updated = await updateAppointment(
+      'tenant-1',
+      apt.id,
+      {
+        scheduledStart: updatedStart,
+        scheduledEnd: updatedEnd,
+        timezone: 'America/Los_Angeles',
+      },
+      repo
+    );
+
+    expect(updated!.scheduledStart.getTime()).toBe(updatedStart.getTime());
+    expect(updated!.scheduledEnd.getTime()).toBe(updatedEnd.getTime());
+    expect(updated!.scheduledStart).not.toBe(updatedStart);
+    expect(updated!.scheduledEnd).not.toBe(updatedEnd);
+    expect(updated!.timezone).toBe('America/Los_Angeles');
+  });
+
+  it('validation — rejects invalid timezone values', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          timezone: 'Mars/Phobos',
+          createdBy: 'user-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Invalid timezone');
+  });
+
+
   it('validation — rejects missing required fields', () => {
     const errors = validateAppointmentInput({
       tenantId: '',
