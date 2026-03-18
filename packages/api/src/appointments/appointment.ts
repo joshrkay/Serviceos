@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { validateAppointmentTimes } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -66,6 +67,11 @@ export async function createAppointment(
   const errors = validateAppointmentInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
+  const timeValidation = validateAppointmentTimes(input);
+  if (timeValidation.errors.length > 0) {
+    throw new Error(`Validation failed: ${timeValidation.errors.join(', ')}`);
+  }
+
   const appointment: Appointment = {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -81,6 +87,11 @@ export async function createAppointment(
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+
+  // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
+  }
 
   return repository.create(appointment);
 }
@@ -99,7 +110,28 @@ export async function updateAppointment(
   input: UpdateAppointmentInput,
   repository: AppointmentRepository
 ): Promise<Appointment | null> {
-  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  const effectiveSchedule = {
+    scheduledStart: input.scheduledStart ?? existing.scheduledStart,
+    scheduledEnd: input.scheduledEnd ?? existing.scheduledEnd,
+    arrivalWindowStart: input.arrivalWindowStart ?? existing.arrivalWindowStart,
+    arrivalWindowEnd: input.arrivalWindowEnd ?? existing.arrivalWindowEnd,
+  };
+
+  const timeValidation = validateAppointmentTimes(effectiveSchedule);
+  if (timeValidation.errors.length > 0) {
+    throw new Error(`Validation failed: ${timeValidation.errors.join(', ')}`);
+  }
+
+  const updated = await repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  if (!updated) return null;
+  // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on update: ${timeValidation.warnings.join(', ')}`);
+  }
+  return updated;
 }
 
 export async function listByJob(

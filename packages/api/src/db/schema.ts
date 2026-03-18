@@ -874,8 +874,14 @@ function makePoliciesIdempotent(sql: string): string {
 }
 
 export function getMigrationSQL(): string {
-  const combinedSql = Object.values(MIGRATIONS).join('\n');
-  return makePoliciesIdempotent(combinedSql);
+  return Object.values(MIGRATIONS)
+    .map((migration) =>
+      migration.replace(
+        /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)/g,
+        'DROP POLICY IF EXISTS $1 ON $2;\n    CREATE POLICY $1 ON $2'
+      )
+    )
+    .join('\n');
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

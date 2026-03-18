@@ -36,6 +36,12 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(sql).toContain('tenant_isolation_messages');
   });
 
+  it('tenant isolation — policy creation is idempotent', () => {
+    const sql = getMigrationSQL();
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_isolation_users ON users;');
+    expect(sql).toContain('CREATE POLICY tenant_isolation_users ON users');
+  });
+
   it('happy path — setTenantContext generates correct SQL', () => {
     const sql = setTenantContext('550e8400-e29b-41d4-a716-446655440000');
     expect(sql).toBe("SET app.current_tenant_id = '550e8400-e29b-41d4-a716-446655440000'");
