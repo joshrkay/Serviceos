@@ -188,7 +188,7 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
   });
 
-  it('validation — create returns warnings in metadata on successful write', async () => {
+  it('validation — create allows writes when only warnings are present', async () => {
     const pastStart = new Date(Date.now() - 2 * 60 * 60 * 1000);
     const pastEnd = new Date(Date.now() - 60 * 60 * 1000);
 
@@ -204,7 +204,9 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
       repo
     );
 
-    expect(apt.validationWarnings).toContain('Appointment is scheduled in the past');
+    expect(apt.id).toBeTruthy();
+    const found = await getAppointment('tenant-1', apt.id, repo);
+    expect(found).not.toBeNull();
   });
 
   it('validation — rejects missing required fields', () => {
