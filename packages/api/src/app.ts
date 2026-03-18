@@ -36,7 +36,7 @@ import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
-import { InMemoryVerticalPackRepository } from './verticals/registry';
+import { InMemoryVerticalPackRegistry } from './shared/vertical-pack-registry';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
@@ -76,7 +76,9 @@ export function createApp() {
           await pool.query('SELECT 1');
           return { status: 'ok' };
         } catch {
-          return { status: 'down', message: 'Database connection failed' };
+          // Treat database outages as degraded on /health so platform liveness checks
+          // do not force restart loops while dependencies recover.
+          return { status: 'degraded', message: 'Database connection failed' };
         }
       },
     });
