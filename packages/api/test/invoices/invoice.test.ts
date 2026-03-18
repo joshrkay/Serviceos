@@ -89,6 +89,23 @@ describe('P1-011 — Invoice entity + balance calculations', () => {
     expect(errors).toContain('At least one line item is required');
   });
 
+  it('validation — createInvoice throws formatted validation errors', async () => {
+    await expect(
+      createInvoice(
+        {
+          tenantId: '',
+          jobId: '',
+          invoiceNumber: '',
+          lineItems: [],
+          createdBy: '',
+        },
+        repo
+      )
+    ).rejects.toThrow(
+      'Validation failed: tenantId is required, jobId is required, invoiceNumber is required, createdBy is required, At least one line item is required'
+    );
+  });
+
   it('tenant isolation — cross-tenant data inaccessible', async () => {
     const invoice = await createInvoice(
       { tenantId: 'tenant-1', jobId: 'job-1', invoiceNumber: 'INV-0001', lineItems: sampleItems, createdBy: 'u-1' },

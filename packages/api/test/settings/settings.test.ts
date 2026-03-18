@@ -126,6 +126,12 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(errors).toContain('defaultPaymentTermDays must be non-negative');
   });
 
+  it('validation — createSettings throws formatted validation errors', async () => {
+    await expect(
+      createSettings({ tenantId: '', businessName: '' }, repo)
+    ).rejects.toThrow('Validation failed: tenantId is required, businessName is required');
+  });
+
   it('tenant isolation — settings are tenant-scoped', async () => {
     await createSettings({ tenantId: 'tenant-1', businessName: 'ACME' }, repo);
     await createSettings({ tenantId: 'tenant-2', businessName: 'Beta Co' }, repo);

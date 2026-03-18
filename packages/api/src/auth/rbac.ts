@@ -194,12 +194,12 @@ export function hasPermission(role: Role, permission: Permission): boolean {
   return permissions.includes(permission);
 }
 
-export function isValidRole(role: string): role is Role {
-  return role === 'owner' || role === 'dispatcher' || role === 'technician';
+export function getPermissions(role: Role): Permission[] {
+  return ROLE_PERMISSIONS[role] || [];
 }
 
-export function getPermissions(role: Role | string): Permission[] {
-  return ROLE_PERMISSIONS[role as Role] || [];
+export function isValidRole(role: string): role is Role {
+  return ['owner', 'dispatcher', 'technician'].includes(role);
 }
 
 export interface PermissionContract {
@@ -208,7 +208,7 @@ export interface PermissionContract {
 }
 
 export function getPermissionContract(): PermissionContract[] {
-  return (['owner', 'dispatcher', 'technician'] as Role[]).map((role) => ({
+  return (Object.keys(ROLE_PERMISSIONS) as Role[]).map((role) => ({
     role,
     permissions: ROLE_PERMISSIONS[role],
   }));

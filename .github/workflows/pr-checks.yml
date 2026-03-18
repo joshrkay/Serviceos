@@ -18,6 +18,7 @@ jobs:
       - name: Type check API
         run: npx tsc --noEmit
         working-directory: packages/api
+
       - name: Type check Web
         run: npx tsc --noEmit
         working-directory: packages/web

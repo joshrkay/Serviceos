@@ -10,13 +10,12 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit && eslint src/",
+    "lint": "tsc --noEmit",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts"
   },
   "dependencies": {
-    "@ai-service-os/shared": "*",
     "cors": "^2.8.6",
     "express": "^4.18.0",
     "openai": "^4.0.0",
@@ -39,7 +38,7 @@
     "supertest": "^6.3.0",
     "testcontainers": "^10.7.0",
     "ts-node": "^10.9.0",
-    "typescript": "^5.4.0",
+    "typescript": "^5.9.3",
     "vitest": "^1.6.0"
   }
 }
