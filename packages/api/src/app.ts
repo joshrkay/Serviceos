@@ -109,7 +109,11 @@ export function createApp() {
   const packActivationRepo = new InMemoryPackActivationRepository();
 
   // Canonical vertical packs are required for pack config loading and activation workflows
-  seedCanonicalVerticalPacks(verticalPackRegistry);
+  seedCanonicalVerticalPacks(verticalPackRegistry).catch(err => {
+    // A proper logger should be used in a production environment.
+    console.error('Failed to seed canonical vertical packs on startup:', err);
+    process.exit(1);
+  });
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
