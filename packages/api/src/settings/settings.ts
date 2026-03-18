@@ -3,6 +3,8 @@ import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
 
+import { isValidTimezone } from '../shared/timezone';
+
 export interface TenantSettings {
   id: string;
   tenantId: string;

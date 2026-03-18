@@ -5,6 +5,10 @@ import { isValidTimezone } from '../shared/timezone';
 import { toUtcDate } from './time';
 import { validateAppointmentTimes } from './validation';
 
+import { isValidTimezone } from '../shared/timezone';
+import { toUtcDate } from './time';
+import { validateAppointmentTimes as validateAppointmentDateRanges } from './validation';
+
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
 export interface Appointment {
