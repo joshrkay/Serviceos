@@ -52,7 +52,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_users_clerk ON users(clerk_user_id);
     ALTER TABLE users ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE users FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_users ON users;
     CREATE POLICY tenant_isolation_users ON users
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -75,7 +74,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_events(entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_events(correlation_id);
     ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_audit ON audit_events;
     CREATE POLICY tenant_isolation_audit ON audit_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -101,7 +99,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_files_tenant ON files(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_files_entity ON files(entity_type, entity_id);
     ALTER TABLE files ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE files FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_files ON files;
     CREATE POLICY tenant_isolation_files ON files
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -122,7 +119,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_conversations_tenant ON conversations(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_conversations_entity ON conversations(entity_type, entity_id);
     ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_conversations ON conversations;
     CREATE POLICY tenant_isolation_conversations ON conversations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -145,7 +141,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_messages_tenant ON messages(tenant_id);
     ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE messages FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_messages ON messages;
     CREATE POLICY tenant_isolation_messages ON messages
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -169,7 +164,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_voice_tenant ON voice_recordings(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_voice_status ON voice_recordings(status);
     ALTER TABLE voice_recordings ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE voice_recordings FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_voice ON voice_recordings;
     CREATE POLICY tenant_isolation_voice ON voice_recordings
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -200,7 +194,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_ai_runs_task ON ai_runs(task_type);
     CREATE INDEX IF NOT EXISTS idx_ai_runs_prompt ON ai_runs(prompt_version_id);
     ALTER TABLE ai_runs ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE ai_runs FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_ai_runs ON ai_runs;
     CREATE POLICY tenant_isolation_ai_runs ON ai_runs
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -240,7 +233,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_doc_rev_tenant ON document_revisions(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_doc_rev_document ON document_revisions(document_type, document_id);
     ALTER TABLE document_revisions ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE document_revisions FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_doc_rev ON document_revisions;
     CREATE POLICY tenant_isolation_doc_rev ON document_revisions
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -263,7 +255,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_diff_tenant ON diff_analyses(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_diff_document ON diff_analyses(document_type, document_id);
     ALTER TABLE diff_analyses ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE diff_analyses FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_diffs ON diff_analyses;
     CREATE POLICY tenant_isolation_diffs ON diff_analyses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -682,7 +673,6 @@ export const MIGRATIONS = {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_idempotency ON proposals(tenant_id, idempotency_key);
     CREATE INDEX IF NOT EXISTS idx_proposals_target ON proposals(target_entity_type, target_entity_id);
     ALTER TABLE proposals ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE proposals FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_proposals ON proposals;
     CREATE POLICY tenant_isolation_proposals ON proposals
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -805,7 +795,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_et_category ON estimate_templates(tenant_id, category_id);
     CREATE INDEX IF NOT EXISTS idx_et_vertical ON estimate_templates(tenant_id, vertical_type);
     ALTER TABLE estimate_templates ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE estimate_templates FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_templates ON estimate_templates;
     CREATE POLICY tenant_isolation_templates ON estimate_templates
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -829,7 +818,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_sb_tenant ON service_bundles(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_sb_vertical ON service_bundles(tenant_id, vertical_type);
     ALTER TABLE service_bundles ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE service_bundles FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_bundles ON service_bundles;
     CREATE POLICY tenant_isolation_bundles ON service_bundles
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -853,7 +841,6 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_wp_scope ON wording_preferences(tenant_id, scope);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_wp_tenant_scope_key ON wording_preferences(tenant_id, scope, key);
     ALTER TABLE wording_preferences ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE wording_preferences FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_wording ON wording_preferences;
     CREATE POLICY tenant_isolation_wording ON wording_preferences
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
@@ -872,15 +859,29 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_qm_metric ON quality_metrics(tenant_id, metric_name);
     CREATE INDEX IF NOT EXISTS idx_qm_recorded ON quality_metrics(recorded_at);
     ALTER TABLE quality_metrics ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE quality_metrics FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_qm ON quality_metrics;
     CREATE POLICY tenant_isolation_qm ON quality_metrics
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 
+function makePoliciesIdempotent(sql: string): string {
+  return sql.replace(
+    /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)\s+USING\s*\(([^;]+)\);/g,
+    (_match, policyName: string, tableName: string, usingClause: string) =>
+      `DROP POLICY IF EXISTS ${policyName} ON ${tableName};\n    CREATE POLICY ${policyName} ON ${tableName}\n      USING (${usingClause});`
+  );
+}
+
 export function getMigrationSQL(): string {
-  return Object.values(MIGRATIONS).join('\n');
+  return Object.values(MIGRATIONS)
+    .map((migration) =>
+      migration.replace(
+        /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)/g,
+        'DROP POLICY IF EXISTS $1 ON $2;\n    CREATE POLICY $1 ON $2'
+      )
+    )
+    .join('\n');
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
