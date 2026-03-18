@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { validateAppointmentTimes } from './validation';
 
 import { isValidTimezone } from '../shared/timezone';
 import { toUtcDate } from './time';
@@ -126,6 +127,11 @@ export async function createAppointment(
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+
+  // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
+  }
 
   return repository.create(appointment);
 }

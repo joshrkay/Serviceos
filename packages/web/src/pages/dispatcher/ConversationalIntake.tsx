@@ -5,6 +5,66 @@ import { VoiceRecorder } from '../../components/voice/VoiceRecorder';
 import { ProposalCard } from '../../components/conversations/ProposalCard';
 import { useVoiceRecorder } from '../../components/voice/useVoiceRecorder';
 
+const SUPPORTED_PROPOSAL_TYPES = [
+  'create_customer',
+  'create_job',
+  'create_appointment',
+] as const;
+
+type SupportedProposalType = (typeof SUPPORTED_PROPOSAL_TYPES)[number];
+
+function isSupportedProposalType(type: unknown): type is SupportedProposalType {
+  return typeof type === 'string' && SUPPORTED_PROPOSAL_TYPES.includes(type as SupportedProposalType);
+}
+
+function getMessageProposalType(message: Message): unknown {
+  return message.metadata?.proposalType ?? message.metadata?.type;
+}
+
+function getMessageProposalId(message: Message): string | null {
+  const proposalId = message.metadata?.proposalId;
+  return typeof proposalId === 'string' ? proposalId : null;
+}
+
+function getMessageIntakeChannel(message: Message): string {
+  const channel = message.metadata?.intakeChannel;
+  if (channel === 'voice' || channel === 'text') return channel;
+  return 'submission';
+}
+
+function resolveProposalForMessage(message: Message, proposals: Proposal[]): { proposal?: Proposal; error?: string } {
+  const mappedProposalId = getMessageProposalId(message);
+  if (mappedProposalId) {
+    const proposal = proposals.find((candidate) => candidate.id === mappedProposalId);
+    if (!proposal) {
+      return { error: `Unable to render proposal card: proposal "${mappedProposalId}" was not found.` };
+    }
+    if (!isSupportedProposalType(proposal.type)) {
+      return { error: `Unsupported proposal type "${proposal.type}" for ${getMessageIntakeChannel(message)} intake.` };
+    }
+    return { proposal };
+  }
+
+  const proposalType = getMessageProposalType(message);
+  if (!isSupportedProposalType(proposalType)) {
+    const parsedType = typeof proposalType === 'string' ? proposalType : 'unknown';
+    return { error: `Unsupported proposal type "${parsedType}" for ${getMessageIntakeChannel(message)} intake.` };
+  }
+
+  const proposal = proposals
+    .filter((candidate) => candidate.type === proposalType)
+    .sort((a, b) => {
+      const timeDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return timeDiff !== 0 ? timeDiff : a.id.localeCompare(b.id);
+    })[0];
+
+  if (!proposal) {
+    return { error: `No ${proposalType} proposal is available for this ${getMessageIntakeChannel(message)} intake.` };
+  }
+
+  return { proposal };
+}
+
 export interface ConversationalIntakeProps {
   conversationId?: string;
   messages: Message[];
@@ -44,10 +104,17 @@ export function ConversationalIntake({
 
   const renderProposal = useCallback(
     (message: Message) => {
-      const proposal = proposals.find(
-        (p) => p.id === message.metadata?.proposalId
-      );
+      const { proposal, error } = resolveProposalForMessage(message, proposals);
+      if (error) {
+        return (
+          <div className="intake-proposal-error" data-testid="intake-proposal-error" role="alert">
+            {error}
+          </div>
+        );
+      }
+
       if (!proposal) return null;
+
       return (
         <ProposalCard
           proposal={proposal}
