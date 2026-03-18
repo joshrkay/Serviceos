@@ -47,6 +47,16 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
     updatedAt: new Date(),
   };
 
+  const technicianCreatedUnassignedConversation: Conversation = {
+    id: 'conv-3',
+    tenantId: 'tenant-1',
+    createdBy: 'tech-1',
+    assignedUserIds: ['tech-other'],
+    status: 'open',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
   it('happy path — owner can access any conversation', () => {
     expect(canAccessConversation(ownerContext, conversation)).toBe(true);
     expect(canAccessConversation(ownerContext, unassignedConversation)).toBe(true);
@@ -59,6 +69,12 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
 
   it('happy path — technician can access assigned conversation', () => {
     expect(canAccessConversation(technicianContext, conversation)).toBe(true);
+  });
+
+  it('technician-created but unassigned conversation is denied', () => {
+    expect(canAccessConversation(technicianContext, technicianCreatedUnassignedConversation)).toBe(
+      false
+    );
   });
 
   it('happy path — filters conversations by visibility', () => {
@@ -106,7 +122,7 @@ describe('P3-015 — Conversation permissions and visibility rules', () => {
 
   it('wrong tenant returns 403', () => {
     const crossTenantConv: Conversation = {
-      id: 'conv-3',
+      id: 'conv-4',
       tenantId: 'tenant-other',
       createdBy: 'user-x',
       status: 'open',
