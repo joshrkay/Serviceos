@@ -94,7 +94,11 @@ describe('P3-008 — Technician voice update workflow', () => {
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('record-button'));
+    });
+    await act(async () => {
       fireEvent.click(screen.getByTestId('stop-button'));
+    });
+    await act(async () => {
       fireEvent.click(screen.getByTestId('upload-button'));
     });
 
