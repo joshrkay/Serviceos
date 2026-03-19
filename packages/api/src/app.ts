@@ -21,6 +21,7 @@ import { createVerticalRouter } from './routes/verticals';
 import { createTemplateRouter } from './routes/templates';
 import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
+import { createPackActivationRouter } from './routes/pack-activation';
 
 // In-memory repositories
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -40,6 +41,7 @@ import { InMemoryEstimateTemplateRepository } from './templates/estimate-templat
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
+import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -100,11 +102,15 @@ export function createApp() {
   const conversationRepo = new InMemoryConversationRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
+  // Pack activation + pack-config-loader share the canonical registry shape.
+  const canonicalPackRegistry = new InMemoryVerticalPackRegistry();
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
-  const sharedVerticalPackRegistry = new InMemoryVerticalPackRegistry();
   const packActivationRepo = new InMemoryPackActivationRepository();
+
+  // Canonical vertical packs are required for pack config loading and activation workflows
+  seedCanonicalVerticalPacks(canonicalPackRegistry);
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
@@ -116,11 +122,9 @@ export function createApp() {
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
-  app.use('/api/settings', createSettingsRouter(settingsRepo, {
-    activationRepo: packActivationRepo,
-    verticalPackRegistry: sharedVerticalPackRegistry,
-  }));
-  app.use('/api/verticals', createVerticalRouter(sharedVerticalPackRegistry));
+  app.use('/api/settings', createSettingsRouter(settingsRepo));
+  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
+  app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter(qualityMetricsRepo));
