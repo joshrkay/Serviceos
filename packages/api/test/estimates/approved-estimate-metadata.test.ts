@@ -3,6 +3,7 @@ import {
   createApprovedEstimateMetadata,
   validateApprovedEstimateMetadataInput,
 } from '../../src/estimates/approved-estimate-metadata';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-005A — Approved-estimate retrieval metadata', () => {
   let repo: InMemoryApprovedEstimateMetadataRepository;
@@ -62,6 +63,38 @@ describe('P4-005A — Approved-estimate retrieval metadata', () => {
       approvedAt: new Date(), lineItemCount: -1, totalCents: 100, lineItemSummary: [],
     });
     expect(errors).toContain('lineItemCount must be non-negative');
+  });
+
+  it('runtime validation — createApprovedEstimateMetadata rejects malformed payloads with deterministic text', async () => {
+    const invalidInput = {
+      tenantId: '',
+      estimateId: '',
+      approvalOutcome: 'approved' as const,
+      approvedAt: new Date(),
+      lineItemCount: -1,
+      totalCents: -5,
+      lineItemSummary: [],
+    };
+
+    await expect(createApprovedEstimateMetadata(invalidInput, repo)).rejects.toThrow(ValidationError);
+    await expect(createApprovedEstimateMetadata(invalidInput, repo)).rejects.toThrow(
+      'Validation failed: tenantId is required, estimateId is required, lineItemCount must be non-negative, totalCents must be non-negative'
+    );
+
+    try {
+      await createApprovedEstimateMetadata(invalidInput, repo);
+      fail('Expected createApprovedEstimateMetadata to throw ValidationError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).details).toEqual({
+        errors: [
+          'tenantId is required',
+          'estimateId is required',
+          'lineItemCount must be non-negative',
+          'totalCents must be non-negative',
+        ],
+      });
+    }
   });
 
   it('tenant isolation — only returns own tenant records', async () => {
