@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
+import { VALID_TIMEZONES } from '../settings/settings';
+import { toUtcDate } from './time';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -7,10 +9,18 @@ export interface Appointment {
   id: string;
   tenantId: string;
   jobId: string;
+  /** Persisted as a UTC instant. */
   scheduledStart: Date;
+  /** Persisted as a UTC instant. */
   scheduledEnd: Date;
+  /** Persisted as a UTC instant when present. */
   arrivalWindowStart?: Date;
+  /** Persisted as a UTC instant when present. */
   arrivalWindowEnd?: Date;
+  /**
+   * Display/context timezone only (e.g., rendering and UX context).
+   * This metadata does not affect persisted UTC instants.
+   */
   timezone: string;
   status: AppointmentStatus;
   notes?: string;
@@ -26,6 +36,7 @@ export interface CreateAppointmentInput {
   scheduledEnd: Date;
   arrivalWindowStart?: Date;
   arrivalWindowEnd?: Date;
+  /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone: string;
   notes?: string;
   createdBy: string;
@@ -36,6 +47,7 @@ export interface UpdateAppointmentInput {
   scheduledEnd?: Date;
   arrivalWindowStart?: Date;
   arrivalWindowEnd?: Date;
+  /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone?: string;
   notes?: string;
   status?: AppointmentStatus;
@@ -64,6 +76,7 @@ export function validateAppointmentInput(input: CreateAppointmentInput): string[
   if (!input.scheduledStart) errors.push('scheduledStart is required');
   if (!input.scheduledEnd) errors.push('scheduledEnd is required');
   if (!input.timezone) errors.push('timezone is required');
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
   if (!input.createdBy) errors.push('createdBy is required');
   return errors;
 }
@@ -86,10 +99,10 @@ export async function createAppointment(
     id: uuidv4(),
     tenantId: input.tenantId,
     jobId: input.jobId,
-    scheduledStart: input.scheduledStart,
-    scheduledEnd: input.scheduledEnd,
-    arrivalWindowStart: input.arrivalWindowStart,
-    arrivalWindowEnd: input.arrivalWindowEnd,
+    scheduledStart: toUtcDate(input.scheduledStart),
+    scheduledEnd: toUtcDate(input.scheduledEnd),
+    arrivalWindowStart: input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined,
+    arrivalWindowEnd: input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined,
     timezone: input.timezone,
     status: 'scheduled',
     notes: input.notes,
@@ -123,6 +136,10 @@ export async function updateAppointment(
 ): Promise<Appointment | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
+
+  const errors: string[] = [];
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
