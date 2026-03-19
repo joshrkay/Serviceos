@@ -39,11 +39,25 @@ export function createHealthRouter(
       ...(Object.keys(checkResults).length > 0 ? { checks: checkResults } : {}),
     };
 
-    res.status(overallStatus === 'down' ? 503 : 200).json(response);
+    // Always return 200 for liveness — platform healthchecks (Railway) use /health
+    // to decide if the deploy succeeded. Dependency failures (DB, cache) should
+    // degrade gracefully, not block deploys. Use /ready for readiness gating.
+    res.status(200).json(response);
   });
 
-  router.get('/ready', (_req: Request, res: Response) => {
-    res.status(200).json({ status: 'ready' });
+  router.get('/ready', async (_req: Request, res: Response) => {
+    // Readiness probe — returns 503 when a critical dependency is down.
+    let ready = true;
+    for (const hc of checks) {
+      try {
+        const result = await hc.check();
+        if (result.status === 'down') { ready = false; break; }
+      } catch {
+        ready = false;
+        break;
+      }
+    }
+    res.status(ready ? 200 : 503).json({ status: ready ? 'ready' : 'not_ready' });
   });
 
   return router;

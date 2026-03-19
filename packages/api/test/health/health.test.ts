@@ -60,7 +60,7 @@ describe('P0-005 — Health endpoint', () => {
     expect(res.body.status).toBe('degraded');
   });
 
-  it('validation — returns 503 when health check fails', async () => {
+  it('liveness — /health always returns 200 even when check is down', async () => {
     const app = express();
     const router = createHealthRouter('1.0.0', 'test', [
       { name: 'db', check: async () => ({ status: 'down', message: 'Connection refused' }) },
@@ -68,7 +68,19 @@ describe('P0-005 — Health endpoint', () => {
     app.use(router);
 
     const res = await request(app, '/health');
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     expect(res.body.status).toBe('down');
+  });
+
+  it('readiness — /ready returns 503 when a check is down', async () => {
+    const app = express();
+    const router = createHealthRouter('1.0.0', 'test', [
+      { name: 'db', check: async () => ({ status: 'down', message: 'Connection refused' }) },
+    ]);
+    app.use(router);
+
+    const res = await request(app, '/ready');
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('not_ready');
   });
 });
