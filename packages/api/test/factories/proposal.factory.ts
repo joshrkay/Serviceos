@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { Proposal, ProposalStatus, ProposalType, CreateProposalInput } from '../../src/proposals/proposal';
 
 export function buildProposal(overrides?: Partial<Proposal>): Proposal {
