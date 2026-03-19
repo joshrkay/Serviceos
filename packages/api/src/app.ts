@@ -195,11 +195,15 @@ export function createApp() {
   });
 
   setInterval(async () => {
-    const message = await queue.receive();
-    if (!message) return;
-    const processed = await processMessage(message, transcriptionWorker, workerLogger);
-    if (processed) {
-      await queue.delete(message.id);
+    try {
+      const message = await queue.receive();
+      if (!message) return;
+      const processed = await processMessage(message, transcriptionWorker, workerLogger);
+      if (processed) {
+        await queue.delete(message.id);
+      }
+    } catch (err) {
+      workerLogger.error('Queue poll failed', { error: err instanceof Error ? err.message : String(err) });
     }
   }, 250);
 
