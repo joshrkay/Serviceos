@@ -8,6 +8,7 @@ import { WordingPreferenceRepository } from '../../estimates/wording-preferences
 import { MissingItemSignalRepository } from '../../estimates/missing-item-signals';
 
 const MAX_TERMINOLOGY_HINTS = 15;
+type VerticalConfigInput = VerticalPackConfig | VerticalPackConfig[] | null | undefined;
 
 // P4-009B: Service category + template context assembly
 export interface VerticalEstimateContext {
@@ -22,12 +23,13 @@ export interface VerticalEstimateContext {
 
 export function assembleVerticalEstimateContext(
   sourceContext: SourceContext,
-  verticalConfig?: VerticalPackConfig | null,
+  verticalConfig?: VerticalConfigInput,
   template?: EstimateTemplate | null
 ): VerticalEstimateContext {
   const result: VerticalEstimateContext = {};
+  const resolvedConfig = resolveVerticalConfig(verticalConfig, template);
 
-  if (!verticalConfig) return result;
+  if (!resolvedConfig) return result;
 
   if (template) {
     result.serviceCategory = template.serviceCategory;
@@ -41,9 +43,9 @@ export function assembleVerticalEstimateContext(
     };
   }
 
-  if (verticalConfig.terminology) {
+  if (resolvedConfig.terminology) {
     const hints: Array<{ term: string; hint: string }> = [];
-    for (const [key, entry] of Object.entries(verticalConfig.terminology)) {
+    for (const [key, entry] of Object.entries(resolvedConfig.terminology)) {
       if (entry.displayLabel && entry.promptHint) {
         hints.push({ term: entry.displayLabel, hint: entry.promptHint });
       }
@@ -147,7 +149,7 @@ export interface FullEstimateContext {
 
 export async function assembleFullEstimateContext(
   sourceContext: SourceContext,
-  verticalConfig: VerticalPackConfig | null | undefined,
+  verticalConfig: VerticalConfigInput,
   template: EstimateTemplate | null | undefined,
   tenantId: string,
   verticalType?: VerticalType,
@@ -161,6 +163,31 @@ export async function assembleFullEstimateContext(
   trimHistoryToFit(vertical, history);
 
   return { vertical, history };
+}
+
+function resolveVerticalConfig(
+  verticalConfig: VerticalConfigInput,
+  template?: EstimateTemplate | null
+): VerticalPackConfig | null {
+  const fromInput = Array.isArray(verticalConfig) ? verticalConfig : verticalConfig ? [verticalConfig] : [];
+  if (fromInput.length === 0) {
+    return null;
+  }
+
+  return pickBestVerticalConfig(fromInput, template?.verticalType);
+}
+
+function pickBestVerticalConfig(
+  configs: VerticalPackConfig[],
+  preferredVerticalType?: VerticalType
+): VerticalPackConfig {
+  const sorted = [...configs].sort(
+    (a, b) => a.verticalType.localeCompare(b.verticalType) || a.packId.localeCompare(b.packId)
+  );
+  if (preferredVerticalType) {
+    return sorted.find((c) => c.verticalType === preferredVerticalType) ?? sorted[0];
+  }
+  return sorted[0];
 }
 
 function trimHistoryToFit(vertical: VerticalEstimateContext, history: HistoryContext): void {

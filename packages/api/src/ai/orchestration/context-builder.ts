@@ -17,7 +17,7 @@ export interface SourceContext {
   job?: Record<string, unknown>;
   location?: Record<string, unknown>;
   tenant?: { name: string; settings?: Record<string, unknown> };
-  vertical?: VerticalContext;
+  verticals?: VerticalContext[];
 }
 
 export interface EntityRefs {
@@ -39,7 +39,7 @@ export interface ContextRepositories {
   getJob?(tenantId: string, jobId: string): Promise<Record<string, unknown> | null>;
   getLocation?(tenantId: string, locationId: string): Promise<Record<string, unknown> | null>;
   getTenantInfo?(tenantId: string): Promise<{ name: string; settings?: Record<string, unknown> } | null>;
-  getActiveVerticalConfig?(tenantId: string): Promise<VerticalConfigResult | null>;
+  getActiveVerticalConfigs?(tenantId: string): Promise<VerticalConfigResult[]>;
 }
 
 export const MAX_CONTEXT_TOKENS = 8000;
@@ -95,19 +95,21 @@ export async function buildSourceContext(
     }
   }
 
-  if (repos.getActiveVerticalConfig) {
+  if (repos.getActiveVerticalConfigs) {
     try {
-      const verticalConfig = await repos.getActiveVerticalConfig(tenantId);
-      if (verticalConfig) {
-        context.vertical = {
-          type: verticalConfig.type,
-          packId: verticalConfig.packId,
-          terminology: verticalConfig.terminology,
-          categories: verticalConfig.categories,
-        };
+      const verticalConfigs = await repos.getActiveVerticalConfigs(tenantId);
+      if (verticalConfigs.length > 0) {
+        context.verticals = [...verticalConfigs]
+          .sort((a, b) => a.type.localeCompare(b.type) || a.packId.localeCompare(b.packId))
+          .map((verticalConfig) => ({
+            type: verticalConfig.type,
+            packId: verticalConfig.packId,
+            terminology: verticalConfig.terminology,
+            categories: verticalConfig.categories,
+          }));
       }
     } catch (err) {
-      console.error('Failed to load vertical config for tenant', tenantId, err);
+      console.error('Failed to load active vertical configs for tenant', tenantId, err);
     }
   }
 
