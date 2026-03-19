@@ -22,6 +22,7 @@ export interface CreateAssignmentInput {
 
 export interface AssignmentRepository {
   create(assignment: AppointmentAssignment): Promise<AppointmentAssignment>;
+  update(assignment: AppointmentAssignment): Promise<AppointmentAssignment>;
   findByAppointment(tenantId: string, appointmentId: string): Promise<AppointmentAssignment[]>;
   findByTechnician(tenantId: string, technicianId: string): Promise<AppointmentAssignment[]>;
   delete(tenantId: string, id: string): Promise<boolean>;
@@ -43,6 +44,17 @@ export async function assignTechnician(
   input: CreateAssignmentInput,
   repository: AssignmentRepository
 ): Promise<AppointmentAssignment> {
+  const validationErrors = validateAssignmentInput(input);
+  if (validationErrors.length > 0) {
+    throw new Error(`Invalid assignment input: ${validationErrors.join('; ')}`);
+  }
+
+  if (input.isPrimary ?? true) {
+    const existingAssignments = await repository.findByAppointment(input.tenantId, input.appointmentId);
+    const existingPrimaries = existingAssignments.filter((assignment) => assignment.isPrimary);
+    await Promise.all(existingPrimaries.map((assignment) => repository.update({ ...assignment, isPrimary: false })));
+  }
+
   const assignment: AppointmentAssignment = {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -80,7 +92,13 @@ export async function syncJobAssignment(
   jobRepo: JobRepository
 ): Promise<void> {
   const assignments = await assignmentRepo.findByAppointment(tenantId, appointmentId);
-  const primary = assignments.find((a) => a.isPrimary);
+  const primaryAssignments = assignments.filter((a) => a.isPrimary);
+  const primary = primaryAssignments.length > 0 ? primaryAssignments[primaryAssignments.length - 1] : undefined;
+
+  if (primaryAssignments.length > 1) {
+    const assignmentsToDemote = primaryAssignments.slice(0, -1);
+    await Promise.all(assignmentsToDemote.map((assignment) => assignmentRepo.update({ ...assignment, isPrimary: false })));
+  }
 
   if (primary) {
     await jobRepo.update(tenantId, jobId, {
@@ -99,6 +117,11 @@ export class InMemoryAssignmentRepository implements AssignmentRepository {
   private assignments: Map<string, AppointmentAssignment> = new Map();
 
   async create(assignment: AppointmentAssignment): Promise<AppointmentAssignment> {
+    this.assignments.set(assignment.id, { ...assignment });
+    return { ...assignment };
+  }
+
+  async update(assignment: AppointmentAssignment): Promise<AppointmentAssignment> {
     this.assignments.set(assignment.id, { ...assignment });
     return { ...assignment };
   }
