@@ -1,5 +1,6 @@
 // Onboarding extraction pipeline — barrel export
 export * from './types';
+export { tryParseJson, MAX_TRANSCRIPT_CHARS } from './utils';
 export { BusinessProfileExtractor } from './business-profile-extractor';
 export { CategoryExtractor } from './category-extractor';
 export { PricingExtractor } from './pricing-extractor';

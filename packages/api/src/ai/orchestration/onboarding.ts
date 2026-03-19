@@ -168,7 +168,7 @@ export class OnboardingOrchestrator {
         proposalType: 'onboarding_schedule',
         payload: payload as unknown as Record<string, unknown>,
         summary: 'Configure working hours and schedule',
-        confidenceScore: 0.8,
+        confidenceScore: scheduleResult.confidence.score,
         sourceContext: conversationId ? { conversationId } : undefined,
         createdBy: userId,
       };

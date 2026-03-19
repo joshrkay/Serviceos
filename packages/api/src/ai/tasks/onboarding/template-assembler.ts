@@ -1,6 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
 import { createProposal, CreateProposalInput, Proposal } from '../../../proposals/proposal';
-import { calculateLineItemTotal } from '../../../shared/billing-engine';
 import { assessConfidence, ConfidenceMetadata } from '../../guardrails/confidence';
 import {
   ServiceCategoryExtraction,
