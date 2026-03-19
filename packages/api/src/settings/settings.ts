@@ -1,4 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
+
+import { isValidTimezone } from '../shared/timezone';
 
 export interface TenantSettings {
   id: string;
@@ -51,7 +54,7 @@ export interface SettingsRepository {
   incrementInvoiceNumber(tenantId: string): Promise<number>;
 }
 
-const VALID_TIMEZONES = [
+export const VALID_TIMEZONES = [
   'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
   'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'America/Detroit',
   'America/Indiana/Indianapolis', 'America/Boise', 'UTC',
@@ -61,7 +64,7 @@ export function validateSettingsInput(input: CreateSettingsInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.businessName) errors.push('businessName is required');
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+  if (input.timezone && !isValidTimezone(input.timezone)) {
     errors.push('Invalid timezone');
   }
   if (input.estimatePrefix !== undefined && input.estimatePrefix.length === 0) {
@@ -80,9 +83,12 @@ export async function createSettings(
   input: CreateSettingsInput,
   repository: SettingsRepository
 ): Promise<TenantSettings> {
+  const errors = validateSettingsInput(input);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
+
   const existing = await repository.findByTenant(input.tenantId);
   if (existing) {
-    throw new Error('Settings already exist for this tenant');
+    throw new ValidationError('Settings already exist for this tenant');
   }
 
   const settings: TenantSettings = {
@@ -126,7 +132,7 @@ export async function getNextEstimateNumber(
   repository: SettingsRepository
 ): Promise<string> {
   const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new Error('Tenant settings not found');
+  if (!settings) throw new ValidationError('Tenant settings not found');
   const num = await repository.incrementEstimateNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.estimatePrefix}${String(num).padStart(4, '0')}`;
@@ -137,7 +143,7 @@ export async function getNextInvoiceNumber(
   repository: SettingsRepository
 ): Promise<string> {
   const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new Error('Tenant settings not found');
+  if (!settings) throw new ValidationError('Tenant settings not found');
   const num = await repository.incrementInvoiceNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
@@ -201,7 +207,7 @@ export class InMemorySettingsRepository implements SettingsRepository {
 
   async incrementEstimateNumber(tenantId: string): Promise<number> {
     const s = this.settings.get(tenantId);
-    if (!s) throw new Error('Settings not found');
+    if (!s) throw new ValidationError('Settings not found');
     const num = s.nextEstimateNumber;
     s.nextEstimateNumber += 1;
     this.settings.set(tenantId, s);
@@ -210,7 +216,7 @@ export class InMemorySettingsRepository implements SettingsRepository {
 
   async incrementInvoiceNumber(tenantId: string): Promise<number> {
     const s = this.settings.get(tenantId);
-    if (!s) throw new Error('Settings not found');
+    if (!s) throw new ValidationError('Settings not found');
     const num = s.nextInvoiceNumber;
     s.nextInvoiceNumber += 1;
     this.settings.set(tenantId, s);

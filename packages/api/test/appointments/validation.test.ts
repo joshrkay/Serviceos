@@ -1,4 +1,4 @@
-import { validateAppointmentTimes } from '../../src/appointments/validation';
+import { validateAppointmentTimes, validateAppointmentUpdateInput } from '../../src/appointments/validation';
 
 describe('P1-007A — Appointment validation rules', () => {
   const now = new Date();
@@ -93,6 +93,46 @@ describe('P1-007A — Appointment validation rules', () => {
 
     expect(result.warnings).toContain('Appointment is scheduled in the past');
     // Past scheduling is a warning, not an error
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('validation — update merges existing fields and validates cross-field rules', () => {
+    const result = validateAppointmentUpdateInput(
+      {
+        id: 'apt-1',
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: future(24),
+        scheduledEnd: future(26),
+        timezone: 'UTC',
+        status: 'scheduled',
+        createdBy: 'user-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { scheduledEnd: future(23) }
+    );
+
+    expect(result.errors).toContain('scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — update partial fields can remain valid when merged', () => {
+    const result = validateAppointmentUpdateInput(
+      {
+        id: 'apt-1',
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: future(24),
+        scheduledEnd: future(26),
+        timezone: 'UTC',
+        status: 'scheduled',
+        createdBy: 'user-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { notes: 'Customer asked for text updates' }
+    );
+
     expect(result.errors).toHaveLength(0);
   });
 });
