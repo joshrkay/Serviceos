@@ -71,6 +71,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: npm install -g @railway/cli
+      - name: Run API migrations (dev)
+        run: railway run --service api --environment dev -- node packages/api/dist/src/db/migrate.js
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (dev)
         run: railway up --service api --environment dev --detach
         env:
@@ -89,6 +93,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: npm install -g @railway/cli
+      - name: Run API migrations (staging)
+        run: railway run --service api --environment staging -- node packages/api/dist/src/db/migrate.js
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (staging)
         run: railway up --service api --environment staging --detach
         env:
@@ -107,6 +115,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: npm install -g @railway/cli
+      - name: Run API migrations (prod)
+        run: railway run --service api --environment production -- node packages/api/dist/src/db/migrate.js
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (prod)
         run: railway up --service api --environment production --detach
         env:

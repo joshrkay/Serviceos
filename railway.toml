@@ -4,6 +4,8 @@ dockerfilePath = "Dockerfile"
 dockerfileTarget = "api"
 
 [deploy]
+# Keep startup focused on serving traffic; run DB migrations as a separate
+# one-off/release step (CI/CD or Railway pre-deploy command).
 startCommand = "node packages/api/dist/src/index.js"
 healthcheckPath = "/ready"
 healthcheckTimeout = 60
