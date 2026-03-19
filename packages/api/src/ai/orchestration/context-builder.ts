@@ -6,6 +6,8 @@ export interface VerticalContext {
   packId: string;
   terminology?: Record<string, unknown>;
   categories?: unknown[];
+  templates?: unknown[];
+  intakeConfig?: Record<string, unknown>;
 }
 
 export interface SourceContext {
@@ -31,6 +33,8 @@ export interface VerticalConfigResult {
   packId: string;
   terminology: Record<string, unknown>;
   categories: unknown[];
+  templates: unknown[];
+  intakeConfig: Record<string, unknown>;
 }
 
 export interface ContextRepositories {

@@ -6,6 +6,7 @@ import {
   listByCustomer,
   setPrimary,
   validateLocationInput,
+  validateLocationUpdateInput,
   InMemoryLocationRepository,
 } from '../../src/locations/location';
 
@@ -91,6 +92,49 @@ describe('P1-003 — Service location entity', () => {
     );
 
     expect(updated!.accessNotes).toBe('Ring doorbell twice');
+  });
+
+  it('validation — rejects invalid location update before write', async () => {
+    const location = await createLocation(
+      {
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        street1: '123 Main St',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62701',
+      },
+      repo
+    );
+
+    await expect(
+      updateLocation('tenant-1', location.id, { street1: '' }, repo)
+    ).rejects.toThrow('Validation failed: street1 is required');
+
+    const unchanged = await getLocation('tenant-1', location.id, repo);
+    expect(unchanged!.street1).toBe('123 Main St');
+  });
+
+  it('validation — partial update validation uses merged fields', () => {
+    const errors = validateLocationUpdateInput(
+      {
+        id: 'loc-1',
+        tenantId: 'tenant-1',
+        customerId: 'cust-1',
+        street1: '123 Main St',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62701',
+        country: 'US',
+        isPrimary: true,
+        isArchived: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { accessNotes: 'Use side gate' }
+    );
+
+    expect(errors).toHaveLength(0);
   });
 
   it('happy path — archives location', async () => {

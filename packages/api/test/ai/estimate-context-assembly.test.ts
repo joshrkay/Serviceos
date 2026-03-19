@@ -17,6 +17,8 @@ describe('P4-009B — Service category + template context assembly', () => {
       ac_unit: { canonical: 'ac_unit', displayLabel: 'AC Unit', promptHint: 'Air conditioning unit', aliases: [] },
     },
     categories: [{ id: 'diagnostic', name: 'Diagnostic', description: 'Diagnostic services', sortOrder: 1, typicalLineItems: ['Diagnostic fee'] }],
+    templates: [{ id: 'hvac-diagnostic-template', name: 'HVAC Diagnostic Visit', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+    intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
   };
 
   const template: EstimateTemplate = {
@@ -113,5 +115,60 @@ describe('P4-009B — Service category + template context assembly', () => {
 
     const context = assembleVerticalEstimateContext(sourceContext, largeConfig, null);
     expect(context.terminologyHints!.length).toBeLessThanOrEqual(15);
+  });
+
+  it('applies tenant terminology overrides to prompt-facing hints and tracks applied keys', () => {
+    const context = assembleVerticalEstimateContext(
+      sourceContext,
+      hvacConfig,
+      null,
+      {
+        furnace: 'Heating System',
+        ac_unit: 'Cooling System',
+      }
+    );
+
+    expect(context.terminologyHints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ term: 'Heating System', hint: 'Gas or electric furnace' }),
+        expect.objectContaining({ term: 'Cooling System', hint: 'Air conditioning unit' }),
+      ])
+    );
+    expect(context.terminologyPreferencesApplied).toEqual({
+      furnace: 'Heating System',
+      ac_unit: 'Cooling System',
+    });
+  });
+
+  it('ignores unknown override keys and empty values', () => {
+    const context = assembleVerticalEstimateContext(
+      sourceContext,
+      hvacConfig,
+      null,
+      {
+        unknown_term: 'Should be ignored',
+        furnace: '   ',
+      }
+    );
+
+    expect(context.terminologyPreferencesApplied).toEqual({});
+    expect(context.terminologyHints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ term: 'Furnace' }),
+        expect.objectContaining({ term: 'AC Unit' }),
+      ])
+    );
+  });
+
+  it('no regression — omitting terminology preferences keeps canonical display labels', () => {
+    const context = assembleVerticalEstimateContext(sourceContext, hvacConfig, null);
+
+    expect(context.terminologyHints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ term: 'Furnace' }),
+        expect.objectContaining({ term: 'AC Unit' }),
+      ])
+    );
+    expect(context.terminologyPreferencesApplied).toEqual({});
   });
 });

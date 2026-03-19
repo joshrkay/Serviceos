@@ -19,6 +19,7 @@ export interface VerticalEstimateContext {
     defaultNotes?: string;
   };
   terminologyHints?: Array<{ term: string; hint: string }>;
+  terminologyPreferencesApplied?: Record<string, string>;
 }
 
 export function assembleVerticalEstimateContext(
@@ -47,10 +48,19 @@ export function assembleVerticalEstimateContext(
     const hints: Array<{ term: string; hint: string }> = [];
     for (const [key, entry] of Object.entries(resolvedConfig.terminology)) {
       if (entry.displayLabel && entry.promptHint) {
-        hints.push({ term: entry.displayLabel, hint: entry.promptHint });
+        const tenantPreferredTerm = tenantTerminologyPreferences?.[key]?.trim();
+        if (tenantPreferredTerm) {
+          terminologyPreferencesApplied[key] = tenantPreferredTerm;
+        }
+
+        hints.push({
+          term: terminologyPreferencesApplied[key] ?? entry.displayLabel,
+          hint: entry.promptHint,
+        });
       }
     }
     result.terminologyHints = hints.slice(0, MAX_TERMINOLOGY_HINTS);
+    result.terminologyPreferencesApplied = terminologyPreferencesApplied;
   }
 
   return result;

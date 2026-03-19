@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository } from './invoice';
+import { ValidationError } from '../shared/errors';
 
 export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
@@ -55,16 +56,19 @@ export async function recordPayment(
   invoiceRepo: InvoiceRepository,
   paymentRepo: PaymentRepository
 ): Promise<{ payment: Payment; invoice: Invoice }> {
+  const errors = validatePaymentInput(input);
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const invoice = await invoiceRepo.findById(input.tenantId, input.invoiceId);
-  if (!invoice) throw new Error('Invoice not found');
+  if (!invoice) throw new ValidationError('Invoice not found');
 
   const PAYABLE_STATUSES = ['open', 'partially_paid'];
   if (!PAYABLE_STATUSES.includes(invoice.status)) {
-    throw new Error(`Cannot record payment on invoice with status '${invoice.status}'`);
+    throw new ValidationError(`Cannot record payment on invoice with status '${invoice.status}'`);
   }
 
   if (input.amountCents > invoice.amountDueCents) {
-    throw new Error('Payment amount exceeds amount due');
+    throw new ValidationError('Payment amount exceeds amount due');
   }
 
   const payment: Payment = {

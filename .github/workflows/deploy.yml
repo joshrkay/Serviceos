@@ -40,27 +40,6 @@ jobs:
         run: npm run migrate:dryrun
         working-directory: packages/api
 
-  chromatic-baseline:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - name: Publish Chromatic baseline
-        uses: chromaui/action@latest
-        with:
-          projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
-          workingDir: packages/web
-          buildScriptName: build-storybook
-          # Merged code is definitionally correct — auto-accept as the new visual baseline
-          autoAcceptChanges: true
-
   # Railway deployment pipeline
   deploy-railway-dev:
     needs: test
@@ -71,6 +50,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: npm install -g @railway/cli
+      - name: Run API migrations (dev)
+        run: railway run --service api --environment dev -- node packages/api/dist/src/db/migrate.js
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (dev)
         run: railway up --service api --environment dev --detach
         env:
@@ -89,6 +72,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: npm install -g @railway/cli
+      - name: Run API migrations (staging)
+        run: railway run --service api --environment staging -- node packages/api/dist/src/db/migrate.js
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (staging)
         run: railway up --service api --environment staging --detach
         env:
@@ -107,6 +94,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Railway CLI
         run: npm install -g @railway/cli
+      - name: Run API migrations (prod)
+        run: railway run --service api --environment production -- node packages/api/dist/src/db/migrate.js
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (prod)
         run: railway up --service api --environment production --detach
         env:
