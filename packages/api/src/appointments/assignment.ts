@@ -23,6 +23,7 @@ export interface CreateAssignmentInput {
 
 export interface AssignmentRepository {
   create(assignment: AppointmentAssignment): Promise<AppointmentAssignment>;
+  update(assignment: AppointmentAssignment): Promise<AppointmentAssignment>;
   findByAppointment(tenantId: string, appointmentId: string): Promise<AppointmentAssignment[]>;
   findByTechnician(tenantId: string, technicianId: string): Promise<AppointmentAssignment[]>;
   delete(tenantId: string, id: string): Promise<boolean>;
@@ -47,12 +48,21 @@ export async function assignTechnician(
   const errors = validateAssignmentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
+  const isPrimary = input.isPrimary ?? true;
+
+  // Demote any existing primary assignments before assigning new primary
+  if (isPrimary) {
+    const existing = await repository.findByAppointment(input.tenantId, input.appointmentId);
+    const currentPrimaries = existing.filter((a) => a.isPrimary);
+    await Promise.all(currentPrimaries.map((a) => repository.update({ ...a, isPrimary: false })));
+  }
+
   const assignment: AppointmentAssignment = {
     id: uuidv4(),
     tenantId: input.tenantId,
     appointmentId: input.appointmentId,
     technicianId: input.technicianId,
-    isPrimary: input.isPrimary ?? true,
+    isPrimary,
     assignedBy: input.assignedBy,
     assignedAt: new Date(),
   };
@@ -84,7 +94,13 @@ export async function syncJobAssignment(
   jobRepo: JobRepository
 ): Promise<void> {
   const assignments = await assignmentRepo.findByAppointment(tenantId, appointmentId);
-  const primary = assignments.find((a) => a.isPrimary);
+  const primaryAssignments = assignments.filter((a) => a.isPrimary);
+  const primary = primaryAssignments.length > 0 ? primaryAssignments[primaryAssignments.length - 1] : undefined;
+
+  if (primaryAssignments.length > 1) {
+    const assignmentsToDemote = primaryAssignments.slice(0, -1);
+    await Promise.all(assignmentsToDemote.map((assignment) => assignmentRepo.update({ ...assignment, isPrimary: false })));
+  }
 
   if (primary) {
     await jobRepo.update(tenantId, jobId, {
@@ -103,6 +119,11 @@ export class InMemoryAssignmentRepository implements AssignmentRepository {
   private assignments: Map<string, AppointmentAssignment> = new Map();
 
   async create(assignment: AppointmentAssignment): Promise<AppointmentAssignment> {
+    this.assignments.set(assignment.id, { ...assignment });
+    return { ...assignment };
+  }
+
+  async update(assignment: AppointmentAssignment): Promise<AppointmentAssignment> {
     this.assignments.set(assignment.id, { ...assignment });
     return { ...assignment };
   }

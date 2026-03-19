@@ -34,6 +34,24 @@ describe('P1-008 — Technician assignment model', () => {
     expect(assignment.isPrimary).toBe(true);
   });
 
+  it('happy path — assigning a new primary demotes existing primary', async () => {
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo
+    );
+
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-2', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo
+    );
+
+    const assignments = await getAssignments('tenant-1', 'apt-1', assignmentRepo);
+    const primaryAssignments = assignments.filter((assignment) => assignment.isPrimary);
+
+    expect(primaryAssignments).toHaveLength(1);
+    expect(primaryAssignments[0].technicianId).toBe('tech-2');
+  });
+
   it('happy path — retrieves assignments for appointment', async () => {
     await assignTechnician(
       { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
@@ -89,6 +107,21 @@ describe('P1-008 — Technician assignment model', () => {
     expect(errors).toContain('Assigned user must have technician role');
   });
 
+  it('validation — assignTechnician rejects non-technician role', async () => {
+    await expect(
+      assignTechnician(
+        {
+          tenantId: 'tenant-1',
+          appointmentId: 'apt-1',
+          technicianId: 'user-1',
+          technicianRole: 'dispatcher',
+          assignedBy: 'owner-1',
+        },
+        assignmentRepo
+      )
+    ).rejects.toThrow('Assigned user must have technician role');
+  });
+
   it('validation — rejects missing required fields', () => {
     const errors = validateAssignmentInput({
       tenantId: '',
@@ -135,6 +168,32 @@ describe('P1-008 — Technician assignment model', () => {
     await syncJobAssignment('tenant-1', job.id, 'apt-1', assignmentRepo, jobRepo);
     const updatedJob = await jobRepo.findById('tenant-1', job.id);
     expect(updatedJob!.assignedTechnicianId).toBeUndefined();
+  });
+
+  it('edge case — syncJobAssignment deterministically keeps a single primary when multiple exist', async () => {
+    const job = await createJob(
+      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Test', createdBy: 'u-1' },
+      jobRepo
+    );
+
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1', isPrimary: true },
+      assignmentRepo
+    );
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-2', technicianRole: 'technician', assignedBy: 'disp-1', isPrimary: true },
+      assignmentRepo
+    );
+
+    await syncJobAssignment('tenant-1', job.id, 'apt-1', assignmentRepo, jobRepo);
+
+    const updatedJob = await jobRepo.findById('tenant-1', job.id);
+    expect(updatedJob!.assignedTechnicianId).toBe('tech-2');
+
+    const assignments = await getAssignments('tenant-1', 'apt-1', assignmentRepo);
+    const primaryAssignments = assignments.filter((assignment) => assignment.isPrimary);
+    expect(primaryAssignments).toHaveLength(1);
+    expect(primaryAssignments[0].technicianId).toBe('tech-2');
   });
 
   it('tenant isolation — cross-tenant assignment inaccessible', async () => {
