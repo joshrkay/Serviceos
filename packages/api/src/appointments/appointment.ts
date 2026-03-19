@@ -78,10 +78,6 @@ export async function createAppointment(
   errors.push(...timeValidation.errors);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
-  const timeValidation = validateAppointmentTimes(input);
-  if (timeValidation.errors.length > 0) {
-    throw new Error(`Validation failed: ${timeValidation.errors.join('; ')}`);
-  }
   if (timeValidation.warnings.length > 0) {
     options?.onValidationWarnings?.(timeValidation.warnings);
   }
