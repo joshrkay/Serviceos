@@ -137,6 +137,10 @@ export async function updateAppointment(
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 
+  const errors: string[] = [];
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
