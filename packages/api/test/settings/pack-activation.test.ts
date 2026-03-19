@@ -5,6 +5,7 @@ import {
   getActivePacks,
   validateActivationInput,
 } from '../../src/settings/pack-activation';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-001B — Tenant-to-pack activation linkage', () => {
   let repo: InMemoryPackActivationRepository;
@@ -52,9 +53,12 @@ describe('P4-001B — Tenant-to-pack activation linkage', () => {
     expect(reactivated.status).toBe('active');
   });
 
-  it('validation — rejects missing tenantId', () => {
-    const errors = validateActivationInput({ tenantId: '', packId: 'hvac-v1' });
-    expect(errors).toContain('tenantId is required');
+  it('validation — write path rejects missing tenantId with structured errors', async () => {
+    await expect(activatePack({ tenantId: '', packId: 'hvac-v1' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid activation input',
+      details: { errors: ['tenantId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('validation — rejects missing packId', () => {

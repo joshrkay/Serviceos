@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalType, ServiceCategory } from '../../shared/vertical-types';
 import { LineItemCategory } from '../../shared/billing-engine';
+import { ValidationError } from '../../shared/errors';
 
 export interface TemplateLineItem {
   description: string;
@@ -75,6 +76,11 @@ export async function createTemplate(
   input: CreateTemplateInput,
   repository: EstimateTemplateRepository
 ): Promise<EstimateTemplate> {
+  const errors = validateTemplateInput(input);
+  if (errors.length > 0) {
+    throw new ValidationError('Invalid estimate template input', { errors });
+  }
+
   const template: EstimateTemplate = {
     id: uuidv4(),
     packId: input.packId,

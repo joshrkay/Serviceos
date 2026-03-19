@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
 
 export interface TenantSettings {
   id: string;
@@ -80,6 +81,11 @@ export async function createSettings(
   input: CreateSettingsInput,
   repository: SettingsRepository
 ): Promise<TenantSettings> {
+  const errors = validateSettingsInput(input);
+  if (errors.length > 0) {
+    throw new ValidationError('Invalid settings input', { errors });
+  }
+
   const existing = await repository.findByTenant(input.tenantId);
   if (existing) {
     throw new Error('Settings already exist for this tenant');

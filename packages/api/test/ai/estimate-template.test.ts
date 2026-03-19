@@ -6,6 +6,7 @@ import {
   CreateTemplateInput,
 } from '../../src/ai/tasks/estimate-template';
 import { calculateLineItemTotal } from '../../src/shared/billing-engine';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-004A — Vertical estimate template schema', () => {
   let repo: InMemoryEstimateTemplateRepository;
@@ -49,9 +50,12 @@ describe('P4-004A — Vertical estimate template schema', () => {
     }
   });
 
-  it('validation — rejects missing packId', () => {
-    const errors = validateTemplateInput({ ...validInput, packId: '' });
-    expect(errors).toContain('packId is required');
+  it('validation — write path rejects missing packId with structured errors', async () => {
+    await expect(createTemplate({ ...validInput, packId: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid estimate template input',
+      details: { errors: ['packId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('validation — rejects missing name', () => {

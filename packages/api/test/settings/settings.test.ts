@@ -7,6 +7,7 @@ import {
   validateSettingsInput,
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P1-017 — Tenant business settings and numbering preferences', () => {
   let repo: InMemorySettingsRepository;
@@ -89,9 +90,12 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(num2).toBe('INV-0002');
   });
 
-  it('validation — rejects missing businessName', () => {
-    const errors = validateSettingsInput({ tenantId: 'tenant-1', businessName: '' });
-    expect(errors).toContain('businessName is required');
+  it('validation — write path rejects missing businessName with structured errors', async () => {
+    await expect(createSettings({ tenantId: 'tenant-1', businessName: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid settings input',
+      details: { errors: ['businessName is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('validation — rejects missing tenantId', () => {
