@@ -87,6 +87,26 @@ The **architecture and scaffolding are excellent** — strict TypeScript, RLS, a
 
 ---
 
+### 9a. Frontend Missing Global Error Boundary & Toast Notifications
+- `sonner` (toast library) is installed but not wired up anywhere
+- No React error boundary wrapping the app
+- Loading states are inconsistent — present on HomePage but missing on LeadsPage, CustomersPage
+- **Work needed:** Add `<ErrorBoundary>` in App.tsx, integrate Sonner for mutation feedback.
+
+### 9b. Frontend Payment Page Has No Real Stripe Integration
+- `InvoicePaymentPage` (`/pay/:id`) has card/ACH/bank entry UI but no Stripe SDK
+- No `@stripe/react-stripe-js` or `@stripe/stripe-js` imports found
+- Form captures card data but doesn't process it
+- **Work needed:** Integrate Stripe Elements for PCI-compliant payment capture.
+
+### 9c. Installed But Unused Libraries
+- `react-hook-form` — installed, not used (all forms are manual `useState`)
+- `recharts` — installed, not used in any visible page
+- These add bundle weight with no benefit
+- **Fix:** Either integrate or remove.
+
+---
+
 ## MEDIUM-PRIORITY ISSUES (Should fix, won't block a careful beta)
 
 ### 10. Environment Variable Validation
@@ -131,6 +151,9 @@ The **architecture and scaffolding are excellent** — strict TypeScript, RLS, a
 | **Shared Contracts** | 95% | 40+ enums, Zod schemas throughout |
 | **Logging/Error Handling** | 90% | Structured JSON, correlation IDs, global error handler |
 | **Component Tests** | Good | ~61 test files in web, solid component coverage |
+| **Frontend UI/UX** | 85% | Polished dashboard, responsive mobile nav, 30+ shadcn components |
+| **Frontend Routing** | 100% | React Router v7, 13 pages + 3 customer-facing flows, deep links work |
+| **Mobile Responsiveness** | 90% | Bottom tab nav, responsive grids, proper breakpoints |
 
 ---
 
