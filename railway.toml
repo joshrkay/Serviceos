@@ -4,7 +4,6 @@ dockerfilePath = "Dockerfile"
 dockerfileTarget = "api"
 
 [deploy]
-preDeployCommand = "node packages/api/dist/src/db/migrate.js || true"
 startCommand = "node packages/api/dist/src/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
