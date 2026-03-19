@@ -28,12 +28,14 @@ export function createLLMGateway(config: AppConfig, logger?: LLMGatewayLogger): 
     );
   }
 
+  const baseURL = config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1';
+
   const provider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
-    baseURL: config.AI_PROVIDER_BASE_URL,
+    baseURL,
     // OpenRouter requires these headers to identify your app
     defaultHeaders:
-      config.AI_PROVIDER_BASE_URL.includes('openrouter.ai')
+      baseURL.includes('openrouter.ai')
         ? {
             'HTTP-Referer': 'https://serviceos.app',
             'X-Title': 'ServiceOS',

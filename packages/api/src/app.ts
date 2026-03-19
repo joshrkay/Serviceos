@@ -172,7 +172,7 @@ export function createApp() {
               return fd;
             })(),
           });
-          const data = await res.json();
+          const data = (await res.json()) as { text?: string };
           return {
             transcript: data.text || '',
             metadata: { provider: 'openai-whisper', processedAt: new Date().toISOString() },

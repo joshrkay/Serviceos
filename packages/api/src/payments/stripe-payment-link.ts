@@ -45,7 +45,7 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
       },
       body: new URLSearchParams({
         'line_items[0][price_data][currency]': 'usd',
-        'line_items[0][price_data][product_data][name]': `Invoice ${request.invoiceNumber ?? request.invoiceId}`,
+        'line_items[0][price_data][product_data][name]': `Invoice ${request.invoiceId}`,
         'line_items[0][price_data][unit_amount]': String(request.amountCents),
         'line_items[0][quantity]': '1',
         'metadata[tenant_id]': request.tenantId,
@@ -58,9 +58,9 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
       throw new Error(`Stripe API error (${res.status}): ${body}`);
     }
 
-    const data = await res.json();
-    const linkId = data.id as string;
-    const linkUrl = data.url as string;
+    const data = (await res.json()) as { id: string; url: string };
+    const linkId = data.id;
+    const linkUrl = data.url;
     const now = new Date();
     const expiryMs = parseInt(process.env.PAYMENT_LINK_EXPIRY_HOURS || '24', 10) * 60 * 60 * 1000;
 
