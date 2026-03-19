@@ -40,9 +40,8 @@ import { InMemoryVerticalPackRepository as InMemoryLegacyVerticalPackRepository 
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryPackActivationRepository } from './settings/pack-activation';
-import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
-import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
+import { InMemoryApprovalRepository } from './estimates/approval';
+import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
 
@@ -107,10 +106,8 @@ export function createApp() {
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
-  const packActivationRepo = new InMemoryPackActivationRepository();
-
-  // Canonical vertical packs are required for pack config loading and activation workflows
-  seedCanonicalVerticalPacks(canonicalPackRegistry);
+  const approvalRepo = new InMemoryApprovalRepository();
+  const deltaRepo = new InMemoryEditDeltaRepository();
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
