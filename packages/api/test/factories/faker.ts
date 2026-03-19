@@ -80,8 +80,8 @@ export const faker = {
     state: ({ abbreviated }: { abbreviated?: boolean } = {}) =>
       abbreviated ? randomFrom(['CA', 'TX', 'FL', 'NY']) : randomFrom(['California', 'Texas', 'Florida', 'New York']),
     zipCode: () => faker.string.numeric(5),
-    latitude: () => (Math.random() * 180 - 90).toFixed(6),
-    longitude: () => (Math.random() * 360 - 180).toFixed(6),
+    latitude: () => Number((Math.random() * 180 - 90).toFixed(6)),
+    longitude: () => Number((Math.random() * 360 - 180).toFixed(6)),
   },
   commerce: {
     productName: () => `${randomFrom(['Premium', 'Standard', 'Heavy-Duty'])} ${randomFrom(['Compressor', 'Valve', 'Filter', 'Pipe'])}`,
