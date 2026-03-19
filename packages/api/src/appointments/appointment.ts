@@ -90,10 +90,18 @@ function normalizeAppointmentTimeUpdates(
 ): Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'> {
   const normalized: Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'> = {};
 
-  if ('scheduledStart' in input && input.scheduledStart) normalized.scheduledStart = toUtcDate(input.scheduledStart);
-  if ('scheduledEnd' in input && input.scheduledEnd) normalized.scheduledEnd = toUtcDate(input.scheduledEnd);
-  if ('arrivalWindowStart' in input && input.arrivalWindowStart) normalized.arrivalWindowStart = toUtcDate(input.arrivalWindowStart);
-  if ('arrivalWindowEnd' in input && input.arrivalWindowEnd) normalized.arrivalWindowEnd = toUtcDate(input.arrivalWindowEnd);
+  if ('scheduledStart' in input) {
+    normalized.scheduledStart = input.scheduledStart ? toUtcDate(input.scheduledStart) : undefined;
+  }
+  if ('scheduledEnd' in input) {
+    normalized.scheduledEnd = input.scheduledEnd ? toUtcDate(input.scheduledEnd) : undefined;
+  }
+  if ('arrivalWindowStart' in input) {
+    normalized.arrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
+  }
+  if ('arrivalWindowEnd' in input) {
+    normalized.arrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
+  }
 
   return normalized;
 }
