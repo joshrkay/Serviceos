@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { InternalNote, NoteEntityType, CreateNoteInput } from '../../src/notes/note';
 
 export function buildNote(overrides?: Partial<InternalNote>): InternalNote {

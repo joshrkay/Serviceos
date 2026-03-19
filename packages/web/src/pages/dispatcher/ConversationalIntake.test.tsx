@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../../components/voice/useVoiceRecorder', () => ({
@@ -32,7 +32,7 @@ import { ConversationalIntake, validateIntakeInput } from './ConversationalIntak
 import { Message, Proposal } from '../../types/conversation';
 
 describe('P3-009 — Dispatcher conversational intake workflow', () => {
-  const messages: Message[] = [
+  const baseMessages: Message[] = [
     {
       id: 'msg-1',
       tenantId: 'tenant-1',
@@ -45,7 +45,7 @@ describe('P3-009 — Dispatcher conversational intake workflow', () => {
     },
   ];
 
-  const proposals: Proposal[] = [
+  const baseProposals: Proposal[] = [
     {
       id: 'prop-1',
       type: 'create_customer',
@@ -62,14 +62,22 @@ describe('P3-009 — Dispatcher conversational intake workflow', () => {
       details: { serviceType: 'HVAC repair' },
       createdAt: '2024-01-01T10:01:01Z',
     },
+    {
+      id: 'prop-3',
+      type: 'create_appointment',
+      summary: 'Create appointment for Jan 3 @ 10:00 AM',
+      status: 'pending',
+      details: { start: '2024-01-03T10:00:00Z' },
+      createdAt: '2024-01-01T10:01:02Z',
+    },
   ];
 
   it('happy path — text intake produces proposals in-thread', () => {
     const onSend = vi.fn();
     render(
       <ConversationalIntake
-        messages={messages}
-        proposals={proposals}
+        messages={baseMessages}
+        proposals={baseProposals}
         onSendMessage={onSend}
         onUploadVoice={vi.fn()}
         onApproveProposal={vi.fn()}
@@ -82,7 +90,76 @@ describe('P3-009 — Dispatcher conversational intake workflow', () => {
     expect(screen.getByTestId('intake-proposals')).toBeInTheDocument();
 
     const proposalCards = screen.getAllByTestId('proposal-card');
-    expect(proposalCards).toHaveLength(2);
+    expect(proposalCards).toHaveLength(3);
+  });
+
+  it('happy path — required create_* proposals are rendered and actionable in-thread', () => {
+    const onApprove = vi.fn();
+    const onReject = vi.fn();
+    const proposalMessages: Message[] = [
+      {
+        id: 'proposal-message-1',
+        tenantId: 'tenant-1',
+        conversationId: 'conv-1',
+        messageType: 'proposal',
+        content: 'Text intake mapped to customer creation',
+        senderId: 'system-1',
+        senderRole: 'dispatcher',
+        metadata: { intakeChannel: 'text', proposalType: 'create_customer' },
+        createdAt: '2024-01-01T10:05:00Z',
+      },
+      {
+        id: 'proposal-message-2',
+        tenantId: 'tenant-1',
+        conversationId: 'conv-1',
+        messageType: 'proposal',
+        content: 'Voice intake mapped to job creation',
+        senderId: 'system-1',
+        senderRole: 'dispatcher',
+        metadata: { intakeChannel: 'voice', proposalType: 'create_job' },
+        createdAt: '2024-01-01T10:05:01Z',
+      },
+      {
+        id: 'proposal-message-3',
+        tenantId: 'tenant-1',
+        conversationId: 'conv-1',
+        messageType: 'proposal',
+        content: 'Voice intake mapped to appointment creation',
+        senderId: 'system-1',
+        senderRole: 'dispatcher',
+        metadata: { intakeChannel: 'voice', proposalType: 'create_appointment' },
+        createdAt: '2024-01-01T10:05:02Z',
+      },
+    ];
+
+    render(
+      <ConversationalIntake
+        messages={proposalMessages}
+        proposals={baseProposals}
+        onSendMessage={vi.fn()}
+        onUploadVoice={vi.fn()}
+        onApproveProposal={onApprove}
+        onRejectProposal={onReject}
+      />
+    );
+
+    const messagesContainer = screen.getByTestId('conversation-messages');
+    expect(within(messagesContainer).getByText('Create customer: John Smith, 555-1234')).toBeInTheDocument();
+    expect(within(messagesContainer).getByText('Create HVAC repair job')).toBeInTheDocument();
+    expect(within(messagesContainer).getByText('Create appointment for Jan 3 @ 10:00 AM')).toBeInTheDocument();
+
+    const inThreadApproveButtons = within(messagesContainer).getAllByTestId('proposal-approve-button');
+    fireEvent.click(inThreadApproveButtons[0]);
+    fireEvent.click(inThreadApproveButtons[1]);
+    fireEvent.click(inThreadApproveButtons[2]);
+
+    expect(onApprove).toHaveBeenNthCalledWith(1, 'prop-1');
+    expect(onApprove).toHaveBeenNthCalledWith(2, 'prop-2');
+    expect(onApprove).toHaveBeenNthCalledWith(3, 'prop-3');
+
+    const inThreadRejectButtons = within(messagesContainer).getAllByTestId('proposal-reject-button');
+    fireEvent.click(inThreadRejectButtons[0]);
+    expect(onReject).toHaveBeenCalledWith('prop-1');
   });
 
   it('happy path — sending message calls onSendMessage', () => {
@@ -127,7 +204,7 @@ describe('P3-009 — Dispatcher conversational intake workflow', () => {
     render(
       <ConversationalIntake
         messages={[]}
-        proposals={proposals}
+        proposals={baseProposals}
         onSendMessage={vi.fn()}
         onUploadVoice={vi.fn()}
         onApproveProposal={onApprove}
@@ -144,5 +221,56 @@ describe('P3-009 — Dispatcher conversational intake workflow', () => {
     expect(validateIntakeInput('')).toBe('Intake message cannot be empty');
     expect(validateIntakeInput('   ')).toBe('Intake message cannot be empty');
     expect(validateIntakeInput('Valid input')).toBeNull();
+  });
+
+  it('validation — unsupported or malformed proposal types show clear error and cannot be actioned', () => {
+    const onApprove = vi.fn();
+    const onReject = vi.fn();
+    const unsupportedMessages: Message[] = [
+      {
+        id: 'bad-proposal-message-1',
+        tenantId: 'tenant-1',
+        conversationId: 'conv-1',
+        messageType: 'proposal',
+        content: 'Unsupported create_invoice proposal',
+        senderId: 'system-1',
+        senderRole: 'dispatcher',
+        metadata: { intakeChannel: 'text', proposalType: 'create_invoice' },
+        createdAt: '2024-01-01T10:06:00Z',
+      },
+      {
+        id: 'bad-proposal-message-2',
+        tenantId: 'tenant-1',
+        conversationId: 'conv-1',
+        messageType: 'proposal',
+        content: 'Malformed proposal type payload',
+        senderId: 'system-1',
+        senderRole: 'dispatcher',
+        metadata: { intakeChannel: 'voice', proposalType: 42 },
+        createdAt: '2024-01-01T10:06:01Z',
+      },
+    ];
+
+    render(
+      <ConversationalIntake
+        messages={unsupportedMessages}
+        proposals={[]}
+        onSendMessage={vi.fn()}
+        onUploadVoice={vi.fn()}
+        onApproveProposal={onApprove}
+        onRejectProposal={onReject}
+      />
+    );
+
+    const errors = screen.getAllByTestId('intake-proposal-error');
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toHaveTextContent('Unsupported proposal type "create_invoice" for text intake.');
+    expect(errors[1]).toHaveTextContent('Unsupported proposal type "unknown" for voice intake.');
+
+    const messagesContainer = screen.getByTestId('conversation-messages');
+    expect(within(messagesContainer).queryByTestId('proposal-approve-button')).not.toBeInTheDocument();
+    expect(within(messagesContainer).queryByTestId('proposal-reject-button')).not.toBeInTheDocument();
+    expect(onApprove).not.toHaveBeenCalled();
+    expect(onReject).not.toHaveBeenCalled();
   });
 });

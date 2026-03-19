@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { AuditEvent } from '../../src/audit/audit';
 
 export function buildAuditEvent(overrides?: Partial<AuditEvent>): AuditEvent {

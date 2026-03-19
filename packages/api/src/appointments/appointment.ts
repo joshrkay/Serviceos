@@ -1,4 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
+import { VALID_TIMEZONES } from '../settings/settings';
+import { toUtcDate } from './time';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -6,10 +9,18 @@ export interface Appointment {
   id: string;
   tenantId: string;
   jobId: string;
+  /** Persisted as a UTC instant. */
   scheduledStart: Date;
+  /** Persisted as a UTC instant. */
   scheduledEnd: Date;
+  /** Persisted as a UTC instant when present. */
   arrivalWindowStart?: Date;
+  /** Persisted as a UTC instant when present. */
   arrivalWindowEnd?: Date;
+  /**
+   * Display/context timezone only (e.g., rendering and UX context).
+   * This metadata does not affect persisted UTC instants.
+   */
   timezone: string;
   status: AppointmentStatus;
   notes?: string;
@@ -21,10 +32,15 @@ export interface Appointment {
 export interface CreateAppointmentInput {
   tenantId: string;
   jobId: string;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   scheduledStart: Date;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   scheduledEnd: Date;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   arrivalWindowStart?: Date;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   arrivalWindowEnd?: Date;
+  /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone: string;
   notes?: string;
   createdBy: string;
@@ -35,6 +51,7 @@ export interface UpdateAppointmentInput {
   scheduledEnd?: Date;
   arrivalWindowStart?: Date;
   arrivalWindowEnd?: Date;
+  /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone?: string;
   notes?: string;
   status?: AppointmentStatus;
@@ -48,6 +65,14 @@ export interface AppointmentRepository {
   update(tenantId: string, id: string, updates: Partial<Appointment>): Promise<Appointment | null>;
 }
 
+export interface AppointmentWriteOptions {
+  /**
+   * Optional metadata channel for non-blocking validation warnings.
+   * Write operations still succeed when warnings are present.
+   */
+  onValidationWarnings?: (warnings: string[]) => void;
+}
+
 export function validateAppointmentInput(input: CreateAppointmentInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
@@ -55,25 +80,54 @@ export function validateAppointmentInput(input: CreateAppointmentInput): string[
   if (!input.scheduledStart) errors.push('scheduledStart is required');
   if (!input.scheduledEnd) errors.push('scheduledEnd is required');
   if (!input.timezone) errors.push('timezone is required');
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
   if (!input.createdBy) errors.push('createdBy is required');
   return errors;
 }
 
+function normalizeAppointmentTimeUpdates(
+  input: Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'>
+): Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'> {
+  const normalized: Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'> = {};
+
+  if ('scheduledStart' in input) {
+    normalized.scheduledStart = input.scheduledStart ? toUtcDate(input.scheduledStart) : undefined;
+  }
+  if ('scheduledEnd' in input) {
+    normalized.scheduledEnd = input.scheduledEnd ? toUtcDate(input.scheduledEnd) : undefined;
+  }
+  if ('arrivalWindowStart' in input) {
+    normalized.arrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
+  }
+  if ('arrivalWindowEnd' in input) {
+    normalized.arrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
+  }
+
+  return normalized;
+}
+
 export async function createAppointment(
   input: CreateAppointmentInput,
-  repository: AppointmentRepository
+  repository: AppointmentRepository,
+  options?: AppointmentWriteOptions
 ): Promise<Appointment> {
   const errors = validateAppointmentInput(input);
+  const timeValidation = validateAppointmentTimes(input);
+  errors.push(...timeValidation.errors);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
+  if (timeValidation.warnings.length > 0) {
+    options?.onValidationWarnings?.(timeValidation.warnings);
+  }
 
   const appointment: Appointment = {
     id: uuidv4(),
     tenantId: input.tenantId,
     jobId: input.jobId,
-    scheduledStart: input.scheduledStart,
-    scheduledEnd: input.scheduledEnd,
-    arrivalWindowStart: input.arrivalWindowStart,
-    arrivalWindowEnd: input.arrivalWindowEnd,
+    scheduledStart: toUtcDate(input.scheduledStart),
+    scheduledEnd: toUtcDate(input.scheduledEnd),
+    arrivalWindowStart: input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined,
+    arrivalWindowEnd: input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined,
     timezone: input.timezone,
     status: 'scheduled',
     notes: input.notes,
@@ -81,6 +135,11 @@ export async function createAppointment(
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+
+  // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
+  }
 
   return repository.create(appointment);
 }
@@ -97,9 +156,25 @@ export async function updateAppointment(
   tenantId: string,
   id: string,
   input: UpdateAppointmentInput,
-  repository: AppointmentRepository
+  repository: AppointmentRepository,
+  options?: AppointmentWriteOptions
 ): Promise<Appointment | null> {
-  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+    throw new Error('Validation failed: Invalid timezone');
+  }
+
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  const errors: string[] = [];
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
+  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
+  const validation = validateAppointmentUpdateInput(existing, input);
+  if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+
+  const normalizedTimes = normalizeAppointmentTimeUpdates(input);
+  return repository.update(tenantId, id, { ...input, ...normalizedTimes, updatedAt: new Date() });
 }
 
 export async function listByJob(

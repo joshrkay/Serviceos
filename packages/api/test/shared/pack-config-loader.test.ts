@@ -37,7 +37,7 @@ describe('P4-001C — Vertical pack config loading', () => {
     return pack.packId;
   }
 
-  it('happy path — loads HVAC config with terminology and categories', async () => {
+  it('happy path — loads HVAC config with terminology, categories, templates, and intake config', async () => {
     await registerAndActivateHvac();
 
     const config = await loadPackConfig('hvac-v1', registry);
@@ -48,6 +48,10 @@ describe('P4-001C — Vertical pack config loading', () => {
     expect(config!.terminology.furnace).toBeDefined();
     expect(config!.categories.length).toBeGreaterThan(0);
     expect(config!.categories.find((c) => c.id === 'diagnostic')).toBeDefined();
+    expect(config!.templates.length).toBeGreaterThan(0);
+    expect(config!.templates[0].lineItems.length).toBeGreaterThan(0);
+    expect(config!.intakeConfig.questions.length).toBeGreaterThan(0);
+    expect(config!.intakeConfig.questions.some((q) => q.required)).toBe(true);
   });
 
   it('happy path — loads plumbing config with terminology and categories', async () => {
@@ -95,6 +99,17 @@ describe('P4-001C — Vertical pack config loading', () => {
       version: '1.0.0',
       terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
       categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
+      templates: [
+        {
+          id: 'tmpl-1',
+          name: 'Template',
+          categoryId: 'diagnostic',
+          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
+        },
+      ],
+      intakeConfig: {
+        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
+      },
     });
     expect(errors).toHaveLength(0);
   });
@@ -106,6 +121,17 @@ describe('P4-001C — Vertical pack config loading', () => {
       version: '1.0.0',
       terminology: {},
       categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
+      templates: [
+        {
+          id: 'tmpl-1',
+          name: 'Template',
+          categoryId: 'diagnostic',
+          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
+        },
+      ],
+      intakeConfig: {
+        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
+      },
     });
     expect(errors).toContain('terminology must not be empty');
   });
@@ -117,8 +143,56 @@ describe('P4-001C — Vertical pack config loading', () => {
       version: '1.0.0',
       terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
       categories: [],
+      templates: [
+        {
+          id: 'tmpl-1',
+          name: 'Template',
+          categoryId: 'diagnostic',
+          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
+        },
+      ],
+      intakeConfig: {
+        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
+      },
     });
     expect(errors).toContain('categories must not be empty');
+  });
+
+  it('validation — rejects missing templates', () => {
+    const errors = validatePackConfig({
+      verticalType: 'hvac',
+      packId: 'test',
+      version: '1.0.0',
+      terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
+      categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
+      templates: [],
+      intakeConfig: {
+        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
+      },
+    });
+    expect(errors).toContain('templates must not be empty');
+  });
+
+  it('validation — rejects invalid intake config', () => {
+    const errors = validatePackConfig({
+      verticalType: 'hvac',
+      packId: 'test',
+      version: '1.0.0',
+      terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
+      categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
+      templates: [
+        {
+          id: 'tmpl-1',
+          name: 'Template',
+          categoryId: 'diagnostic',
+          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
+        },
+      ],
+      intakeConfig: {
+        questions: [{ id: 'urgency', label: 'Urgency', inputType: 'select', required: true, options: [] }],
+      },
+    });
+    expect(errors).toContain('intakeConfig question "urgency" select options must not be empty');
   });
 
   it('edge case — both packs load independently', async () => {

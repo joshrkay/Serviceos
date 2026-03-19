@@ -107,6 +107,45 @@ export function validateCustomerInput(input: CreateCustomerInput): string[] {
   return errors;
 }
 
+export function validateCustomerUpdateInput(
+  existing: Customer,
+  input: UpdateCustomerInput
+): string[] {
+  const mergedFirstName = input.firstName ?? existing.firstName;
+  const mergedLastName = input.lastName ?? existing.lastName;
+  const mergedCompanyName = input.companyName ?? existing.companyName;
+  const mergedPrimaryPhone = input.primaryPhone ?? existing.primaryPhone;
+  const mergedSecondaryPhone = input.secondaryPhone ?? existing.secondaryPhone;
+  const mergedEmail = input.email ?? existing.email;
+  const mergedPreferredChannel = input.preferredChannel ?? existing.preferredChannel;
+
+  const errors: string[] = [];
+
+  if (!mergedFirstName && !mergedCompanyName) {
+    errors.push('firstName or companyName is required');
+  }
+  if (mergedFirstName && mergedFirstName.length > 100) {
+    errors.push('firstName must be 100 characters or fewer');
+  }
+  if (mergedLastName && mergedLastName.length > 100) {
+    errors.push('lastName must be 100 characters or fewer');
+  }
+  if (mergedPrimaryPhone && !isValidPhone(mergedPrimaryPhone)) {
+    errors.push('Invalid primaryPhone format');
+  }
+  if (mergedSecondaryPhone && !isValidPhone(mergedSecondaryPhone)) {
+    errors.push('Invalid secondaryPhone format');
+  }
+  if (mergedEmail && !isValidEmail(mergedEmail)) {
+    errors.push('Invalid email format');
+  }
+  if (!['phone', 'email', 'sms', 'none'].includes(mergedPreferredChannel)) {
+    errors.push('Invalid preferredChannel');
+  }
+
+  return errors;
+}
+
 export async function createCustomer(
   input: CreateCustomerInput,
   repository: CustomerRepository,
@@ -169,6 +208,9 @@ export async function updateCustomer(
 ): Promise<Customer | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
+
+  const validationErrors = validateCustomerUpdateInput(existing, input);
+  if (validationErrors.length > 0) throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
 
   const updates: Partial<Customer> = { ...input, updatedAt: new Date() };
   if (input.firstName !== undefined || input.lastName !== undefined || input.companyName !== undefined) {

@@ -1,7 +1,7 @@
 /**
  * Test Factories — One factory per entity
  *
- * Factories use @faker-js/faker for realistic data with overridable defaults.
+ * Factories use local faker-like helpers for realistic data with overridable defaults.
  * Never use hardcoded IDs in tests — always generate via factory.
  */
 export { buildCustomer, buildCreateCustomerInput } from './customer.factory';
