@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
+import { isValidTimezone } from '../shared/timezone';
+import { toUtcDate } from './time';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -114,10 +116,10 @@ export async function createAppointment(
     id: uuidv4(),
     tenantId: input.tenantId,
     jobId: input.jobId,
-    scheduledStart: normalizedScheduledStart,
-    scheduledEnd: normalizedScheduledEnd,
-    arrivalWindowStart: normalizedArrivalWindowStart,
-    arrivalWindowEnd: normalizedArrivalWindowEnd,
+    scheduledStart: toUtcDate(input.scheduledStart),
+    scheduledEnd: toUtcDate(input.scheduledEnd),
+    arrivalWindowStart: input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined,
+    arrivalWindowEnd: input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined,
     timezone: input.timezone,
     status: 'scheduled',
     notes: input.notes,
@@ -127,8 +129,8 @@ export async function createAppointment(
   };
 
   // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
-  if (timeWarnings.length > 0) {
-    console.warn(`Appointment validation warnings on create: ${timeWarnings.join(', ')}`);
+  if (timeValidation.warnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
   }
 
   return repository.create(appointment);
@@ -159,7 +161,8 @@ export async function updateAppointment(
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
-  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  const normalizedTimes = normalizeAppointmentTimeUpdates(input);
+  return repository.update(tenantId, id, { ...input, ...normalizedTimes, updatedAt: new Date() });
 }
 
 export async function listByJob(
