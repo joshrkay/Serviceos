@@ -21,6 +21,30 @@ export interface VerticalIntakeConfig {
   followUpQuestions: string[];
 }
 
+export interface PackTemplateLineItem {
+  description: string;
+  unitPriceCents: number;
+}
+
+export interface PackTemplateConfig {
+  id: string;
+  name: string;
+  categoryId: string;
+  lineItems: PackTemplateLineItem[];
+}
+
+export interface IntakeQuestionConfig {
+  id: string;
+  label: string;
+  inputType: 'text' | 'multiline' | 'select';
+  required: boolean;
+  options?: string[];
+}
+
+export interface PackIntakeConfig {
+  questions: IntakeQuestionConfig[];
+}
+
 export interface VerticalPackConfig {
   verticalType: VerticalType;
   packId: string;
@@ -31,6 +55,64 @@ export interface VerticalPackConfig {
   intakeConfig: VerticalIntakeConfig;
   promptContext?: Record<string, unknown>;
 }
+
+const HVAC_TEMPLATES: PackTemplateConfig[] = [
+  {
+    id: 'hvac-diagnostic-template',
+    name: 'HVAC Diagnostic Visit',
+    categoryId: 'diagnostic',
+    lineItems: [
+      { description: 'Diagnostic service call', unitPriceCents: 8900 },
+      { description: 'System performance inspection', unitPriceCents: 4500 },
+    ],
+  },
+  {
+    id: 'hvac-maintenance-template',
+    name: 'Seasonal HVAC Tune-Up',
+    categoryId: 'maintenance',
+    lineItems: [
+      { description: 'Seasonal tune-up labor', unitPriceCents: 9900 },
+      { description: 'Filter replacement', unitPriceCents: 2500 },
+    ],
+  },
+];
+
+const PLUMBING_TEMPLATES: PackTemplateConfig[] = [
+  {
+    id: 'plumbing-drain-template',
+    name: 'Drain Cleaning Service',
+    categoryId: 'drain',
+    lineItems: [
+      { description: 'Drain cleaning labor', unitPriceCents: 14900 },
+      { description: 'Drain camera inspection', unitPriceCents: 7900 },
+    ],
+  },
+  {
+    id: 'plumbing-diagnostic-template',
+    name: 'Plumbing Diagnostic Visit',
+    categoryId: 'diagnostic',
+    lineItems: [
+      { description: 'Diagnostic service call', unitPriceCents: 7500 },
+      { description: 'Leak detection', unitPriceCents: 6500 },
+    ],
+  },
+];
+
+const HVAC_INTAKE_CONFIG: PackIntakeConfig = {
+  questions: [
+    { id: 'problemSummary', label: 'Describe the HVAC issue', inputType: 'multiline', required: true },
+    { id: 'equipmentType', label: 'Equipment type', inputType: 'select', required: true, options: ['AC', 'Furnace', 'Heat Pump', 'Other'] },
+    { id: 'systemAge', label: 'Approximate system age', inputType: 'text', required: false },
+  ],
+};
+
+const PLUMBING_INTAKE_CONFIG: PackIntakeConfig = {
+  questions: [
+    { id: 'problemSummary', label: 'Describe the plumbing issue', inputType: 'multiline', required: true },
+    { id: 'leakSeverity', label: 'Leak severity', inputType: 'select', required: true, options: ['None', 'Slow leak', 'Active leak', 'Burst pipe'] },
+    { id: 'waterShutoffAvailable', label: 'Water shut-off accessible?', inputType: 'select', required: false, options: ['Yes', 'No', 'Unknown'] },
+  ],
+};
 
 function getTerminology(verticalType: VerticalType): TerminologyMap {
   switch (verticalType) {

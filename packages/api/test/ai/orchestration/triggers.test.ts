@@ -43,6 +43,34 @@ describe('P3-010 — Proposal trigger modes by workflow type', () => {
     expect(decision.requiresConfirmation).toBe(true);
   });
 
+  it('validation — rejects role/workflow mismatch (fail closed)', () => {
+    const input: TriggerEvaluationInput = {
+      workflowType: 'dispatcher_intake',
+      hasTranscript: true,
+      hasExistingProposal: false,
+      userRole: 'technician',
+    };
+
+    const decision = evaluateTrigger(input);
+    expect(decision.shouldTrigger).toBe(false);
+    expect(decision.reason).toContain('is not allowed for workflow');
+  });
+
+  it('happy path — allows valid role/workflow pair with existing trigger-mode semantics', () => {
+    const input: TriggerEvaluationInput = {
+      workflowType: 'dispatcher_intake',
+      hasTranscript: true,
+      hasExistingProposal: false,
+      userRole: 'owner',
+    };
+
+    const decision = evaluateTrigger(input);
+    expect(decision.shouldTrigger).toBe(true);
+    expect(decision.mode).toBe('semi_automatic');
+    expect(decision.requiresConfirmation).toBe(true);
+    expect(decision.reason).toBe('Semi-automatic trigger with transcript available');
+  });
+
   it('happy path — manual workflow does not auto-trigger', () => {
     const input: TriggerEvaluationInput = {
       workflowType: 'customer_request',

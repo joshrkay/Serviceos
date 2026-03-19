@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { Job, CreateJobInput, JobStatus, JobPriority } from '../../src/jobs/job';
 
 export function buildJob(overrides?: Partial<Job>): Job {
