@@ -3,6 +3,8 @@ import {
   createSettings,
   updateSettings,
   getSettings,
+  validateSettingsInput,
+  validateUpdateSettingsInput,
 } from '../../src/settings/settings';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
@@ -80,6 +82,63 @@ describe('P4-010A — Active vertical settings in tenant config', () => {
     }, repo);
 
     expect(updated!.activeVerticalPacks).toEqual([]);
+  });
+
+  it('validation — rejects empty or whitespace-only pack IDs', () => {
+    const errors = validateSettingsInput({
+      tenantId: 't1',
+      businessName: 'Service Co',
+      activeVerticalPacks: ['hvac-v1', '   '],
+    });
+
+    expect(errors).toContain('activeVerticalPacks[1] must be a non-empty string');
+  });
+
+  it('validation — rejects duplicate pack IDs after normalization', () => {
+    const errors = validateUpdateSettingsInput({
+      activeVerticalPacks: [' HVAC-v1 ', 'hvac-v1'],
+    });
+
+    expect(errors).toContain('activeVerticalPacks contains duplicate pack ID: hvac-v1');
+  });
+
+  it('validation — accepts multi-pack configuration and normalizes IDs', async () => {
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'Service Co',
+    }, repo);
+
+    const updated = await updateSettings('t1', {
+      activeVerticalPacks: [' HVAC-v1 ', 'Plumbing-V1'],
+    }, repo);
+
+    expect(updated!.activeVerticalPacks).toEqual(['hvac-v1', 'plumbing-v1']);
+  });
+
+  it('validation — updateSettings rejects invalid packs before persisting', async () => {
+    await createSettings({
+      tenantId: 't1',
+      businessName: 'Service Co',
+      activeVerticalPacks: ['hvac-v1'],
+    }, repo);
+
+    await expect(
+      updateSettings('t1', {
+        activeVerticalPacks: ['hvac-v1', ' HVAC-v1 '],
+      }, repo)
+    ).rejects.toThrow('activeVerticalPacks contains duplicate pack ID: hvac-v1');
+
+    const settings = await getSettings('t1', repo);
+    expect(settings!.activeVerticalPacks).toEqual(['hvac-v1']);
+  });
+
+  it('validation — supports constraining pack IDs to known values', () => {
+    const errors = validateUpdateSettingsInput(
+      { activeVerticalPacks: ['hvac-v1', 'electrical-v1'] },
+      { knownPackIds: ['hvac-v1', 'plumbing-v1'] }
+    );
+
+    expect(errors).toContain('activeVerticalPacks contains unknown pack ID: electrical-v1');
   });
 });
 
