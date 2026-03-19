@@ -159,7 +159,7 @@ export async function updateAppointment(
   repository: AppointmentRepository,
   options?: AppointmentWriteOptions
 ): Promise<Appointment | null> {
-  if (input.timezone && !isValidTimezone(input.timezone)) {
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
     throw new Error('Validation failed: Invalid timezone');
   }
 
