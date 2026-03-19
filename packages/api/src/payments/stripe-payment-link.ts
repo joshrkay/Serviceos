@@ -1,6 +1,5 @@
-import { v4 as uuidv4 } from 'uuid';
 import { PaymentLinkProvider, PaymentLinkRequest, PaymentLinkResult, validatePaymentLinkRequest } from './payment-link-provider';
-import { PaymentReadiness, PaymentReadinessRepository } from '../invoices/payment-readiness';
+import { PaymentReadinessRepository } from '../invoices/payment-readiness';
 
 export interface StripeConfig {
   apiKey: string;
@@ -13,6 +12,11 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
 
   constructor(config: StripeConfig, readinessRepo: PaymentReadinessRepository) {
     this.config = config;
+
+    if (!config.apiKey) {
+      throw new Error('StripePaymentLinkProvider requires a Stripe API key. Set STRIPE_API_KEY in environment.');
+    }
+
     this.readinessRepo = readinessRepo;
   }
 
@@ -30,16 +34,40 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
       };
     }
 
-    // In production, this would call Stripe API
-    // For now, generate a mock Stripe link
-    const linkId = `plink_${uuidv4().replace(/-/g, '').substring(0, 24)}`;
-    const linkUrl = `https://checkout.stripe.com/pay/${linkId}`;
+    // Call Stripe API to create a payment link
+    // Uses the Stripe REST API directly to avoid adding the stripe SDK dependency.
+    // When ready, replace with: const stripe = new Stripe(this.config.apiKey);
+    const res = await fetch('https://api.stripe.com/v1/payment_links', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.config.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        'line_items[0][price_data][currency]': 'usd',
+        'line_items[0][price_data][product_data][name]': `Invoice ${request.invoiceNumber ?? request.invoiceId}`,
+        'line_items[0][price_data][unit_amount]': String(request.amountCents),
+        'line_items[0][quantity]': '1',
+        'metadata[tenant_id]': request.tenantId,
+        'metadata[invoice_id]': request.invoiceId,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Stripe API error (${res.status}): ${body}`);
+    }
+
+    const data = await res.json();
+    const linkId = data.id as string;
+    const linkUrl = data.url as string;
     const now = new Date();
+    const expiryMs = parseInt(process.env.PAYMENT_LINK_EXPIRY_HOURS || '24', 10) * 60 * 60 * 1000;
 
     const result: PaymentLinkResult = {
       linkId,
       linkUrl,
-      expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+      expiresAt: new Date(now.getTime() + expiryMs),
       providerReference: `stripe_${linkId}`,
     };
 
@@ -55,6 +83,19 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
   }
 
   async deactivateLink(linkId: string): Promise<void> {
-    // In production, would call Stripe to deactivate
+    // Stripe payment links can be deactivated via the API
+    const res = await fetch(`https://api.stripe.com/v1/payment_links/${linkId}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.config.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ active: 'false' }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Stripe deactivation failed (${res.status}): ${body}`);
+    }
   }
 }

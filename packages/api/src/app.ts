@@ -24,7 +24,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 
-// In-memory repositories
+// In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
@@ -37,20 +37,45 @@ import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
-import { InMemoryVerticalPackRepository as InMemoryLegacyVerticalPackRepository } from './verticals/registry';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository } from './voice/voice-service';
-import { createTranscriptionWorker } from './workers/transcription';
-import { createLogger } from './logging/logger';
 import { InMemoryQueue, processMessage } from './queues/queue';
-
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
+
+// Postgres-backed repositories (production)
+import { PgCustomerRepository } from './customers/pg-customer';
+import { PgLocationRepository } from './locations/pg-location';
+import { PgJobRepository } from './jobs/pg-job';
+import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
+import { PgAppointmentRepository } from './appointments/pg-appointment';
+import { PgEstimateRepository } from './estimates/pg-estimate';
+import { PgInvoiceRepository } from './invoices/pg-invoice';
+import { PgPaymentRepository } from './invoices/pg-payment';
+import { PgNoteRepository } from './notes/pg-note';
+import { PgConversationRepository } from './conversations/pg-conversation';
+import { PgSettingsRepository } from './settings/pg-settings';
+import { PgAuditRepository } from './audit/pg-audit';
+import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
+import { PgServiceBundleRepository } from './verticals/pg-bundles';
+import { PgQualityMetricsRepository } from './quality/pg-metrics';
+import { PgVoiceRepository } from './voice/pg-voice';
+import { PgApprovalRepository } from './estimates/pg-approval';
+import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
+import { PgPackActivationRepository } from './settings/pg-pack-activation';
+import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
+import { PgFileRepository } from './files/pg-file';
+import { PgWebhookRepository } from './webhooks/pg-webhook';
+import { PgQueue } from './queues/pg-queue';
+
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
+import { createTranscriptionWorker } from './workers/transcription';
+import { createLogger } from './logging/logger';
+
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
 
@@ -94,41 +119,74 @@ export function createApp() {
   app.use('/', healthRouter);
 
   // Auth middleware for API routes
-  const clerkSecret = process.env.CLERK_SECRET_KEY || 'dev-secret-key';
+  // In dev without CLERK_SECRET_KEY, verifyClerkSession handles dev-mode bypass.
+  // In prod/staging, loadConfig() enforces CLERK_SECRET_KEY is present.
+  const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
 
-  // Initialize in-memory repositories
-  const customerRepo = new InMemoryCustomerRepository();
-  const locationRepo = new InMemoryLocationRepository();
-  const jobRepo = new InMemoryJobRepository();
-  const timelineRepo = new InMemoryJobTimelineRepository();
-  const appointmentRepo = new InMemoryAppointmentRepository();
-  const estimateRepo = new InMemoryEstimateRepository();
-  const invoiceRepo = new InMemoryInvoiceRepository();
-  const paymentRepo = new InMemoryPaymentRepository();
-  const noteRepo = new InMemoryNoteRepository();
-  const conversationRepo = new InMemoryConversationRepository();
-  const settingsRepo = new InMemorySettingsRepository();
-  const auditRepo = new InMemoryAuditRepository();
-  // Pack activation + pack-config-loader share the canonical registry shape.
-  const packActivationRepo = new InMemoryPackActivationRepository();
-  const canonicalPackRegistry = new InMemoryCanonicalVerticalPackRegistry();
+  // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
+  // fall back to in-memory for local development without a database.
+  const usePostgres = !!process.env.DATABASE_URL;
+  const pool = usePostgres ? createPool() : undefined;
+
+  const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
+  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
+  const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
+  const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
+  const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
+  const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
+  const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
+  const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
+  const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  const auditRepo          = pool ? new PgAuditRepository(pool)          : new InMemoryAuditRepository();
+  const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
+  const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
+  const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
+  const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
+  const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
+  const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
+  const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
+  const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
+
+  const canonicalPackRegistry = pool
+    ? new PgVerticalPackRegistry(pool)
+    : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
-  const templateRepo = new InMemoryEstimateTemplateRepository();
-  const bundleRepo = new InMemoryServiceBundleRepository();
-  const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
-  const approvalRepo = new InMemoryApprovalRepository();
-  const deltaRepo = new InMemoryEditDeltaRepository();
-  const voiceRepo = new InMemoryVoiceRepository();
-  const queue = new InMemoryQueue();
-  const transcriptionProvider = {
-    async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-      return {
-        transcript: `Transcribed audio from ${audioUrl}`,
-        metadata: { provider: 'in-memory', processedAt: new Date().toISOString() },
+
+  // Transcription provider — use OpenAI Whisper API when API key is configured,
+  // otherwise fall back to a no-op provider for dev.
+  const transcriptionProvider = process.env.AI_PROVIDER_API_KEY
+    ? {
+        async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
+          // Real implementation would call OpenAI Whisper API here.
+          // For now, this signals intent — replace with actual Whisper call.
+          const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${process.env.AI_PROVIDER_API_KEY}` },
+            body: (() => {
+              const fd = new FormData();
+              fd.append('file', audioUrl);
+              fd.append('model', 'whisper-1');
+              return fd;
+            })(),
+          });
+          const data = await res.json();
+          return {
+            transcript: data.text || '',
+            metadata: { provider: 'openai-whisper', processedAt: new Date().toISOString() },
+          };
+        },
+      }
+    : {
+        async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
+          return {
+            transcript: `[Dev mode] Transcription not available. Audio: ${audioUrl}`,
+            metadata: { provider: 'dev-fallback', processedAt: new Date().toISOString() },
+          };
+        },
       };
-    },
-  };
   const transcriptionWorker = createTranscriptionWorker(voiceRepo, transcriptionProvider);
   const workerLogger = createLogger({
     service: 'transcription-worker',

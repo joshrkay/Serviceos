@@ -10,6 +10,8 @@ export interface EnvironmentConfig {
   memoryMiB: number;
   enableDeletionProtection: boolean;
   certificateArn?: string;
+  /** CORS allowed origins for the S3 uploads bucket */
+  corsOrigins: string[];
 }
 
 export const environments: Record<Environment, EnvironmentConfig> = {
@@ -21,6 +23,7 @@ export const environments: Record<Environment, EnvironmentConfig> = {
     cpu: 256,
     memoryMiB: 512,
     enableDeletionProtection: false,
+    corsOrigins: ['http://localhost:5173', 'http://localhost:3000', '*'],
   },
   staging: {
     environment: 'staging',
@@ -30,6 +33,8 @@ export const environments: Record<Environment, EnvironmentConfig> = {
     cpu: 512,
     memoryMiB: 1024,
     enableDeletionProtection: true,
+    // Set to your staging domain before deploying
+    corsOrigins: [process.env.STAGING_CORS_ORIGIN || 'https://staging.serviceos.io'],
   },
   prod: {
     environment: 'prod',
@@ -39,6 +44,8 @@ export const environments: Record<Environment, EnvironmentConfig> = {
     cpu: 1024,
     memoryMiB: 2048,
     enableDeletionProtection: true,
+    // Set to your production domain before deploying
+    corsOrigins: [process.env.PROD_CORS_ORIGIN || 'https://app.serviceos.io'],
   },
 };
 
