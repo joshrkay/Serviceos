@@ -111,7 +111,7 @@ export async function createAppointment(
   const normalizedArrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
   const normalizedArrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
 
-  const { errors: timeErrors } = validateAppointmentDateRanges({
+  const { errors: timeErrors, warnings: timeWarnings } = validateAppointmentDateRanges({
     scheduledStart: normalizedScheduledStart,
     scheduledEnd: normalizedScheduledEnd,
     arrivalWindowStart: normalizedArrivalWindowStart,
@@ -136,8 +136,8 @@ export async function createAppointment(
   };
 
   // Warnings are non-blocking for writes; we emit them to logs as an optional metadata channel.
-  if (timeValidation.warnings.length > 0) {
-    console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
+  if (timeWarnings.length > 0) {
+    console.warn(`Appointment validation warnings on create: ${timeWarnings.join(', ')}`);
   }
 
   return repository.create(appointment);
@@ -174,7 +174,7 @@ export async function updateAppointment(
   const arrivalWindowEnd =
     'arrivalWindowEnd' in normalizedTimeUpdates ? normalizedTimeUpdates.arrivalWindowEnd : existing.arrivalWindowEnd;
 
-  const { errors: timeErrors } = validateAppointmentDateRanges({
+  const { errors: timeErrors, warnings: timeWarnings } = validateAppointmentDateRanges({
     scheduledStart,
     scheduledEnd,
     arrivalWindowStart,
