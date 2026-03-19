@@ -1,7 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { VALID_TIMEZONES } from '../settings/settings';
-import { toUtcDate } from './time';
-import { validateAppointmentTimes } from './validation';
+import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -61,6 +59,14 @@ export interface AppointmentRepository {
   update(tenantId: string, id: string, updates: Partial<Appointment>): Promise<Appointment | null>;
 }
 
+export interface AppointmentWriteOptions {
+  /**
+   * Optional metadata channel for non-blocking validation warnings.
+   * Write operations still succeed when warnings are present.
+   */
+  onValidationWarnings?: (warnings: string[]) => void;
+}
+
 export function validateAppointmentInput(input: CreateAppointmentInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
@@ -75,14 +81,16 @@ export function validateAppointmentInput(input: CreateAppointmentInput): string[
 
 export async function createAppointment(
   input: CreateAppointmentInput,
-  repository: AppointmentRepository
+  repository: AppointmentRepository,
+  options?: AppointmentWriteOptions
 ): Promise<Appointment> {
   const errors = validateAppointmentInput(input);
+  const timeValidation = validateAppointmentTimes(input);
+  errors.push(...timeValidation.errors);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
-  const timeValidation = validateAppointmentTimes(input);
-  if (timeValidation.errors.length > 0) {
-    throw new Error(`Validation failed: ${timeValidation.errors.join(', ')}`);
+  if (timeValidation.warnings.length > 0) {
+    options?.onValidationWarnings?.(timeValidation.warnings);
   }
 
   const appointment: Appointment = {
@@ -121,23 +129,16 @@ export async function updateAppointment(
   tenantId: string,
   id: string,
   input: UpdateAppointmentInput,
-  repository: AppointmentRepository
+  repository: AppointmentRepository,
+  options?: AppointmentWriteOptions
 ): Promise<Appointment | null> {
-  const updates: Partial<Appointment> = {
-    ...input,
-    updatedAt: new Date(),
-  };
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
 
-  if (input.scheduledStart) updates.scheduledStart = toUtcDate(input.scheduledStart);
-  if (input.scheduledEnd) updates.scheduledEnd = toUtcDate(input.scheduledEnd);
-  if (input.arrivalWindowStart) updates.arrivalWindowStart = toUtcDate(input.arrivalWindowStart);
-  if (input.arrivalWindowEnd) updates.arrivalWindowEnd = toUtcDate(input.arrivalWindowEnd);
+  const validation = validateAppointmentUpdateInput(existing, input);
+  if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
-    throw new Error('Validation failed: Invalid timezone');
-  }
-
-  return repository.update(tenantId, id, updates);
+  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
 }
 
 export async function listByJob(

@@ -146,6 +146,52 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(updated!.notes).toBe('Confirmed by customer');
   });
 
+  it('validation — rejects invalid appointment update before write', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        { arrivalWindowStart: new Date(tomorrow.getTime() + 60 * 60 * 1000) },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Both arrivalWindowStart and arrivalWindowEnd must be provided together');
+
+    const unchanged = await getAppointment('tenant-1', apt.id, repo);
+    expect(unchanged!.arrivalWindowStart).toBeUndefined();
+    expect(unchanged!.arrivalWindowEnd).toBeUndefined();
+  });
+
+  it('validation — valid partial appointment update continues to work', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const updated = await updateAppointment('tenant-1', apt.id, { notes: 'Bring ladder' }, repo);
+    expect(updated!.notes).toBe('Bring ladder');
+    expect(updated!.scheduledStart).toEqual(tomorrow);
+    expect(updated!.scheduledEnd).toEqual(tomorrowEnd);
+  });
+
   it('happy path — lists appointments by job', async () => {
     await createAppointment(
       { tenantId: 'tenant-1', jobId: 'job-1', scheduledStart: tomorrow, scheduledEnd: tomorrowEnd, timezone: 'UTC', createdBy: 'u-1' },
@@ -335,5 +381,124 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
 
     const found = await getAppointment('tenant-2', apt.id, repo);
     expect(found).toBeNull();
+  });
+
+  it('validation — create rejects scheduledStart >= scheduledEnd', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrowEnd,
+          scheduledEnd: tomorrow,
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — create rejects only one arrival window boundary provided', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          arrivalWindowStart: arrivalStart,
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Both arrivalWindowStart and arrivalWindowEnd must be provided together');
+  });
+
+  it('validation — create rejects arrivalWindowStart after scheduledStart', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          arrivalWindowStart: new Date(tomorrow.getTime() + 30 * 60 * 1000),
+          arrivalWindowEnd: new Date(tomorrow.getTime() + 90 * 60 * 1000),
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('arrivalWindowStart must be at or before scheduledStart');
+  });
+
+  it('validation — create rejects max duration > 24h', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: new Date(tomorrow.getTime() + 25 * 60 * 60 * 1000),
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Appointment duration cannot exceed 24 hours');
+  });
+
+  it('validation — update uses merged schedule and rejects invalid arrival window', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        arrivalWindowStart: arrivalStart,
+        arrivalWindowEnd: arrivalEnd,
+        timezone: 'UTC',
+        createdBy: 'u-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        {
+          arrivalWindowStart: new Date(tomorrow.getTime() + 10 * 60 * 1000),
+        },
+        repo
+      )
+    ).rejects.toThrow('arrivalWindowStart must be at or before scheduledStart');
+  });
+
+  it('validation — warnings are emitted through optional metadata channel', async () => {
+    const warnings: string[] = [];
+
+    const pastStart = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const pastEnd = new Date(Date.now() - 1 * 60 * 60 * 1000);
+
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: pastStart,
+        scheduledEnd: pastEnd,
+        timezone: 'UTC',
+        createdBy: 'u-1',
+      },
+      repo,
+      {
+        onValidationWarnings: (incomingWarnings) => warnings.push(...incomingWarnings),
+      }
+    );
+
+    expect(apt.id).toBeTruthy();
+    expect(warnings).toContain('Appointment is scheduled in the past');
   });
 });

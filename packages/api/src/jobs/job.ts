@@ -74,7 +74,9 @@ export async function createJob(
   auditRepo?: AuditRepository
 ): Promise<Job> {
   const errors = validateJobInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) {
+    throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
+  }
 
   const jobNumber = await repository.getNextJobNumber(input.tenantId);
 
