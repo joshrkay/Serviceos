@@ -122,7 +122,7 @@ export function createApp() {
     activationRepo: packActivationRepo,
     verticalPackRegistry: sharedVerticalPackRegistry,
   }));
-  app.use('/api/verticals', createVerticalRouter(verticalPackRepo));
+  app.use('/api/verticals', createVerticalRouter(new InMemoryVerticalPackRepository()));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter(qualityMetricsRepo));
