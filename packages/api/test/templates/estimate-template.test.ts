@@ -2,10 +2,10 @@ import {
   createTemplate,
   instantiateTemplate,
   findBestTemplate,
-  validateTemplateInput,
   InMemoryEstimateTemplateRepository,
   EstimateTemplate,
 } from '../../src/templates/estimate-template';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-004 — Estimate Templates', () => {
   let repo: InMemoryEstimateTemplateRepository;
@@ -61,23 +61,39 @@ describe('P4-004 — Estimate Templates', () => {
     expect(template.usageCount).toBe(0);
   });
 
-  it('validates required fields', () => {
-    expect(validateTemplateInput({ ...sampleInput, tenantId: '' })).toContain('tenantId is required');
-    expect(validateTemplateInput({ ...sampleInput, name: '' })).toContain('name is required');
-    expect(validateTemplateInput({ ...sampleInput, lineItemTemplates: [] })).toContain(
-      'at least one line item template is required'
-    );
+  it('write path — rejects missing tenantId', async () => {
+    await expect(createTemplate({ ...sampleInput, tenantId: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid template input',
+    });
   });
 
-  it('validates line item template values', () => {
-    const errors = validateTemplateInput({
-      ...sampleInput,
-      lineItemTemplates: [
-        { description: '', category: 'labor', defaultQuantity: -1, defaultUnitPriceCents: 100, taxable: true, sortOrder: 1, isOptional: false },
-      ],
+  it('write path — rejects missing name', async () => {
+    await expect(createTemplate({ ...sampleInput, name: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid template input',
     });
-    expect(errors).toContain('lineItemTemplates[0].description is required');
-    expect(errors).toContain('lineItemTemplates[0].defaultQuantity must be non-negative');
+  });
+
+  it('write path — rejects empty line items', async () => {
+    await expect(createTemplate({ ...sampleInput, lineItemTemplates: [] }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid template input',
+    });
+  });
+
+  it('write path — rejects invalid line item values', async () => {
+    await expect(
+      createTemplate({
+        ...sampleInput,
+        lineItemTemplates: [
+          { description: '', category: 'labor', defaultQuantity: -1, defaultUnitPriceCents: 100, taxable: true, sortOrder: 1, isOptional: false },
+        ],
+      }, repo)
+    ).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid template input',
+    });
   });
 
   it('instantiates template with non-optional items', async () => {

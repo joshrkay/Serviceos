@@ -3,7 +3,6 @@ import {
   activatePack,
   deactivatePack,
   getActivePacks,
-  validateActivationInput,
 } from '../../src/settings/pack-activation';
 import { ValidationError } from '../../src/shared/errors';
 
@@ -61,9 +60,12 @@ describe('P4-001B — Tenant-to-pack activation linkage', () => {
     } satisfies Partial<ValidationError>);
   });
 
-  it('validation — rejects missing packId', () => {
-    const errors = validateActivationInput({ tenantId: 't1', packId: '' });
-    expect(errors).toContain('packId is required');
+  it('write path — rejects missing packId', async () => {
+    await expect(activatePack({ tenantId: 't1', packId: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid activation input',
+      details: { errors: ['packId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('edge case — throws if pack already active', async () => {
