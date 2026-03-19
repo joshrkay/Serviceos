@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
 
+import { isValidTimezone } from '../shared/timezone';
+
 export interface TenantSettings {
   id: string;
   tenantId: string;
@@ -62,7 +64,7 @@ export function validateSettingsInput(input: CreateSettingsInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.businessName) errors.push('businessName is required');
-  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+  if (input.timezone && !isValidTimezone(input.timezone)) {
     errors.push('Invalid timezone');
   }
   if (input.estimatePrefix !== undefined && input.estimatePrefix.length === 0) {

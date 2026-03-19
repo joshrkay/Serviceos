@@ -32,9 +32,13 @@ export interface Appointment {
 export interface CreateAppointmentInput {
   tenantId: string;
   jobId: string;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   scheduledStart: Date;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   scheduledEnd: Date;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   arrivalWindowStart?: Date;
+  /** UTC/local instant provided by caller; persisted as a normalized UTC instant. */
   arrivalWindowEnd?: Date;
   /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone: string;
@@ -79,6 +83,27 @@ export function validateAppointmentInput(input: CreateAppointmentInput): string[
   if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) errors.push('Invalid timezone');
   if (!input.createdBy) errors.push('createdBy is required');
   return errors;
+}
+
+function normalizeAppointmentTimeUpdates(
+  input: Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'>
+): Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'> {
+  const normalized: Pick<UpdateAppointmentInput, 'scheduledStart' | 'scheduledEnd' | 'arrivalWindowStart' | 'arrivalWindowEnd'> = {};
+
+  if ('scheduledStart' in input) {
+    normalized.scheduledStart = input.scheduledStart ? toUtcDate(input.scheduledStart) : undefined;
+  }
+  if ('scheduledEnd' in input) {
+    normalized.scheduledEnd = input.scheduledEnd ? toUtcDate(input.scheduledEnd) : undefined;
+  }
+  if ('arrivalWindowStart' in input) {
+    normalized.arrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
+  }
+  if ('arrivalWindowEnd' in input) {
+    normalized.arrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
+  }
+
+  return normalized;
 }
 
 export async function createAppointment(
@@ -134,6 +159,10 @@ export async function updateAppointment(
   repository: AppointmentRepository,
   options?: AppointmentWriteOptions
 ): Promise<Appointment | null> {
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
+    throw new Error('Validation failed: Invalid timezone');
+  }
+
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 
@@ -144,7 +173,8 @@ export async function updateAppointment(
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
-  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  const normalizedTimes = normalizeAppointmentTimeUpdates(input);
+  return repository.update(tenantId, id, { ...input, ...normalizedTimes, updatedAt: new Date() });
 }
 
 export async function listByJob(
