@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { validateAppointmentTimes } from './validation';
+import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -74,12 +74,10 @@ export async function createAppointment(
   options?: AppointmentWriteOptions
 ): Promise<Appointment> {
   const errors = validateAppointmentInput(input);
+  const timeValidation = validateAppointmentTimes(input);
+  errors.push(...timeValidation.errors);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
-  const timeValidation = validateAppointmentTimes(input);
-  if (timeValidation.errors.length > 0) {
-    throw new Error(`Validation failed: ${timeValidation.errors.join('; ')}`);
-  }
   if (timeValidation.warnings.length > 0) {
     options?.onValidationWarnings?.(timeValidation.warnings);
   }
@@ -126,20 +124,8 @@ export async function updateAppointment(
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 
-  const effectiveSchedule = {
-    scheduledStart: input.scheduledStart ?? existing.scheduledStart,
-    scheduledEnd: input.scheduledEnd ?? existing.scheduledEnd,
-    arrivalWindowStart: input.arrivalWindowStart ?? existing.arrivalWindowStart,
-    arrivalWindowEnd: input.arrivalWindowEnd ?? existing.arrivalWindowEnd,
-  };
-
-  const timeValidation = validateAppointmentTimes(effectiveSchedule);
-  if (timeValidation.errors.length > 0) {
-    throw new Error(`Validation failed: ${timeValidation.errors.join('; ')}`);
-  }
-  if (timeValidation.warnings.length > 0) {
-    options?.onValidationWarnings?.(timeValidation.warnings);
-  }
+  const validation = validateAppointmentUpdateInput(existing, input);
+  if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
   return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
 }
