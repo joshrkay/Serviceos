@@ -1,22 +1,12 @@
-// P4-001A: Vertical Pack Registry
-// Manages registration and lookup of vertical packs (HVAC, plumbing, etc.)
+import { randomUUID } from 'crypto';
+import {
+  InMemoryVerticalPackRegistry,
+  VerticalPack as CanonicalVerticalPack,
+  VerticalPackRegistry,
+} from '../shared/vertical-pack-registry';
+import { PackStatus, VerticalType } from '../shared/vertical-types';
 
-import { v4 as uuidv4 } from 'uuid';
-
-export type VerticalType = 'hvac' | 'plumbing';
-
-export interface VerticalPack {
-  id: string;
-  type: VerticalType;
-  name: string;
-  version: string;
-  description: string;
-  isActive: boolean;
-  categories: ServiceCategory[];
-  terminology: TerminologyMap;
-  createdAt: Date;
-  updatedAt: Date;
-}
+export { VerticalType };
 
 export interface ServiceCategory {
   id: string;
@@ -32,6 +22,14 @@ export interface TerminologyMap {
     aliases: string[];
     description?: string;
   };
+}
+
+export interface VerticalPack extends CanonicalVerticalPack {
+  type: VerticalType;
+  name: string;
+  isActive: boolean;
+  categories: ServiceCategory[];
+  terminology: TerminologyMap;
 }
 
 export interface VerticalPackRepository {
@@ -51,32 +49,59 @@ export function createVerticalPack(
   categories: ServiceCategory[],
   terminology: TerminologyMap
 ): VerticalPack {
+  const now = new Date();
   return {
-    id: uuidv4(),
+    id: randomUUID(),
+    packId: `${type}-pack`,
+    version,
+    verticalType: type,
+    status: 'active',
+    displayName: name,
+    description,
+    metadata: {
+      categories,
+      terminology,
+    },
+    createdAt: now,
+    updatedAt: now,
     type,
     name,
-    version,
-    description,
     isActive: true,
     categories,
     terminology,
-    createdAt: new Date(),
-    updatedAt: new Date(),
   };
 }
 
 export function validateVerticalPack(pack: Partial<VerticalPack>): string[] {
   const errors: string[] = [];
-  if (!pack.type) errors.push('type is required');
-  if (pack.type && !['hvac', 'plumbing'].includes(pack.type)) {
-    errors.push('type must be hvac or plumbing');
+  if (!pack.verticalType && !pack.type) errors.push('verticalType is required');
+  const type = pack.verticalType || pack.type;
+  if (type && !['hvac', 'plumbing'].includes(type)) {
+    errors.push('verticalType must be hvac or plumbing');
   }
-  if (!pack.name) errors.push('name is required');
+  if (!pack.displayName && !pack.name) errors.push('displayName is required');
   if (!pack.version) errors.push('version is required');
-  if (!pack.categories || pack.categories.length === 0) {
+  const categories = pack.categories || (pack.metadata as any)?.categories;
+  if (!categories || categories.length === 0) {
     errors.push('at least one category is required');
   }
   return errors;
+}
+
+function readCategories(pack: Pick<VerticalPack, 'categories' | 'metadata'>): ServiceCategory[] {
+  const metadataCategories = (pack.metadata as Record<string, unknown> | undefined)?.categories as
+    | ServiceCategory[]
+    | undefined;
+  return pack.categories?.length ? pack.categories : metadataCategories || [];
+}
+
+function readTerminology(pack: Pick<VerticalPack, 'terminology' | 'metadata'>): TerminologyMap {
+  const metadataTerminology = (pack.metadata as Record<string, unknown> | undefined)?.terminology as
+    | TerminologyMap
+    | undefined;
+  return (pack.terminology && Object.keys(pack.terminology).length > 0)
+    ? pack.terminology
+    : (metadataTerminology || {});
 }
 
 export function resolveTerminology(
@@ -84,14 +109,13 @@ export function resolveTerminology(
   term: string
 ): { displayName: string; description?: string } | null {
   const normalizedTerm = term.toLowerCase().trim();
+  const terminology = readTerminology(pack);
 
-  // Direct key match
-  if (pack.terminology[normalizedTerm]) {
-    return pack.terminology[normalizedTerm];
+  if (terminology[normalizedTerm]) {
+    return terminology[normalizedTerm];
   }
 
-  // Alias match
-  for (const [_key, entry] of Object.entries(pack.terminology)) {
+  for (const entry of Object.values(terminology)) {
     if (entry.aliases.some((a) => a.toLowerCase() === normalizedTerm)) {
       return entry;
     }
@@ -104,16 +128,17 @@ export function getCategoryHierarchy(
   pack: VerticalPack,
   categoryId: string
 ): ServiceCategory[] {
+  const categories = readCategories(pack);
   const result: ServiceCategory[] = [];
   const visited = new Set<string>();
-  let current = pack.categories.find((c) => c.id === categoryId);
+  let current = categories.find((c) => c.id === categoryId);
 
   while (current) {
-    if (visited.has(current.id)) break; // Guard against cyclic parentId
+    if (visited.has(current.id)) break;
     visited.add(current.id);
     result.unshift(current);
     if (!current.parentId) break;
-    current = pack.categories.find((c) => c.id === current!.parentId);
+    current = categories.find((c) => c.id === current!.parentId);
   }
 
   return result;
@@ -123,50 +148,110 @@ export function getChildCategories(
   pack: VerticalPack,
   parentId?: string
 ): ServiceCategory[] {
-  return pack.categories
+  const categories = readCategories(pack);
+  return categories
     .filter((c) => c.parentId === parentId)
     .sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
-function clonePack(p: VerticalPack): VerticalPack {
-  return { ...p, categories: p.categories.map((c) => ({ ...c })), terminology: { ...p.terminology } };
+function clonePack(pack: VerticalPack): VerticalPack {
+  return {
+    ...pack,
+    categories: pack.categories.map((c) => ({ ...c })),
+    terminology: { ...pack.terminology },
+    metadata: pack.metadata ? { ...pack.metadata } : undefined,
+  };
+}
+
+function toStatus(isActive: boolean): PackStatus {
+  return isActive ? 'active' : 'deprecated';
+}
+
+function fromCanonical(pack: CanonicalVerticalPack): VerticalPack {
+  const metadata = (pack.metadata || {}) as Record<string, unknown>;
+  const categories = (metadata.categories as ServiceCategory[] | undefined) || [];
+  const terminology = (metadata.terminology as TerminologyMap | undefined) || {};
+
+  return {
+    ...pack,
+    type: pack.verticalType,
+    name: pack.displayName,
+    isActive: pack.status === 'active',
+    categories,
+    terminology,
+  };
+}
+
+function toCanonical(pack: VerticalPack): CanonicalVerticalPack {
+  return {
+    id: pack.id,
+    packId: pack.packId,
+    version: pack.version,
+    verticalType: pack.verticalType || pack.type,
+    status: pack.status || toStatus(pack.isActive),
+    displayName: pack.displayName || pack.name,
+    description: pack.description,
+    metadata: {
+      ...(pack.metadata || {}),
+      categories: pack.categories,
+      terminology: pack.terminology,
+    },
+    createdAt: pack.createdAt,
+    updatedAt: pack.updatedAt,
+  };
 }
 
 export class InMemoryVerticalPackRepository implements VerticalPackRepository {
-  private packs: Map<string, VerticalPack> = new Map();
+  constructor(private readonly registry: VerticalPackRegistry = new InMemoryVerticalPackRegistry()) {}
 
   async create(pack: VerticalPack): Promise<VerticalPack> {
-    this.packs.set(pack.id, clonePack(pack));
-    return clonePack(pack);
+    const created = await this.registry.register(toCanonical(pack));
+    return clonePack(fromCanonical(created));
   }
 
   async findById(id: string): Promise<VerticalPack | null> {
-    const p = this.packs.get(id);
-    return p ? clonePack(p) : null;
+    const found = await this.registry.get(id);
+    return found ? clonePack(fromCanonical(found)) : null;
   }
 
   async findByType(type: VerticalType): Promise<VerticalPack | null> {
-    for (const p of this.packs.values()) {
-      if (p.type === type && p.isActive) return clonePack(p);
-    }
-    return null;
+    const candidates = await this.registry.findByVertical(type);
+    const active = candidates.find((pack) => pack.status === 'active');
+    return active ? clonePack(fromCanonical(active)) : null;
   }
 
   async findAll(): Promise<VerticalPack[]> {
-    return Array.from(this.packs.values()).map(clonePack);
+    const packs = await this.registry.list();
+    return packs.map((pack) => clonePack(fromCanonical(pack)));
   }
 
   async findActive(): Promise<VerticalPack[]> {
-    return Array.from(this.packs.values())
-      .filter((p) => p.isActive)
-      .map(clonePack);
+    const packs = await this.registry.list();
+    return packs
+      .filter((pack) => pack.status === 'active')
+      .map((pack) => clonePack(fromCanonical(pack)));
   }
 
   async update(id: string, updates: Partial<VerticalPack>): Promise<VerticalPack | null> {
-    const p = this.packs.get(id);
-    if (!p) return null;
-    const updated = { ...p, ...updates, updatedAt: new Date() };
-    this.packs.set(id, clonePack(updated));
-    return clonePack(updated);
+    const status =
+      updates.status ||
+      (updates.isActive !== undefined ? toStatus(updates.isActive) : undefined);
+
+    const updated = await this.registry.update(id, {
+      ...updates,
+      verticalType: updates.verticalType || updates.type,
+      displayName: updates.displayName || updates.name,
+      status,
+      metadata: updates.categories || updates.terminology
+        ? {
+          ...(updates.metadata || {}),
+          ...(updates.categories ? { categories: updates.categories } : {}),
+          ...(updates.terminology ? { terminology: updates.terminology } : {}),
+        }
+        : updates.metadata,
+      updatedAt: new Date(),
+    });
+
+    return updated ? clonePack(fromCanonical(updated)) : null;
   }
 }

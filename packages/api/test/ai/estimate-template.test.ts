@@ -6,6 +6,7 @@ import {
   CreateTemplateInput,
 } from '../../src/ai/tasks/estimate-template';
 import { calculateLineItemTotal } from '../../src/shared/billing-engine';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-004A — Vertical estimate template schema', () => {
   let repo: InMemoryEstimateTemplateRepository;
@@ -52,6 +53,25 @@ describe('P4-004A — Vertical estimate template schema', () => {
   it('validation — rejects missing packId', () => {
     const errors = validateTemplateInput({ ...validInput, packId: '' });
     expect(errors).toContain('packId is required');
+  });
+
+  it('runtime validation — createTemplate rejects malformed payloads with typed error', async () => {
+    const invalidInput = { ...validInput, packId: '', defaultLineItems: [] };
+
+    await expect(createTemplate(invalidInput, repo)).rejects.toThrow(ValidationError);
+    await expect(createTemplate(invalidInput, repo)).rejects.toThrow(
+      'Validation failed: packId is required, At least one default line item is required'
+    );
+
+    try {
+      await createTemplate(invalidInput, repo);
+      throw new Error('Expected createTemplate to throw ValidationError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).details).toEqual({
+        errors: ['packId is required', 'At least one default line item is required'],
+      });
+    }
   });
 
   it('validation — rejects missing name', () => {
