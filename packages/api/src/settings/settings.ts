@@ -54,17 +54,45 @@ export interface SettingsRepository {
   incrementInvoiceNumber(tenantId: string): Promise<number>;
 }
 
+export interface ActiveVerticalPackValidationOptions {
+  normalizePackId?: (packId: string) => string;
+  isKnownPackId?: (packId: string) => boolean;
+  knownPackIds?: string[];
+}
+
 export const VALID_TIMEZONES = [
   'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
   'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu', 'America/Detroit',
   'America/Indiana/Indianapolis', 'America/Boise', 'UTC',
 ];
 
-export function validateSettingsInput(input: CreateSettingsInput): string[] {
+export function validateSettingsInput(
+  input: CreateSettingsInput,
+  options?: ActiveVerticalPackValidationOptions
+): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.businessName) errors.push('businessName is required');
-  if (input.timezone && !isValidTimezone(input.timezone)) {
+  errors.push(...validateCommonSettingsFields(input));
+  errors.push(...validateActiveVerticalPacks(input.activeVerticalPacks, options));
+  return errors;
+}
+
+export function validateUpdateSettingsInput(
+  input: UpdateSettingsInput,
+  options?: ActiveVerticalPackValidationOptions
+): string[] {
+  const errors: string[] = [];
+  errors.push(...validateCommonSettingsFields(input));
+  errors.push(...validateActiveVerticalPacks(input.activeVerticalPacks, options));
+  return errors;
+}
+
+function validateCommonSettingsFields(
+  input: Pick<CreateSettingsInput, 'timezone' | 'estimatePrefix' | 'invoicePrefix' | 'defaultPaymentTermDays'>
+): string[] {
+  const errors: string[] = [];
+  if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
     errors.push('Invalid timezone');
   }
   if (input.estimatePrefix !== undefined && input.estimatePrefix.length === 0) {
@@ -79,12 +107,88 @@ export function validateSettingsInput(input: CreateSettingsInput): string[] {
   return errors;
 }
 
+export function normalizePackId(packId: string): string {
+  return packId.trim().toLowerCase();
+}
+
+export function normalizeActiveVerticalPacks(
+  activeVerticalPacks?: string[],
+  normalizeFn: (packId: string) => string = normalizePackId
+): string[] | undefined {
+  if (!Array.isArray(activeVerticalPacks)) {
+    return undefined;
+  }
+
+  return activeVerticalPacks.map((packId) => normalizeFn(packId));
+}
+
+function validateActiveVerticalPacks(
+  activeVerticalPacks?: string[],
+  options?: ActiveVerticalPackValidationOptions
+): string[] {
+  const errors: string[] = [];
+  if (activeVerticalPacks === undefined) {
+    return errors;
+  }
+
+  if (!Array.isArray(activeVerticalPacks)) {
+    errors.push('activeVerticalPacks must be an array');
+    return errors;
+  }
+
+  const normalizeFn = options?.normalizePackId ?? normalizePackId;
+  const normalizedKnownPackIds = options?.knownPackIds
+    ? new Set(options.knownPackIds.map((id) => normalizeFn(id)))
+    : undefined;
+  const seen = new Set<string>();
+
+  for (let i = 0; i < activeVerticalPacks.length; i += 1) {
+    const value = activeVerticalPacks[i];
+    if (typeof value !== 'string') {
+      errors.push(`activeVerticalPacks[${i}] must be a string`);
+      continue;
+    }
+
+    const normalized = normalizeFn(value);
+    if (normalized.length === 0) {
+      errors.push(`activeVerticalPacks[${i}] must be a non-empty string`);
+      continue;
+    }
+
+    if (seen.has(normalized)) {
+      errors.push(`activeVerticalPacks contains duplicate pack ID: ${normalized}`);
+      continue;
+    }
+    seen.add(normalized);
+
+    if (normalizedKnownPackIds && !normalizedKnownPackIds.has(normalized)) {
+      errors.push(`activeVerticalPacks contains unknown pack ID: ${normalized}`);
+      continue;
+    }
+
+    if (options?.isKnownPackId && !options.isKnownPackId(normalized)) {
+      errors.push(`activeVerticalPacks contains unknown pack ID: ${normalized}`);
+    }
+  }
+
+  return errors;
+}
+
 export async function createSettings(
   input: CreateSettingsInput,
-  repository: SettingsRepository
+  repository: SettingsRepository,
+  options?: ActiveVerticalPackValidationOptions
 ): Promise<TenantSettings> {
-  const errors = validateSettingsInput(input);
-  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
+  const errors = validateSettingsInput({
+    ...input,
+    activeVerticalPacks: normalizeActiveVerticalPacks(
+      input.activeVerticalPacks,
+      options?.normalizePackId ?? normalizePackId
+    ),
+  }, options);
+  if (errors.length > 0) {
+    throw new Error(errors.join('; '));
+  }
 
   const existing = await repository.findByTenant(input.tenantId);
   if (existing) {
@@ -104,7 +208,10 @@ export async function createSettings(
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: input.defaultPaymentTermDays ?? 30,
     terminologyPreferences: input.terminologyPreferences,
-    activeVerticalPacks: input.activeVerticalPacks,
+    activeVerticalPacks: normalizeActiveVerticalPacks(
+      input.activeVerticalPacks,
+      options?.normalizePackId ?? normalizePackId
+    ),
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -122,9 +229,22 @@ export async function getSettings(
 export async function updateSettings(
   tenantId: string,
   input: UpdateSettingsInput,
-  repository: SettingsRepository
+  repository: SettingsRepository,
+  options?: ActiveVerticalPackValidationOptions
 ): Promise<TenantSettings | null> {
-  return repository.update(tenantId, { ...input, updatedAt: new Date() });
+  const normalizedInput: UpdateSettingsInput = {
+    ...input,
+    activeVerticalPacks: normalizeActiveVerticalPacks(
+      input.activeVerticalPacks,
+      options?.normalizePackId ?? normalizePackId
+    ),
+  };
+  const errors = validateUpdateSettingsInput(normalizedInput, options);
+  if (errors.length > 0) {
+    throw new Error(errors.join('; '));
+  }
+
+  return repository.update(tenantId, { ...normalizedInput, updatedAt: new Date() });
 }
 
 export async function getNextEstimateNumber(
