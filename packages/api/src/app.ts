@@ -42,7 +42,6 @@ import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
-import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -103,7 +102,6 @@ export function createApp() {
   const conversationRepo = new InMemoryConversationRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
-  // Legacy vertical routes still use the P4 repository shape.
   // Pack activation + pack-config-loader share the canonical registry shape.
   const canonicalPackRegistry = new InMemoryCanonicalVerticalPackRegistry();
   const templateRepo = new InMemoryEstimateTemplateRepository();
