@@ -21,6 +21,7 @@ import { createVerticalRouter } from './routes/verticals';
 import { createTemplateRouter } from './routes/templates';
 import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
+import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 
 // In-memory repositories
@@ -116,6 +117,8 @@ export function createApp() {
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
+  const approvalRepo = new InMemoryApprovalRepository();
+  const deltaRepo = new InMemoryEditDeltaRepository();
   const voiceRepo = new InMemoryVoiceRepository();
   const queue = new InMemoryQueue();
   const transcriptionProvider = {
@@ -157,7 +160,7 @@ export function createApp() {
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
-  app.use('/api/quality', createQualityRouter(qualityMetricsRepo));
+  app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
 
   // Global error handler
