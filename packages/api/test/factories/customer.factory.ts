@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { Customer, CreateCustomerInput, PreferredChannel } from '../../src/customers/customer';
 
 export function buildCustomer(overrides?: Partial<Customer>): Customer {

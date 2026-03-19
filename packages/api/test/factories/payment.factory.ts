@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { Payment, PaymentStatus, PaymentMethod, RecordPaymentInput } from '../../src/invoices/payment';
 
 export function buildPayment(overrides?: Partial<Payment>): Payment {

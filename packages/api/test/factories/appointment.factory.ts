@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { Appointment, AppointmentStatus, CreateAppointmentInput } from '../../src/appointments/appointment';
 
 export function buildAppointment(overrides?: Partial<Appointment>): Appointment {

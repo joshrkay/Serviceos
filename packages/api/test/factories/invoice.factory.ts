@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { Invoice, InvoiceStatus, CreateInvoiceInput } from '../../src/invoices/invoice';
 import { calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { buildLineItem } from './line-item.factory';

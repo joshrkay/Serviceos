@@ -78,7 +78,7 @@ export async function createTemplate(
 ): Promise<EstimateTemplate> {
   const errors = validateTemplateInput(input);
   if (errors.length > 0) {
-    throw new ValidationError('Invalid estimate template input', { errors });
+    throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
   }
 
   const template: EstimateTemplate = {

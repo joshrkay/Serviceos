@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { ServiceLocation, CreateLocationInput } from '../../src/locations/location';
 
 export function buildLocation(overrides?: Partial<ServiceLocation>): ServiceLocation {

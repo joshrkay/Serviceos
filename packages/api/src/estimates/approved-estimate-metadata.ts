@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ApprovalStatus } from './approval';
 import { VerticalType, ServiceCategory } from '../shared/vertical-types';
+import { ValidationError } from '../shared/errors';
 
 export interface ApprovedEstimateMetadata {
   id: string;
@@ -56,6 +57,11 @@ export async function createApprovedEstimateMetadata(
   input: CreateApprovedEstimateMetadataInput,
   repository: ApprovedEstimateMetadataRepository
 ): Promise<ApprovedEstimateMetadata> {
+  const errors = validateApprovedEstimateMetadataInput(input);
+  if (errors.length > 0) {
+    throw new ValidationError(`Validation failed: ${errors.join(', ')}`, { errors });
+  }
+
   const metadata: ApprovedEstimateMetadata = {
     id: uuidv4(),
     ...input,

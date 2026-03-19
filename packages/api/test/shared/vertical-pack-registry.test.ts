@@ -8,7 +8,7 @@ import {
 } from '../../src/shared/vertical-pack-registry';
 import { ValidationError } from '../../src/shared/errors';
 
-describe('P4-001A — Vertical pack registry schema', () => {
+describe('P4-001A — Canonical vertical pack registry model', () => {
   let registry: InMemoryVerticalPackRegistry;
 
   beforeEach(() => {
@@ -71,6 +71,22 @@ describe('P4-001A — Vertical pack registry schema', () => {
 
     const allPacks = await registry.list();
     expect(allPacks).toHaveLength(2);
+  });
+
+
+  it('uses canonical field names only', async () => {
+    const pack = await registerPack({
+      packId: 'canonical-hvac-v1',
+      version: '1.0.0',
+      verticalType: 'hvac',
+      displayName: 'HVAC Pack',
+      status: 'active',
+    }, registry);
+
+    expect(pack.verticalType).toBe('hvac');
+    expect(pack.status).toBe('active');
+    expect((pack as any).type).toBeUndefined();
+    expect((pack as any).isActive).toBeUndefined();
   });
 
   it('happy path — activates and deprecates a pack', async () => {

@@ -58,6 +58,25 @@ describe('P4-004A — Vertical estimate template schema', () => {
     } satisfies Partial<ValidationError>);
   });
 
+  it('runtime validation — createTemplate rejects malformed payloads with typed error', async () => {
+    const invalidInput = { ...validInput, packId: '', defaultLineItems: [] };
+
+    await expect(createTemplate(invalidInput, repo)).rejects.toThrow(ValidationError);
+    await expect(createTemplate(invalidInput, repo)).rejects.toThrow(
+      'Validation failed: packId is required, At least one default line item is required'
+    );
+
+    try {
+      await createTemplate(invalidInput, repo);
+      throw new Error('Expected createTemplate to throw ValidationError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).details).toEqual({
+        errors: ['packId is required', 'At least one default line item is required'],
+      });
+    }
+  });
+
   it('validation — rejects missing name', () => {
     const errors = validateTemplateInput({ ...validInput, name: '' });
     expect(errors).toContain('name is required');
