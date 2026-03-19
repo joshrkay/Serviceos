@@ -83,4 +83,13 @@ describe('P1-014 — Conversation linkage to customers and jobs', () => {
     });
     expect(errors).toContain('Invalid entityType');
   });
+
+  it('validation — linkConversation surfaces validator errors', async () => {
+    await expect(
+      linkConversation(
+        { tenantId: 'tenant-1', conversationId: 'conv-1', entityType: 'widget' as any, entityId: 'w-1' },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Invalid entityType');
+  });
 });

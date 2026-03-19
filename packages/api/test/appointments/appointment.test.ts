@@ -45,6 +45,83 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(found!.notes).toBe('Customer prefers morning');
   });
 
+  it('normalizes all persisted time fields as UTC instants regardless of timezone metadata', async () => {
+    const scheduledStartIso = '2025-03-15T09:30:00-04:00';
+    const scheduledEndIso = '2025-03-15T11:00:00-04:00';
+    const arrivalStartIso = '2025-03-15T09:00:00-04:00';
+    const arrivalEndIso = '2025-03-15T10:00:00-04:00';
+
+    const nyAppointment = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-utc-1',
+        scheduledStart: new Date(scheduledStartIso),
+        scheduledEnd: new Date(scheduledEndIso),
+        arrivalWindowStart: new Date(arrivalStartIso),
+        arrivalWindowEnd: new Date(arrivalEndIso),
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const utcAppointment = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-utc-2',
+        scheduledStart: new Date(scheduledStartIso),
+        scheduledEnd: new Date(scheduledEndIso),
+        arrivalWindowStart: new Date(arrivalStartIso),
+        arrivalWindowEnd: new Date(arrivalEndIso),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    expect(nyAppointment.scheduledStart.toISOString()).toBe('2025-03-15T13:30:00.000Z');
+    expect(nyAppointment.scheduledEnd.toISOString()).toBe('2025-03-15T15:00:00.000Z');
+    expect(nyAppointment.arrivalWindowStart?.toISOString()).toBe('2025-03-15T13:00:00.000Z');
+    expect(nyAppointment.arrivalWindowEnd?.toISOString()).toBe('2025-03-15T14:00:00.000Z');
+
+    expect(utcAppointment.scheduledStart.toISOString()).toBe(nyAppointment.scheduledStart.toISOString());
+    expect(utcAppointment.scheduledEnd.toISOString()).toBe(nyAppointment.scheduledEnd.toISOString());
+    expect(utcAppointment.arrivalWindowStart?.toISOString()).toBe(nyAppointment.arrivalWindowStart?.toISOString());
+    expect(utcAppointment.arrivalWindowEnd?.toISOString()).toBe(nyAppointment.arrivalWindowEnd?.toISOString());
+  });
+
+  it('normalizes updated time fields as UTC instants', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const updated = await updateAppointment(
+      'tenant-1',
+      apt.id,
+      {
+        scheduledStart: new Date('2025-01-10T07:00:00-08:00'),
+        scheduledEnd: new Date('2025-01-10T09:00:00-08:00'),
+        arrivalWindowStart: new Date('2025-01-10T06:30:00-08:00'),
+        arrivalWindowEnd: new Date('2025-01-10T07:30:00-08:00'),
+        timezone: 'America/Los_Angeles',
+      },
+      repo
+    );
+
+    expect(updated!.scheduledStart.toISOString()).toBe('2025-01-10T15:00:00.000Z');
+    expect(updated!.scheduledEnd.toISOString()).toBe('2025-01-10T17:00:00.000Z');
+    expect(updated!.arrivalWindowStart?.toISOString()).toBe('2025-01-10T14:30:00.000Z');
+    expect(updated!.arrivalWindowEnd?.toISOString()).toBe('2025-01-10T15:30:00.000Z');
+  });
+
   it('happy path — updates appointment', async () => {
     const apt = await createAppointment(
       {
@@ -67,6 +144,52 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
 
     expect(updated!.status).toBe('confirmed');
     expect(updated!.notes).toBe('Confirmed by customer');
+  });
+
+  it('validation — rejects invalid appointment update before write', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        { arrivalWindowStart: new Date(tomorrow.getTime() + 60 * 60 * 1000) },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Both arrivalWindowStart and arrivalWindowEnd must be provided together');
+
+    const unchanged = await getAppointment('tenant-1', apt.id, repo);
+    expect(unchanged!.arrivalWindowStart).toBeUndefined();
+    expect(unchanged!.arrivalWindowEnd).toBeUndefined();
+  });
+
+  it('validation — valid partial appointment update continues to work', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const updated = await updateAppointment('tenant-1', apt.id, { notes: 'Bring ladder' }, repo);
+    expect(updated!.notes).toBe('Bring ladder');
+    expect(updated!.scheduledStart).toEqual(tomorrow);
+    expect(updated!.scheduledEnd).toEqual(tomorrowEnd);
   });
 
   it('happy path — lists appointments by job', async () => {
@@ -95,6 +218,142 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(results).toHaveLength(1);
   });
 
+  it('utc persistence — normalizes incoming Date objects and stores stable UTC instants on create', async () => {
+    const baseStart = new Date('2026-04-01T13:00:00.000Z');
+    const baseEnd = new Date('2026-04-01T15:00:00.000Z');
+
+    const ny = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-ny',
+        scheduledStart: new Date(baseStart.getTime()),
+        scheduledEnd: new Date(baseEnd.getTime()),
+        arrivalWindowStart: new Date(baseStart.getTime() - 30 * 60 * 1000),
+        arrivalWindowEnd: new Date(baseStart.getTime() + 30 * 60 * 1000),
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const utc = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-utc',
+        scheduledStart: new Date(baseStart.getTime()),
+        scheduledEnd: new Date(baseEnd.getTime()),
+        arrivalWindowStart: new Date(baseStart.getTime() - 30 * 60 * 1000),
+        arrivalWindowEnd: new Date(baseStart.getTime() + 30 * 60 * 1000),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    expect(ny.scheduledStart.getTime()).toBe(utc.scheduledStart.getTime());
+    expect(ny.scheduledEnd.getTime()).toBe(utc.scheduledEnd.getTime());
+    expect(ny.arrivalWindowStart!.getTime()).toBe(utc.arrivalWindowStart!.getTime());
+    expect(ny.arrivalWindowEnd!.getTime()).toBe(utc.arrivalWindowEnd!.getTime());
+
+    // Ensure persistence stores clones rather than caller-owned Date references.
+    const foundNy = await getAppointment('tenant-1', ny.id, repo);
+    expect(foundNy!.scheduledStart).not.toBe(baseStart);
+    expect(foundNy!.scheduledEnd).not.toBe(baseEnd);
+  });
+
+  it('utc persistence — update flow normalizes incoming Date fields consistently', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-04-01T10:00:00.000Z'),
+        scheduledEnd: new Date('2026-04-01T12:00:00.000Z'),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const updatedStart = new Date('2026-04-01T14:00:00.000Z');
+    const updatedEnd = new Date('2026-04-01T16:00:00.000Z');
+
+    const updated = await updateAppointment(
+      'tenant-1',
+      apt.id,
+      {
+        scheduledStart: updatedStart,
+        scheduledEnd: updatedEnd,
+        timezone: 'America/Los_Angeles',
+      },
+      repo
+    );
+
+    expect(updated!.scheduledStart.getTime()).toBe(updatedStart.getTime());
+    expect(updated!.scheduledEnd.getTime()).toBe(updatedEnd.getTime());
+    expect(updated!.scheduledStart).not.toBe(updatedStart);
+    expect(updated!.scheduledEnd).not.toBe(updatedEnd);
+    expect(updated!.timezone).toBe('America/Los_Angeles');
+  });
+
+
+  it('validation — rejects invalid scheduling ranges during create', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: new Date('2026-04-02T12:00:00.000Z'),
+          scheduledEnd: new Date('2026-04-02T10:00:00.000Z'),
+          timezone: 'UTC',
+          createdBy: 'user-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — rejects invalid scheduling ranges during update', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-04-03T10:00:00.000Z'),
+        scheduledEnd: new Date('2026-04-03T12:00:00.000Z'),
+        timezone: 'UTC',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        {
+          scheduledStart: new Date('2026-04-03T13:00:00.000Z'),
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — rejects invalid timezone values', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          timezone: 'Mars/Phobos',
+          createdBy: 'user-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Invalid timezone');
+  });
+
+
   it('validation — rejects missing required fields', () => {
     const errors = validateAppointmentInput({
       tenantId: '',
@@ -112,6 +371,30 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(errors).toContain('createdBy is required');
   });
 
+  it('validation — rejects invalid timezone values', () => {
+    const errors = validateAppointmentInput({
+      tenantId: 'tenant-1',
+      jobId: 'job-1',
+      scheduledStart: tomorrow,
+      scheduledEnd: tomorrowEnd,
+      timezone: 'Mars/Phobos',
+      createdBy: 'user-1',
+    });
+
+    expect(errors).toContain('Invalid timezone');
+  });
+
+  it('validation — rejects invalid timezone values on update', async () => {
+    const apt = await createAppointment(
+      { tenantId: 'tenant-1', jobId: 'job-1', scheduledStart: tomorrow, scheduledEnd: tomorrowEnd, timezone: 'UTC', createdBy: 'u-1' },
+      repo
+    );
+
+    await expect(
+      updateAppointment('tenant-1', apt.id, { timezone: 'Mars/Phobos' }, repo)
+    ).rejects.toThrow('Validation failed: Invalid timezone');
+  });
+
   it('tenant isolation — cross-tenant data inaccessible', async () => {
     const apt = await createAppointment(
       { tenantId: 'tenant-1', jobId: 'job-1', scheduledStart: tomorrow, scheduledEnd: tomorrowEnd, timezone: 'UTC', createdBy: 'u-1' },
@@ -120,5 +403,124 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
 
     const found = await getAppointment('tenant-2', apt.id, repo);
     expect(found).toBeNull();
+  });
+
+  it('validation — create rejects scheduledStart >= scheduledEnd', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrowEnd,
+          scheduledEnd: tomorrow,
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('scheduledStart must be before scheduledEnd');
+  });
+
+  it('validation — create rejects only one arrival window boundary provided', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          arrivalWindowStart: arrivalStart,
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Both arrivalWindowStart and arrivalWindowEnd must be provided together');
+  });
+
+  it('validation — create rejects arrivalWindowStart after scheduledStart', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: tomorrowEnd,
+          arrivalWindowStart: new Date(tomorrow.getTime() + 30 * 60 * 1000),
+          arrivalWindowEnd: new Date(tomorrow.getTime() + 90 * 60 * 1000),
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('arrivalWindowStart must be at or before scheduledStart');
+  });
+
+  it('validation — create rejects max duration > 24h', async () => {
+    await expect(
+      createAppointment(
+        {
+          tenantId: 'tenant-1',
+          jobId: 'job-1',
+          scheduledStart: tomorrow,
+          scheduledEnd: new Date(tomorrow.getTime() + 25 * 60 * 60 * 1000),
+          timezone: 'UTC',
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toThrow('Appointment duration cannot exceed 24 hours');
+  });
+
+  it('validation — update uses merged schedule and rejects invalid arrival window', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        arrivalWindowStart: arrivalStart,
+        arrivalWindowEnd: arrivalEnd,
+        timezone: 'UTC',
+        createdBy: 'u-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        {
+          arrivalWindowStart: new Date(tomorrow.getTime() + 10 * 60 * 1000),
+        },
+        repo
+      )
+    ).rejects.toThrow('arrivalWindowStart must be at or before scheduledStart');
+  });
+
+  it('validation — warnings are emitted through optional metadata channel', async () => {
+    const warnings: string[] = [];
+
+    const pastStart = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const pastEnd = new Date(Date.now() - 1 * 60 * 60 * 1000);
+
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: pastStart,
+        scheduledEnd: pastEnd,
+        timezone: 'UTC',
+        createdBy: 'u-1',
+      },
+      repo,
+      {
+        onValidationWarnings: (incomingWarnings) => warnings.push(...incomingWarnings),
+      }
+    );
+
+    expect(apt.id).toBeTruthy();
+    expect(warnings).toContain('Appointment is scheduled in the past');
   });
 });
