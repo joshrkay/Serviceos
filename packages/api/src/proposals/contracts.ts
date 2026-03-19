@@ -3,6 +3,13 @@ import { ProposalType } from './proposal';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
+import {
+  onboardingTenantSettingsPayloadSchema,
+  onboardingServiceCategoryPayloadSchema,
+  onboardingEstimateTemplatePayloadSchema,
+  onboardingTeamMemberPayloadSchema,
+  onboardingSchedulePayloadSchema,
+} from './contracts/onboarding';
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -81,6 +88,11 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
+  onboarding_tenant_settings: onboardingTenantSettingsPayloadSchema,
+  onboarding_service_category: onboardingServiceCategoryPayloadSchema,
+  onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,
+  onboarding_team_member: onboardingTeamMemberPayloadSchema,
+  onboarding_schedule: onboardingSchedulePayloadSchema,
 };
 
 export function validateProposalPayload(

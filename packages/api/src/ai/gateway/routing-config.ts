@@ -61,5 +61,53 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
       temperature: 0.3,
       maxTokens: 512,
     },
+    extract_business_profile: {
+      model: 'openai/gpt-4o',
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract structured business profile data from an onboarding voice transcript. ' +
+        'Return valid JSON. Only identify verticals from: hvac, plumbing.',
+    },
+    extract_categories: {
+      model: 'openai/gpt-4o',
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract service categories from an onboarding voice transcript. ' +
+        'Match against the canonical category taxonomy. Return valid JSON.',
+    },
+    extract_pricing: {
+      model: 'openai/gpt-4o',
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract pricing information from an onboarding voice transcript. ' +
+        'All amounts in integer cents. Return valid JSON.',
+    },
+    extract_team: {
+      model: 'openai/gpt-4o-mini',
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract team member information from an onboarding voice transcript. ' +
+        'Distinguish technician, dispatcher, and owner roles. Return valid JSON.',
+    },
+    extract_schedule: {
+      model: 'openai/gpt-4o-mini',
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract working hours and SLA expectations from an onboarding voice transcript. ' +
+        'Use 24-hour time format. Return valid JSON.',
+    },
+    generate_clarification_questions: {
+      model: 'openai/gpt-4o-mini',
+      temperature: 0.3,
+      maxTokens: 512,
+      systemPrompt:
+        'Generate targeted follow-up questions for incomplete onboarding data. ' +
+        'Questions should be specific, not generic. Return valid JSON.',
+    },
   },
 };
