@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { LineItem, LineItemCategory, calculateLineItemTotal } from '../../src/shared/billing-engine';
 
 export function buildLineItem(overrides?: Partial<LineItem>): LineItem {
