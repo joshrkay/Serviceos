@@ -80,6 +80,26 @@ describe('P1-013 — Payment entity + partial payments', () => {
     expect(invoice.status).toBe('paid');
   });
 
+  it('payment arithmetic — partial payments keep running balance correct', async () => {
+    const first = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 2500, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo
+    );
+    expect(first.invoice.amountPaidCents).toBe(2500);
+    expect(first.invoice.amountDueCents).toBe(7500);
+    expect(first.invoice.status).toBe('partially_paid');
+
+    const second = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 2500, method: 'check', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo
+    );
+    expect(second.invoice.amountPaidCents).toBe(5000);
+    expect(second.invoice.amountDueCents).toBe(5000);
+    expect(second.invoice.status).toBe('partially_paid');
+  });
+
   it('happy path — retrieves payments for invoice', async () => {
     await recordPayment(
       { tenantId: 'tenant-1', invoiceId, amountCents: 3000, method: 'cash', processedBy: 'u-1' },
@@ -149,6 +169,24 @@ describe('P1-013 — Payment entity + partial payments', () => {
     });
     expect(errors).toContain('tenantId is required');
     expect(errors).toContain('invoiceId is required');
+  });
+
+  it('validation — rejects invalid payload before invoice lookup with aggregated message', async () => {
+    await expect(
+      recordPayment(
+        {
+          tenantId: '',
+          invoiceId: 'missing-invoice',
+          amountCents: 0,
+          method: '' as any,
+          processedBy: '',
+        },
+        invoiceRepo,
+        paymentRepo
+      )
+    ).rejects.toThrow(
+      'Validation failed: tenantId is required, amountCents must be positive, method is required, processedBy is required'
+    );
   });
 
   it('validation — rejects payment on draft invoice', async () => {
