@@ -1,4 +1,4 @@
-import { MIGRATIONS, getMigrationSQL, setTenantContext } from '../../src/db/schema';
+import { MIGRATIONS, SCHEMA_MIGRATIONS_TABLE_SQL, getMigrationSQL, setTenantContext } from '../../src/db/schema';
 import { createDatabaseConfig } from '../../src/db/connection';
 
 describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
@@ -16,6 +16,12 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS files');
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS conversations');
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS messages');
+  });
+
+  it('happy path — schema_migrations table tracks migration key and timestamp', () => {
+    expect(SCHEMA_MIGRATIONS_TABLE_SQL).toContain('CREATE TABLE IF NOT EXISTS schema_migrations');
+    expect(SCHEMA_MIGRATIONS_TABLE_SQL).toContain('migration_key TEXT PRIMARY KEY');
+    expect(SCHEMA_MIGRATIONS_TABLE_SQL).toContain('applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   });
 
   it('tenant isolation — RLS is enabled on tenant-scoped tables', () => {

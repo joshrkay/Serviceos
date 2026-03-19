@@ -879,6 +879,13 @@ export const MIGRATIONS = {
   `,
 };
 
+export const SCHEMA_MIGRATIONS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    migration_key TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
+
 export function getMigrationSQL(): string {
   return Object.values(MIGRATIONS).join('\n');
 }
