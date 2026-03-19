@@ -3,10 +3,10 @@ import {
   getJob,
   updateJob,
   listJobs,
-  validateJobInput,
   InMemoryJobRepository,
 } from '../../src/jobs/job';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P1-005 — Job entity + CRUD', () => {
   let repo: InMemoryJobRepository;
@@ -103,31 +103,54 @@ describe('P1-005 — Job entity + CRUD', () => {
     expect(events[0].eventType).toBe('job.created');
   });
 
-  it('validation — rejects missing required fields', () => {
-    const errors = validateJobInput({
-      tenantId: '',
-      customerId: '',
-      locationId: '',
-      summary: '',
-      createdBy: '',
-    });
-    expect(errors).toContain('tenantId is required');
-    expect(errors).toContain('customerId is required');
-    expect(errors).toContain('locationId is required');
-    expect(errors).toContain('summary is required');
-    expect(errors).toContain('createdBy is required');
+  it('validation — rejects missing required fields', async () => {
+    await expect(
+      createJob(
+        {
+          tenantId: '',
+          customerId: '',
+          locationId: '',
+          summary: '',
+          createdBy: '',
+        },
+        repo
+      )
+    ).rejects.toMatchObject({
+      name: 'ValidationError',
+      message:
+        'Validation failed: tenantId is required, customerId is required, locationId is required, summary is required, createdBy is required',
+      details: {
+        errors: [
+          'tenantId is required',
+          'customerId is required',
+          'locationId is required',
+          'summary is required',
+          'createdBy is required',
+        ],
+      },
+    } satisfies Partial<ValidationError>);
   });
 
-  it('validation — rejects invalid priority', () => {
-    const errors = validateJobInput({
-      tenantId: 't-1',
-      customerId: 'c-1',
-      locationId: 'l-1',
-      summary: 'Test',
-      priority: 'critical' as any,
-      createdBy: 'u-1',
-    });
-    expect(errors).toContain('Invalid priority');
+  it('validation — rejects invalid priority', async () => {
+    await expect(
+      createJob(
+        {
+          tenantId: 't-1',
+          customerId: 'c-1',
+          locationId: 'l-1',
+          summary: 'Test',
+          priority: 'critical' as any,
+          createdBy: 'u-1',
+        },
+        repo
+      )
+    ).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Validation failed: Invalid priority',
+      details: {
+        errors: ['Invalid priority'],
+      },
+    } satisfies Partial<ValidationError>);
   });
 
   it('validation — createJob surfaces validator errors', async () => {
