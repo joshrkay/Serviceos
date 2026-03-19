@@ -36,6 +36,14 @@ export interface TriggerDecision {
   reason: string;
 }
 
+const ALLOWED_WORKFLOW_ROLES: Record<WorkflowType, ReadonlyArray<string>> = {
+  technician_voice_update: ['technician'],
+  dispatcher_intake: ['dispatcher', 'owner'],
+  customer_request: ['dispatcher', 'owner'],
+  job_completion: ['technician'],
+  estimate_revision: ['dispatcher', 'owner'],
+};
+
 export function getTriggerConfig(
   workflowType: string,
   config: WorkflowTriggerConfig[] = DEFAULT_TRIGGER_CONFIG
@@ -62,6 +70,16 @@ export function evaluateTrigger(input: TriggerEvaluationInput): TriggerDecision 
       mode: 'manual',
       requiresConfirmation: true,
       reason: `Unknown workflow type: ${input.workflowType}`,
+    };
+  }
+
+  const allowedRoles = ALLOWED_WORKFLOW_ROLES[triggerConfig.workflowType] ?? [];
+  if (!allowedRoles.includes(input.userRole)) {
+    return {
+      shouldTrigger: false,
+      mode: triggerConfig.triggerMode,
+      requiresConfirmation: triggerConfig.requiresConfirmation,
+      reason: `Role ${input.userRole} is not allowed for workflow ${triggerConfig.workflowType}`,
     };
   }
 
