@@ -44,6 +44,7 @@ import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
+import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
 
@@ -106,6 +107,7 @@ export function createApp() {
   // Pack activation + pack-config-loader share the canonical registry shape.
   const packActivationRepo = new InMemoryPackActivationRepository();
   const canonicalPackRegistry = new InMemoryCanonicalVerticalPackRegistry();
+  seedCanonicalVerticalPacks(canonicalPackRegistry);
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
