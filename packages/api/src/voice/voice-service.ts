@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
@@ -54,7 +54,7 @@ export function validateVoiceIngest(input: IngestVoiceInput, fileContentType?: s
 
 export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
   return {
-    id: uuidv4(),
+    id: randomUUID(),
     tenantId: input.tenantId,
     fileId: input.fileId,
     conversationId: input.conversationId,

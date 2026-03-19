@@ -141,8 +141,6 @@ export function createApp() {
       await queue.delete(message.id);
     }
   }, 250);
-  const approvalRepo = new InMemoryApprovalRepository();
-  const deltaRepo = new InMemoryEditDeltaRepository();
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
