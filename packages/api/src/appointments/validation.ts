@@ -1,19 +1,21 @@
-import { CreateAppointmentInput, UpdateAppointmentInput } from './appointment';
+import { Appointment, CreateAppointmentInput, UpdateAppointmentInput } from './appointment';
 
 export interface AppointmentValidationResult {
   errors: string[];
   warnings: string[];
 }
 
+export interface AppointmentTimeFields {
+  scheduledStart: Date;
+  scheduledEnd: Date;
+  arrivalWindowStart?: Date;
+  arrivalWindowEnd?: Date;
+}
+
 const MAX_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export function validateAppointmentTimes(
-  input: CreateAppointmentInput | {
-    scheduledStart: Date;
-    scheduledEnd: Date;
-    arrivalWindowStart?: Date;
-    arrivalWindowEnd?: Date;
-  }
+  input: CreateAppointmentInput | AppointmentTimeFields
 ): AppointmentValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -59,4 +61,16 @@ export function validateAppointmentTimes(
   }
 
   return { errors, warnings };
+}
+
+export function validateAppointmentUpdateInput(
+  existing: Appointment,
+  input: UpdateAppointmentInput
+): AppointmentValidationResult {
+  return validateAppointmentTimes({
+    scheduledStart: input.scheduledStart ?? existing.scheduledStart,
+    scheduledEnd: input.scheduledEnd ?? existing.scheduledEnd,
+    arrivalWindowStart: input.arrivalWindowStart ?? existing.arrivalWindowStart,
+    arrivalWindowEnd: input.arrivalWindowEnd ?? existing.arrivalWindowEnd,
+  });
 }
