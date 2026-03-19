@@ -1,4 +1,4 @@
-import { faker } from '@faker-js/faker';
+import { faker } from './faker';
 import { TenantRow, UserRow } from '../../src/db/schema';
 
 export function buildTenant(overrides?: Partial<TenantRow>): TenantRow {

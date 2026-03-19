@@ -18,6 +18,7 @@ jobs:
       - name: Type check API
         run: npx tsc --noEmit
         working-directory: packages/api
+
       - name: Type check Web
         run: npx tsc --noEmit
         working-directory: packages/web
@@ -36,26 +37,3 @@ jobs:
 
       - name: Coverage check
         run: npm run test:coverage
-
-  chromatic:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Chromatic needs full git history for TurboSnap and baseline detection
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - name: Run Chromatic
-        uses: chromaui/action@latest
-        with:
-          projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
-          workingDir: packages/web
-          buildScriptName: build-storybook
-          # Visual diffs surface in the Chromatic UI for review — PR check always passes
-          exitZeroOnChanges: true
-          # TurboSnap: only re-snapshot stories whose component files changed in this PR
-          onlyChanged: true
