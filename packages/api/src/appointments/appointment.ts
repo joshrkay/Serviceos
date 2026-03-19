@@ -1,13 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import { validateAppointmentTimes } from './validation';
-
-import { isValidTimezone } from '../shared/timezone';
-import { toUtcDate } from './time';
-import { validateAppointmentTimes } from './validation';
-
-import { isValidTimezone } from '../shared/timezone';
-import { toUtcDate } from './time';
 import { validateAppointmentTimes as validateAppointmentDateRanges } from './validation';
+import { isValidTimezone } from '../shared/timezone';
+import { toUtcDate } from './time';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -117,7 +111,7 @@ export async function createAppointment(
   const normalizedArrivalWindowStart = input.arrivalWindowStart ? toUtcDate(input.arrivalWindowStart) : undefined;
   const normalizedArrivalWindowEnd = input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined;
 
-  const { errors: timeErrors } = validateAppointmentTimes({
+  const { errors: timeErrors } = validateAppointmentDateRanges({
     scheduledStart: normalizedScheduledStart,
     scheduledEnd: normalizedScheduledEnd,
     arrivalWindowStart: normalizedArrivalWindowStart,
@@ -180,7 +174,7 @@ export async function updateAppointment(
   const arrivalWindowEnd =
     'arrivalWindowEnd' in normalizedTimeUpdates ? normalizedTimeUpdates.arrivalWindowEnd : existing.arrivalWindowEnd;
 
-  const { errors: timeErrors } = validateAppointmentTimes({
+  const { errors: timeErrors } = validateAppointmentDateRanges({
     scheduledStart,
     scheduledEnd,
     arrivalWindowStart,
