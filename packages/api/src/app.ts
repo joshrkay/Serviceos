@@ -39,6 +39,8 @@ import { InMemoryVerticalPackRepository } from './verticals/registry';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
+import { InMemoryApprovalRepository } from './estimates/approval';
+import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -101,6 +103,8 @@ export function createApp() {
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
+  const approvalRepo = new InMemoryApprovalRepository();
+  const deltaRepo = new InMemoryEditDeltaRepository();
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
@@ -116,7 +120,7 @@ export function createApp() {
   app.use('/api/verticals', createVerticalRouter(verticalPackRepo));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
-  app.use('/api/quality', createQualityRouter(qualityMetricsRepo));
+  app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
