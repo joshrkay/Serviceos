@@ -1,11 +1,25 @@
 import { VerticalType, ServiceCategory } from './vertical-types';
-import { VerticalPackRegistry, VerticalPack } from './vertical-pack-registry';
+import { VerticalPackRegistry } from './vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { TerminologyMap } from '../verticals/hvac/terminology';
 import { HVAC_TERMINOLOGY } from '../verticals/hvac/terminology';
-import { HVAC_CATEGORIES, ServiceCategoryDefinition } from '../verticals/hvac/categories';
+import { HVAC_CATEGORIES } from '../verticals/hvac/categories';
 import { PLUMBING_TERMINOLOGY } from '../verticals/plumbing/terminology';
-import { PLUMBING_CATEGORIES, PlumbingCategoryDefinition } from '../verticals/plumbing/categories';
+import { PLUMBING_CATEGORIES } from '../verticals/plumbing/categories';
+
+export interface VerticalTemplateConfig {
+  id: string;
+  name: string;
+  serviceCategory: ServiceCategory;
+  defaultLineItems: string[];
+  defaultNotes?: string;
+}
+
+export interface VerticalIntakeConfig {
+  requiredFields: string[];
+  optionalFields: string[];
+  followUpQuestions: string[];
+}
 
 export interface VerticalPackConfig {
   verticalType: VerticalType;
@@ -13,6 +27,8 @@ export interface VerticalPackConfig {
   version: string;
   terminology: TerminologyMap;
   categories: Array<{ id: string; name: string; description: string; sortOrder: number; typicalLineItems: string[] }>;
+  templates: VerticalTemplateConfig[];
+  intakeConfig: VerticalIntakeConfig;
   promptContext?: Record<string, unknown>;
 }
 
@@ -54,6 +70,76 @@ function getCategories(verticalType: VerticalType): VerticalPackConfig['categori
   }
 }
 
+function getTemplates(verticalType: VerticalType): VerticalTemplateConfig[] {
+  switch (verticalType) {
+    case 'hvac':
+      return [
+        {
+          id: 'hvac-diagnostic-template',
+          name: 'HVAC Diagnostic Visit',
+          serviceCategory: 'diagnostic',
+          defaultLineItems: ['Diagnostic service call', 'System inspection'],
+          defaultNotes: 'Capture symptoms and verify operating conditions.',
+        },
+        {
+          id: 'hvac-maintenance-template',
+          name: 'HVAC Seasonal Maintenance',
+          serviceCategory: 'maintenance',
+          defaultLineItems: ['Seasonal tune-up', 'Filter inspection'],
+        },
+      ];
+    case 'plumbing':
+      return [
+        {
+          id: 'plumbing-diagnostic-template',
+          name: 'Plumbing Diagnostic Visit',
+          serviceCategory: 'diagnostic',
+          defaultLineItems: ['Service call / diagnostic fee', 'Leak detection'],
+          defaultNotes: 'Identify fixture and isolate leak source before quoting repairs.',
+        },
+        {
+          id: 'plumbing-drain-template',
+          name: 'Drain Service',
+          serviceCategory: 'drain',
+          defaultLineItems: ['Drain cleaning', 'Snake / auger service'],
+        },
+      ];
+    default: {
+      const _exhaustive: never = verticalType;
+      throw new Error(`Unknown vertical type: ${verticalType}`);
+    }
+  }
+}
+
+function getIntakeConfig(verticalType: VerticalType): VerticalIntakeConfig {
+  switch (verticalType) {
+    case 'hvac':
+      return {
+        requiredFields: ['serviceAddress', 'equipmentType', 'symptomDescription'],
+        optionalFields: ['systemAgeYears', 'lastServiceDate', 'thermostatType'],
+        followUpQuestions: [
+          'Is the system currently running?',
+          'When did the issue start?',
+          'Are there unusual noises or odors?',
+        ],
+      };
+    case 'plumbing':
+      return {
+        requiredFields: ['serviceAddress', 'fixtureType', 'issueDescription'],
+        optionalFields: ['waterShutoffAccessible', 'issueDuration', 'recentRepairs'],
+        followUpQuestions: [
+          'Is water currently leaking or flooding?',
+          'Is the issue isolated to one fixture or multiple fixtures?',
+          'Has this issue happened before?',
+        ],
+      };
+    default: {
+      const _exhaustive: never = verticalType;
+      throw new Error(`Unknown vertical type: ${verticalType}`);
+    }
+  }
+}
+
 export async function loadPackConfig(
   packId: string,
   registry: VerticalPackRegistry
@@ -68,6 +154,8 @@ export async function loadPackConfig(
     version: pack.version,
     terminology: getTerminology(pack.verticalType),
     categories: getCategories(pack.verticalType),
+    templates: getTemplates(pack.verticalType),
+    intakeConfig: getIntakeConfig(pack.verticalType),
     promptContext: (pack.metadata as Record<string, unknown>) || undefined,
   };
 }
@@ -100,6 +188,32 @@ export function validatePackConfig(config: VerticalPackConfig): string[] {
   }
   if (!config.categories || config.categories.length === 0) {
     errors.push('categories must not be empty');
+  }
+  if (!config.templates || config.templates.length === 0) {
+    errors.push('templates must not be empty');
+  } else {
+    for (const [index, template] of config.templates.entries()) {
+      if (!template.id) errors.push(`templates[${index}].id is required`);
+      if (!template.name) errors.push(`templates[${index}].name is required`);
+      if (!template.serviceCategory) errors.push(`templates[${index}].serviceCategory is required`);
+      if (!Array.isArray(template.defaultLineItems) || template.defaultLineItems.length === 0) {
+        errors.push(`templates[${index}].defaultLineItems must not be empty`);
+      }
+    }
+  }
+
+  if (!config.intakeConfig) {
+    errors.push('intakeConfig is required');
+  } else {
+    if (!Array.isArray(config.intakeConfig.requiredFields) || config.intakeConfig.requiredFields.length === 0) {
+      errors.push('intakeConfig.requiredFields must not be empty');
+    }
+    if (!Array.isArray(config.intakeConfig.optionalFields)) {
+      errors.push('intakeConfig.optionalFields must be an array');
+    }
+    if (!Array.isArray(config.intakeConfig.followUpQuestions) || config.intakeConfig.followUpQuestions.length === 0) {
+      errors.push('intakeConfig.followUpQuestions must not be empty');
+    }
   }
   return errors;
 }
