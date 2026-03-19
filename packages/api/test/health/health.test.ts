@@ -47,6 +47,19 @@ describe('P0-005 — Health endpoint', () => {
     expect(res.body.status).toBe('ready');
   });
 
+
+  it('degraded dependencies — returns 200 with degraded status', async () => {
+    const app = express();
+    const router = createHealthRouter('1.0.0', 'test', [
+      { name: 'db', check: async () => ({ status: 'degraded', message: 'Slow' }) },
+    ]);
+    app.use(router);
+
+    const res = await request(app, '/health');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('degraded');
+  });
+
   it('validation — returns 503 when health check fails', async () => {
     const app = express();
     const router = createHealthRouter('1.0.0', 'test', [
