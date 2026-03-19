@@ -7,6 +7,7 @@ import {
   listCustomers,
   searchCustomers,
   validateCustomerInput,
+  validateCustomerUpdateInput,
   InMemoryCustomerRepository,
 } from '../../src/customers/customer';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -73,6 +74,42 @@ describe('P1-001 — Customer entity + CRUD', () => {
 
     expect(updated!.firstName).toBe('Jane');
     expect(updated!.displayName).toBe('Jane Doe');
+  });
+
+  it('validation — rejects invalid customer update before write', async () => {
+    const customer = await createCustomer(
+      { tenantId: 'tenant-1', firstName: 'John', lastName: 'Doe', createdBy: 'user-1' },
+      repo
+    );
+
+    await expect(
+      updateCustomer('tenant-1', customer.id, { email: 'bad-email' }, repo)
+    ).rejects.toThrow('Validation failed: Invalid email format');
+
+    const unchanged = await getCustomer('tenant-1', customer.id, repo);
+    expect(unchanged!.email).toBeUndefined();
+  });
+
+  it('validation — partial updates merge existing fields for validation', () => {
+    const errors = validateCustomerUpdateInput(
+      {
+        id: 'cust-1',
+        tenantId: 'tenant-1',
+        firstName: 'Jane',
+        lastName: 'Doe',
+        displayName: 'Jane Doe',
+        companyName: 'Acme Co',
+        preferredChannel: 'none',
+        smsConsent: false,
+        isArchived: false,
+        createdBy: 'user-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { firstName: '' }
+    );
+
+    expect(errors).toHaveLength(0);
   });
 
   it('happy path — archives and restores customer', async () => {

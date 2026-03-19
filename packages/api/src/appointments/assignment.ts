@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { JobRepository } from '../jobs/job';
+import { ValidationError } from '../shared/errors';
 
 export interface AppointmentAssignment {
   id: string;
@@ -44,16 +45,8 @@ export async function assignTechnician(
   input: CreateAssignmentInput,
   repository: AssignmentRepository
 ): Promise<AppointmentAssignment> {
-  const validationErrors = validateAssignmentInput(input);
-  if (validationErrors.length > 0) {
-    throw new Error(`Invalid assignment input: ${validationErrors.join('; ')}`);
-  }
-
-  if (input.isPrimary ?? true) {
-    const existingAssignments = await repository.findByAppointment(input.tenantId, input.appointmentId);
-    const existingPrimaries = existingAssignments.filter((assignment) => assignment.isPrimary);
-    await Promise.all(existingPrimaries.map((assignment) => repository.update({ ...assignment, isPrimary: false })));
-  }
+  const errors = validateAssignmentInput(input);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const assignment: AppointmentAssignment = {
     id: uuidv4(),
