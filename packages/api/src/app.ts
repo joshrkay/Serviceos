@@ -36,13 +36,13 @@ import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
-import { InMemoryVerticalPackRegistry } from './shared/vertical-pack-registry';
+import { InMemoryVerticalPackRepository as InMemoryLegacyVerticalPackRepository } from './verticals/registry';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
-
+import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
 
@@ -103,7 +103,7 @@ export function createApp() {
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
   // Pack activation + pack-config-loader share the canonical registry shape.
-  const canonicalPackRegistry = new InMemoryVerticalPackRegistry();
+  const canonicalPackRegistry = new InMemoryCanonicalVerticalPackRegistry();
   const templateRepo = new InMemoryEstimateTemplateRepository();
   const bundleRepo = new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
