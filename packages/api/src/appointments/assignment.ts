@@ -48,12 +48,21 @@ export async function assignTechnician(
   const errors = validateAssignmentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
+  const isPrimary = input.isPrimary ?? true;
+
+  // Demote any existing primary assignments before assigning new primary
+  if (isPrimary) {
+    const existing = await repository.findByAppointment(input.tenantId, input.appointmentId);
+    const currentPrimaries = existing.filter((a) => a.isPrimary);
+    await Promise.all(currentPrimaries.map((a) => repository.update({ ...a, isPrimary: false })));
+  }
+
   const assignment: AppointmentAssignment = {
     id: uuidv4(),
     tenantId: input.tenantId,
     appointmentId: input.appointmentId,
     technicianId: input.technicianId,
-    isPrimary: input.isPrimary ?? true,
+    isPrimary,
     assignedBy: input.assignedBy,
     assignedAt: new Date(),
   };
