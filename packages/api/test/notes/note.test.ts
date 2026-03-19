@@ -163,4 +163,20 @@ describe('P1-015 — Internal notes across key entities', () => {
     });
     expect(errors).toContain('Invalid entityType');
   });
+
+  it('validation — createNote surfaces validator errors', async () => {
+    await expect(
+      createNote(
+        {
+          tenantId: 'tenant-1',
+          entityType: 'widget' as any,
+          entityId: 'w-1',
+          content: 'Test',
+          authorId: 'u-1',
+          authorRole: 'owner',
+        },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Invalid entityType');
+  });
 });

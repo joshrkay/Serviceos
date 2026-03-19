@@ -12,6 +12,8 @@ describe('P4-009A — Vertical-aware context assembly', () => {
         packId: 'hvac-v1',
         terminology: { furnace: { canonical: 'furnace' } },
         categories: [{ id: 'diagnostic', name: 'Diagnostic' }],
+        templates: [{ id: 'tmpl-1', name: 'Diagnostic', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+        intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
       }),
     };
 
@@ -21,6 +23,8 @@ describe('P4-009A — Vertical-aware context assembly', () => {
     expect(context.vertical!.packId).toBe('hvac-v1');
     expect(context.vertical!.terminology).toBeDefined();
     expect(context.vertical!.categories).toBeDefined();
+    expect(context.vertical!.templates).toBeDefined();
+    expect(context.vertical!.intakeConfig).toBeDefined();
   });
 
   it('happy path — no vertical leaves context unchanged', async () => {
@@ -46,6 +50,8 @@ describe('P4-009A — Vertical-aware context assembly', () => {
         packId: 'plumbing-v1',
         terminology: { pipe: { canonical: 'pipe' } },
         categories: [{ id: 'drain', name: 'Drain Service' }],
+        templates: [{ id: 'tmpl-2', name: 'Drain Service', serviceCategory: 'drain', defaultLineItems: ['Drain cleaning'] }],
+        intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['Is there active leaking?'] },
       }),
       getTenantInfo: async () => ({ name: 'Test Co', settings: {} }),
     };

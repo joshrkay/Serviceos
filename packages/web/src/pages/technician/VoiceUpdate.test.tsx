@@ -42,6 +42,7 @@ describe('P3-008 — Technician voice update workflow', () => {
       <VoiceUpdate
         jobContext={jobContext}
         onUploadRecording={vi.fn().mockResolvedValue('rec-1')}
+        onGenerateProposal={vi.fn()}
       />
     );
 
@@ -52,7 +53,13 @@ describe('P3-008 — Technician voice update workflow', () => {
 
   it('happy path — voice capture creates recording linked to job', async () => {
     const onUpload = vi.fn().mockResolvedValue('rec-1');
-    render(<VoiceUpdate jobContext={jobContext} onUploadRecording={onUpload} />);
+    render(
+      <VoiceUpdate
+        jobContext={jobContext}
+        onUploadRecording={onUpload}
+        onGenerateProposal={vi.fn()}
+      />
+    );
 
     // Start recording
     await act(async () => {
@@ -73,11 +80,44 @@ describe('P3-008 — Technician voice update workflow', () => {
     });
   });
 
+  it('happy path — automatic workflow triggers proposal generation with context', async () => {
+    const onGenerateProposal = vi.fn();
+    render(
+      <VoiceUpdate
+        jobContext={jobContext}
+        onUploadRecording={vi.fn().mockResolvedValue('rec-1')}
+        onGenerateProposal={onGenerateProposal}
+        transcript="Customer needs a replacement coil."
+        workflowMode="automatic"
+      />
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('record-button'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('stop-button'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('upload-button'));
+    });
+
+    await vi.waitFor(() => {
+      expect(onGenerateProposal).toHaveBeenCalledWith({
+        jobId: 'job-123',
+        appointmentId: 'apt-456',
+        recordingId: 'rec-1',
+        transcript: 'Customer needs a replacement coil.',
+      });
+    });
+  });
+
   it('happy path — shows transcript status after upload', () => {
     render(
       <VoiceUpdate
         jobContext={jobContext}
         onUploadRecording={vi.fn().mockResolvedValue('rec-1')}
+        onGenerateProposal={vi.fn()}
         transcriptionStatus="completed"
         transcript="Customer needs new HVAC unit."
       />
@@ -91,7 +131,7 @@ describe('P3-008 — Technician voice update workflow', () => {
 
   it('validation — cannot submit without active job context', () => {
     render(
-      <VoiceUpdate jobContext={null} onUploadRecording={vi.fn()} />
+      <VoiceUpdate jobContext={null} onUploadRecording={vi.fn()} onGenerateProposal={vi.fn()} />
     );
 
     expect(screen.getByTestId('voice-update-no-context')).toBeInTheDocument();
@@ -102,6 +142,27 @@ describe('P3-008 — Technician voice update workflow', () => {
     // Try to start recording
     fireEvent.click(screen.getByTestId('record-button'));
     expect(screen.getByTestId('voice-update-error')).toBeInTheDocument();
+  });
+
+  it('validation — does not trigger proposal generation when job context is missing', async () => {
+    const onGenerateProposal = vi.fn();
+    render(
+      <VoiceUpdate
+        jobContext={null}
+        onUploadRecording={vi.fn().mockResolvedValue('rec-1')}
+        onGenerateProposal={onGenerateProposal}
+        workflowMode="manual"
+      />
+    );
+
+    const button = screen.getByTestId('generate-proposal-button');
+    expect(button).toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(button);
+    });
+
+    expect(onGenerateProposal).not.toHaveBeenCalled();
   });
 
   it('validation — validates job context fields', () => {
