@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VALID_TIMEZONES } from '../settings/settings';
 import { toUtcDate } from './time';
+import { validateAppointmentTimes } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
