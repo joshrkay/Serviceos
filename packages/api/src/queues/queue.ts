@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { Logger } from '../logging/logger';
 
 export interface QueueMessage<T = unknown> {
@@ -49,7 +49,7 @@ export class InMemoryQueue implements Queue {
   }
 
   async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
-    const id = uuidv4();
+    const id = randomUUID();
     this.messages.push({
       id,
       type,

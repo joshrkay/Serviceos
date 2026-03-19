@@ -22,6 +22,7 @@ import { createTemplateRouter } from './routes/templates';
 import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
+import { createVoiceRouter } from './routes/voice';
 
 // In-memory repositories
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -40,6 +41,11 @@ import { InMemoryVerticalPackRepository as InMemoryLegacyVerticalPackRepository 
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
+import { InMemoryVoiceRepository } from './voice/voice-service';
+import { createTranscriptionWorker } from './workers/transcription';
+import { createLogger } from './logging/logger';
+import { InMemoryQueue, processMessage } from './queues/queue';
+
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -113,6 +119,31 @@ export function createApp() {
   const qualityMetricsRepo = new InMemoryQualityMetricsRepository();
   const approvalRepo = new InMemoryApprovalRepository();
   const deltaRepo = new InMemoryEditDeltaRepository();
+  const voiceRepo = new InMemoryVoiceRepository();
+  const queue = new InMemoryQueue();
+  const transcriptionProvider = {
+    async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
+      return {
+        transcript: `Transcribed audio from ${audioUrl}`,
+        metadata: { provider: 'in-memory', processedAt: new Date().toISOString() },
+      };
+    },
+  };
+  const transcriptionWorker = createTranscriptionWorker(voiceRepo, transcriptionProvider);
+  const workerLogger = createLogger({
+    service: 'transcription-worker',
+    environment: process.env.NODE_ENV || 'development',
+    level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
+  });
+
+  setInterval(async () => {
+    const message = await queue.receive();
+    if (!message) return;
+    const processed = await processMessage(message, transcriptionWorker, workerLogger);
+    if (processed) {
+      await queue.delete(message.id);
+    }
+  }, 250);
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
@@ -130,6 +161,7 @@ export function createApp() {
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
