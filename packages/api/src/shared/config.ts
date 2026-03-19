@@ -11,7 +11,7 @@ const configSchema = z.object({
     }),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1).optional(),
-  DB_HOST: z.string().optional(),
+  DB_HOST: z.string().default('localhost'),
   DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_NAME: z.string().optional(),
   DB_USER: z.string().optional(),
