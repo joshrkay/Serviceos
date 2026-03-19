@@ -104,7 +104,6 @@ export function createApp() {
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
   // Legacy vertical routes still use the P4 repository shape.
-  const verticalCatalogRepo = new InMemoryLegacyVerticalPackRepository();
   // Pack activation + pack-config-loader share the canonical registry shape.
   const canonicalPackRegistry = new InMemoryCanonicalVerticalPackRegistry();
   const templateRepo = new InMemoryEstimateTemplateRepository();
@@ -127,7 +126,7 @@ export function createApp() {
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
-  app.use('/api/verticals', createVerticalRouter(verticalCatalogRepo));
+  app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter(qualityMetricsRepo));
