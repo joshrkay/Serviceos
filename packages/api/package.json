@@ -2,10 +2,10 @@
   "name": "@serviceos/api",
   "version": "0.0.1",
   "private": true,
-  "type": "module",
   "scripts": {
-    "build": "tsc --noEmit",
-    "start": "ts-node src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/src/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
