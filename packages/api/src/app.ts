@@ -42,7 +42,7 @@ import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
-
+import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
 
