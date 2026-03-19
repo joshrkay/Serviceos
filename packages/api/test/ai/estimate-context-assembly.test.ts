@@ -17,17 +17,8 @@ describe('P4-009B — Service category + template context assembly', () => {
       ac_unit: { canonical: 'ac_unit', displayLabel: 'AC Unit', promptHint: 'Air conditioning unit', aliases: [] },
     },
     categories: [{ id: 'diagnostic', name: 'Diagnostic', description: 'Diagnostic services', sortOrder: 1, typicalLineItems: ['Diagnostic fee'] }],
-    templates: [
-      {
-        id: 'tmpl-1',
-        name: 'HVAC Diagnostic',
-        categoryId: 'diagnostic',
-        lineItems: [{ description: 'Diagnostic service call', unitPriceCents: 8900 }],
-      },
-    ],
-    intakeConfig: {
-      questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
-    },
+    templates: [{ id: 'hvac-diagnostic-template', name: 'HVAC Diagnostic Visit', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+    intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
   };
 
   const template: EstimateTemplate = {

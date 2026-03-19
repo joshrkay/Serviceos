@@ -37,7 +37,7 @@ describe('P4-001C — Vertical pack config loading', () => {
     return pack.packId;
   }
 
-  it('happy path — loads HVAC config with terminology, categories, templates, and intake config', async () => {
+  it('happy path — loads HVAC config with terminology, categories, templates, and intake settings', async () => {
     await registerAndActivateHvac();
 
     const config = await loadPackConfig('hvac-v1', registry);
@@ -49,12 +49,12 @@ describe('P4-001C — Vertical pack config loading', () => {
     expect(config!.categories.length).toBeGreaterThan(0);
     expect(config!.categories.find((c) => c.id === 'diagnostic')).toBeDefined();
     expect(config!.templates.length).toBeGreaterThan(0);
-    expect(config!.templates[0].lineItems.length).toBeGreaterThan(0);
-    expect(config!.intakeConfig.questions.length).toBeGreaterThan(0);
-    expect(config!.intakeConfig.questions.some((q) => q.required)).toBe(true);
+    expect(config!.templates[0].id).toBeTruthy();
+    expect(config!.intakeConfig.requiredFields.length).toBeGreaterThan(0);
+    expect(config!.intakeConfig.followUpQuestions.length).toBeGreaterThan(0);
   });
 
-  it('happy path — loads plumbing config with terminology and categories', async () => {
+  it('happy path — loads plumbing config with terminology, categories, templates, and intake settings', async () => {
     await registerAndActivatePlumbing();
 
     const config = await loadPackConfig('plumbing-v1', registry);
@@ -62,6 +62,8 @@ describe('P4-001C — Vertical pack config loading', () => {
     expect(config!.verticalType).toBe('plumbing');
     expect(config!.terminology.pipe).toBeDefined();
     expect(config!.categories.find((c) => c.id === 'drain')).toBeDefined();
+    expect(config!.templates.find((t) => t.serviceCategory === 'drain')).toBeDefined();
+    expect(config!.intakeConfig.requiredFields).toContain('serviceAddress');
   });
 
   it('happy path — loads active pack configs for tenant', async () => {
@@ -73,6 +75,8 @@ describe('P4-001C — Vertical pack config loading', () => {
     const configs = await loadActivePackConfigs('t1', activationRepo, registry);
     expect(configs).toHaveLength(2);
     expect(configs.map((c) => c.verticalType).sort()).toEqual(['hvac', 'plumbing']);
+    expect(configs.every((c) => c.templates.length > 0)).toBe(true);
+    expect(configs.every((c) => c.intakeConfig.requiredFields.length > 0)).toBe(true);
   });
 
   it('validation — inactive pack returns null', async () => {
@@ -99,17 +103,8 @@ describe('P4-001C — Vertical pack config loading', () => {
       version: '1.0.0',
       terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
       categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
-      templates: [
-        {
-          id: 'tmpl-1',
-          name: 'Template',
-          categoryId: 'diagnostic',
-          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
-        },
-      ],
-      intakeConfig: {
-        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
-      },
+      templates: [{ id: 'tmpl-1', name: 'Diagnostic', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+      intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
     });
     expect(errors).toHaveLength(0);
   });
@@ -121,17 +116,8 @@ describe('P4-001C — Vertical pack config loading', () => {
       version: '1.0.0',
       terminology: {},
       categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
-      templates: [
-        {
-          id: 'tmpl-1',
-          name: 'Template',
-          categoryId: 'diagnostic',
-          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
-        },
-      ],
-      intakeConfig: {
-        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
-      },
+      templates: [{ id: 'tmpl-1', name: 'Diagnostic', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+      intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
     });
     expect(errors).toContain('terminology must not be empty');
   });
@@ -143,22 +129,13 @@ describe('P4-001C — Vertical pack config loading', () => {
       version: '1.0.0',
       terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
       categories: [],
-      templates: [
-        {
-          id: 'tmpl-1',
-          name: 'Template',
-          categoryId: 'diagnostic',
-          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
-        },
-      ],
-      intakeConfig: {
-        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
-      },
+      templates: [{ id: 'tmpl-1', name: 'Diagnostic', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+      intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
     });
     expect(errors).toContain('categories must not be empty');
   });
 
-  it('validation — rejects missing templates', () => {
+  it('validation — rejects empty templates', () => {
     const errors = validatePackConfig({
       verticalType: 'hvac',
       packId: 'test',
@@ -166,33 +143,37 @@ describe('P4-001C — Vertical pack config loading', () => {
       terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
       categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
       templates: [],
-      intakeConfig: {
-        questions: [{ id: 'problemSummary', label: 'Describe issue', inputType: 'multiline', required: true }],
-      },
+      intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
     });
     expect(errors).toContain('templates must not be empty');
   });
 
-  it('validation — rejects invalid intake config', () => {
+  it('validation — rejects invalid template shape', () => {
     const errors = validatePackConfig({
       verticalType: 'hvac',
       packId: 'test',
       version: '1.0.0',
       terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
       categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
-      templates: [
-        {
-          id: 'tmpl-1',
-          name: 'Template',
-          categoryId: 'diagnostic',
-          lineItems: [{ description: 'Diagnostic fee', unitPriceCents: 8900 }],
-        },
-      ],
-      intakeConfig: {
-        questions: [{ id: 'urgency', label: 'Urgency', inputType: 'select', required: true, options: [] }],
-      },
+      templates: [{ id: '', name: 'Broken', serviceCategory: 'diagnostic', defaultLineItems: [] }],
+      intakeConfig: { requiredFields: ['serviceAddress'], optionalFields: [], followUpQuestions: ['When did this start?'] },
     });
-    expect(errors).toContain('intakeConfig question "urgency" select options must not be empty');
+    expect(errors).toContain('templates[0].id is required');
+    expect(errors).toContain('templates[0].defaultLineItems must not be empty');
+  });
+
+  it('validation — rejects missing intake required fields', () => {
+    const errors = validatePackConfig({
+      verticalType: 'hvac',
+      packId: 'test',
+      version: '1.0.0',
+      terminology: { test: { canonical: 'test', displayLabel: 'Test', promptHint: 'test', aliases: [] } },
+      categories: [{ id: 'diagnostic', name: 'Diag', description: 'Diag', sortOrder: 1, typicalLineItems: ['x'] }],
+      templates: [{ id: 'tmpl-1', name: 'Diagnostic', serviceCategory: 'diagnostic', defaultLineItems: ['Diagnostic service call'] }],
+      intakeConfig: { requiredFields: [], optionalFields: [], followUpQuestions: [] },
+    });
+    expect(errors).toContain('intakeConfig.requiredFields must not be empty');
+    expect(errors).toContain('intakeConfig.followUpQuestions must not be empty');
   });
 
   it('edge case — both packs load independently', async () => {
@@ -204,8 +185,10 @@ describe('P4-001C — Vertical pack config loading', () => {
 
     expect(hvac!.terminology.furnace).toBeDefined();
     expect(hvac!.terminology.pipe).toBeUndefined();
+    expect(hvac!.templates.some((t) => t.serviceCategory === 'maintenance')).toBe(true);
 
     expect(plumbing!.terminology.pipe).toBeDefined();
     expect(plumbing!.terminology.furnace).toBeUndefined();
+    expect(plumbing!.templates.some((t) => t.serviceCategory === 'drain')).toBe(true);
   });
 });
