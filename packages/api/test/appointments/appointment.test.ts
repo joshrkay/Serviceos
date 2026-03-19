@@ -69,6 +69,52 @@ describe('P1-007 — Appointment entity with schedule + arrival window', () => {
     expect(updated!.notes).toBe('Confirmed by customer');
   });
 
+  it('validation — rejects invalid appointment update before write', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    await expect(
+      updateAppointment(
+        'tenant-1',
+        apt.id,
+        { arrivalWindowStart: new Date(tomorrow.getTime() + 60 * 60 * 1000) },
+        repo
+      )
+    ).rejects.toThrow('Validation failed: Both arrivalWindowStart and arrivalWindowEnd must be provided together');
+
+    const unchanged = await getAppointment('tenant-1', apt.id, repo);
+    expect(unchanged!.arrivalWindowStart).toBeUndefined();
+    expect(unchanged!.arrivalWindowEnd).toBeUndefined();
+  });
+
+  it('validation — valid partial appointment update continues to work', async () => {
+    const apt = await createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: tomorrow,
+        scheduledEnd: tomorrowEnd,
+        timezone: 'America/New_York',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    const updated = await updateAppointment('tenant-1', apt.id, { notes: 'Bring ladder' }, repo);
+    expect(updated!.notes).toBe('Bring ladder');
+    expect(updated!.scheduledStart).toEqual(tomorrow);
+    expect(updated!.scheduledEnd).toEqual(tomorrowEnd);
+  });
+
   it('happy path — lists appointments by job', async () => {
     await createAppointment(
       { tenantId: 'tenant-1', jobId: 'job-1', scheduledStart: tomorrow, scheduledEnd: tomorrowEnd, timezone: 'UTC', createdBy: 'u-1' },

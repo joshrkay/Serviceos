@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -64,6 +65,8 @@ export async function createAppointment(
   repository: AppointmentRepository
 ): Promise<Appointment> {
   const errors = validateAppointmentInput(input);
+  const timeValidation = validateAppointmentTimes(input);
+  errors.push(...timeValidation.errors);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
 
   const appointment: Appointment = {
@@ -99,6 +102,12 @@ export async function updateAppointment(
   input: UpdateAppointmentInput,
   repository: AppointmentRepository
 ): Promise<Appointment | null> {
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  const validation = validateAppointmentUpdateInput(existing, input);
+  if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+
   return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
 }
 

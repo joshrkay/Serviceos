@@ -69,6 +69,27 @@ export function validateLocationInput(input: CreateLocationInput): string[] {
   return errors;
 }
 
+export function validateLocationUpdateInput(
+  existing: ServiceLocation,
+  input: UpdateLocationInput
+): string[] {
+  return validateLocationInput({
+    tenantId: existing.tenantId,
+    customerId: existing.customerId,
+    label: input.label ?? existing.label,
+    street1: input.street1 ?? existing.street1,
+    street2: input.street2 ?? existing.street2,
+    city: input.city ?? existing.city,
+    state: input.state ?? existing.state,
+    postalCode: input.postalCode ?? existing.postalCode,
+    country: input.country ?? existing.country,
+    latitude: input.latitude ?? existing.latitude,
+    longitude: input.longitude ?? existing.longitude,
+    accessNotes: input.accessNotes ?? existing.accessNotes,
+    isPrimary: existing.isPrimary,
+  });
+}
+
 export async function createLocation(
   input: CreateLocationInput,
   repository: LocationRepository
@@ -126,6 +147,12 @@ export async function updateLocation(
   input: UpdateLocationInput,
   repository: LocationRepository
 ): Promise<ServiceLocation | null> {
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  const validationErrors = validateLocationUpdateInput(existing, input);
+  if (validationErrors.length > 0) throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
+
   return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
 }
 
