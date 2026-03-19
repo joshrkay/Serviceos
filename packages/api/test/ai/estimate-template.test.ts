@@ -65,7 +65,7 @@ describe('P4-004A — Vertical estimate template schema', () => {
 
     try {
       await createTemplate(invalidInput, repo);
-      fail('Expected createTemplate to throw ValidationError');
+      throw new Error('Expected createTemplate to throw ValidationError');
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
       expect((error as ValidationError).details).toEqual({

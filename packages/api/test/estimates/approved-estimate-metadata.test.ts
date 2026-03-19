@@ -83,7 +83,7 @@ describe('P4-005A — Approved-estimate retrieval metadata', () => {
 
     try {
       await createApprovedEstimateMetadata(invalidInput, repo);
-      fail('Expected createApprovedEstimateMetadata to throw ValidationError');
+      throw new Error('Expected createApprovedEstimateMetadata to throw ValidationError');
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
       expect((error as ValidationError).details).toEqual({
