@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { apiFetch } from '../utils/api-fetch';
 
 export interface DetailQueryResult<T> {
   data: T | null;
@@ -20,7 +21,7 @@ export function useDetailQuery<T>(
     setIsLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${endpoint}/${id}`);
+      const response = await apiFetch(`${endpoint}/${id}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json();
       setData(result);

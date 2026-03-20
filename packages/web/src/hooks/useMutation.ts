@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { apiFetch } from '../utils/api-fetch';
 
 export interface MutationResult<TBody, TResult> {
   mutate: (body: TBody) => Promise<TResult>;
@@ -17,9 +18,8 @@ export function useMutation<TBody, TResult>(
     setIsLoading(true);
     setError(null);
     try {
-      const response = await fetch(path, {
+      const response = await apiFetch(path, {
         method,
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

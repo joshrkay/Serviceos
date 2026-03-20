@@ -1,10 +1,14 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
 import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
+import { loadConfig } from './shared/config';
+import { createWebhookRouter } from './webhooks/routes';
+import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
@@ -97,9 +101,29 @@ export function createApp() {
   // Swagger UI — no auth required
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
+  // Load validated config
+  const config = loadConfig();
+
+  // Rate limiting — applied before auth to protect all routes
+  app.use('/api', rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100,                  // per IP
+    standardHeaders: true,
+    legacyHeaders: false,
+  }));
+  app.use('/webhooks', rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: 30,
+  }));
+
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
   const pool = process.env.DATABASE_URL ? createPool() : undefined;
+
+  // In production, in-memory repositories lose all data on restart — crash fast.
+  if (!pool && (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging')) {
+    throw new Error('DATABASE_URL is required in production and staging environments');
+  }
 
   // Health checks — no auth required. Reuse the main pool (no duplicate connections).
   const checks: HealthCheck[] = [];
@@ -118,6 +142,11 @@ export function createApp() {
   }
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
+
+  // Webhook routes — mounted before Clerk JWT middleware because webhooks
+  // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
+  const tenantRepo = pool ? new PgTenantRepository(pool) : undefined;
+  app.use('/webhooks', createWebhookRouter(config, { tenantRepo }));
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
@@ -154,18 +183,24 @@ export function createApp() {
   const transcriptionProvider = process.env.AI_PROVIDER_API_KEY
     ? {
         async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-          // Real implementation would call OpenAI Whisper API here.
-          // For now, this signals intent — replace with actual Whisper call.
+          // Fetch the audio binary from the URL, then upload to Whisper
+          const audioResponse = await fetch(audioUrl);
+          if (!audioResponse.ok) {
+            throw new Error(`Failed to fetch audio from ${audioUrl}: ${audioResponse.status}`);
+          }
+          const audioBlob = await audioResponse.blob();
+          const fd = new FormData();
+          fd.append('file', audioBlob, 'audio.webm');
+          fd.append('model', 'whisper-1');
           const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${process.env.AI_PROVIDER_API_KEY}` },
-            body: (() => {
-              const fd = new FormData();
-              fd.append('file', audioUrl);
-              fd.append('model', 'whisper-1');
-              return fd;
-            })(),
+            body: fd,
           });
+          if (!res.ok) {
+            const errBody = await res.text();
+            throw new Error(`Whisper API error ${res.status}: ${errBody}`);
+          }
           const data = (await res.json()) as { text?: string };
           return {
             transcript: data.text || '',

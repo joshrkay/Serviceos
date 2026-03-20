@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { apiFetch } from '../utils/api-fetch';
 
 export interface ListQueryOptions {
   search?: string;
@@ -45,7 +46,7 @@ export function useListQuery<T>(
         ...(search ? { search } : {}),
         ...filters,
       });
-      const response = await fetch(`${endpoint}?${params}`);
+      const response = await apiFetch(`${endpoint}?${params}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json();
       setData(result.data ?? result);

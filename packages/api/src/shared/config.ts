@@ -80,9 +80,11 @@ function validateProductionConfig(config: AppConfig): void {
   // Auth
   if (!config.CLERK_SECRET_KEY) missing.push('CLERK_SECRET_KEY');
 
+  // Webhooks — signing secrets required to verify inbound webhooks
+  if (!config.CLERK_WEBHOOK_SECRET) missing.push('CLERK_WEBHOOK_SECRET');
+
   // AI provider
   if (!config.AI_PROVIDER_API_KEY) missing.push('AI_PROVIDER_API_KEY');
-  if (!config.AI_PROVIDER_BASE_URL) missing.push('AI_PROVIDER_BASE_URL');
 
   if (missing.length > 0) {
     throw new Error(

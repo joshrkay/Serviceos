@@ -36,6 +36,8 @@ export class StubProvider implements LLMProvider {
       throw new ValidationError('Request must have at least one message');
     }
 
+    process.stderr.write(`[WARN] StubProvider handling LLM request — no real AI provider configured\n`);
+
     this.lastRequest = request;
 
     return {
