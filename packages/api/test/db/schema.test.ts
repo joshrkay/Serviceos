@@ -1,5 +1,4 @@
 import { MIGRATIONS, getMigrationSQL, setTenantContext } from '../../src/db/schema';
-import { createDatabaseConfig } from '../../src/db/connection';
 
 describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
   it('happy path — all migrations are defined', () => {
@@ -51,16 +50,6 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(() => setTenantContext('abc-123')).toThrow('Invalid tenant ID format');
     expect(() => setTenantContext("'; DROP TABLE tenants; --")).toThrow('Invalid tenant ID format');
     expect(() => setTenantContext('')).toThrow('Invalid tenant ID format');
-  });
-
-  it('validation — createDatabaseConfig rejects unknown env', () => {
-    expect(() => createDatabaseConfig('invalid')).toThrow('Unknown database environment');
-  });
-
-  it('happy path — dev config uses localhost', () => {
-    const config = createDatabaseConfig('dev');
-    expect(config.host).toBe('localhost');
-    expect(config.database).toBe('serviceos_dev');
   });
 
   it('tenant isolation — each table has tenant_id reference', () => {

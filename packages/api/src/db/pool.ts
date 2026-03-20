@@ -31,5 +31,12 @@ export function createPool(): Pool {
     };
   }
 
-  return new Pool(config);
+  const pool = new Pool(config);
+
+  // Prevent unhandled 'error' events on idle clients from crashing the process.
+  pool.on('error', (err) => {
+    process.stderr.write(`pg pool background error: ${err.message}\n`);
+  });
+
+  return pool;
 }

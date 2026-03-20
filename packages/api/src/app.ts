@@ -97,10 +97,13 @@ export function createApp() {
   // Swagger UI — no auth required
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
-  // Health checks — no auth required
+  // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
+  // fall back to in-memory for local development without a database.
+  const pool = process.env.DATABASE_URL ? createPool() : undefined;
+
+  // Health checks — no auth required. Reuse the main pool (no duplicate connections).
   const checks: HealthCheck[] = [];
-  if (process.env.DATABASE_URL) {
-    const pool = createPool();
+  if (pool) {
     checks.push({
       name: 'database',
       check: async () => {
@@ -108,8 +111,6 @@ export function createApp() {
           await pool.query('SELECT 1');
           return { status: 'ok' };
         } catch {
-          // Treat database outages as degraded on /health so platform liveness checks
-          // do not force restart loops while dependencies recover.
           return { status: 'degraded', message: 'Database connection failed' };
         }
       },
@@ -119,15 +120,8 @@ export function createApp() {
   app.use('/', healthRouter);
 
   // Auth middleware for API routes
-  // In dev without CLERK_SECRET_KEY, verifyClerkSession handles dev-mode bypass.
-  // In prod/staging, loadConfig() enforces CLERK_SECRET_KEY is present.
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
-
-  // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
-  // fall back to in-memory for local development without a database.
-  const usePostgres = !!process.env.DATABASE_URL;
-  const pool = usePostgres ? createPool() : undefined;
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
