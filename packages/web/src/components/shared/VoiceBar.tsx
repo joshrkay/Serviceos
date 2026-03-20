@@ -2,17 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
 
-type BarPhase = 'idle' | 'listening' | 'transcript' | 'sending';
-
-const DEMO_COMMANDS = [
-  'Invoice the Rodriguez job',
-  'Schedule the Thompson exterior paint job',
-  'What do I have going on today?',
-  'Send a follow-up to Michael Davis',
-  "How's the Williams paint job going?",
-  "What's on the schedule tomorrow?",
-  'Show me overdue invoices',
-];
+type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
 
 // ─── Compact waveform ─────────────────────────────────────────────
 function Waveform() {
@@ -51,22 +41,69 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
-  // Pick a random demo command each time listening starts
-  const startListening = () => {
-    const cmd = DEMO_COMMANDS[Math.floor(Math.random() * DEMO_COMMANDS.length)];
-    setTranscript(cmd);
+  // Start recording via MediaRecorder API
+  const startListening = async () => {
     setPhase('listening');
+    setTranscript('');
+    audioChunksRef.current = [];
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.start();
+    } catch {
+      // Microphone unavailable — let the user know
+      setTranscript('(Microphone not available — please type your message)');
+      setPhase('transcript');
+    }
   };
 
-  // Auto-advance: listening → transcript after 2.2s
-  useEffect(() => {
-    if (phase !== 'listening') return;
-    const t = setTimeout(() => {
+  // Stop recording and send audio for transcription
+  const stopListening = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
       setPhase('transcript');
-    }, 2200);
-    return () => clearTimeout(t);
-  }, [phase]);
+      return;
+    }
+
+    setPhase('transcribing');
+
+    recorder.onstop = async () => {
+      // Clean up media stream
+      recorder.stream.getTracks().forEach(t => t.stop());
+
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      try {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+        const res = await fetch('/api/voice/transcribe', {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setTranscript(data.transcript || '(Could not transcribe)');
+        } else {
+          setTranscript('(Transcription service unavailable)');
+        }
+      } catch {
+        setTranscript('(Transcription service unavailable)');
+      }
+      setPhase('transcript');
+    };
+
+    recorder.stop();
+  };
 
   // Focus input when transcript appears
   useEffect(() => {
@@ -74,6 +111,13 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
       setTimeout(() => inputRef.current?.focus(), 80);
     }
   }, [phase]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      mediaRecorderRef.current?.stream?.getTracks().forEach(t => t.stop());
+    };
+  }, []);
 
   function handleSend() {
     if (!transcript.trim()) return;
@@ -86,6 +130,12 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
   }
 
   function handleCancel() {
+    // Stop recording if active
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      recorder.stop();
+    }
     setPhase('idle');
     setTranscript('');
   }
@@ -126,16 +176,20 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
           px-4 transition-all
           ${isDesktop ? 'py-2.5' : 'py-3'}
         `}>
-          {/* Live indicator */}
           <span className="flex shrink-0 size-7 items-center justify-center rounded-full bg-blue-600">
             <span className="size-2.5 rounded-full bg-white" style={{ animation: 'liveDot 1s ease-in-out infinite' }} />
           </span>
-          {/* Waveform + label */}
           <div className="flex-1 flex items-center gap-3 min-w-0">
             <span className="text-sm text-blue-700 shrink-0">Listening…</span>
             <div className="flex-1"><Waveform /></div>
           </div>
-          {/* Cancel */}
+          {/* Stop recording */}
+          <button
+            onClick={stopListening}
+            className="shrink-0 flex size-7 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+          >
+            <Send size={13} />
+          </button>
           <button
             onClick={handleCancel}
             className="shrink-0 flex size-6 items-center justify-center rounded-full bg-blue-100 hover:bg-blue-200 transition-colors"
@@ -148,6 +202,24 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
               50%       { transform: scale(1);   opacity: 1; }
             }
           `}</style>
+        </div>
+      )}
+
+      {/* ── TRANSCRIBING ── */}
+      {phase === 'transcribing' && (
+        <div className={`
+          flex items-center gap-3 rounded-2xl border border-blue-100 bg-blue-50
+          px-4
+          ${isDesktop ? 'py-2.5' : 'py-3'}
+        `}>
+          <Sparkles size={16} className="text-blue-500 shrink-0" style={{ animation: 'spin 1.2s linear infinite' }} />
+          <span className="text-sm text-blue-700 flex-1">Transcribing…</span>
+          <div className="flex gap-1 shrink-0">
+            {[0, 1, 2].map(i => (
+              <span key={i} className="size-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: `${i * 120}ms` }} />
+            ))}
+          </div>
+          <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
 

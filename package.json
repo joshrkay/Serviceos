@@ -11,6 +11,7 @@
     "test": "npm run test --workspaces",
     "test:integration": "npm run test:integration --workspace=packages/api",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "typecheck": "cd packages/api && npx tsc --project tsconfig.build.json --noEmit",
     "lint": "npm run lint --workspaces",
     "seed": "npm run seed --workspace=packages/api",
     "seed:clean": "npm run seed:clean --workspace=packages/api",

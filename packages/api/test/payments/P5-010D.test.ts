@@ -5,6 +5,20 @@ import {
   createPaymentReadiness,
 } from '../../src/invoices/payment-readiness';
 
+// Counter for generating unique Stripe-like IDs across tests
+let linkCounter = 0;
+
+function mockStripeResponse() {
+  linkCounter++;
+  const id = `plink_test${linkCounter}`;
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ id, url: `https://checkout.stripe.com/pay/${id}` }),
+    text: async () => '',
+  };
+}
+
 describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
   let readinessRepo: InMemoryPaymentReadinessRepository;
   let provider: StripePaymentLinkProvider;
@@ -27,6 +41,12 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
     provider = new StripePaymentLinkProvider(config, readinessRepo);
     // Pre-create a readiness record for the invoice
     await createPaymentReadiness('tenant-1', 'inv-001', true, readinessRepo);
+    // Mock fetch to avoid real Stripe API calls
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(mockStripeResponse())));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   describe('Happy path: generates link with URL and stores in readiness', () => {

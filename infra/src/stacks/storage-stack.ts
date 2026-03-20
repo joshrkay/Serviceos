@@ -34,10 +34,7 @@ export class StorageStack extends cdk.Stack {
       cors: [
         {
           allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.POST],
-          allowedOrigins:
-            envConfig.environment === 'prod'
-              ? ['https://app.serviceos.io']
-              : ['http://localhost:5173', 'http://localhost:3000', '*'],
+          allowedOrigins: envConfig.corsOrigins,
           allowedHeaders: ['*'],
           maxAge: 3000,
         },

@@ -17,7 +17,8 @@ RUN cd packages/web && npx vite build
 FROM base AS api-build
 COPY tsconfig.base.json ./
 COPY packages/api/ packages/api/
-RUN cd packages/api && npx tsc --project tsconfig.build.json
+ARG RAILWAY_GIT_COMMIT_SHA=unknown
+RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --project tsconfig.build.json
 
 # Web static files (served by nginx) — used by @serviceos/web
 FROM nginx:alpine AS web

@@ -21,3 +21,12 @@
 - Use the shared billing engine for all financial calculations
 - Use the async worker pattern (P0-009) for background jobs
 - Use the webhook base (P0-014) for all external webhook handlers
+
+## Build Verification (mandatory)
+Before marking any story complete or pushing code, run:
+```
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+```
+This uses the same tsconfig as the Railway deploy. Fix all errors before committing.
+The default `tsconfig.json` includes test files and vitest types — it is NOT
+sufficient to verify the production build. Always use `tsconfig.build.json`.

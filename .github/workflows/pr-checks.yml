@@ -15,8 +15,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
-      - name: Type check API
-        run: npx tsc --noEmit
+      - name: Type check API (build config)
+        run: npx tsc --project tsconfig.build.json --noEmit
         working-directory: packages/api
 
       - name: Type check Web

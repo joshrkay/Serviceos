@@ -863,6 +863,46 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_qm ON quality_metrics
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '037_create_notes': `
+    CREATE TABLE IF NOT EXISTS notes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('customer', 'location', 'job', 'estimate', 'invoice')),
+      entity_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      author_id TEXT NOT NULL,
+      author_role TEXT NOT NULL,
+      is_pinned BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_notes_tenant ON notes(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(entity_type, entity_id);
+    ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE notes FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_notes ON notes;
+    CREATE POLICY tenant_isolation_notes ON notes
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '038_create_pack_activations': `
+    CREATE TABLE IF NOT EXISTS pack_activations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      pack_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deactivated')),
+      activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      deactivated_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_pack_act_tenant ON pack_activations(tenant_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pack_act_unique ON pack_activations(tenant_id, pack_id);
+    ALTER TABLE pack_activations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE pack_activations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_pack_act ON pack_activations;
+    CREATE POLICY tenant_isolation_pack_act ON pack_activations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
