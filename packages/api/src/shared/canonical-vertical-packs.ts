@@ -26,21 +26,25 @@ function buildCanonicalPack(
 }
 
 export function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): void {
-  void registry.register(
+  registry.register(
     buildCanonicalPack(
       'hvac-v1',
       'hvac',
       'HVAC Pack',
       'Canonical HVAC pack with terminology and categories for estimating.'
     )
-  );
+  ).catch((err) => {
+    process.stderr.write(`[seed] Failed to register hvac-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
+  });
 
-  void registry.register(
+  registry.register(
     buildCanonicalPack(
       'plumbing-v1',
       'plumbing',
       'Plumbing Pack',
       'Canonical plumbing pack with terminology and categories for estimating.'
     )
-  );
+  ).catch((err) => {
+    process.stderr.write(`[seed] Failed to register plumbing-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
+  });
 }
