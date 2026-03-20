@@ -231,7 +231,12 @@ export function createApp() {
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio));
+  const voiceLogger = createLogger({
+    service: 'voice',
+    environment: process.env.NODE_ENV || 'development',
+    level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
+  });
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
   app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
 
   // Global error handler

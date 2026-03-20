@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { customers, technicians } from '../../data/mock-data';
 import type { ServiceType } from '../../data/mock-data';
+import { apiFetch } from '../../utils/api-fetch';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FlowStep   = 'start' | 'voice' | 'customer' | 'details' | 'schedule' | 'done';
@@ -253,6 +254,8 @@ export function NewJobFlow({
   const [vSeconds,    setVSeconds]    = useState(0);
   const [vTranscript, setVTranscript] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     if (vPhase !== 'recording') return;
@@ -261,12 +264,52 @@ export function NewJobFlow({
   }, [vPhase]);
   useEffect(() => { if (vPhase === 'recording' && vSeconds >= 9) stopRecording(); }, [vSeconds, vPhase]);
 
-  function startRecording() { setVPhase('recording'); setVSeconds(0); }
+  // Cleanup media stream on unmount
+  useEffect(() => {
+    return () => { mediaRecorderRef.current?.stream?.getTracks().forEach(t => t.stop()); };
+  }, []);
+
+  async function startRecording() {
+    setVPhase('recording'); setVSeconds(0);
+    audioChunksRef.current = [];
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      recorder.start();
+    } catch {
+      setVTranscript('(Microphone not available — use the manual flow instead)');
+      setVPhase('parsed');
+    }
+  }
   function stopRecording() {
     if (timerRef.current) clearInterval(timerRef.current);
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      setVPhase('parsed');
+      return;
+    }
     setVPhase('processing');
-    const sample = VOICE_SAMPLES[Math.floor(Math.random() * VOICE_SAMPLES.length)];
-    setTimeout(() => { setVTranscript(sample); setVPhase('parsed'); }, 1800);
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      try {
+        const fd = new FormData();
+        fd.append('audio', audioBlob, 'recording.webm');
+        const res = await apiFetch('/api/voice/transcribe', { method: 'POST', body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          setVTranscript(data.transcript || '(Could not transcribe)');
+        } else {
+          setVTranscript('(Transcription service unavailable)');
+        }
+      } catch {
+        setVTranscript('(Transcription service unavailable)');
+      }
+      setVPhase('parsed');
+    };
+    recorder.stop();
   }
   function buildFromVoice() {
     const result = parseVoice(vTranscript);

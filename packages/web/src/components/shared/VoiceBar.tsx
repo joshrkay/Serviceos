@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
@@ -6,6 +6,11 @@ import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useTTS } from '../../hooks/useTTS';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
+
+export interface VoiceBarHandle {
+  /** Programmatically start listening (e.g. from a keyboard shortcut) */
+  activate: () => void;
+}
 
 // ─── Compact waveform ─────────────────────────────────────────────
 function Waveform() {
@@ -39,7 +44,7 @@ interface VoiceBarProps {
   variant?: 'mobile' | 'desktop';
 }
 
-export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
+export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
   const navigate = useNavigate();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
@@ -47,6 +52,11 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
+
+  // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
+  useImperativeHandle(ref, () => ({
+    activate: () => { if (phase === 'idle') startListening(); },
+  }), [phase]);
 
   // Start recording via MediaRecorder API
   const startListening = async () => {
@@ -307,4 +317,4 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
 
     </div>
   );
-}
+});
