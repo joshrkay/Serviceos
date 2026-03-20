@@ -3,6 +3,7 @@ dist/
 *.js.map
 *.d.ts
 !jest.config.ts
+!**/vite-env.d.ts
 .env
 .env.*
 !.env.example
