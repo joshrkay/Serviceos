@@ -17,6 +17,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   reassign_appointment: 1,
   reschedule_appointment: 1,
   cancel_appointment: 1,
+  onboarding_tenant_settings: 6,
+  onboarding_service_category: 7,
+  onboarding_estimate_template: 8,
+  onboarding_team_member: 9,
+  onboarding_schedule: 10,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

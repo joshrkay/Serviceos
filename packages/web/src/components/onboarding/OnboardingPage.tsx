@@ -124,19 +124,69 @@ function breadcrumb(step: number, a: Answers): string {
 
 // ─── Voice + Text input ────────────────────────────────────────────────────
 function VoiceAnswer({
-  onSubmit, placeholder, mockVoice,
-}: { onSubmit: (v: string) => void; placeholder: string; mockVoice: string }) {
-  const [phase, setPhase] = useState<'idle' | 'listening' | 'text'>('idle');
+  onSubmit, placeholder,
+}: { onSubmit: (v: string) => void; placeholder: string }) {
+  const [phase, setPhase] = useState<'idle' | 'listening' | 'transcribing' | 'text'>('idle');
   const [val,   setVal]   = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
-  function tapMic() {
+  async function tapMic() {
     setPhase('listening');
-    setTimeout(() => {
-      setVal(mockVoice);
+    audioChunksRef.current = [];
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      // Auto-stop after 10 seconds of silence
+      recorder.start();
+      setTimeout(() => {
+        if (recorder.state === 'recording') stopRecording();
+      }, 10000);
+    } catch {
+      // Microphone not available — switch to text input
       setPhase('text');
       setTimeout(() => inputRef.current?.focus(), 50);
-    }, 2000);
+    }
+  }
+
+  async function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      setPhase('text');
+      return;
+    }
+
+    setPhase('transcribing');
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      try {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+        const res = await fetch('/api/voice/transcribe', {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setVal(data.transcript || '');
+        }
+      } catch {
+        // Transcription failed — let user type
+      }
+      setPhase('text');
+      setTimeout(() => inputRef.current?.focus(), 50);
+    };
+    recorder.stop();
   }
 
   function submit() {
@@ -557,8 +607,8 @@ function QuestionScreen({ onDone }: { onDone: (name: string) => void }) {
 
   function renderAnswer() {
     switch (step) {
-      case 0: return <VoiceAnswer onSubmit={v => advance({ name: v })}         placeholder="Your first name…"    mockVoice="Mike"                />;
-      case 1: return <VoiceAnswer onSubmit={v => advance({ businessName: v })} placeholder="Business name…"      mockVoice="Austin Pro Services"  />;
+      case 0: return <VoiceAnswer onSubmit={v => advance({ name: v })}         placeholder="Your first name…"    />;
+      case 1: return <VoiceAnswer onSubmit={v => advance({ businessName: v })} placeholder="Business name…"      />;
       case 2: return <MultiChoice onSubmit={v  => advance({ services: v })} />;
       case 3: return <SingleChoice cols={2} options={TEAM_OPTIONS}     onSubmit={v => advance({ teamSize: v })}    />;
       case 4: return <SingleChoice         options={WORKER_TERMS}     onSubmit={v => advance({ workerTerm: v })}  />;

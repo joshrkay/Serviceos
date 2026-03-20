@@ -33,7 +33,10 @@ export function createDefaultRegistry(config: DefaultRegistryConfig = {}): Provi
   const registry = new ProviderRegistry();
   const env = config.environment || process.env.NODE_ENV || 'development';
 
-  if (env === 'development' || env === 'test') {
+  // StubProvider is ONLY registered for local dev and tests.
+  // Production and staging must have a real AI provider configured
+  // via AI_PROVIDER_API_KEY and AI_PROVIDER_BASE_URL.
+  if (env === 'development' || env === 'test' || env === 'dev') {
     registry.register(new StubProvider('stub'));
   }
 
