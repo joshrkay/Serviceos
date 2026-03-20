@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
+import { apiFetch } from '../../utils/api-fetch';
+import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
+import { useTTS } from '../../hooks/useTTS';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
 
@@ -43,6 +46,7 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const { speak } = useTTS({ rate: 1.05 });
 
   // Start recording via MediaRecorder API
   const startListening = async () => {
@@ -85,9 +89,8 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
       try {
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
-        const res = await fetch('/api/voice/transcribe', {
+        const res = await apiFetch('/api/voice/transcribe', {
           method: 'POST',
-          credentials: 'include',
           body: formData,
         });
         if (res.ok) {
@@ -121,6 +124,21 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
 
   function handleSend() {
     if (!transcript.trim()) return;
+
+    // Check for voice navigation commands first
+    const command = matchVoiceCommand(transcript.trim());
+    if (command) {
+      setPhase('sending');
+      speak(command.label);
+      setTimeout(() => {
+        navigate(command.route);
+        setPhase('idle');
+        setTranscript('');
+      }, 420);
+      return;
+    }
+
+    // Fall through to assistant
     setPhase('sending');
     setTimeout(() => {
       navigate(`/assistant?q=${encodeURIComponent(transcript.trim())}`);

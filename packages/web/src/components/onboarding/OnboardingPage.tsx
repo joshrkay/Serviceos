@@ -1,10 +1,19 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import {
   Mic, Keyboard, Check, ArrowRight, Sparkles, ChevronRight,
   Zap, Clock, Receipt, AlertTriangle, MessageSquare, Eye, Camera,
-  Building2, Users,
+  Building2, Users, Volume2,
 } from 'lucide-react';
+import { useTTS } from '../../hooks/useTTS';
+import { apiFetch } from '../../utils/api-fetch';
+import {
+  parseServices,
+  parseTeamSize,
+  parseTerminology,
+  parseRuleToggle,
+  parseConfirmation,
+} from './voice-parsers';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 interface Answers {
@@ -171,9 +180,8 @@ function VoiceAnswer({
       try {
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
-        const res = await fetch('/api/voice/transcribe', {
+        const res = await apiFetch('/api/voice/transcribe', {
           method: 'POST',
-          credentials: 'include',
           body: formData,
         });
         if (res.ok) {
@@ -281,10 +289,105 @@ function VoiceAnswer({
   );
 }
 
+// ─── Inline voice mic for structured steps ────────────────────────────────
+function useStepVoice(onTranscript: (t: string) => void) {
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  const startRecording = useCallback(async () => {
+    chunksRef.current = [];
+    setRecording(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.start();
+      setTimeout(() => {
+        if (recorder.state === 'recording') stopRecording();
+      }, 10000);
+    } catch {
+      setRecording(false);
+    }
+  }, []);
+
+  const stopRecording = useCallback(async () => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      setRecording(false);
+      return;
+    }
+    setTranscribing(true);
+    setRecording(false);
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
+      try {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+        const res = await apiFetch('/api/voice/transcribe', {
+          method: 'POST',
+          body: formData,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.transcript) onTranscript(data.transcript);
+        }
+      } catch {
+        // Transcription failed
+      }
+      setTranscribing(false);
+    };
+    recorder.stop();
+  }, [onTranscript]);
+
+  return { recording, transcribing, startRecording, stopRecording };
+}
+
+function VoiceMicButton({ onTranscript }: { onTranscript: (t: string) => void }) {
+  const { recording, transcribing, startRecording, stopRecording } = useStepVoice(onTranscript);
+
+  if (transcribing) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-2 text-xs text-indigo-400">
+        <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />
+        Transcribing...
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={recording ? stopRecording : startRecording}
+      className={`flex items-center justify-center gap-2 py-2 text-xs transition-colors ${
+        recording
+          ? 'text-red-500 hover:text-red-600'
+          : 'text-slate-400 hover:text-slate-600'
+      }`}
+    >
+      <Mic size={12} className={recording ? 'animate-pulse' : ''} />
+      {recording ? 'Tap to stop' : 'Or say it'}
+    </button>
+  );
+}
+
 // ─── Multi-select chips ────────────────────────────────────────────────────
 function MultiChoice({ onSubmit }: { onSubmit: (v: string[]) => void }) {
   const [sel, setSel] = useState<string[]>([]);
   const toggle = (v: string) => setSel(p => p.includes(v) ? p.filter(x => x !== v) : [...p, v]);
+
+  const handleVoice = useCallback((transcript: string) => {
+    const parsed = parseServices(transcript);
+    if (parsed.length > 0) {
+      setSel(parsed);
+      // Auto-submit after a brief visual delay
+      setTimeout(() => onSubmit(parsed), 600);
+    }
+  }, [onSubmit]);
 
   return (
     <div className="flex flex-col gap-3 w-full">
@@ -308,6 +411,7 @@ function MultiChoice({ onSubmit }: { onSubmit: (v: string[]) => void }) {
           );
         })}
       </div>
+      <VoiceMicButton onTranscript={handleVoice} />
       {sel.length > 0 && (
         <button
           onClick={() => onSubmit(sel)}
@@ -323,8 +427,13 @@ function MultiChoice({ onSubmit }: { onSubmit: (v: string[]) => void }) {
 
 // ─── Single-select list ────────────────────────────────────────────────────
 function SingleChoice({
-  options, cols = 1, onSubmit,
-}: { options: { value: string; label: string; sub?: string }[]; cols?: 1|2; onSubmit: (v: string) => void }) {
+  options, cols = 1, onSubmit, voiceParser,
+}: {
+  options: { value: string; label: string; sub?: string }[];
+  cols?: 1|2;
+  onSubmit: (v: string) => void;
+  voiceParser?: (transcript: string) => string | null;
+}) {
   const [chosen, setChosen] = useState<string | null>(null);
 
   function pick(v: string) {
@@ -332,30 +441,41 @@ function SingleChoice({
     setTimeout(() => onSubmit(v), 280);
   }
 
+  const handleVoice = useCallback((transcript: string) => {
+    // Try custom parser first, then fallback to generic terminology matching
+    const parsed = voiceParser
+      ? voiceParser(transcript)
+      : parseTerminology(transcript, options);
+    if (parsed) pick(parsed);
+  }, [voiceParser, options, onSubmit]);
+
   return (
-    <div className={`grid gap-2.5 w-full ${cols === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-      {options.map(o => {
-        const on = chosen === o.value;
-        return (
-          <button
-            key={o.value}
-            onClick={() => pick(o.value)}
-            className={`flex items-center gap-3 rounded-2xl border px-4 py-3.5 text-left transition-all active:scale-95 ${
-              on ? 'border-indigo-400 bg-indigo-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'
-            }`}
-          >
-            <div className="flex-1 min-w-0">
-              <p className={`text-sm ${on ? 'text-indigo-700' : 'text-slate-800'}`}>{o.label}</p>
-              {o.sub && <p className={`text-xs mt-0.5 ${on ? 'text-indigo-400' : 'text-slate-400'}`}>{o.sub}</p>}
-            </div>
-            <div className={`size-5 shrink-0 rounded-full border-2 flex items-center justify-center transition-all ${
-              on ? 'border-indigo-500 bg-indigo-500' : 'border-slate-200'
-            }`}>
-              {on && <Check size={11} className="text-white" strokeWidth={3} />}
-            </div>
-          </button>
-        );
-      })}
+    <div className="flex flex-col gap-2.5 w-full">
+      <div className={`grid gap-2.5 w-full ${cols === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        {options.map(o => {
+          const on = chosen === o.value;
+          return (
+            <button
+              key={o.value}
+              onClick={() => pick(o.value)}
+              className={`flex items-center gap-3 rounded-2xl border px-4 py-3.5 text-left transition-all active:scale-95 ${
+                on ? 'border-indigo-400 bg-indigo-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'
+              }`}
+            >
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm ${on ? 'text-indigo-700' : 'text-slate-800'}`}>{o.label}</p>
+                {o.sub && <p className={`text-xs mt-0.5 ${on ? 'text-indigo-400' : 'text-slate-400'}`}>{o.sub}</p>}
+              </div>
+              <div className={`size-5 shrink-0 rounded-full border-2 flex items-center justify-center transition-all ${
+                on ? 'border-indigo-500 bg-indigo-500' : 'border-slate-200'
+              }`}>
+                {on && <Check size={11} className="text-white" strokeWidth={3} />}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <VoiceMicButton onTranscript={handleVoice} />
     </div>
   );
 }
@@ -368,6 +488,16 @@ function RuleCards({ initial, onConfirm }: { initial: Rule[]; onConfirm: (r: Rul
   function toggle(id: string) {
     setRules(p => p.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
   }
+
+  const handleVoice = useCallback((transcript: string) => {
+    const toggles = parseRuleToggle(transcript, rules);
+    if (toggles) {
+      setRules(prev => prev.map(r => {
+        const match = toggles.find(t => t.id === r.id);
+        return match ? { ...r, enabled: match.enabled } : r;
+      }));
+    }
+  }, [rules]);
 
   return (
     <div className="flex flex-col gap-2.5 w-full">
@@ -402,6 +532,7 @@ function RuleCards({ initial, onConfirm }: { initial: Rule[]; onConfirm: (r: Rul
           </div>
         );
       })}
+      <VoiceMicButton onTranscript={handleVoice} />
       <button
         onClick={() => onConfirm(rules)}
         className="flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 text-white py-3.5 text-sm hover:bg-indigo-500 active:scale-95 transition-all mt-1"
@@ -416,7 +547,37 @@ function RuleCards({ initial, onConfirm }: { initial: Rule[]; onConfirm: (r: Rul
 function ConfigSummary({ answers: a, rules, onConfirm }: {
   answers: Answers; rules: Rule[]; onConfirm: () => void;
 }) {
+  const [saving, setSaving] = useState(false);
   const active = rules.filter(r => r.enabled);
+
+  const handleVoice = useCallback((transcript: string) => {
+    const result = parseConfirmation(transcript);
+    if (result === 'confirm') handleConfirm();
+  }, []);
+
+  async function handleConfirm() {
+    setSaving(true);
+    try {
+      await apiFetch('/api/onboarding/configure', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: a.name,
+          businessName: a.businessName,
+          services: a.services,
+          teamSize: a.teamSize,
+          workerTerm: a.workerTerm,
+          jobTerm: a.jobTerm,
+          estimateTerm: a.estimateTerm,
+          automationRules: rules.map(r => ({ id: r.id, enabled: r.enabled })),
+        }),
+      });
+    } catch {
+      // Still proceed — settings save is best-effort during onboarding
+    }
+    setSaving(false);
+    onConfirm();
+  }
+
   return (
     <div className="flex flex-col gap-3 w-full">
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
@@ -469,11 +630,13 @@ function ConfigSummary({ answers: a, rules, onConfirm }: {
         </div>
       </div>
 
+      <VoiceMicButton onTranscript={handleVoice} />
       <button
-        onClick={onConfirm}
-        className="flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 text-white py-4 text-sm hover:bg-indigo-500 active:scale-95 transition-all"
+        onClick={handleConfirm}
+        disabled={saving}
+        className="flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 text-white py-4 text-sm hover:bg-indigo-500 disabled:opacity-50 active:scale-95 transition-all"
       >
-        <Check size={15} /> Looks good — launch my workspace
+        <Check size={15} /> {saving ? 'Saving...' : 'Looks good — launch my workspace'}
       </button>
     </div>
   );
@@ -585,11 +748,21 @@ function QuestionScreen({ onDone }: { onDone: (name: string) => void }) {
   const [rules,   setRules]   = useState<Rule[]>([]);
   const [animKey, setAnimKey] = useState(0);   // triggers re-animation on step change
   const [fading,  setFading]  = useState(false);
+  const { speak, stop: stopSpeech, isSpeaking } = useTTS({ rate: 1.05 });
+
+  // Speak the question when step changes
+  useEffect(() => {
+    const q = question(step, answers);
+    // Clean the question text for speech (remove newlines)
+    const speechText = q.replace(/\n+/g, ' ').trim();
+    if (speechText) speak(speechText);
+  }, [step, animKey]);
 
   function advance(update: Partial<Answers>) {
     const na = { ...answers, ...update };
     setAnswers(na);
     setFading(true);
+    stopSpeech(); // Stop speaking when user answers
 
     setTimeout(() => {
       const next = step + 1;
@@ -610,7 +783,7 @@ function QuestionScreen({ onDone }: { onDone: (name: string) => void }) {
       case 0: return <VoiceAnswer onSubmit={v => advance({ name: v })}         placeholder="Your first name…"    />;
       case 1: return <VoiceAnswer onSubmit={v => advance({ businessName: v })} placeholder="Business name…"      />;
       case 2: return <MultiChoice onSubmit={v  => advance({ services: v })} />;
-      case 3: return <SingleChoice cols={2} options={TEAM_OPTIONS}     onSubmit={v => advance({ teamSize: v })}    />;
+      case 3: return <SingleChoice cols={2} options={TEAM_OPTIONS}     onSubmit={v => advance({ teamSize: v })} voiceParser={parseTeamSize} />;
       case 4: return <SingleChoice         options={WORKER_TERMS}     onSubmit={v => advance({ workerTerm: v })}  />;
       case 5: return <SingleChoice         options={JOB_TERMS}        onSubmit={v => advance({ jobTerm: v })}     />;
       case 6: return <SingleChoice cols={2} options={ESTIMATE_TERMS}  onSubmit={v => advance({ estimateTerm: v })}/>;
@@ -684,8 +857,15 @@ function QuestionScreen({ onDone }: { onDone: (name: string) => void }) {
 
           {/* AI avatar + question */}
           <div className={`flex flex-col items-center text-center ${isLongStep ? 'pt-6 pb-4' : 'py-10'}`}>
-            <div className="flex size-10 items-center justify-center rounded-full bg-indigo-600 mb-5 shadow-lg shadow-indigo-200">
-              <Sparkles size={16} className="text-white" />
+            <div className="relative mb-5">
+              <div className="flex size-10 items-center justify-center rounded-full bg-indigo-600 shadow-lg shadow-indigo-200">
+                <Sparkles size={16} className="text-white" />
+              </div>
+              {isSpeaking && (
+                <div className="absolute -right-1 -bottom-1 flex size-5 items-center justify-center rounded-full bg-white shadow">
+                  <Volume2 size={10} className="text-indigo-500 animate-pulse" />
+                </div>
+              )}
             </div>
             <h2
               className="text-slate-900 leading-snug"
