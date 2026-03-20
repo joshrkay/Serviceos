@@ -63,16 +63,12 @@ function createRealSentryClient(): SentryClient {
     setUser(user: { id: string; email?: string }): void {
       Sentry.setUser(user);
     },
-    startTransaction(name: string): SentryTransaction {
-      const start = Date.now();
+    startTransaction(_name: string): SentryTransaction {
+      // Sentry v8+ deprecated startTransaction in favor of Sentry.startSpan().
+      // Auto-instrumentation handles most tracing; callers needing manual spans
+      // should use Sentry.startSpan() directly at call sites.
       return {
-        finish() {
-          Sentry.addBreadcrumb({
-            category: 'transaction',
-            message: name,
-            data: { duration_ms: Date.now() - start },
-          });
-        },
+        finish() {},
         setStatus: () => {},
       };
     },
