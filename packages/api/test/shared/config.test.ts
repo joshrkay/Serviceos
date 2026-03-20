@@ -19,6 +19,12 @@ describe('P0-006 — Secrets/config framework', () => {
       PORT: '8080',
       DB_HOST: 'db.example.com',
       DB_PORT: '5433',
+      DB_NAME: 'serviceos',
+      DB_USER: 'admin',
+      DB_PASSWORD: 'secret',
+      CLERK_SECRET_KEY: 'sk_test_staging',
+      AI_PROVIDER_API_KEY: 'ak_test',
+      AI_PROVIDER_BASE_URL: 'https://ai.example.com',
       LOG_LEVEL: 'debug',
     });
     expect(config.NODE_ENV).toBe('staging');

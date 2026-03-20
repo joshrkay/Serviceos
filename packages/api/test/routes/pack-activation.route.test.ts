@@ -32,8 +32,12 @@ describe('Pack activation routes', () => {
   let app: Express;
 
   beforeEach(() => {
-    delete process.env.CLERK_SECRET_KEY;
+    process.env.CLERK_SECRET_KEY = TEST_SECRET;
     app = createApp();
+  });
+
+  afterEach(() => {
+    delete process.env.CLERK_SECRET_KEY;
   });
 
   it('activates HVAC pack for the authenticated tenant', async () => {

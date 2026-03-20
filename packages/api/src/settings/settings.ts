@@ -187,7 +187,7 @@ export async function createSettings(
     ),
   }, options);
   if (errors.length > 0) {
-    throw new Error(errors.join('; '));
+    throw new Error(`Validation failed: ${errors.join('; ')}`);
   }
 
   const existing = await repository.findByTenant(input.tenantId);
@@ -241,7 +241,7 @@ export async function updateSettings(
   };
   const errors = validateUpdateSettingsInput(normalizedInput, options);
   if (errors.length > 0) {
-    throw new Error(errors.join('; '));
+    throw new Error(`Validation failed: ${errors.join('; ')}`);
   }
 
   return repository.update(tenantId, { ...normalizedInput, updatedAt: new Date() });

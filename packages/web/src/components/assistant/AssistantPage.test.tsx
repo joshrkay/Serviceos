@@ -7,10 +7,6 @@ import { AssistantPage } from './AssistantPage';
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../shared/AIProposalCard', () => ({ AIProposalCard: () => null }));
 vi.mock('../../data/mock-data', () => ({
-  initialMessages: [
-    { id: 'm1', role: 'assistant', content: 'Hello! How can I help you today?', time: '9:00 AM' },
-    { id: 'm2', role: 'user',      content: 'What jobs are scheduled today?',   time: '9:01 AM' },
-  ],
   type: {},
 }));
 
@@ -41,10 +37,11 @@ function renderPage() {
 }
 
 describe('AssistantPage', () => {
-  it('falls back to mock initialMessages when no conversationId', () => {
+  it('shows welcome message when no conversationId', async () => {
     renderPage();
-    expect(screen.getByText('Hello! How can I help you today?')).toBeInTheDocument();
-    expect(screen.getByText('What jobs are scheduled today?')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
   });
 
   it('renders messages from API when conversation data is available', async () => {
@@ -65,7 +62,7 @@ describe('AssistantPage', () => {
     });
   });
 
-  it('falls back to mock messages when API returns error', async () => {
+  it('shows welcome message when API returns error', async () => {
     vi.mocked(useDetailQuery).mockReturnValue({
       ...defaultDetailResult,
       error: 'HTTP 404',
@@ -73,7 +70,7 @@ describe('AssistantPage', () => {
     });
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText('Hello! How can I help you today?')).toBeInTheDocument();
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
     });
   });
 

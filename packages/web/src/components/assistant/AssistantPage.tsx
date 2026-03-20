@@ -6,7 +6,7 @@ import {
   AlertCircle, Volume2,
 } from 'lucide-react';
 import { useSearchParams } from 'react-router';
-import { initialMessages, type Message, type AIProposal } from '../../data/mock-data';
+import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 
@@ -53,115 +53,43 @@ const SUGGESTIONS = [
   { text: 'Any overdue invoices?',            icon: AlertCircle },
 ];
 
-// ─── AI Reply Bank ──────────────────────────────────────────────
-const AI_REPLIES: Record<string, { content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean }> = {
-  default: {
-    content: "I'm on it. Let me check the latest from your jobs and contacts…",
-    reasoning: 'Searching across jobs, customers, schedule, and financials.',
-  },
-  invoice: {
-    content: "Found Rodriguez's active HVAC job. Here's a draft invoice ready to review — line items match what Carlos logged on site:",
-    reasoning: 'Job #1042 is active today. EST-0045 was viewed but not approved, so I built the invoice from site notes and parts logged.',
-    proposal: {
-      id: 'p-inv-new',
-      title: 'Draft Invoice – Roberto Rodriguez',
-      summary: 'AC tune-up + thermostat install. Total: $425. Due in 7 days.',
-      explanation: 'Matches parts logged by Carlos: capacitor ($28.50), contactor ($22.00), plus labor.',
-      reasoning: [
-        'Job #1042 has been active since 9:04 AM — Carlos is on site',
-        'Parts logged at 9:24 AM: capacitor + contactor ($50.50 in parts)',
-        'Standard labor rate: $95/hr × 2.5h estimated = $237.50',
-        'Total comes to $425 including service call fee',
-      ],
-      editFields: [
-        { label: 'Customer', key: 'customer', value: 'Roberto Rodriguez' },
-        { label: 'Total amount', key: 'total', value: '$425.00' },
-        { label: 'Due date', key: 'due', value: 'Mar 17, 2026' },
-        { label: 'Send via', key: 'method', value: 'SMS to (512) 555-2201' },
-      ],
-      confidence: 'High',
-      type: 'Invoice',
-      status: 'Pending',
-      relatedId: 'i2',
-      impact: 'Sends immediately after approval',
-    },
-  },
-  schedule: {
-    content: "Thompson's exterior paint job is approved and ready to go — just needs a date. Sarah Lin has clean availability Thursday and Friday this week. I'd suggest Thursday at 8am.",
-    reasoning: "EST-0047 was approved 3 days ago. No conflicts on Sarah's schedule Thursday. Drive time to 1100 Elm Court is ~22 min from her last job.",
-    proposal: {
-      id: 'p-sched-new',
-      title: 'Schedule Job #1045 – James Thompson',
-      summary: 'Exterior repaint, 2,400 sq ft. Thursday Mar 12 at 8:00 AM. Assign Sarah Lin.',
-      explanation: 'Sarah has no conflicts. Drive time is 22 min from her prior job.',
-      reasoning: [
-        "Estimate EST-0047 was approved 3 days ago — customer is waiting",
-        "Sarah Lin has zero conflicts Thursday Mar 12",
-        "No other jobs require Sarah until Thursday at 2:00 PM",
-        "Thompson is 22 min from Sarah's prior job — safe buffer",
-      ],
-      editFields: [
-        { label: 'Date', key: 'date', value: 'Thursday, Mar 12, 2026' },
-        { label: 'Start time', key: 'time', value: '8:00 AM' },
-        { label: 'Technician', key: 'tech', value: 'Sarah Lin' },
-        { label: 'Notify customer', key: 'notify', value: 'Yes – SMS confirmation' },
-      ],
-      confidence: 'High',
-      type: 'Schedule',
-      status: 'Pending',
-      relatedId: 'j5',
-      impact: 'Books the job + notifies Thompson',
-    },
-  },
-  followup: {
-    content: "Davis hasn't opened EST-0046 in 3 days — that's unusual for him. I've drafted a short, friendly follow-up text. Sending it now as an internal update.",
-    reasoning: "EST-0046 was sent Mar 7. Michael Davis typically responds within 24h. This is overdue — low-pressure nudge is the right move.",
-    autoApplied: true,
-  },
-  tomorrow: {
-    content: "Tomorrow you have 2 scheduled jobs:\n\n• **Michael Davis** — HVAC maintenance at 35 Birch Blvd, 10:00 AM with Carlos\n• **Linda Brown** — Drain cleaning at 302 Ash Ave, 9:30 AM with Sarah\n\nNo conflicts. Travel times look clean. Want me to send reminder texts to both customers tonight?",
-    reasoning: 'Checked schedule for Mar 11. Two confirmed bookings. No overlapping dispatch.',
-  },
-  free: {
-    content: "Thursday morning looks good for Sarah Lin. She's done by 11:30 AM based on her current job. Carlos has a slot opening at 10:00 AM if the Rodriguez job wraps early. Marcus is fully booked.",
-    reasoning: 'Checked all three techs against confirmed jobs and estimated durations for Thursday morning.',
-  },
-  overdue: {
-    content: "Yes — one overdue invoice:\n\n• **INV-0086** – Patricia Johnson, $325.00. Due Mar 3 — 7 days overdue.\n\nWant me to send a payment reminder text now?",
-    reasoning: 'Scanned all open invoices. Only INV-0086 is past due date.',
-    proposal: {
-      id: 'p-overdue',
-      title: 'Send Payment Reminder – Patricia Johnson',
-      summary: 'INV-0086 ($325) is 7 days overdue. Friendly SMS reminder.',
-      explanation: 'Sent to (512) 555-3341. Message will be polite and include a payment link.',
-      reasoning: [
-        'INV-0086 was due Mar 3 — 7 days past deadline',
-        'No payment or contact from Johnson since invoice was sent',
-        'A single friendly reminder at this stage has ~70% recovery rate',
-      ],
-      confidence: 'High',
-      type: 'Alert',
-      status: 'Pending',
-      relatedId: 'i4',
-      impact: 'SMS sent to Johnson immediately',
-    },
-  },
-  photo: {
-    content: "Got the photo — looks like a cracked condensate drain pan on a residential unit. I can see rust along the left side and what looks like standing water. Based on this, I'd suggest:\n\n1. Drain pan replacement (1–2 hours labor)\n2. Check the drain line for blockage\n3. Add bio-treatment tablets while you're at it\n\nWant me to draft a line item estimate for this?",
-    reasoning: 'Analyzed image for visible HVAC components and failure signs. Rust pattern and standing water indicate drain pan failure.',
-  },
-};
+// ─── AI Conversation API ────────────────────────────────────────
+// Send user messages to the backend conversation API and receive real AI responses.
+// Falls back to a simple echo if the API is unavailable.
+async function sendToConversationAPI(
+  conversationId: string | null,
+  text: string,
+): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string }> {
+  try {
+    const body: Record<string, unknown> = { content: text, messageType: 'text' };
+    if (conversationId) body.conversationId = conversationId;
 
-function getReply(text: string, hasAttachment?: boolean) {
-  if (hasAttachment) return AI_REPLIES.photo;
-  const t = text.toLowerCase();
-  if (t.includes('invoice') || t.includes('rodriguez')) return AI_REPLIES.invoice;
-  if (t.includes('schedule') || t.includes('thompson')) return AI_REPLIES.schedule;
-  if (t.includes('follow') || t.includes('davis'))      return AI_REPLIES.followup;
-  if (t.includes('tomorrow'))                           return AI_REPLIES.tomorrow;
-  if (t.includes('free') || t.includes('thursday'))     return AI_REPLIES.free;
-  if (t.includes('overdue') || t.includes('invoice') || t.includes('paid')) return AI_REPLIES.overdue;
-  return AI_REPLIES.default;
+    const res = await fetch('/api/conversations/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      throw new Error(`API error: ${res.status}`);
+    }
+
+    const data = await res.json();
+    return {
+      content: data.content || data.message || 'I received your message but could not generate a response.',
+      reasoning: data.reasoning,
+      proposal: data.proposal,
+      autoApplied: data.autoApplied,
+      newConversationId: data.conversationId,
+    };
+  } catch {
+    // Fallback when API is unreachable (e.g., local dev without backend)
+    return {
+      content: `I received your message: "${text}". The AI backend is not connected yet — connect it via AI_PROVIDER_API_KEY to get real responses.`,
+      reasoning: 'API unavailable — showing fallback response.',
+    };
+  }
 }
 
 // ─── Message timestamp helper ───────────────────────────────────
@@ -370,24 +298,67 @@ function VoiceRecordingBar({ onCancel, onSend }: {
   const [transcribing, setTranscribing] = useState(false);
   const [transcript, setTranscript]   = useState('');
 
-  const MOCK = [
-    "Invoice the Rodriguez job and send it to him",
-    "What's Carlos working on right now?",
-    "Schedule Thompson for Thursday morning with Sarah",
-    "Are there any overdue invoices I should know about?",
-  ];
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
+    // Start recording via MediaRecorder API
+    navigator.mediaDevices?.getUserMedia({ audio: true }).then((stream) => {
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.start();
+    }).catch(() => {
+      // Microphone not available — user will need to type instead
+    });
+
     const t = setInterval(() => setSeconds(s => s + 1), 1000);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      mediaRecorderRef.current?.stream.getTracks().forEach(t => t.stop());
+    };
   }, []);
 
   function stop() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      setTranscribing(true);
+      // Fallback: no recorder available
+      setTimeout(() => {
+        setTranscribing(false);
+        setTranscript('(Microphone not available — please type your message)');
+      }, 500);
+      return;
+    }
+
     setTranscribing(true);
-    setTimeout(() => {
+    recorder.onstop = async () => {
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      try {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+        const res = await fetch('/api/voice/transcribe', {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setTranscript(data.transcript || '(Could not transcribe audio)');
+        } else {
+          setTranscript('(Transcription service unavailable)');
+        }
+      } catch {
+        setTranscript('(Transcription service unavailable)');
+      }
       setTranscribing(false);
-      setTranscript(MOCK[Math.floor(Math.random() * MOCK.length)]);
-    }, 1400);
+    };
+    recorder.stop();
   }
 
   const fmt = (s: number) =>
@@ -517,13 +488,19 @@ export function AssistantPage() {
   const { data: conversation, isLoading: convLoading, error: convError } =
     useDetailQuery<ApiConversation>('/api/conversations', conversationId);
 
-  // Seed messages from API or fall back to mock initialMessages
+  // Seed messages from API — show empty state if no conversation exists yet
   useEffect(() => {
     if (convLoading) return;
     if (conversation?.messages?.length) {
       setMessages(conversation.messages.map(mapApiMessage));
     } else {
-      setMessages(initialMessages);
+      // No mock data — start with an empty conversation or a welcome message
+      setMessages([{
+        id: 'welcome',
+        role: 'assistant' as const,
+        content: "Hi! I'm your AI assistant. I can help you manage jobs, create estimates, schedule appointments, and more. What can I help you with?",
+        time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+      }]);
     }
   }, [convLoading, conversation, convError]);
 
@@ -550,7 +527,7 @@ export function AssistantPage() {
     setShowScrollBtn(scrollHeight - scrollTop - clientHeight > 120);
   }
 
-  const send = useCallback((text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
+  const send = useCallback(async (text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
     if (!text.trim() && !opts?.attachments?.length) return;
     const t = now();
 
@@ -568,12 +545,16 @@ export function AssistantPage() {
     setInput('');
     setPendingAttachment([]);
     setTyping(true);
+    setTypingReason('Thinking…');
 
-    const reply = getReply(text, !!opts?.attachments?.length);
-    setTypingReason(reply.reasoning ?? 'Checking your jobs and schedule…');
+    try {
+      const reply = await sendToConversationAPI(conversationId, text);
 
-    const delay = 900 + Math.random() * 700;
-    setTimeout(() => {
+      // If a new conversation was created, store it
+      if (reply.newConversationId && !conversationId) {
+        localStorage.setItem('conversationId', reply.newConversationId);
+      }
+
       const aiMsg: Message = {
         id: uid(),
         role: 'assistant',
@@ -583,10 +564,18 @@ export function AssistantPage() {
         autoApplied: reply.autoApplied,
       };
       setMessages(prev => [...prev, aiMsg]);
+    } catch {
+      setMessages(prev => [...prev, {
+        id: uid(),
+        role: 'assistant',
+        content: 'Sorry, something went wrong. Please try again.',
+        time: now(),
+      }]);
+    } finally {
       setTyping(false);
       setTypingReason('');
-    }, delay);
-  }, []);
+    }
+  }, [conversationId]);
 
   function handleSend() {
     if (pendingAttachment && pendingAttachment.length > 0) {
@@ -671,7 +660,7 @@ export function AssistantPage() {
       >
         <div className="max-w-3xl mx-auto">
 
-          <DateSep label="Today · Mar 10, 2026" />
+          <DateSep label={`Today · ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`} />
 
           {messages.map((msg, i) => (
             <MessageBubble key={msg.id} msg={msg} isLast={i === messages.length - 1} />

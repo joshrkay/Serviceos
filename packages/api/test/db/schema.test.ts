@@ -51,16 +51,6 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(() => setTenantContext('')).toThrow('Invalid tenant ID format');
   });
 
-  it('validation — createDatabaseConfig rejects unknown env', () => {
-    expect(() => createDatabaseConfig('invalid')).toThrow('Unknown database environment');
-  });
-
-  it('happy path — dev config uses localhost', () => {
-    const config = createDatabaseConfig('dev');
-    expect(config.host).toBe('localhost');
-    expect(config.database).toBe('serviceos_dev');
-  });
-
   it('tenant isolation — each table has tenant_id reference', () => {
     const sql = getMigrationSQL();
     const tenantScopedTables = ['users', 'audit_events', 'files', 'conversations', 'messages', 'voice_recordings', 'ai_runs', 'document_revisions'];

@@ -86,7 +86,9 @@ export class PlatformStack extends cdk.Stack {
     const logGroup = new logs.LogGroup(this, 'ApiLogGroup', logGroupProps);
 
     taskDefinition.addContainer('api', {
-      image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
+      // Use the ECR repository provisioned above. Initial deploy uses a placeholder;
+      // CI/CD pipeline pushes real images and updates the service.
+      image: ecs.ContainerImage.fromEcrRepository(this.repository, 'latest'),
       portMappings: [{ containerPort: CONTAINER_PORT }],
       environment: {
         NODE_ENV: envConfig.environment,

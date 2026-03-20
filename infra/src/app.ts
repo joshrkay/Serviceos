@@ -58,6 +58,7 @@ for (const envName of envNames) {
   queues.transcriptionQueue.grantConsumeMessages(taskRole);
   secrets.clerkSecret.grantRead(taskRole);
   secrets.openAiSecret.grantRead(taskRole);
+  secrets.stripeSecret.grantRead(taskRole);
   data.dbSecret.grantRead(taskRole);
 
   // Suppress unused-variable warnings in strict TS — stacks are registered on app

@@ -3,27 +3,32 @@ import type { GatewayConfig } from './types';
 /**
  * Task-to-model routing table.
  *
- * Model names work for both OpenAI and OpenRouter:
- *   OpenAI:      gpt-4o, gpt-4o-mini
- *   OpenRouter:  openai/gpt-4o, openai/gpt-4o-mini, anthropic/claude-3-5-sonnet, etc.
+ * Model identifiers use the OpenRouter namespaced format by default.
+ * Override per-environment via AI_DEFAULT_MODEL and AI_PROVIDER_BASE_URL env vars.
  *
- * To switch providers, change AI_PROVIDER_BASE_URL + AI_PROVIDER_API_KEY in .env
- * and update model names here if using OpenRouter's namespaced format.
+ * System prompts are intentionally generic — they reference "service businesses"
+ * rather than specific verticals so the same routing works for HVAC, plumbing,
+ * painting, electrical, or any service type the tenant configures.
  */
+
+const defaultModel = process.env.AI_DEFAULT_MODEL || 'openai/gpt-4o-mini';
+const advancedModel = process.env.AI_ADVANCED_MODEL || 'openai/gpt-4o';
+
 export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
-  defaultModel: 'openai/gpt-4o-mini',
+  defaultModel,
   routes: {
     draft_estimate: {
-      model: 'openai/gpt-4o',
+      model: advancedModel,
       temperature: 0.2,
       maxTokens: 2048,
       systemPrompt:
-        'You are an expert estimator for HVAC and plumbing businesses. ' +
+        'You are an expert estimator for service businesses. ' +
         'Generate accurate, detailed job estimates in structured JSON. ' +
+        'Adapt terminology and line items to the tenant\'s configured service vertical. ' +
         'Use integer cents for all money values.',
     },
     classify_intent: {
-      model: 'openai/gpt-4o-mini',
+      model: defaultModel,
       temperature: 0.0,
       maxTokens: 256,
       systemPrompt:
@@ -31,7 +36,7 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
         'Respond only with valid JSON matching the IntentClassification schema.',
     },
     extract_job_details: {
-      model: 'openai/gpt-4o-mini',
+      model: defaultModel,
       temperature: 0.1,
       maxTokens: 1024,
       systemPrompt:
@@ -39,7 +44,7 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
         'Respond only with valid JSON. Use integer cents for money.',
     },
     generate_proposal: {
-      model: 'openai/gpt-4o',
+      model: advancedModel,
       temperature: 0.1,
       maxTokens: 4096,
       systemPrompt:
@@ -48,18 +53,68 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
         'Never include personally identifiable information in reasoning fields.',
     },
     transcription_correction: {
-      model: 'openai/gpt-4o-mini',
+      model: defaultModel,
       temperature: 0.1,
       maxTokens: 2048,
       systemPrompt:
-        'Correct errors in voice transcriptions for HVAC/plumbing context. ' +
-        'Fix technical terminology, names, and numbers. ' +
+        'Correct errors in voice transcriptions for a service business context. ' +
+        'Fix technical terminology, trade-specific terms, names, and numbers. ' +
         'Return corrected text only — no commentary.',
     },
     summarize_conversation: {
-      model: 'openai/gpt-4o-mini',
+      model: defaultModel,
       temperature: 0.3,
       maxTokens: 512,
+    },
+    extract_business_profile: {
+      model: advancedModel,
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract structured business profile data from an onboarding voice transcript. ' +
+        'Return valid JSON. Identify the business vertical (e.g., HVAC, plumbing, ' +
+        'painting, electrical, contracting, or any service trade described).',
+    },
+    extract_categories: {
+      model: advancedModel,
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract service categories from an onboarding voice transcript. ' +
+        'Match against the canonical category taxonomy when possible, ' +
+        'but also capture custom categories the business describes. Return valid JSON.',
+    },
+    extract_pricing: {
+      model: advancedModel,
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract pricing information from an onboarding voice transcript. ' +
+        'All amounts in integer cents. Return valid JSON.',
+    },
+    extract_team: {
+      model: defaultModel,
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract team member information from an onboarding voice transcript. ' +
+        'Distinguish technician, dispatcher, and owner roles. Return valid JSON.',
+    },
+    extract_schedule: {
+      model: defaultModel,
+      temperature: 0.1,
+      maxTokens: 1024,
+      systemPrompt:
+        'Extract working hours and SLA expectations from an onboarding voice transcript. ' +
+        'Use 24-hour time format. Return valid JSON.',
+    },
+    generate_clarification_questions: {
+      model: defaultModel,
+      temperature: 0.3,
+      maxTokens: 512,
+      systemPrompt:
+        'Generate targeted follow-up questions for incomplete onboarding data. ' +
+        'Questions should be specific, not generic. Return valid JSON.',
     },
   },
 };

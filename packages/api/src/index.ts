@@ -7,10 +7,12 @@ process.on('uncaughtException', (err: Error) => {
 });
 
 process.on('unhandledRejection', (reason: unknown) => {
-  process.stdout.write(
-    `FATAL unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}\n`
+  process.stderr.write(
+    `WARN unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}\n`
   );
-  process.exit(1);
+  // Do NOT call process.exit() here — an unhandled rejection from a background
+  // task (e.g. DB seeding, queue polling) should not kill the entire process
+  // and block Railway healthchecks. Errors are logged for observability.
 });
 
 const PORT = parseInt(process.env.PORT || '3000', 10);

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-push hook: verify the API builds against the production tsconfig.
+# Install with: git config core.hooksPath .githooks
+
+echo "Running production type check..."
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "Type check failed. Fix errors before pushing."
+  exit 1
+fi
