@@ -97,22 +97,35 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             created: result.created,
           });
 
-          // Write tenant_id back to Clerk user's public_metadata
+          // Write tenant_id back to Clerk user's public_metadata (best-effort)
           if (config.CLERK_SECRET_KEY) {
-            await fetch(`https://api.clerk.com/v1/users/${userId}`, {
-              method: 'PATCH',
-              headers: {
-                'Authorization': `Bearer ${config.CLERK_SECRET_KEY}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                public_metadata: { tenant_id: result.tenantId },
-              }),
-            });
-            logger.info('Clerk user metadata updated with tenant_id', {
-              userId,
-              tenantId: result.tenantId,
-            });
+            try {
+              const clerkRes = await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+                method: 'PATCH',
+                headers: {
+                  'Authorization': `Bearer ${config.CLERK_SECRET_KEY}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  public_metadata: { tenant_id: result.tenantId },
+                }),
+              });
+              if (!clerkRes.ok) {
+                const errBody = await clerkRes.text();
+                logger.error('Failed to update Clerk user metadata', {
+                  userId, tenantId: result.tenantId, status: clerkRes.status, body: errBody,
+                });
+              } else {
+                logger.info('Clerk user metadata updated with tenant_id', {
+                  userId, tenantId: result.tenantId,
+                });
+              }
+            } catch (err) {
+              logger.error('Clerk API call failed', {
+                userId, tenantId: result.tenantId,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              });
+            }
           }
         } else if (!deps.tenantRepo) {
           logger.warn('No tenant repository configured — skipping tenant bootstrap');
