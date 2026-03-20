@@ -2,13 +2,18 @@ import { Router, Request, Response } from 'express';
 import { AppConfig } from '../shared/config';
 import { verifyWebhookSignature, handleWebhookEvent, InMemoryWebhookRepository } from './webhook-handler';
 import { createLogger } from '../logging/logger';
+import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
 // Shared in-memory repo for dev — swap for DB-backed repo in production
 const webhookRepo = new InMemoryWebhookRepository();
 
-export function createWebhookRouter(config: AppConfig): Router {
+export interface WebhookRouterDeps {
+  tenantRepo?: TenantRepository;
+}
+
+export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
   const router = Router();
 
   /**
@@ -85,9 +90,33 @@ export function createWebhookRouter(config: AppConfig): Router {
 
         logger.info('user.created webhook received', { userId, email: primaryEmail });
 
-        // TODO: call bootstrapTenant() and write tenant_id back to Clerk
-        // public_metadata via Clerk Backend API once DB is connected.
-        // For now, log the event — the tenant bootstrap logic is wired and ready.
+        if (deps.tenantRepo && primaryEmail) {
+          const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo);
+          logger.info('Tenant bootstrap complete', {
+            tenantId: result.tenantId,
+            created: result.created,
+          });
+
+          // Write tenant_id back to Clerk user's public_metadata
+          if (config.CLERK_SECRET_KEY) {
+            await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+              method: 'PATCH',
+              headers: {
+                'Authorization': `Bearer ${config.CLERK_SECRET_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                public_metadata: { tenant_id: result.tenantId },
+              }),
+            });
+            logger.info('Clerk user metadata updated with tenant_id', {
+              userId,
+              tenantId: result.tenantId,
+            });
+          }
+        } else if (!deps.tenantRepo) {
+          logger.warn('No tenant repository configured — skipping tenant bootstrap');
+        }
       }
 
       await webhookRepo.updateStatus(svixId, 'processed');
