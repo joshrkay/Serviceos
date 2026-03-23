@@ -3,8 +3,8 @@ import {
   activatePack,
   deactivatePack,
   getActivePacks,
-  validateActivationInput,
 } from '../../src/settings/pack-activation';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-001B — Tenant-to-pack activation linkage', () => {
   let repo: InMemoryPackActivationRepository;
@@ -52,14 +52,20 @@ describe('P4-001B — Tenant-to-pack activation linkage', () => {
     expect(reactivated.status).toBe('active');
   });
 
-  it('validation — rejects missing tenantId', () => {
-    const errors = validateActivationInput({ tenantId: '', packId: 'hvac-v1' });
-    expect(errors).toContain('tenantId is required');
+  it('validation — write path rejects missing tenantId with structured errors', async () => {
+    await expect(activatePack({ tenantId: '', packId: 'hvac-v1' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid activation input',
+      details: { errors: ['tenantId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
-  it('validation — rejects missing packId', () => {
-    const errors = validateActivationInput({ tenantId: 't1', packId: '' });
-    expect(errors).toContain('packId is required');
+  it('write path — rejects missing packId', async () => {
+    await expect(activatePack({ tenantId: 't1', packId: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid activation input',
+      details: { errors: ['packId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('edge case — throws if pack already active', async () => {

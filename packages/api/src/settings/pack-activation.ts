@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { ValidationError } from '../shared/errors';
 
 export type ActivationStatus = 'active' | 'deactivated';
 
@@ -34,6 +35,11 @@ export async function activatePack(
   input: ActivatePackInput,
   repository: PackActivationRepository
 ): Promise<TenantPackActivation> {
+  const errors = validateActivationInput(input);
+  if (errors.length > 0) {
+    throw new ValidationError('Invalid activation input', { errors });
+  }
+
   const existing = await repository.findByTenantAndPack(input.tenantId, input.packId);
   if (existing && existing.status === 'active') {
     throw new Error('Pack already activated for this tenant');
