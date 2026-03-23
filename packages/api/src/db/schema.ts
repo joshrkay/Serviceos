@@ -905,6 +905,12 @@ export const MIGRATIONS = {
   `,
 };
 
+export const SCHEMA_MIGRATIONS_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS schema_migrations (
+    migration_key TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
 function makePoliciesIdempotent(sql: string): string {
   return sql.replace(
     /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)\s+USING\s*\(([^;]+)\);/g,
