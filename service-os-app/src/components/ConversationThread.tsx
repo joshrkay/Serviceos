@@ -61,7 +61,8 @@ export default function ConversationThread() {
         proposal: data.clarification_needed ? undefined : data,
       };
       setMessages(prev => [...prev, assistantMsg]);
-    } catch {
+    } catch (error) {
+      console.error('Failed to send message:', error);
       setMessages(prev => [
         ...prev,
         {

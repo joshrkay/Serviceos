@@ -43,7 +43,8 @@ export async function POST(req: Request) {
     .single();
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error('Supabase error creating tenant:', error.message);
+    return NextResponse.json({ error: 'Failed to create tenant' }, { status: 500 });
   }
 
   return NextResponse.json({ id: data.id }, { status: 201 });

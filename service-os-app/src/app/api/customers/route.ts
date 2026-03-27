@@ -13,7 +13,10 @@ export async function GET() {
     .eq('tenant_id', tenantId)
     .order('name');
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    console.error('Supabase error listing customers:', error.message);
+    return NextResponse.json({ error: 'Failed to load customers' }, { status: 500 });
+  }
   return NextResponse.json(data);
 }
 
@@ -51,6 +54,9 @@ export async function POST(req: Request) {
     .select()
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    console.error('Supabase error creating customer:', error.message);
+    return NextResponse.json({ error: 'Failed to create customer' }, { status: 500 });
+  }
   return NextResponse.json(data, { status: 201 });
 }

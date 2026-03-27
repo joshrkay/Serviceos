@@ -109,8 +109,8 @@ export function useDeepgramSTT(): UseDeepgramSTTReturn {
             setInterimTranscript(text);
           }
         }
-      } catch {
-        // Ignore parse errors
+      } catch (e) {
+        console.warn('Could not parse Deepgram message:', e);
       }
     };
 

@@ -1,3 +1,4 @@
+import logging
 import os
 from dotenv import load_dotenv
 
@@ -8,12 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agent.graph import build_graph
 
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="ServiceOS Agent", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ALLOWED_ORIGINS", "").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -51,4 +53,5 @@ async def process(req: ProcessRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Unexpected error processing request: %s", req.transcript[:100])
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")

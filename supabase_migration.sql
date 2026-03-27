@@ -8,6 +8,16 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ============================================================
+-- Auto-update trigger for updated_at columns
+-- ============================================================
+CREATE OR REPLACE FUNCTION handle_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================
 -- 1. tenants
 -- ============================================================
 CREATE TABLE IF NOT EXISTS tenants (
@@ -24,6 +34,9 @@ CREATE TABLE IF NOT EXISTS tenants (
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenants_own ON tenants
   USING (clerk_user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE TRIGGER on_tenants_update BEFORE UPDATE ON tenants
+  FOR EACH ROW EXECUTE PROCEDURE handle_updated_at();
 
 -- ============================================================
 -- 2. customers
@@ -49,6 +62,9 @@ ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
 CREATE POLICY customers_tenant ON customers
   USING (tenant_id IN (SELECT id FROM tenants WHERE clerk_user_id = current_setting('request.jwt.claims', true)::json->>'sub'));
 
+CREATE TRIGGER on_customers_update BEFORE UPDATE ON customers
+  FOR EACH ROW EXECUTE PROCEDURE handle_updated_at();
+
 -- ============================================================
 -- 3. jobs
 -- ============================================================
@@ -71,6 +87,9 @@ CREATE INDEX idx_jobs_customer ON jobs(customer_id);
 ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY jobs_tenant ON jobs
   USING (tenant_id IN (SELECT id FROM tenants WHERE clerk_user_id = current_setting('request.jwt.claims', true)::json->>'sub'));
+
+CREATE TRIGGER on_jobs_update BEFORE UPDATE ON jobs
+  FOR EACH ROW EXECUTE PROCEDURE handle_updated_at();
 
 -- ============================================================
 -- 4. invoices
@@ -95,6 +114,9 @@ CREATE INDEX idx_invoices_customer ON invoices(customer_id);
 ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
 CREATE POLICY invoices_tenant ON invoices
   USING (tenant_id IN (SELECT id FROM tenants WHERE clerk_user_id = current_setting('request.jwt.claims', true)::json->>'sub'));
+
+CREATE TRIGGER on_invoices_update BEFORE UPDATE ON invoices
+  FOR EACH ROW EXECUTE PROCEDURE handle_updated_at();
 
 -- ============================================================
 -- 5. conversations

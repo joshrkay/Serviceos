@@ -36,6 +36,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     .select()
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) {
+    console.error('Supabase error updating customer:', error.message);
+    return NextResponse.json({ error: 'Failed to update customer' }, { status: 500 });
+  }
   return NextResponse.json(data);
 }

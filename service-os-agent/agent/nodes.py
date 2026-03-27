@@ -1,15 +1,25 @@
 import json
+import logging
 import os
 from langchain_anthropic import ChatAnthropic
 from supabase import create_client, Client
 from .state import AgentState, CustomerMatch, Proposal
 from .prompts import CLASSIFY_EXTRACT_SYSTEM
 
+logger = logging.getLogger(__name__)
 
 # ─── Shared clients (initialized lazily) ────────────────────
 
 _llm = None
 _supabase: Client | None = None
+
+
+def _require_env(name: str) -> str:
+    """Get a required environment variable or raise a clear error."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Required environment variable {name} is not set")
+    return value
 
 
 def get_llm() -> ChatAnthropic:
@@ -18,7 +28,7 @@ def get_llm() -> ChatAnthropic:
         _llm = ChatAnthropic(
             model="claude-sonnet-4-20250514",
             max_tokens=500,
-            anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
+            anthropic_api_key=_require_env("ANTHROPIC_API_KEY"),
         )
     return _llm
 
@@ -27,8 +37,8 @@ def get_supabase() -> Client:
     global _supabase
     if _supabase is None:
         _supabase = create_client(
-            os.environ["SUPABASE_URL"],
-            os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+            _require_env("SUPABASE_URL"),
+            _require_env("SUPABASE_SERVICE_ROLE_KEY"),
         )
     return _supabase
 
@@ -68,6 +78,7 @@ def classify_extract(state: AgentState) -> dict:
         }
 
     except (json.JSONDecodeError, KeyError, IndexError) as e:
+        logger.warning("Failed to parse LLM response: %s", e)
         return {
             "intent": "unknown",
             "intent_confidence": 0.0,
@@ -76,6 +87,7 @@ def classify_extract(state: AgentState) -> dict:
             "error": f"Parse error: {e}",
         }
     except Exception as e:
+        logger.exception("Unexpected error in classify_extract")
         return {
             "intent": "unknown",
             "intent_confidence": 0.0,
@@ -151,15 +163,14 @@ def resolve(state: AgentState) -> dict:
         )
 
     # Decision logic
-    if len(scored) == 1 and scored[0]["confidence"] > 0.90:
-        return {"customer_match": scored[0], "customer_alternatives": []}
-
-    if len(scored) == 1 and scored[0]["confidence"] >= 0.70:
+    if len(scored) == 1 and scored[0].get("confidence", 0) >= 0.70:
         return {"customer_match": scored[0], "customer_alternatives": []}
 
     if len(scored) >= 2:
         # Multiple matches — check if top is clearly better
-        if scored[0]["confidence"] > 0.90 and scored[0]["confidence"] - scored[1]["confidence"] > 0.15:
+        top_conf = scored[0].get("confidence", 0)
+        second_conf = scored[1].get("confidence", 0)
+        if top_conf > 0.90 and top_conf - second_conf > 0.15:
             return {"customer_match": scored[0], "customer_alternatives": scored[1:]}
         return {
             "customer_match": scored[0],
@@ -202,7 +213,7 @@ def score(state: AgentState) -> dict:
         level = "low"
 
     # Build confirmation message
-    cust_name = customer_match["name"] if customer_match else "unknown customer"
+    cust_name = (customer_match.get("name") if customer_match else None) or "unknown customer"
     amount = entities.get("amount")
     service = entities.get("service", "")
     cust_address = customer_match.get("address", "") if customer_match else ""
@@ -211,23 +222,23 @@ def score(state: AgentState) -> dict:
         confirmation = f"How much should I charge {cust_name}?"
         clarification_q = confirmation
     elif clarification == "customer":
-        names = [a["name"] for a in alternatives[:3]]
+        names = [a.get("name", "?") for a in alternatives[:3]]
         confirmation = f"Which customer: {' or '.join(names)}?"
         clarification_q = confirmation
     elif level == "high":
-        parts = [f"Invoice for {cust_name}"]
+        base = f"Invoice for {cust_name}"
         if amount:
-            parts[0] += f", ${amount:,.2f}"
+            base += f", ${amount:,.2f}"
         if service:
-            parts[0] += f", {service}"
-        parts.append("Sound good?")
-        confirmation = " ".join(parts)
+            base += f", {service}"
+        confirmation = f"{base} Sound good?"
         clarification_q = None
     elif level == "medium":
         addr_part = f" on {cust_address.split(',')[0]}" if cust_address else ""
-        parts = [f"{cust_name}{addr_part}"]
+        base = f"{cust_name}{addr_part}"
         if intent == "create_invoice" and amount:
-            parts[0] = f"{cust_name}{addr_part} — invoice for ${amount:,.2f}"
+            base = f"{cust_name}{addr_part} — invoice for ${amount:,.2f}"
+        parts = [base]
         if service:
             parts.append(service)
         parts.append("Is that right?")

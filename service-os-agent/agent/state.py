@@ -1,4 +1,9 @@
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, Literal
+
+
+class Material(TypedDict, total=False):
+    name: str
+    quantity: int
 
 
 class CustomerMatch(TypedDict, total=False):
@@ -21,18 +26,18 @@ class Entities(TypedDict, total=False):
     customer: Optional[str]
     amount: Optional[float]
     service: Optional[str]
-    materials: list[dict]
+    materials: list[Material]
     job_type: Optional[str]
 
 
 class Proposal(TypedDict, total=False):
     type: str
     confidence: float
-    confidence_level: str  # "high" | "medium" | "low"
+    confidence_level: Literal["high", "medium", "low"]
     customer: CustomerMatch
     amount: Optional[float]
     service_description: Optional[str]
-    materials: list[dict]
+    materials: list[Material]
     clarification_needed: Optional[str]
     clarification_question: Optional[str]
     confirmation_message: str

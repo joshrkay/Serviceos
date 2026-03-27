@@ -24,7 +24,8 @@ export async function GET() {
 
   if (!res.ok) {
     const body = await res.text();
-    return NextResponse.json({ error: `Deepgram error: ${body}` }, { status: res.status });
+    console.error(`Deepgram token error: ${body}`);
+    return NextResponse.json({ error: 'Failed to initialize voice service' }, { status: res.status });
   }
 
   const data = await res.json();
