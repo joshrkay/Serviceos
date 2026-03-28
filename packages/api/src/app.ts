@@ -27,6 +27,7 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createOnboardingRouter } from './routes/onboarding';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -44,7 +45,7 @@ import { InMemoryAuditRepository } from './audit/audit';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryVoiceRepository } from './voice/voice-service';
+import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
@@ -178,44 +179,22 @@ export function createApp() {
     : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
-  // Transcription provider — use OpenAI Whisper API when API key is configured,
-  // otherwise fall back to a no-op provider for dev.
-  const transcriptionProvider = process.env.AI_PROVIDER_API_KEY
-    ? {
-        async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-          // Fetch the audio binary from the URL, then upload to Whisper
-          const audioResponse = await fetch(audioUrl);
-          if (!audioResponse.ok) {
-            throw new Error(`Failed to fetch audio from ${audioUrl}: ${audioResponse.status}`);
-          }
-          const audioBlob = await audioResponse.blob();
-          const fd = new FormData();
-          fd.append('file', audioBlob, 'audio.webm');
-          fd.append('model', 'whisper-1');
-          const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${process.env.AI_PROVIDER_API_KEY}` },
-            body: fd,
-          });
-          if (!res.ok) {
-            const errBody = await res.text();
-            throw new Error(`Whisper API error ${res.status}: ${errBody}`);
-          }
-          const data = (await res.json()) as { text?: string };
-          return {
-            transcript: data.text || '',
-            metadata: { provider: 'openai-whisper', processedAt: new Date().toISOString() },
-          };
-        },
+  // Synchronous transcription function — used by POST /api/voice/transcribe
+  const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
+
+  // Async transcription provider for the queue-based worker pipeline.
+  // Wraps transcribeAudio: fetches audio from URL first, then transcribes the buffer.
+  const transcriptionProvider = {
+    async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
+      const audioResponse = await fetch(audioUrl);
+      if (!audioResponse.ok) {
+        throw new Error(`Failed to fetch audio from ${audioUrl}: ${audioResponse.status}`);
       }
-    : {
-        async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-          return {
-            transcript: `[Dev mode] Transcription not available. Audio: ${audioUrl}`,
-            metadata: { provider: 'dev-fallback', processedAt: new Date().toISOString() },
-          };
-        },
-      };
+      const arrayBuffer = await audioResponse.arrayBuffer();
+      const contentType = audioResponse.headers.get('content-type') || 'audio/webm';
+      return transcribeAudio(Buffer.from(arrayBuffer), contentType);
+    },
+  };
   const transcriptionWorker = createTranscriptionWorker(voiceRepo, transcriptionProvider);
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -252,7 +231,13 @@ export function createApp() {
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  const voiceLogger = createLogger({
+    service: 'voice',
+    environment: process.env.NODE_ENV || 'development',
+    level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
+  });
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
+  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

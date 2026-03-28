@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { customers } from '../../data/mock-data';
 import type { ServiceType } from '../../data/mock-data';
+import { apiFetch } from '../../utils/api-fetch';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type LineItem   = { description: string; qty: number; rate: number };
@@ -362,15 +363,56 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
     if (phase === 'recording' && seconds >= 9) stop();
   }, [seconds, phase]);
 
-  function start() { setPhase('recording'); setSeconds(0); }
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  // Cleanup media stream on unmount
+  useEffect(() => {
+    return () => { mediaRecorderRef.current?.stream?.getTracks().forEach(t => t.stop()); };
+  }, []);
+
+  async function start() {
+    setPhase('recording'); setSeconds(0);
+    audioChunksRef.current = [];
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      recorder.start();
+    } catch {
+      setTranscript('(Microphone not available)');
+      setPhase('transcribed');
+    }
+  }
 
   function stop() {
     if (timerRef.current) clearInterval(timerRef.current);
-    setPhase('processing');
-    setTimeout(() => {
-      setTranscript(VOICE_TRANSCRIPTS[svcType ?? 'HVAC']);
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
       setPhase('transcribed');
-    }, 1800);
+      return;
+    }
+    setPhase('processing');
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      try {
+        const fd = new FormData();
+        fd.append('audio', audioBlob, 'recording.webm');
+        const res = await apiFetch('/api/voice/transcribe', { method: 'POST', body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          setTranscript(data.transcript || '(Could not transcribe)');
+        } else {
+          setTranscript('(Transcription service unavailable)');
+        }
+      } catch {
+        setTranscript('(Transcription service unavailable)');
+      }
+      setPhase('transcribed');
+    };
+    recorder.stop();
   }
 
   function build() {

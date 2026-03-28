@@ -65,6 +65,64 @@ export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
   };
 }
 
+export interface TranscribeAudioOptions {
+  /** ISO 639-1 language code hint (e.g. 'en', 'es', 'fr'). Improves accuracy. */
+  language?: string;
+}
+
+/**
+ * Synchronous transcription function type.
+ * Accepts raw audio buffer + content type, returns transcript immediately.
+ */
+export interface TranscribeAudioFn {
+  (audioBuffer: Buffer, contentType: string, options?: TranscribeAudioOptions): Promise<{ transcript: string; metadata: Record<string, unknown> }>;
+}
+
+/**
+ * Create a transcribeAudio function backed by OpenAI Whisper API.
+ * Falls back to a dev-mode stub when no API key is provided.
+ */
+export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
+  if (apiKey) {
+    return async (audioBuffer: Buffer, contentType: string, options?: TranscribeAudioOptions) => {
+      const ext = contentType.includes('webm') ? 'webm'
+        : contentType.includes('wav') ? 'wav'
+        : contentType.includes('ogg') ? 'ogg'
+        : contentType.includes('mpeg') ? 'mp3'
+        : 'webm';
+      const fd = new FormData();
+      fd.append('file', new Blob([audioBuffer], { type: contentType }), `audio.${ext}`);
+      fd.append('model', 'whisper-1');
+      if (options?.language) {
+        fd.append('language', options.language);
+      }
+      const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        body: fd,
+      });
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(`Whisper API error ${res.status}: ${errBody}`);
+      }
+      const data = (await res.json()) as { text?: string };
+      return {
+        transcript: data.text || '',
+        metadata: {
+          provider: 'openai-whisper',
+          processedAt: new Date().toISOString(),
+          language: options?.language ?? 'auto',
+        },
+      };
+    };
+  }
+
+  return async (_audioBuffer: Buffer, _contentType: string, _options?: TranscribeAudioOptions) => ({
+    transcript: '[Dev mode] Voice transcription placeholder — configure AI_PROVIDER_API_KEY for real STT.',
+    metadata: { provider: 'dev-fallback', processedAt: new Date().toISOString() },
+  });
+}
+
 export class InMemoryVoiceRepository implements VoiceRepository {
   private recordings: Map<string, VoiceRecording> = new Map();
 
