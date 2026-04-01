@@ -83,7 +83,9 @@ export async function createTemplate(
   repository: EstimateTemplateRepository
 ): Promise<EstimateTemplate> {
   const errors = validateTemplateInput(input);
-  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) {
+    throw new ValidationError('Invalid template input', { errors });
+  }
 
   const template: EstimateTemplate = {
     id: uuidv4(),

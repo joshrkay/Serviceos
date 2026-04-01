@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalType, PackStatus, isValidVerticalType, isValidPackStatus } from './vertical-types';
+import { ValidationError } from './errors';
 
 export interface VerticalPack {
   id: string;
@@ -53,6 +54,11 @@ export async function registerPack(
   input: CreatePackInput,
   registry: VerticalPackRegistry
 ): Promise<VerticalPack> {
+  const errors = validatePackInput(input);
+  if (errors.length > 0) {
+    throw new ValidationError('Invalid pack input', { errors });
+  }
+
   const pack: VerticalPack = {
     id: uuidv4(),
     packId: input.packId,

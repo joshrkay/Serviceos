@@ -50,9 +50,12 @@ describe('P4-004A — Vertical estimate template schema', () => {
     }
   });
 
-  it('validation — rejects missing packId', () => {
-    const errors = validateTemplateInput({ ...validInput, packId: '' });
-    expect(errors).toContain('packId is required');
+  it('validation — write path rejects missing packId with structured errors', async () => {
+    await expect(createTemplate({ ...validInput, packId: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid estimate template input',
+      details: { errors: ['packId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('runtime validation — createTemplate rejects malformed payloads with typed error', async () => {

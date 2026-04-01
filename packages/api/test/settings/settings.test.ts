@@ -4,9 +4,9 @@ import {
   updateSettings,
   getNextEstimateNumber,
   getNextInvoiceNumber,
-  validateSettingsInput,
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P1-017 — Tenant business settings and numbering preferences', () => {
   let repo: InMemorySettingsRepository;
@@ -89,50 +89,35 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(num2).toBe('INV-0002');
   });
 
-  it('validation — rejects missing businessName', () => {
-    const errors = validateSettingsInput({ tenantId: 'tenant-1', businessName: '' });
-    expect(errors).toContain('businessName is required');
+  it('validation — write path rejects missing businessName with structured errors', async () => {
+    await expect(createSettings({ tenantId: 'tenant-1', businessName: '' }, repo)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid settings input',
+      details: { errors: ['businessName is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
-  it('validation — rejects missing tenantId', () => {
-    const errors = validateSettingsInput({ tenantId: '', businessName: 'ACME' });
-    expect(errors).toContain('tenantId is required');
+  it('write path — rejects missing tenantId', async () => {
+    await expect(createSettings({ tenantId: '', businessName: 'ACME' }, repo))
+      .rejects.toThrow('tenantId is required');
   });
 
-  it('validation — rejects invalid timezone', () => {
-    const errors = validateSettingsInput({
-      tenantId: 'tenant-1',
-      businessName: 'ACME',
-      timezone: 'Invalid/Zone',
-    });
-    expect(errors).toContain('Invalid timezone');
-  });
-
-  it('validation — rejects empty prefix', () => {
-    const errors = validateSettingsInput({
-      tenantId: 'tenant-1',
-      businessName: 'ACME',
-      estimatePrefix: '',
-    });
-    expect(errors).toContain('estimatePrefix cannot be empty');
-  });
-
-  it('validation — rejects negative payment terms', () => {
-    const errors = validateSettingsInput({
-      tenantId: 'tenant-1',
-      businessName: 'ACME',
-      defaultPaymentTermDays: -1,
-    });
-    expect(errors).toContain('defaultPaymentTermDays must be non-negative');
-  });
-
-  it('validation — createSettings surfaces validator errors', async () => {
+  it('write path — rejects invalid timezone', async () => {
     await expect(
-      createSettings(
-        { tenantId: 'tenant-1', businessName: 'ACME', timezone: 'Invalid/Zone' },
-        repo
-      )
-    ).rejects.toThrow('Validation failed: Invalid timezone');
+      createSettings({ tenantId: 'tenant-1', businessName: 'ACME', timezone: 'Invalid/Zone' }, repo)
+    ).rejects.toThrow('Invalid timezone');
+  });
+
+  it('write path — rejects empty estimatePrefix', async () => {
+    await expect(
+      createSettings({ tenantId: 'tenant-1', businessName: 'ACME', estimatePrefix: '' }, repo)
+    ).rejects.toThrow('estimatePrefix cannot be empty');
+  });
+
+  it('write path — rejects negative defaultPaymentTermDays', async () => {
+    await expect(
+      createSettings({ tenantId: 'tenant-1', businessName: 'ACME', defaultPaymentTermDays: -1 }, repo)
+    ).rejects.toThrow('defaultPaymentTermDays must be non-negative');
   });
 
   it('tenant isolation — settings are tenant-scoped', async () => {

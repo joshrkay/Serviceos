@@ -6,6 +6,7 @@ import {
   validatePackInput,
   CreatePackInput,
 } from '../../src/shared/vertical-pack-registry';
+import { ValidationError } from '../../src/shared/errors';
 
 describe('P4-001A — Canonical vertical pack registry model', () => {
   let registry: InMemoryVerticalPackRegistry;
@@ -103,14 +104,17 @@ describe('P4-001A — Canonical vertical pack registry model', () => {
     expect(deprecated!.status).toBe('deprecated');
   });
 
-  it('validation — rejects missing packId', () => {
-    const errors = validatePackInput({
+  it('validation — write path rejects missing packId with structured errors', async () => {
+    await expect(registerPack({
       packId: '',
       version: '1.0.0',
       verticalType: 'hvac',
       displayName: 'Test',
-    });
-    expect(errors).toContain('packId is required');
+    }, registry)).rejects.toMatchObject({
+      name: 'ValidationError',
+      message: 'Invalid pack input',
+      details: { errors: ['packId is required'] },
+    } satisfies Partial<ValidationError>);
   });
 
   it('validation — rejects invalid verticalType', () => {
