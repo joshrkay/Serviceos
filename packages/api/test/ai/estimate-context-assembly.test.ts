@@ -62,6 +62,32 @@ describe('P4-009B — Service category + template context assembly', () => {
     expect(context.terminologyHints).toBeUndefined();
   });
 
+  it('selects template-matching config when multiple vertical configs are provided', () => {
+    const plumbingConfig: VerticalPackConfig = {
+      ...hvacConfig,
+      verticalType: 'plumbing',
+      packId: 'plumbing-v1',
+    };
+    const context = assembleVerticalEstimateContext(sourceContext, [plumbingConfig, hvacConfig], template);
+    expect(context.terminologyHints).toBeDefined();
+    expect(context.terminologyHints![0].term).toBe('Furnace');
+  });
+
+  it('uses deterministic ordering when multiple configs are provided without template', () => {
+    const plumbingConfig: VerticalPackConfig = {
+      ...hvacConfig,
+      verticalType: 'plumbing',
+      packId: 'plumbing-v1',
+      terminology: {
+        pipe: { canonical: 'pipe', displayLabel: 'Pipe', promptHint: 'Pipe repair', aliases: [] },
+      },
+    };
+    const context = assembleVerticalEstimateContext(sourceContext, [plumbingConfig, hvacConfig], null);
+
+    expect(context.terminologyHints).toBeDefined();
+    expect(context.terminologyHints![0].term).toBe('Furnace');
+  });
+
   it('skips terminology entries with missing displayLabel or promptHint', () => {
     const configWithGaps: VerticalPackConfig = {
       ...hvacConfig,
