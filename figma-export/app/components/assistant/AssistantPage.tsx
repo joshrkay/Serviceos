@@ -31,77 +31,115 @@ const SUGGESTIONS = [
   { text: 'Any overdue invoices?',            icon: AlertCircle },
 ];
 
-interface AssistantApiMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
-interface AssistantApiReply {
-  role: 'assistant';
-  content: string;
-  reasoning?: string;
-  autoApplied?: boolean;
-  proposal?: AIProposal;
-}
-
-async function requestAssistantReply(messages: AssistantApiMessage[]): Promise<AssistantApiReply> {
-  const request = async (stream: boolean) => fetch('/api/assistant/chat', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: stream ? 'text/event-stream' : 'application/json',
+// ─── AI Reply Bank ──────────────────────────────────────────────
+const AI_REPLIES: Record<string, { content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean }> = {
+  default: {
+    content: "I'm on it. Let me check the latest from your jobs and contacts…",
+    reasoning: 'Searching across jobs, customers, schedule, and financials.',
+  },
+  invoice: {
+    content: "Found Rodriguez's active HVAC job. Here's a draft invoice ready to review — line items match what Carlos logged on site:",
+    reasoning: 'Job #1042 is active today. EST-0045 was viewed but not approved, so I built the invoice from site notes and parts logged.',
+    proposal: {
+      id: 'p-inv-new',
+      title: 'Draft Invoice – Roberto Rodriguez',
+      summary: 'AC tune-up + thermostat install. Total: $425. Due in 7 days.',
+      explanation: 'Matches parts logged by Carlos: capacitor ($28.50), contactor ($22.00), plus labor.',
+      reasoning: [
+        'Job #1042 has been active since 9:04 AM — Carlos is on site',
+        'Parts logged at 9:24 AM: capacitor + contactor ($50.50 in parts)',
+        'Standard labor rate: $95/hr × 2.5h estimated = $237.50',
+        'Total comes to $425 including service call fee',
+      ],
+      editFields: [
+        { label: 'Customer', key: 'customer', value: 'Roberto Rodriguez' },
+        { label: 'Total amount', key: 'total', value: '$425.00' },
+        { label: 'Due date', key: 'due', value: 'Mar 17, 2026' },
+        { label: 'Send via', key: 'method', value: 'SMS to (512) 555-2201' },
+      ],
+      confidence: 'High',
+      type: 'Invoice',
+      status: 'Pending',
+      relatedId: 'i2',
+      impact: 'Sends immediately after approval',
     },
-    body: JSON.stringify({ messages, stream }),
-  });
+  },
+  schedule: {
+    content: "Thompson's exterior paint job is approved and ready to go — just needs a date. Sarah Lin has clean availability Thursday and Friday this week. I'd suggest Thursday at 8am.",
+    reasoning: "EST-0047 was approved 3 days ago. No conflicts on Sarah's schedule Thursday. Drive time to 1100 Elm Court is ~22 min from her last job.",
+    proposal: {
+      id: 'p-sched-new',
+      title: 'Schedule Job #1045 – James Thompson',
+      summary: 'Exterior repaint, 2,400 sq ft. Thursday Mar 12 at 8:00 AM. Assign Sarah Lin.',
+      explanation: 'Sarah has no conflicts. Drive time is 22 min from her prior job.',
+      reasoning: [
+        "Estimate EST-0047 was approved 3 days ago — customer is waiting",
+        "Sarah Lin has zero conflicts Thursday Mar 12",
+        "No other jobs require Sarah until Thursday at 2:00 PM",
+        "Thompson is 22 min from Sarah's prior job — safe buffer",
+      ],
+      editFields: [
+        { label: 'Date', key: 'date', value: 'Thursday, Mar 12, 2026' },
+        { label: 'Start time', key: 'time', value: '8:00 AM' },
+        { label: 'Technician', key: 'tech', value: 'Sarah Lin' },
+        { label: 'Notify customer', key: 'notify', value: 'Yes – SMS confirmation' },
+      ],
+      confidence: 'High',
+      type: 'Schedule',
+      status: 'Pending',
+      relatedId: 'j5',
+      impact: 'Books the job + notifies Thompson',
+    },
+  },
+  followup: {
+    content: "Davis hasn't opened EST-0046 in 3 days — that's unusual for him. I've drafted a short, friendly follow-up text. Sending it now as an internal update.",
+    reasoning: "EST-0046 was sent Mar 7. Michael Davis typically responds within 24h. This is overdue — low-pressure nudge is the right move.",
+    autoApplied: true,
+  },
+  tomorrow: {
+    content: "Tomorrow you have 2 scheduled jobs:\n\n• **Michael Davis** — HVAC maintenance at 35 Birch Blvd, 10:00 AM with Carlos\n• **Linda Brown** — Drain cleaning at 302 Ash Ave, 9:30 AM with Sarah\n\nNo conflicts. Travel times look clean. Want me to send reminder texts to both customers tonight?",
+    reasoning: 'Checked schedule for Mar 11. Two confirmed bookings. No overlapping dispatch.',
+  },
+  free: {
+    content: "Thursday morning looks good for Sarah Lin. She's done by 11:30 AM based on her current job. Carlos has a slot opening at 10:00 AM if the Rodriguez job wraps early. Marcus is fully booked.",
+    reasoning: 'Checked all three techs against confirmed jobs and estimated durations for Thursday morning.',
+  },
+  overdue: {
+    content: "Yes — one overdue invoice:\n\n• **INV-0086** – Patricia Johnson, $325.00. Due Mar 3 — 7 days overdue.\n\nWant me to send a payment reminder text now?",
+    reasoning: 'Scanned all open invoices. Only INV-0086 is past due date.',
+    proposal: {
+      id: 'p-overdue',
+      title: 'Send Payment Reminder – Patricia Johnson',
+      summary: 'INV-0086 ($325) is 7 days overdue. Friendly SMS reminder.',
+      explanation: 'Sent to (512) 555-3341. Message will be polite and include a payment link.',
+      reasoning: [
+        'INV-0086 was due Mar 3 — 7 days past deadline',
+        'No payment or contact from Johnson since invoice was sent',
+        'A single friendly reminder at this stage has ~70% recovery rate',
+      ],
+      confidence: 'High',
+      type: 'Alert',
+      status: 'Pending',
+      relatedId: 'i4',
+      impact: 'SMS sent to Johnson immediately',
+    },
+  },
+  photo: {
+    content: "Got the photo — looks like a cracked condensate drain pan on a residential unit. I can see rust along the left side and what looks like standing water. Based on this, I'd suggest:\n\n1. Drain pan replacement (1–2 hours labor)\n2. Check the drain line for blockage\n3. Add bio-treatment tablets while you're at it\n\nWant me to draft a line item estimate for this?",
+    reasoning: 'Analyzed image for visible HVAC components and failure signs. Rust pattern and standing water indicate drain pan failure.',
+  },
+};
 
-  let res = await request(true);
-  if (!res.ok && res.status >= 400) {
-    res = await request(false);
-  }
-
-  if (!res.ok) {
-    throw new Error(`Assistant request failed: ${res.status}`);
-  }
-
-  const contentType = res.headers.get('content-type') || '';
-  if (contentType.includes('text/event-stream') && res.body) {
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let streamContent = '';
-    let donePayload: { message?: AssistantApiReply } | null = null;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split('\n\n');
-      buffer = events.pop() ?? '';
-
-      for (const rawEvent of events) {
-        const lines = rawEvent.split('\n');
-        const eventLine = lines.find((line) => line.startsWith('event:'));
-        const dataLine = lines.find((line) => line.startsWith('data:'));
-        const eventType = eventLine?.replace('event:', '').trim();
-        const eventData = dataLine?.replace('data:', '').trim();
-        if (!eventType || !eventData) continue;
-
-        const parsed = JSON.parse(eventData);
-        if (eventType === 'token' && typeof parsed.delta === 'string') {
-          streamContent += parsed.delta;
-        } else if (eventType === 'done') {
-          donePayload = parsed;
-        }
-      }
-    }
-
-    if (donePayload?.message) return donePayload.message;
-    return { role: 'assistant', content: streamContent || 'I could not generate a response right now.' };
-  }
-
-  const json = await res.json() as { message?: AssistantApiReply };
-  if (json.message) return json.message;
-  return { role: 'assistant', content: 'I could not generate a response right now.' };
+function getReply(text: string, hasAttachment?: boolean) {
+  if (hasAttachment) return AI_REPLIES.photo;
+  const t = text.toLowerCase();
+  if (t.includes('invoice') || t.includes('rodriguez')) return AI_REPLIES.invoice;
+  if (t.includes('schedule') || t.includes('thompson')) return AI_REPLIES.schedule;
+  if (t.includes('follow') || t.includes('davis'))      return AI_REPLIES.followup;
+  if (t.includes('tomorrow'))                           return AI_REPLIES.tomorrow;
+  if (t.includes('free') || t.includes('thursday'))     return AI_REPLIES.free;
+  if (t.includes('overdue') || t.includes('invoice') || t.includes('paid')) return AI_REPLIES.overdue;
+  return AI_REPLIES.default;
 }
 
 // ─── Message timestamp helper ───────────────────────────────────
@@ -475,7 +513,7 @@ export function AssistantPage() {
     setShowScrollBtn(scrollHeight - scrollTop - clientHeight > 120);
   }
 
-  const send = useCallback(async (text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
+  const send = useCallback((text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
     if (!text.trim() && !opts?.attachments?.length) return;
     const t = now();
 
@@ -494,19 +532,11 @@ export function AssistantPage() {
     setPendingAttachment([]);
     setTyping(true);
 
-    setTypingReason('Checking your jobs and schedule…');
+    const reply = getReply(text, !!opts?.attachments?.length);
+    setTypingReason(reply.reasoning ?? 'Checking your jobs and schedule…');
 
-    try {
-      const conversation: AssistantApiMessage[] = [
-        ...messages.map((msg) => ({ role: msg.role, content: msg.content })),
-        {
-          role: 'user',
-          content: opts?.attachments?.length
-            ? `${text || 'Review this attachment.'}\n\nAttachment count: ${opts.attachments.length}`
-            : text,
-        },
-      ];
-      const reply = await requestAssistantReply(conversation);
+    const delay = 900 + Math.random() * 700;
+    setTimeout(() => {
       const aiMsg: Message = {
         id: uid(),
         role: 'assistant',
@@ -516,19 +546,10 @@ export function AssistantPage() {
         autoApplied: reply.autoApplied,
       };
       setMessages(prev => [...prev, aiMsg]);
-    } catch {
-      const aiMsg: Message = {
-        id: uid(),
-        role: 'assistant',
-        content: 'I ran into a network issue reaching the assistant. Please try again.',
-        time: now(),
-      };
-      setMessages(prev => [...prev, aiMsg]);
-    } finally {
       setTyping(false);
       setTypingReason('');
-    }
-  }, [messages]);
+    }, delay);
+  }, []);
 
   function handleSend() {
     if (pendingAttachment && pendingAttachment.length > 0) {
