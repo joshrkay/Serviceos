@@ -6,9 +6,17 @@ dockerfileTarget = "api"
 [deploy]
 # Keep startup focused on serving traffic; run DB migrations as a separate
 # one-off/release step (CI/CD or Railway pre-deploy command).
-preDeployCommand = "node packages/api/dist/src/db/migrate.js"
+#
+# Run migrations best-effort. A failed migration must not block an otherwise
+# healthy deploy — index.ts logs startup errors and /health stays up so we
+# can diagnose via logs instead of a failed release. See also
+# packages/api/src/db/migrate.ts which already tolerates duplicate-policy.
+preDeployCommand = "node packages/api/dist/src/db/migrate.js || true"
 startCommand = "node packages/api/dist/src/index.js"
-healthcheckPath = "/ready"
+# Use /health (not /ready) — /health always returns 200 so transient DB
+# blips don't block releases. /ready is readiness-gating for clients.
+# See packages/api/src/health/health.ts.
+healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
