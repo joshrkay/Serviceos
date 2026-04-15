@@ -1,5 +1,11 @@
 import * as crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
+import { createLogger } from '../logging/logger';
+
+const authLogger = createLogger({
+  service: 'auth',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 export interface ClerkUser {
   id: string;
@@ -44,8 +50,17 @@ export function verifyClerkSession(clerkSecretKey: string) {
       };
       next();
     } catch (err) {
+      // Do NOT set req.auth. Do NOT short-circuit here — the global
+      // requireAuth middleware downstream will return 401 because
+      // req.auth is unset. Log the reason so bad tokens aren't
+      // silently indistinguishable from missing tokens.
       const message = err instanceof Error ? err.message : 'Authentication failed';
       req.authError = message;
+      authLogger.warn('Clerk token rejected', {
+        reason: message,
+        ip: req.ip,
+        path: req.path,
+      });
       next();
     }
   };

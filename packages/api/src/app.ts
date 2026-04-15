@@ -83,6 +83,7 @@ import { createLogger } from './logging/logger';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
+import { requireAuth } from './middleware/auth';
 
 export function createApp() {
   const app = express();
@@ -152,6 +153,13 @@ export function createApp() {
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
+  // Fail-closed: every /api/* request must carry a valid Clerk session.
+  // Individual routes still apply requireAuth/requireTenant/requirePermission
+  // as defense in depth, but this line makes it architecturally impossible
+  // for a new route to be silently public just because the author forgot
+  // to opt into the per-route gate. The decisions test suite guards this
+  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
+  app.use('/api', requireAuth);
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();

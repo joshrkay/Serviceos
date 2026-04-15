@@ -42,9 +42,12 @@
  * tying them together. This file is that contract.
  */
 
+import * as crypto from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
+import request from 'supertest';
 
+import { createApp } from '../../src/app';
 import {
   ConfidenceLevel,
   assessConfidence,
@@ -346,6 +349,65 @@ describe('D6 — Multi-user from day one', () => {
   it.fails('billing engine supports per-seat pricing', async () => {
     const hits = await grepApiSrc(/seatCount|perSeatCents|seat_count|subscription_tier/);
     expect(hits.length).toBeGreaterThan(0);
+  });
+
+  // ── Fail-closed auth at the /api layer (step 1 of the retrospective plan)
+  //
+  // Historically each route file opted into `requireAuth` per handler.
+  // That worked by convention — a new route added without the import
+  // would silently be public. The fail-closed fix applies `requireAuth`
+  // at the `/api` layer in `app.ts` so the invariant is framework-level,
+  // not convention-level.
+
+  it('app.ts applies requireAuth globally on /api', async () => {
+    const appTs = await fs.readFile(path.resolve(API_SRC, 'app.ts'), 'utf8');
+    // The line order matters: verifyClerkSession must run first (parses
+    // the token), then requireAuth rejects requests without auth.
+    const verify = appTs.indexOf("app.use('/api', verifyClerkSession");
+    const require = appTs.indexOf("app.use('/api', requireAuth)");
+    expect(verify).toBeGreaterThanOrEqual(0);
+    expect(require).toBeGreaterThan(verify);
+  });
+
+  it('A6 adversarial: unauthenticated /api request returns 401', async () => {
+    // This test constructs the real createApp() and hits a real /api
+    // route with no Authorization header. It must return 401 at the
+    // /api layer before ever reaching the route handler.
+    process.env.NODE_ENV = 'dev';
+    const app = createApp();
+    const res = await request(app).get('/api/customers');
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ error: 'UNAUTHORIZED' });
+  });
+
+  it('A6 adversarial: /api request with a tampered token returns 401', async () => {
+    process.env.NODE_ENV = 'dev';
+    const prevSecret = process.env.CLERK_SECRET_KEY;
+    process.env.CLERK_SECRET_KEY = 'decisions-test-secret';
+    try {
+      const app = createApp();
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const body = Buffer.from(JSON.stringify({
+        sub: 'user-test-1',
+        sid: 'session-test-1',
+        tenant_id: 'tenant-a',
+        role: 'owner',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })).toString('base64url');
+      // Sign with the wrong secret — should be rejected.
+      const badSig = crypto.createHmac('sha256', 'wrong-secret').update(`${header}.${body}`).digest('base64url');
+      const tamperedToken = `${header}.${body}.${badSig}`;
+      const res = await request(app)
+        .get('/api/customers')
+        .set('Authorization', `Bearer ${tamperedToken}`);
+      expect(res.status).toBe(401);
+    } finally {
+      if (prevSecret === undefined) {
+        delete process.env.CLERK_SECRET_KEY;
+      } else {
+        process.env.CLERK_SECRET_KEY = prevSecret;
+      }
+    }
   });
 
   it.todo(
