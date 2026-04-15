@@ -776,8 +776,52 @@ describe('A5 — Background agent runs', () => {
 });
 
 describe('A6 — Adversarial tenant-isolation test suite', () => {
-  it.todo('cross-tenant read attempts are blocked on every route (one test per route)');
-  it.todo('cross-tenant write attempts are blocked on every mutation');
-  it.todo('JWT tampering surfaces as 401 with no data leakage');
+  // The real adversarial tests live in
+  // `packages/api/test/decisions/tenant-isolation.test.ts`, which spins
+  // up the real createApp() and exercises cross-tenant reads, writes,
+  // list leakage, lifecycle verbs, and body-forged tenantId against the
+  // customer/location/job/appointment/note routes end-to-end. These
+  // assertions just confirm that file exists and is non-empty so a
+  // deletion or silent stub is caught as a regression.
+  it('tenant-isolation.test.ts exists and encodes cross-tenant probes', async () => {
+    const isoPath = path.resolve(__dirname, 'tenant-isolation.test.ts');
+    const content = await fs.readFile(isoPath, 'utf8');
+    expect(content).toMatch(/Adversarial tenant isolation/i);
+    expect(content).toMatch(/probeCannotRead/);
+    expect(content).toMatch(/probeCannotUpdate/);
+    expect(content).toMatch(/probeCannotHitLifecycle/);
+    expect(content).toMatch(/probeListDoesNotLeak/);
+  });
+
+  it('tenant-isolation suite probes each first-pass entity', async () => {
+    const isoPath = path.resolve(__dirname, 'tenant-isolation.test.ts');
+    const content = await fs.readFile(isoPath, 'utf8');
+    for (const entity of ['/api/customers', '/api/locations', '/api/jobs', '/api/appointments', '/api/notes']) {
+      expect(content).toContain(`describe('${entity}'`);
+    }
+  });
+
+  it('tenant-isolation suite tests body-forged tenantId rewrite', async () => {
+    // The specific body-forgery scenario — "tenant B sends body.tenantId
+    // = 'tenant-a' and the server must never honor it" — is the single
+    // most important cross-tenant attack class. Lock its presence.
+    const isoPath = path.resolve(__dirname, 'tenant-isolation.test.ts');
+    const content = await fs.readFile(isoPath, 'utf8');
+    expect(content).toMatch(/body-forged tenantId/i);
+    expect(content).toMatch(/JWT tenant claim is[\s\S]*authoritative/i);
+  });
+
+  // JWT tampering coverage already lives inside the D6 block at
+  // decisions.test.ts:383 as "A6 adversarial: /api request with a tampered
+  // token returns 401", so there is no separate todo here.
+
   it.todo('prompt-injection attempts that try to breach tenant context are neutralized');
+
+  it.todo(
+    'cross-entity reference forgery: job created in tenant B with customerId from tenant A is rejected'
+  );
+
+  it.todo(
+    'adversarial coverage extended to /api/payments, /api/voice, /api/conversations, /api/assistant'
+  );
 });
