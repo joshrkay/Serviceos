@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createEstimateSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
+import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createEstimate,
   getEstimate,
@@ -16,7 +17,8 @@ import { getNextEstimateNumber, SettingsRepository } from '../settings/settings'
 export function createEstimateRouter(
   estimateRepo: EstimateRepository,
   settingsRepo: SettingsRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  ownership: TenantOwnership
 ): Router {
   const router = Router();
 
@@ -28,6 +30,8 @@ export function createEstimateRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createEstimateSchema.parse(req.body);
+        // Cross-entity tenant guard: jobId must belong to the requesting tenant.
+        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
         const estimateNumber = await getNextEstimateNumber(req.auth!.tenantId, settingsRepo);
         const result = await createEstimate(
           {

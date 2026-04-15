@@ -78,6 +78,7 @@ import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
+import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createLogger } from './logging/logger';
 
@@ -255,15 +256,28 @@ export function createApp() {
     }
   }, 250);
 
+  // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
+  // jobs.customerId) through validation against the requesting tenant
+  // before creating child entities — closes the cross-entity reference
+  // forgery class flagged by the tenant-isolation adversarial suite.
+  const ownership = createTenantOwnership({
+    customerRepo,
+    locationRepo,
+    jobRepo,
+    estimateRepo,
+    invoiceRepo,
+    appointmentRepo,
+  });
+
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/locations', createLocationRouter(locationRepo));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo));
-  app.use('/api/appointments', createAppointmentRouter(appointmentRepo));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo));
+  app.use('/api/locations', createLocationRouter(locationRepo, ownership));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
-  app.use('/api/notes', createNoteRouter(noteRepo));
+  app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));

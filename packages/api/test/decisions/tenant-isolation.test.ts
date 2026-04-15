@@ -465,84 +465,163 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
     });
   });
 
-  // ── Cross-entity reference forgery (open bug — fails by design) ──────
+  // ── Cross-entity reference forgery ──────────────────────────────────
   //
   // Body-forged `tenantId` is structurally impossible (Zod schemas strip
-  // it on parse, handlers re-assign from the JWT). Customer test above
-  // proves the invariant.
+  // it on parse, handlers re-assign from the JWT). The harder class is
+  // cross-entity reference forgery: tenant B sending a parent id (e.g.
+  // customerId) that belongs to tenant A. Without a guard, the new
+  // child entity gets stamped with tenant B's tenantId but its parent
+  // reference field still leaks tenant A's UUID.
   //
-  // The harder case is cross-entity reference forgery: tenant B can
-  // POST /api/jobs with `customerId` set to a customer id from tenant
-  // A. The schema accepts any string, and `createJob` (jobs/job.ts:71)
-  // does not validate that input.customerId belongs to the requesting
-  // tenant. The created job is stamped with tenant B's tenantId but
-  // its customerId field leaks tenant A's UUID — a real data leak
-  // surface.
-  //
-  // This `.fails` probe documents the open bug. When createJob (and
-  // siblings) starts validating cross-entity references against the
-  // requesting tenant, this test will start failing and must be
-  // promoted to it().
+  // Closed by the `TenantOwnership` guard in
+  // `packages/api/src/shared/tenant-ownership.ts`, wired into the six
+  // POST handlers (locations, jobs, appointments, notes, estimates,
+  // invoices). These tests prove the guard works on every entity.
 
   describe('cross-entity reference forgery', () => {
-    it.fails(
-      'POST /api/jobs in tenant B with tenant A customerId is rejected',
-      async () => {
-        // Tenant B needs its own location to satisfy the schema —
-        // create one against a tenant B customer first.
-        const customerB = await request(app)
-          .post('/api/customers')
-          .set(bearer(tokenB))
-          .send({ firstName: 'Bob', lastName: 'TenantB' });
-        expect(customerB.status).toBe(201);
+    let tenantBCustomerId: string;
+    let tenantBLocationId: string;
+    let tenantBJobId: string;
 
-        const locationB = await request(app)
-          .post('/api/locations')
-          .set(bearer(tokenB))
-          .send({
-            customerId: customerB.body.id,
-            street1: '2 Tenant B Way',
-            city: 'Btown',
-            state: 'CA',
-            postalCode: '94001',
-          });
-        expect(locationB.status).toBe(201);
+    beforeAll(async () => {
+      // Seed a minimal tenant B graph so we can construct otherwise-
+      // valid create requests that only differ in the forged parent ref.
+      const cust = await request(app)
+        .post('/api/customers')
+        .set(bearer(tokenB))
+        .send({ firstName: 'Bob', lastName: 'TenantB' });
+      expect(cust.status).toBe(201);
+      tenantBCustomerId = cust.body.id;
 
-        // The forge: customerId belongs to tenant A.
-        const res = await request(app)
-          .post('/api/jobs')
-          .set(bearer(tokenB))
-          .send({
-            customerId: graphA.customerId, // <-- forged cross-tenant ref
-            locationId: locationB.body.id,
-            summary: 'Forged cross-tenant job',
-          });
-        // Expected behavior (currently NOT implemented):
-        //   The server should reject this with 400/404 because
-        //   customerId graphA.customerId does not belong to tenant B.
-        expect([400, 404]).toContain(res.status);
-      }
-    );
+      const loc = await request(app)
+        .post('/api/locations')
+        .set(bearer(tokenB))
+        .send({
+          customerId: tenantBCustomerId,
+          street1: '2 Tenant B Way',
+          city: 'Btown',
+          state: 'CA',
+          postalCode: '94001',
+        });
+      expect(loc.status).toBe(201);
+      tenantBLocationId = loc.body.id;
 
-    it.todo(
-      'POST /api/locations in tenant B with tenant A customerId is rejected'
-    );
+      const job = await request(app)
+        .post('/api/jobs')
+        .set(bearer(tokenB))
+        .send({
+          customerId: tenantBCustomerId,
+          locationId: tenantBLocationId,
+          summary: 'Tenant B own job',
+        });
+      expect(job.status).toBe(201);
+      tenantBJobId = job.body.id;
+    });
 
-    it.todo(
-      'POST /api/appointments in tenant B with tenant A jobId is rejected'
-    );
+    it('POST /api/locations in tenant B with tenant A customerId → 404', async () => {
+      const res = await request(app)
+        .post('/api/locations')
+        .set(bearer(tokenB))
+        .send({
+          customerId: graphA.customerId, // forged
+          street1: '3 Forge Way',
+          city: 'Btown',
+          state: 'CA',
+          postalCode: '94001',
+        });
+      expect(res.status).toBe(404);
+    });
 
-    it.todo(
-      'POST /api/notes in tenant B with tenant A entityId is rejected'
-    );
+    it('POST /api/jobs in tenant B with tenant A customerId → 404', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set(bearer(tokenB))
+        .send({
+          customerId: graphA.customerId, // forged
+          locationId: tenantBLocationId,
+          summary: 'Forged customer ref',
+        });
+      expect(res.status).toBe(404);
+    });
 
-    it.todo(
-      'POST /api/estimates in tenant B with tenant A jobId is rejected'
-    );
+    it('POST /api/jobs in tenant B with tenant A locationId → 404', async () => {
+      const res = await request(app)
+        .post('/api/jobs')
+        .set(bearer(tokenB))
+        .send({
+          customerId: tenantBCustomerId,
+          locationId: graphA.locationId, // forged
+          summary: 'Forged location ref',
+        });
+      expect(res.status).toBe(404);
+    });
 
-    it.todo(
-      'POST /api/invoices in tenant B with tenant A jobId is rejected'
-    );
+    it('POST /api/appointments in tenant B with tenant A jobId → 404', async () => {
+      const start = new Date();
+      start.setHours(start.getHours() + 1);
+      const end = new Date(start);
+      end.setHours(end.getHours() + 1);
+      const res = await request(app)
+        .post('/api/appointments')
+        .set(bearer(tokenB))
+        .send({
+          jobId: graphA.jobId, // forged
+          scheduledStart: start.toISOString(),
+          scheduledEnd: end.toISOString(),
+          timezone: 'UTC',
+        });
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /api/notes in tenant B with tenant A entityId → 404', async () => {
+      const res = await request(app)
+        .post('/api/notes')
+        .set(bearer(tokenB))
+        .send({
+          entityType: 'customer',
+          entityId: graphA.customerId, // forged
+          content: 'Forged note',
+        });
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /api/estimates in tenant B with tenant A jobId → 404', async () => {
+      const res = await request(app)
+        .post('/api/estimates')
+        .set(bearer(tokenB))
+        .send({
+          jobId: graphA.jobId, // forged
+          estimateNumber: 'EST-IGNORED',
+          lineItems: [sampleLineItem('forge-est', 1000)],
+        });
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /api/invoices in tenant B with tenant A jobId → 404', async () => {
+      const res = await request(app)
+        .post('/api/invoices')
+        .set(bearer(tokenB))
+        .send({
+          jobId: graphA.jobId, // forged
+          invoiceNumber: 'INV-IGNORED',
+          lineItems: [sampleLineItem('forge-inv', 1000)],
+        });
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /api/invoices in tenant B with own jobId but tenant A estimateId → 404', async () => {
+      const res = await request(app)
+        .post('/api/invoices')
+        .set(bearer(tokenB))
+        .send({
+          jobId: tenantBJobId,
+          estimateId: graphA.estimateId, // forged
+          invoiceNumber: 'INV-IGNORED-2',
+          lineItems: [sampleLineItem('forge-inv-2', 1000)],
+        });
+      expect(res.status).toBe(404);
+    });
   });
 
   // ── Notes ────────────────────────────────────────────────────────────

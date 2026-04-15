@@ -3,9 +3,13 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createNoteSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
+import { OwnedEntityType, TenantOwnership } from '../shared/tenant-ownership';
 import { createNote, updateNote, deleteNote, listNotes, NoteRepository } from '../notes/note';
 
-export function createNoteRouter(noteRepo: NoteRepository): Router {
+export function createNoteRouter(
+  noteRepo: NoteRepository,
+  ownership: TenantOwnership
+): Router {
   const router = Router();
 
   router.post(
@@ -16,6 +20,15 @@ export function createNoteRouter(noteRepo: NoteRepository): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createNoteSchema.parse(req.body);
+        // Cross-entity tenant guard: the entity the note attaches to
+        // must belong to the requesting tenant. The schema constrains
+        // entityType to {customer, location, job, estimate, invoice}
+        // — all of which are valid OwnedEntityType values.
+        await ownership.requireExists(
+          req.auth!.tenantId,
+          parsed.entityType as OwnedEntityType,
+          parsed.entityId
+        );
         const result = await createNote(
           {
             ...parsed,
