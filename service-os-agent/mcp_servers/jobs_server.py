@@ -32,25 +32,14 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
 from clients.service_os_api import ServiceOsApiClient
+from mcp_servers.ceilings import MAX_UNATTENDED_CENTS
 
 logger = logging.getLogger(__name__)
 
-
-# ─── Ceiling constants (Decision 9) ──────────────────────────
-#
-# Even though jobs_server contains no money-moving tools, the ceiling
-# constants live at the MCP server layer so there is exactly one place
-# in the Python service where the numbers are written down. Every
-# server imports from here rather than defining its own.
-#
-# MAX_UNATTENDED_CENTS: the hard ceiling above which any action —
-#   regardless of trust tier, regardless of who initiated it — requires
-#   explicit voice confirmation as a second factor. Enforced at the
-#   tool layer, not in prompts.
-#
-# Format is integer cents (never float), matching the TS billing engine.
-
-MAX_UNATTENDED_CENTS: int = 50_000  # $500.00
+# Re-exported for backwards compatibility — the canonical source is
+# mcp_servers.ceilings (Decision 9: ceilings live at the MCP tool
+# layer, in one place, never in prompts).
+__all__ = ["JobsServer", "ToolSchema", "ToolRegistration", "MAX_UNATTENDED_CENTS"]
 
 
 @dataclass(frozen=True)

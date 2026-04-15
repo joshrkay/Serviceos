@@ -3,16 +3,18 @@
 Each module in this package defines one `Agent` instance (see
 `service-os-agent/agent/primitive.py`). Agents are data, not code paths.
 
-Vertical-slice status (2026-04-14):
-  - capture.CAPTURE_AGENT    — DEFINED
-  - invoice.INVOICE_AGENT    — TODO (next slice)
-  - payment.PAYMENT_AGENT    — TODO (next slice)
-  - dunning.DUNNING_AGENT    — TODO (post-MVP)
+Vertical-slice status:
+  - capture.CAPTURE_AGENT    — DEFINED (step 0 slice #1)
+  - invoice.INVOICE_AGENT    — DEFINED (step 0 slice #2)
+  - payment.PAYMENT_AGENT    — DEFINED (step 0 slice #2)
   - comms.COMMS_AGENT        — TODO (post-Twilio wiring)
-  - briefing.BRIEFING_AGENT  — TODO (post-MVP)
-  - onboarding.ONBOARDING_AGENT — TODO (post-MVP)
+  - dispatch.DISPATCH_AGENT  — TODO (post-MVP)
+  - briefing.BRIEFING_AGENT  — TODO (D7 morning briefing)
+  - onboarding.ONBOARDING_AGENT — TODO (D1 onboarding flow)
 """
 
 from .capture import CAPTURE_AGENT
+from .invoice import INVOICE_AGENT
+from .payment import PAYMENT_AGENT
 
-__all__ = ["CAPTURE_AGENT"]
+__all__ = ["CAPTURE_AGENT", "INVOICE_AGENT", "PAYMENT_AGENT"]
