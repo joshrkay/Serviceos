@@ -66,9 +66,10 @@ import { Role, Permission, hasPermission, getPermissionContract } from '../../sr
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const API_SRC = path.resolve(REPO_ROOT, 'packages/api/src');
+const AGENT_PY = path.resolve(REPO_ROOT, 'service-os-agent');
 
 // ────────────────────────────────────────────────────────────────────────────
-// Helper: does a file exist in the API source tree?
+// Helpers: file and content searches across the repo surface.
 // ────────────────────────────────────────────────────────────────────────────
 
 async function exists(relPath: string): Promise<boolean> {
@@ -80,26 +81,65 @@ async function exists(relPath: string): Promise<boolean> {
   }
 }
 
-async function grepApiSrc(pattern: RegExp): Promise<string[]> {
+async function existsAt(absRoot: string, relPath: string): Promise<boolean> {
+  try {
+    await fs.access(path.resolve(absRoot, relPath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Recursively search a directory for files whose content matches a pattern.
+// Skips node_modules, dot-dirs, Python caches, and build artifacts.
+async function grepRoots(roots: string[], pattern: RegExp, extensions: Set<string>): Promise<string[]> {
   const hits: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
+  async function walk(dir: string, root: string): Promise<void> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      if (entry.name === 'node_modules') continue;
+      if (entry.name === '__pycache__') continue;
+      if (entry.name === 'dist' || entry.name === 'build') continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-        await walk(full);
+        await walk(full, root);
         continue;
       }
-      if (!entry.name.endsWith('.ts')) continue;
-      const content = await fs.readFile(full, 'utf8');
+      const ext = path.extname(entry.name);
+      if (!extensions.has(ext)) continue;
+      let content: string;
+      try {
+        content = await fs.readFile(full, 'utf8');
+      } catch {
+        continue;
+      }
       if (pattern.test(content)) {
-        hits.push(path.relative(API_SRC, full));
+        hits.push(path.relative(root, full));
       }
     }
   }
-  await walk(API_SRC);
+  for (const root of roots) {
+    await walk(root, root);
+  }
   return hits;
+}
+
+async function grepApiSrc(pattern: RegExp): Promise<string[]> {
+  return grepRoots([API_SRC], pattern, new Set(['.ts']));
+}
+
+// Search both the TS API source and the Python agent service for any file
+// matching the pattern. This is the shape the agent-platform architecture
+// takes: MCP servers, ceiling constants, and agent definitions live in
+// service-os-agent/ while business logic lives in packages/api/src/.
+async function grepAgentStack(pattern: RegExp): Promise<string[]> {
+  return grepRoots([API_SRC, AGENT_PY], pattern, new Set(['.ts', '.py']));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -372,14 +412,54 @@ describe('D9 — Hard gates at MCP tool layer', () => {
     expect(await exists('proposals/execution/executor.ts')).toBe(true);
   });
 
-  it.fails('MCP tool layer exists with per-tenant credential binding', async () => {
-    const hits = await grepApiSrc(/modelcontextprotocol|MCPServer|mcp.server|mcp_server/);
+  it('MCP tool layer scaffold exists in the Python agent service', async () => {
+    // Decision 9 lives in the Python side per the Hybrid framework
+    // decision: MCP servers are Python modules under service-os-agent/
+    // so they can be wrapped by a real claude-agent-sdk MCP server in the
+    // next slice. A server must declare a tenant-scoped call_tool path.
+    const init = await existsAt(AGENT_PY, 'mcp_servers/__init__.py');
+    const jobs = await existsAt(AGENT_PY, 'mcp_servers/jobs_server.py');
+    expect(init && jobs).toBe(true);
+
+    const hits = await grepAgentStack(/class JobsServer|def call_tool|async def call_tool/);
     expect(hits.length).toBeGreaterThan(0);
   });
 
-  it.fails('$500 ceiling constant is enforced at the tool layer for money-moving actions', async () => {
-    const hits = await grepApiSrc(/MAX_UNATTENDED_CENTS|MONEY_CEILING_CENTS|CEILING_CENTS_50000/);
+  it('MCP tool layer enforces tenant isolation, not the prompt', async () => {
+    const jobs = await fs.readFile(
+      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
+      'utf8'
+    );
+    // The server must raise when tenant_id is missing — tenant isolation
+    // at the tool layer, not the prompt. This is the architectural line
+    // the retrospective drew; the test enforces it.
+    expect(jobs).toMatch(/tenant_id is required/);
+    expect(jobs).toMatch(/PermissionError/);
+  });
+
+  it('$500 ceiling constant is declared at the MCP tool layer', async () => {
+    // Decision 9: ceilings are constants in the tool layer, not in the
+    // prompt. The constant MUST live in a Python module under
+    // service-os-agent/mcp_servers/ and equal 50_000 cents ($500.00).
+    const hits = await grepAgentStack(/MAX_UNATTENDED_CENTS/);
     expect(hits.length).toBeGreaterThan(0);
+
+    const jobs = await fs.readFile(
+      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
+      'utf8'
+    );
+    expect(jobs).toMatch(/MAX_UNATTENDED_CENTS\s*:\s*int\s*=\s*50_000/);
+  });
+
+  it('tool schemas carry an explicit money_ceiling_cents field', async () => {
+    // New tools inherit the ceiling discipline via the ToolSchema shape.
+    // Adding a money-moving tool without setting the field forces a
+    // conscious decision about its ceiling at review time.
+    const jobs = await fs.readFile(
+      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
+      'utf8'
+    );
+    expect(jobs).toMatch(/money_ceiling_cents/);
   });
 
   it.todo(
@@ -498,18 +578,85 @@ describe('A1 — Multi-tenant managed agent runtime', () => {
     expect(appTs).toMatch(/DATABASE_URL is required in production/);
   });
 
+  it('Agent primitive is data: name, scope, prompt, memory, mcp_tools, trust_tier, triggers', async () => {
+    // The retrospective lesson was that "agent platform" means agents are
+    // DATA, not hardcoded code paths. The primitive lives in the Python
+    // agent service (per the Hybrid framework decision) and must
+    // include every field the platform dispatches on.
+    const primitive = await fs.readFile(
+      path.resolve(AGENT_PY, 'agent/primitive.py'),
+      'utf8'
+    );
+    for (const field of [
+      'name',
+      'scope',
+      'system_prompt',
+      'memory_namespace',
+      'mcp_tools',
+      'trust_tier',
+      'triggers',
+    ]) {
+      expect(primitive).toMatch(new RegExp(`\\b${field}\\b`));
+    }
+    // The trust tiers must match Decision 3's action classes.
+    for (const tier of [
+      'autonomous',
+      'graduates_fast',
+      'graduates_slowly',
+      'always_asks',
+    ]) {
+      expect(primitive).toMatch(new RegExp(`"${tier}"`));
+    }
+  });
+
+  it('CaptureAgent is defined as a first-class data instance', async () => {
+    const capture = await fs.readFile(
+      path.resolve(AGENT_PY, 'agents/capture.py'),
+      'utf8'
+    );
+    expect(capture).toMatch(/CAPTURE_AGENT\s*=\s*Agent\(/);
+    expect(capture).toMatch(/trust_tier="autonomous"/);
+    expect(capture).toMatch(/mcp_tools=\("jobs_server",?\s*\)/);
+  });
+
+  it('Python agent service does not write to Supabase directly', async () => {
+    // Writes must go through the TS API so the proposal gate, audit
+    // trail, RLS context, and billing invariants are preserved. The new
+    // MCP server must import the TS API client, not the Supabase client.
+    const jobs = await fs.readFile(
+      path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
+      'utf8'
+    );
+    expect(jobs).not.toMatch(/from supabase/);
+    expect(jobs).toMatch(/from clients\.service_os_api/);
+  });
+
   it.todo(
-    'agent runtime: each back-office function runs as a named agent with its own prompt, memory slice, and tool set'
+    'each agent runs under an outer LangGraph dispatcher with checkpointing and interrupt-based approval gates'
   );
 });
 
 describe('A2 — MCP servers (target 12–14)', () => {
-  it.fails('at least one internal MCP server is defined', async () => {
-    const hits = await grepApiSrc(/export.*mcpServer|defineMcpServer|MCPServer/);
-    expect(hits.length).toBeGreaterThan(0);
+  it('at least one internal MCP server is defined', async () => {
+    // service-os-agent/mcp_servers/jobs_server.py is the first of ~6
+    // internal MCP servers. Adding a new one = adding a new file here;
+    // the test flips green the moment the file exists.
+    const jobs = await existsAt(AGENT_PY, 'mcp_servers/jobs_server.py');
+    expect(jobs).toBe(true);
   });
 
-  it.todo('internal MCP servers: jobs, customers, money, inventory, schedule, intel');
+  it('MCP servers own ceiling constants at the tool layer', async () => {
+    // The `mcp_servers/__init__.py` module docstring must name the
+    // ceiling-at-the-tool-layer invariant so new servers inherit it.
+    const init = await fs.readFile(
+      path.resolve(AGENT_PY, 'mcp_servers/__init__.py'),
+      'utf8'
+    );
+    expect(init).toMatch(/CEILING CONSTANTS/i);
+    expect(init).toMatch(/not in prompts/i);
+  });
+
+  it.todo('internal MCP servers: customers, money, inventory, schedule, intel (jobs done)');
 
   it.todo('external MCP wrappers: Stripe, Plaid, Twilio, Google Maps, suppliers, DocuSign, Gmail/Calendar');
 });
