@@ -27,21 +27,20 @@
  *   - /api/customers       (5 routes)
  *   - /api/locations       (6 routes)
  *   - /api/jobs            (5 routes)
+ *   - /api/estimates       (4 routes, no list endpoint)
+ *   - /api/invoices        (5 routes, no list endpoint)
  *   - /api/appointments    (4 routes)
  *   - /api/notes           (4 routes, no GET/:id)
  *
- * Deferred to a follow-up slice: estimates and invoices need a
- * pre-seeded settings row (getNextEstimateNumber/Invoice throws
- * otherwise — that is itself a real onboarding gap this suite
- * surfaced: Clerk webhook tenant bootstrap doesn't auto-create a
- * settings row, so new tenants cannot create estimates or invoices
- * out of the box). Closing that onboarding hole is a separate slice;
- * once settings auto-seed lands, estimates + invoices join the
- * adversarial probes using the same pattern.
+ * Estimates + invoices were unblocked by the edge-case slice that
+ * added `ensureTenantSettings` lazy seeding to `getNextEstimateNumber`
+ * / `getNextInvoiceNumber`. Brand-new tenants now get default
+ * settings on first use, and `bootstrapTenant` also seeds the row
+ * via the Clerk webhook for the production path.
  *
- * Also deferred: payments, voice, conversations, settings-shaped
- * routes, assistant, and cross-entity reference forgery (e.g., job
- * in tenant B that points at customer in tenant A).
+ * Deferred: payments, voice, conversations, settings-shaped routes,
+ * assistant, and cross-entity reference forgery (e.g., job in tenant B
+ * that points at customer in tenant A).
  */
 
 import * as crypto from 'crypto';
@@ -83,17 +82,14 @@ function bearer(token: string): { Authorization: string } {
 
 // Adversarial probes --------------------------------------------------------
 //
-// Accepted status codes for a denied cross-tenant attempt:
-//   - 400/401/403/404 — explicit rejection, the ideal shape
-//   - 500 — handler brittleness: the tenant-scoped lookup returned null
-//           and the handler exploded on it. This is NOT an isolation
-//           failure (no data leaks) but it IS a handler-robustness gap.
-//           Accepted for now so isolation regressions surface cleanly;
-//           tightening each handler to 404 on null lookup is tracked by
-//           `it.todo` entries below.
-// The non-negotiable part is that no resource body leaks through. Every
-// probe asserts no id match in the response body.
-const ISOLATION_OK_STATUSES = [400, 401, 403, 404, 500];
+// Accepted status codes for a denied cross-tenant attempt: 400/401/403/404.
+// 500 was accepted in the first cut because POST /api/jobs/:id/transition
+// exploded on a null cross-tenant lookup; the edge-case slice tightened
+// that handler (and proved the others were already clean) so this set
+// can stay strict. The non-negotiable part is that no resource body
+// leaks through — every probe additionally asserts no id match in the
+// response body.
+const ISOLATION_OK_STATUSES = [400, 401, 403, 404];
 
 async function probeCannotRead(app: Express, path: string, id: string, tokenB: string) {
   const res = await request(app).get(`${path}/${id}`).set(bearer(tokenB));
@@ -146,8 +142,23 @@ interface TenantGraph {
   customerId: string;
   locationId: string;
   jobId: string;
+  estimateId: string;
+  invoiceId: string;
   appointmentId: string;
   noteId: string;
+}
+
+function sampleLineItem(id: string, unitCents: number) {
+  return {
+    id,
+    description: 'Adversarial test line',
+    category: 'labor' as const,
+    quantity: 1,
+    unitPriceCents: unitCents,
+    totalCents: unitCents,
+    sortOrder: 1,
+    taxable: true,
+  };
 }
 
 describe('Adversarial tenant isolation — /api/* over real createApp()', () => {
@@ -203,6 +214,28 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
     expect(jobRes.status).toBe(201);
     const jobId = jobRes.body.id as string;
 
+    const estimateRes = await request(app)
+      .post('/api/estimates')
+      .set(bearer(tokenA))
+      .send({
+        jobId,
+        estimateNumber: 'EST-IGNORED',
+        lineItems: [sampleLineItem('est-line-1', 5000)],
+      });
+    expect(estimateRes.status).toBe(201);
+    const estimateId = estimateRes.body.id as string;
+
+    const invoiceRes = await request(app)
+      .post('/api/invoices')
+      .set(bearer(tokenA))
+      .send({
+        jobId,
+        invoiceNumber: 'INV-IGNORED',
+        lineItems: [sampleLineItem('inv-line-1', 5000)],
+      });
+    expect(invoiceRes.status).toBe(201);
+    const invoiceId = invoiceRes.body.id as string;
+
     const start = new Date();
     start.setHours(start.getHours() + 1);
     const end = new Date(start);
@@ -230,7 +263,7 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
     expect(noteRes.status).toBe(201);
     const noteId = noteRes.body.id as string;
 
-    graphA = { customerId, locationId, jobId, appointmentId, noteId };
+    graphA = { customerId, locationId, jobId, estimateId, invoiceId, appointmentId, noteId };
   });
 
   afterAll(() => {
@@ -357,29 +390,62 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
     });
   });
 
-  // ── Estimates, Invoices ──────────────────────────────────────────────
-  //
-  // Deferred to a follow-up slice: POST /api/estimates and POST
-  // /api/invoices throw from getNextEstimateNumber / getNextInvoiceNumber
-  // because the Clerk webhook bootstrap does not auto-create a tenant
-  // settings row. That's a real onboarding gap this suite surfaced.
-  // Close the onboarding gap, then the same adversarial pattern applies.
-  it.todo('/api/estimates: tenant B cannot read/update/transition tenant A estimate');
-  it.todo('/api/invoices: tenant B cannot read/update/transition/issue tenant A invoice');
-  it.todo('tenant settings auto-seed at Clerk webhook bootstrap (prereq for estimate/invoice adversarial tests)');
+  // ── Estimates ────────────────────────────────────────────────────────
 
-  // ── Handler brittleness follow-ups ───────────────────────────────────
-  //
-  // The adversarial suite currently accepts 500 as a valid isolation
-  // response when a lifecycle handler explodes on a null cross-tenant
-  // lookup. No data leaks — that's the main invariant — but each of
-  // these handlers should return 404 cleanly. Tightening them is a
-  // separate slice; the todos below track the work so ISOLATION_OK_STATUSES
-  // can shrink back to [400, 401, 403, 404].
-  it.todo('POST /api/jobs/:id/transition returns 404 (not 500) on cross-tenant id');
-  it.todo('POST /api/estimates/:id/transition returns 404 (not 500) on cross-tenant id');
-  it.todo('POST /api/invoices/:id/transition returns 404 (not 500) on cross-tenant id');
-  it.todo('POST /api/invoices/:id/issue returns 404 (not 500) on cross-tenant id');
+  describe('/api/estimates', () => {
+    it('tenant B cannot GET tenant A estimate', async () => {
+      await probeCannotRead(app, '/api/estimates', graphA.estimateId, tokenB);
+    });
+
+    it('tenant B cannot PUT tenant A estimate', async () => {
+      await probeCannotUpdate(app, '/api/estimates', graphA.estimateId, tokenB, {
+        customerMessage: 'hacked',
+      });
+    });
+
+    it('tenant B cannot transition tenant A estimate', async () => {
+      await probeCannotHitLifecycle(
+        app,
+        'post',
+        `/api/estimates/${graphA.estimateId}/transition`,
+        tokenB,
+        { status: 'sent' }
+      );
+    });
+  });
+
+  // ── Invoices ─────────────────────────────────────────────────────────
+
+  describe('/api/invoices', () => {
+    it('tenant B cannot GET tenant A invoice', async () => {
+      await probeCannotRead(app, '/api/invoices', graphA.invoiceId, tokenB);
+    });
+
+    it('tenant B cannot PUT tenant A invoice', async () => {
+      await probeCannotUpdate(app, '/api/invoices', graphA.invoiceId, tokenB, {
+        customerMessage: 'hacked',
+      });
+    });
+
+    it('tenant B cannot transition tenant A invoice', async () => {
+      await probeCannotHitLifecycle(
+        app,
+        'post',
+        `/api/invoices/${graphA.invoiceId}/transition`,
+        tokenB,
+        { status: 'open' }
+      );
+    });
+
+    it('tenant B cannot issue tenant A invoice', async () => {
+      await probeCannotHitLifecycle(
+        app,
+        'post',
+        `/api/invoices/${graphA.invoiceId}/issue`,
+        tokenB
+      );
+    });
+  });
 
   // ── Appointments ─────────────────────────────────────────────────────
 
@@ -397,6 +463,86 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
     it('tenant B list does not leak tenant A appointment', async () => {
       await probeListDoesNotLeak(app, '/api/appointments', graphA.appointmentId, tokenB);
     });
+  });
+
+  // ── Cross-entity reference forgery (open bug — fails by design) ──────
+  //
+  // Body-forged `tenantId` is structurally impossible (Zod schemas strip
+  // it on parse, handlers re-assign from the JWT). Customer test above
+  // proves the invariant.
+  //
+  // The harder case is cross-entity reference forgery: tenant B can
+  // POST /api/jobs with `customerId` set to a customer id from tenant
+  // A. The schema accepts any string, and `createJob` (jobs/job.ts:71)
+  // does not validate that input.customerId belongs to the requesting
+  // tenant. The created job is stamped with tenant B's tenantId but
+  // its customerId field leaks tenant A's UUID — a real data leak
+  // surface.
+  //
+  // This `.fails` probe documents the open bug. When createJob (and
+  // siblings) starts validating cross-entity references against the
+  // requesting tenant, this test will start failing and must be
+  // promoted to it().
+
+  describe('cross-entity reference forgery', () => {
+    it.fails(
+      'POST /api/jobs in tenant B with tenant A customerId is rejected',
+      async () => {
+        // Tenant B needs its own location to satisfy the schema —
+        // create one against a tenant B customer first.
+        const customerB = await request(app)
+          .post('/api/customers')
+          .set(bearer(tokenB))
+          .send({ firstName: 'Bob', lastName: 'TenantB' });
+        expect(customerB.status).toBe(201);
+
+        const locationB = await request(app)
+          .post('/api/locations')
+          .set(bearer(tokenB))
+          .send({
+            customerId: customerB.body.id,
+            street1: '2 Tenant B Way',
+            city: 'Btown',
+            state: 'CA',
+            postalCode: '94001',
+          });
+        expect(locationB.status).toBe(201);
+
+        // The forge: customerId belongs to tenant A.
+        const res = await request(app)
+          .post('/api/jobs')
+          .set(bearer(tokenB))
+          .send({
+            customerId: graphA.customerId, // <-- forged cross-tenant ref
+            locationId: locationB.body.id,
+            summary: 'Forged cross-tenant job',
+          });
+        // Expected behavior (currently NOT implemented):
+        //   The server should reject this with 400/404 because
+        //   customerId graphA.customerId does not belong to tenant B.
+        expect([400, 404]).toContain(res.status);
+      }
+    );
+
+    it.todo(
+      'POST /api/locations in tenant B with tenant A customerId is rejected'
+    );
+
+    it.todo(
+      'POST /api/appointments in tenant B with tenant A jobId is rejected'
+    );
+
+    it.todo(
+      'POST /api/notes in tenant B with tenant A entityId is rejected'
+    );
+
+    it.todo(
+      'POST /api/estimates in tenant B with tenant A jobId is rejected'
+    );
+
+    it.todo(
+      'POST /api/invoices in tenant B with tenant A jobId is rejected'
+    );
   });
 
   // ── Notes ────────────────────────────────────────────────────────────

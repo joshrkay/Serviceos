@@ -147,8 +147,18 @@ export function createApp() {
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
+  // The settings repo is constructed early so the Clerk webhook tenant
+  // bootstrap can seed a default TenantSettings row alongside the new
+  // tenant — closes the onboarding hole where a new operator would 500
+  // on their first POST /api/estimates.
   const tenantRepo = pool ? new PgTenantRepository(pool) : undefined;
-  app.use('/webhooks', createWebhookRouter(config, { tenantRepo }));
+  const webhookSettingsRepo = pool
+    ? new PgSettingsRepository(pool)
+    : new InMemorySettingsRepository();
+  app.use(
+    '/webhooks',
+    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+  );
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';

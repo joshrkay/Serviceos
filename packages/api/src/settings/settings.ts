@@ -247,12 +247,67 @@ export async function updateSettings(
   return repository.update(tenantId, { ...normalizedInput, updatedAt: new Date() });
 }
 
+/**
+ * Idempotent settings seeder.
+ *
+ * Returns the existing settings row for the tenant if present. If not,
+ * creates a default row with conservative defaults and returns that.
+ *
+ * The "should" path is for `bootstrapTenant` (auth/clerk.ts) to call
+ * this when the Clerk webhook fires. This function is also called from
+ * `getNextEstimateNumber` / `getNextInvoiceNumber` as a safety net so a
+ * tenant whose webhook bootstrap was missed (test fixtures, manual
+ * tenant creation, future legacy ingestion) does not see a hard 500
+ * the first time it tries to create an estimate or invoice.
+ *
+ * Idempotency matters: race conditions are tolerated. If two requests
+ * call this concurrently for a missing tenant, one will create and the
+ * other will see the existing row (or get a duplicate-key conflict
+ * from the underlying repo and we fall back to refetching).
+ */
+export async function ensureTenantSettings(
+  tenantId: string,
+  repository: SettingsRepository,
+  options?: { businessName?: string }
+): Promise<TenantSettings> {
+  const existing = await repository.findByTenant(tenantId);
+  if (existing) return existing;
+
+  const settings: TenantSettings = {
+    id: uuidv4(),
+    tenantId,
+    businessName: options?.businessName ?? 'My Business',
+    timezone: 'America/New_York',
+    estimatePrefix: 'EST-',
+    invoicePrefix: 'INV-',
+    nextEstimateNumber: 1,
+    nextInvoiceNumber: 1,
+    defaultPaymentTermDays: 30,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  try {
+    return await repository.create(settings);
+  } catch {
+    // Race: another request created the settings row between the
+    // findByTenant() above and the create() here. Refetch and return.
+    const after = await repository.findByTenant(tenantId);
+    if (after) return after;
+    throw new ValidationError(
+      `ensureTenantSettings: could not create or refetch settings for tenant ${tenantId}`
+    );
+  }
+}
+
 export async function getNextEstimateNumber(
   tenantId: string,
   repository: SettingsRepository
 ): Promise<string> {
-  const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new ValidationError('Tenant settings not found');
+  // Lazy-seed: do not throw on missing settings. The webhook bootstrap
+  // is the SHOULD path; this is the safety net for any code path that
+  // didn't go through it.
+  const settings = await ensureTenantSettings(tenantId, repository);
   const num = await repository.incrementEstimateNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.estimatePrefix}${String(num).padStart(4, '0')}`;
@@ -262,8 +317,7 @@ export async function getNextInvoiceNumber(
   tenantId: string,
   repository: SettingsRepository
 ): Promise<string> {
-  const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new ValidationError('Tenant settings not found');
+  const settings = await ensureTenantSettings(tenantId, repository);
   const num = await repository.incrementInvoiceNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
