@@ -122,7 +122,19 @@ class JobsServer:
         # has no money-moving tools today, but the check runs anyway so
         # future additions inherit the discipline.
         if reg.schema.money_ceiling_cents is not None:
-            amount = int(arguments.get("amount_cents", 0) or 0)
+            raw_amount = arguments.get("amount_cents", 0) or 0
+            # LLM-sourced JSON routinely stringifies numbers or emits
+            # fractional strings like "500.0". int() on those raises
+            # ValueError. Go through float() so both shapes parse. On an
+            # unparseable value, raise — silently defaulting to 0 would
+            # let an unparseable money-moving call slip past the ceiling.
+            try:
+                amount = int(float(raw_amount))
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"jobs_server.{name}: amount_cents must be a number, "
+                    f"got {raw_amount!r}"
+                ) from e
             if amount > reg.schema.money_ceiling_cents:
                 raise PermissionError(
                     f"jobs_server.{name}: amount {amount} cents exceeds "

@@ -681,17 +681,39 @@ describe('A1 — Multi-tenant managed agent runtime', () => {
     expect(capture).toMatch(/mcp_tools=\("jobs_server",?\s*\)/);
   });
 
-  it('Python agent service does not write to Supabase directly', async () => {
+  it('Python agent-platform surface does not import supabase directly', async () => {
     // Writes must go through the TS API so the proposal gate, audit
-    // trail, RLS context, and billing invariants are preserved. The new
-    // MCP server must import the TS API client, not the Supabase client.
+    // trail, RLS context, and billing invariants are preserved. The
+    // invariant scans the entire new agent-platform surface — agents,
+    // mcp_servers, clients — not just the first MCP server. Any new file
+    // under these directories must route writes through the TS API.
+    //
+    // The legacy `agent/nodes.py` still imports supabase for the
+    // pre-retrospective linear graph; that migration is tracked as a
+    // separate todo below (part of step 0 slice #3).
+    const platformRoots = [
+      path.resolve(AGENT_PY, 'agents'),
+      path.resolve(AGENT_PY, 'mcp_servers'),
+      path.resolve(AGENT_PY, 'clients'),
+    ];
+    const supabaseHits = await grepRoots(
+      platformRoots,
+      /(^|\n)\s*(from supabase|import supabase)\b/,
+      new Set(['.py'])
+    );
+    expect(supabaseHits).toEqual([]);
+
+    // And the jobs server specifically must use the TS API client.
     const jobs = await fs.readFile(
       path.resolve(AGENT_PY, 'mcp_servers/jobs_server.py'),
       'utf8'
     );
-    expect(jobs).not.toMatch(/from supabase/);
     expect(jobs).toMatch(/from clients\.service_os_api/);
   });
+
+  it.todo(
+    'legacy service-os-agent/agent/nodes.py migrates off direct Supabase access (part of step 0 slice #3)'
+  );
 
   it.todo(
     'each agent runs under an outer LangGraph dispatcher with checkpointing and interrupt-based approval gates'

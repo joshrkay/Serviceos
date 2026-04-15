@@ -21,6 +21,7 @@ responses.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -150,13 +151,25 @@ class ServiceOsApiClient:
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        try:
+
+        # urllib.request.urlopen is blocking. Wrap it in asyncio.to_thread so
+        # the FastAPI event loop is not stalled while the TS API responds.
+        # Swap to httpx if we ever need streaming; this is intentionally
+        # small and stdlib-only for now.
+        def _do_request() -> str:
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
-                raw = resp.read().decode("utf-8")
-                if not raw:
-                    return None
-                return json.loads(raw)
+                return resp.read().decode("utf-8")
+
+        try:
+            raw = await asyncio.to_thread(_do_request)
+            if not raw:
+                return None
+            return json.loads(raw)
         except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
+            # HTTPError's response body is still on the exception object
+            # even after to_thread — read it off-thread too to stay consistent.
+            body = await asyncio.to_thread(
+                lambda: e.read().decode("utf-8", errors="replace")
+            )
             logger.warning("ServiceOsApi %s %s → %d: %s", method, path, e.code, body)
             raise ServiceOsApiError(e.code, body) from e
