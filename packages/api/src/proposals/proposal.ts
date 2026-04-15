@@ -65,6 +65,102 @@ export interface CreateProposalInput {
   idempotencyKey?: string;
   expiresAt?: Date;
   createdBy: string;
+  /**
+   * Trust tier of the agent that produced this proposal. When set,
+   * createProposal consults `decideInitialStatus` to determine whether
+   * the proposal can be created in 'approved' status (skipping the
+   * human review gate). When omitted, the proposal lands in 'draft'
+   * exactly as before — preserves backward compatibility for callers
+   * that do not yet pass agent-source signals.
+   *
+   * Decision 3 (per-action-class trust) wiring lives in
+   * `decideInitialStatus` below.
+   */
+  sourceTrustTier?: TrustTier;
+}
+
+// ─── Decision 3: action class + trust tier ───────────────────────────────
+//
+// Decision 3 from the 2026-04-14 Idea Crystallization doc says trust is
+// per action class:
+//
+//   capture/record   → autonomous from day one
+//   customer comms   → graduates fast
+//   money-moving     → graduates slowly
+//   irreversible     → always asks
+//
+// The data lives on the Python `Agent` primitive
+// (service-os-agent/agent/primitive.py); the runtime wiring lives here.
+// `decideInitialStatus` is the SINGLE place where (action class, trust
+// tier, confidence) maps to an initial proposal status.
+
+export type ActionClass = 'capture' | 'comms' | 'money' | 'irreversible';
+export type TrustTier =
+  | 'autonomous'
+  | 'graduates_fast'
+  | 'graduates_slowly'
+  | 'always_asks';
+
+/**
+ * Map every ProposalType to an action class. The exhaustive switch is
+ * the forcing function: adding a new ProposalType without classifying
+ * it produces a compile error, so D3 cannot silently regress.
+ */
+export function actionClassForProposalType(type: ProposalType): ActionClass {
+  switch (type) {
+    case 'create_customer':
+    case 'update_customer':
+    case 'create_job':
+    case 'create_appointment':
+    case 'draft_estimate':
+    case 'update_estimate':
+    case 'draft_invoice':
+    case 'reassign_appointment':
+    case 'reschedule_appointment':
+    case 'onboarding_tenant_settings':
+    case 'onboarding_service_category':
+    case 'onboarding_estimate_template':
+    case 'onboarding_team_member':
+    case 'onboarding_schedule':
+      return 'capture';
+    case 'cancel_appointment':
+      return 'irreversible';
+  }
+}
+
+/**
+ * Decide the initial proposal status from (action class, trust tier,
+ * confidence). Pure function — no side effects, no I/O.
+ *
+ * Rules (D3):
+ *  - No source trust tier  → 'draft' (existing behavior).
+ *  - autonomous + capture-class + confidence ≥ 0.9 → 'approved'.
+ *  - graduates_fast / graduates_slowly → 'draft' (gated until the
+ *    trust ledger lands; data still attached so the ledger can be
+ *    retroactively built from approval history).
+ *  - always_asks → 'draft' (always gated, even with maximum trust).
+ *  - Money-moving and irreversible classes never auto-approve
+ *    regardless of trust tier. The MCP money_server provides a
+ *    second gate at the tool layer for money-moving actions.
+ */
+export function decideInitialStatus(input: {
+  proposalType: ProposalType;
+  sourceTrustTier?: TrustTier;
+  confidenceScore?: number;
+}): ProposalStatus {
+  if (!input.sourceTrustTier) return 'draft';
+
+  const cls = actionClassForProposalType(input.proposalType);
+
+  if (
+    input.sourceTrustTier === 'autonomous' &&
+    cls === 'capture' &&
+    (input.confidenceScore ?? 0) >= 0.9
+  ) {
+    return 'approved';
+  }
+
+  return 'draft';
 }
 
 export interface ProposalRepository {
@@ -112,11 +208,19 @@ export function validateProposalInput(input: CreateProposalInput): string[] {
 
 export function createProposal(input: CreateProposalInput): Proposal {
   const now = new Date();
+  // D3 wiring: status is decided by the trust-tier rules below, not
+  // hardcoded. Callers that don't pass `sourceTrustTier` get 'draft'
+  // exactly as before — every existing test and AI task is unchanged.
+  const status = decideInitialStatus({
+    proposalType: input.proposalType,
+    sourceTrustTier: input.sourceTrustTier,
+    confidenceScore: input.confidenceScore,
+  });
   return {
     id: uuidv4(),
     tenantId: input.tenantId,
     proposalType: input.proposalType,
-    status: 'draft',
+    status,
     payload: input.payload,
     summary: input.summary,
     explanation: input.explanation,

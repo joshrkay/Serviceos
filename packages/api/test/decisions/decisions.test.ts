@@ -63,7 +63,9 @@ import {
 import {
   ProposalType,
   ProposalStatus,
+  ActionClass,
   createProposal,
+  actionClassForProposalType,
 } from '../../src/proposals/proposal';
 import { Role, Permission, hasPermission, getPermissionContract } from '../../src/auth/rbac';
 
@@ -226,43 +228,94 @@ describe('D3 — Trust model per action class', () => {
     expect(level).toBe('high');
   });
 
-  // The current design of ai/guardrails/confidence.ts explicitly states
-  // "Confidence is advisory only. These functions NEVER trigger auto-approval
-  //  or auto-execution." That is the opposite of D3, which says:
-  //   - Capture/record actions → autonomous from day one
-  //   - Customer communication → graduates fast
-  //   - Money-moving actions   → graduates slowly
-  //   - Irreversible actions   → always asks
-  // D3 requires per-action-class tiers. Today, EVERY proposal type goes
-  // through identical human approval regardless of class. This test asserts
-  // the gap.
-  it.fails('capture-class proposals should auto-approve at high confidence', () => {
+  // Step 5b closed the D3 wiring gap: createProposal now consults the
+  // pure decision function `decideInitialStatus` in proposal.ts, which
+  // maps (action class, trust tier, confidence) → initial status. The
+  // detailed unit tests for the rules live in
+  // packages/api/test/proposals/proposal.test.ts. The assertions below
+  // lock the contract from the decisions surface.
+
+  it('capture-class proposals from autonomous agents auto-approve at high confidence', () => {
     const proposal = createProposal({
       tenantId: 'tenant-1',
       proposalType: 'create_customer', // capture-class
       payload: { name: 'Acme' },
       summary: 'Create customer Acme',
+      sourceTrustTier: 'autonomous',
       confidenceScore: 0.95,
       createdBy: 'agent-capture',
     });
-    // Under D3, capture at high confidence should land in 'approved' or
-    // 'executed' without human review. Today it lands in 'draft' — see the
-    // top-of-file comment in ai/guardrails/confidence.ts which explicitly
-    // forbids auto-approval.
-    const status: ProposalStatus = proposal.status;
-    expect(status).toMatch(/approved|executed/);
+    expect(proposal.status).toBe('approved');
   });
 
-  it.todo(
-    'action-class registry: every ProposalType maps to one of {capture, comms, money, irreversible}'
-  );
+  it('action-class registry: every ProposalType maps to one of {capture, comms, money, irreversible}', () => {
+    const types: ProposalType[] = [
+      'create_customer',
+      'update_customer',
+      'create_job',
+      'create_appointment',
+      'draft_estimate',
+      'update_estimate',
+      'draft_invoice',
+      'reassign_appointment',
+      'reschedule_appointment',
+      'cancel_appointment',
+      'onboarding_tenant_settings',
+      'onboarding_service_category',
+      'onboarding_estimate_template',
+      'onboarding_team_member',
+      'onboarding_schedule',
+    ];
+    const validClasses: ActionClass[] = ['capture', 'comms', 'money', 'irreversible'];
+    for (const t of types) {
+      expect(validClasses).toContain(actionClassForProposalType(t));
+    }
+  });
+
+  it('irreversible actions always require explicit confirmation regardless of trust tier', () => {
+    // cancel_appointment is the only irreversible type today. Even with
+    // autonomous trust + 0.99 confidence, it must land in 'draft'.
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'cancel_appointment',
+      payload: { appointmentId: 'appt-1' },
+      summary: 'Cancel appt-1',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.99,
+      createdBy: 'agent-capture',
+    });
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('decideInitialStatus is the single source of truth for status assignment', async () => {
+    // The decision function lives in proposals/proposal.ts. confidence.ts
+    // must NOT set status itself — it is a pure observer. This test
+    // locks the boundary by asserting the function exists at the
+    // expected location and confidence.ts no longer claims to be the
+    // gate.
+    const proposalSrc = await fs.readFile(
+      path.resolve(API_SRC, 'proposals/proposal.ts'),
+      'utf8'
+    );
+    expect(proposalSrc).toMatch(/export function decideInitialStatus/);
+    expect(proposalSrc).toMatch(/sourceTrustTier === 'autonomous'/);
+
+    const confidenceSrc = await fs.readFile(
+      path.resolve(API_SRC, 'ai/guardrails/confidence.ts'),
+      'utf8'
+    );
+    // The old advisory-only comment must be gone.
+    expect(confidenceSrc).not.toMatch(/NEVER trigger auto-approval/);
+    // The new comment must point at the canonical decision function.
+    expect(confidenceSrc).toMatch(/decideInitialStatus/);
+  });
 
   it.todo(
     'per-tenant trust ladder: operator approvals on a class raise that class autonomy over time'
   );
 
   it.todo(
-    'irreversible actions always require explicit confirmation regardless of trust tier'
+    'AI task call sites pass sourceTrustTier so production proposals exercise the wiring'
   );
 });
 
