@@ -335,7 +335,7 @@ export function createApp() {
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
   app.use(
     '/api/files',
-    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket })
+    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter());
 

@@ -70,6 +70,19 @@ export class PgFileRepository extends PgBaseRepository implements FileRepository
     });
   }
 
+  async updateSize(tenantId: string, id: string, sizeBytes: number): Promise<FileRecord | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE files SET size_bytes = $1, updated_at = NOW()
+         WHERE id = $2 AND tenant_id = $3
+         RETURNING *`,
+        [sizeBytes, id, tenantId]
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
   async delete(tenantId: string, id: string): Promise<boolean> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(

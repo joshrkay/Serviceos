@@ -34,20 +34,28 @@ export interface FileRepository {
   create(record: FileRecord): Promise<FileRecord>;
   findById(tenantId: string, id: string): Promise<FileRecord | null>;
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<FileRecord[]>;
+  updateSize(tenantId: string, id: string, sizeBytes: number): Promise<FileRecord | null>;
   delete(tenantId: string, id: string): Promise<boolean>;
 }
 
+export interface ObjectMetadata {
+  contentLength: number;
+  contentType: string;
+}
+
 // StorageProvider abstracts object storage. The production implementation
-// targets Cloudflare R2, which is S3-compatible — use the AWS SDK v3
-// S3Client pointed at the R2 endpoint:
-//   https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com
+// targets Cloudflare R2, which is S3-compatible — see S3StorageProvider.
+// getObjectMetadata returns null when the backend cannot introspect the
+// object (e.g. the dev provider discards bytes); callers must treat null
+// as "skip reconciliation".
 export interface StorageProvider {
   generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string>;
   generateDownloadUrl(bucket: string, key: string): Promise<string>;
+  getObjectMetadata(bucket: string, key: string): Promise<ObjectMetadata | null>;
   deleteObject(bucket: string, key: string): Promise<void>;
 }
 
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const ALLOWED_CONTENT_TYPES = [
   'image/jpeg',
   'image/png',
@@ -143,6 +151,14 @@ export class InMemoryFileRepository implements FileRepository {
     return Array.from(this.files.values()).filter(
       (f) => f.tenantId === tenantId && f.entityType === entityType && f.entityId === entityId
     );
+  }
+
+  async updateSize(tenantId: string, id: string, sizeBytes: number): Promise<FileRecord | null> {
+    const file = this.files.get(id);
+    if (!file || file.tenantId !== tenantId) return null;
+    const updated: FileRecord = { ...file, sizeBytes, updatedAt: new Date() };
+    this.files.set(id, updated);
+    return { ...updated };
   }
 
   async delete(tenantId: string, id: string): Promise<boolean> {
