@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
-  Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp,
+  Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
 } from 'lucide-react';
+import { useUser, useClerk } from '@clerk/clerk-react';
 import { VoiceBar } from '../shared/VoiceBar';
 import { CameraCapture, CameraButton } from '../shared/CameraCapture';
 
@@ -29,11 +30,28 @@ const BOTTOM_NAV = [
   { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
 ];
 
+function getInitials(fullName: string | null, email: string | null | undefined): string {
+  if (fullName) {
+    const parts = fullName.trim().split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    return parts[0][0].toUpperCase();
+  }
+  if (email) return email[0].toUpperCase();
+  return '?';
+}
+
 export function Shell() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
+  const { isLoaded, user } = useUser();
+  const { signOut } = useClerk();
   const isExact = (to: string) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
+
+  if (!isLoaded) return null;
+
+  const displayName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? '';
+  const initials = getInitials(user?.fullName ?? null, user?.primaryEmailAddress?.emailAddress);
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
@@ -93,12 +111,18 @@ export function Shell() {
         {/* User */}
         <div className="border-t border-slate-100 px-4 py-3">
           <div className="flex items-center gap-2.5">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">MO</span>
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">{initials}</span>
             <div className="min-w-0">
-              <p className="text-xs text-slate-800 truncate">Mike Ortega</p>
+              <p className="text-xs text-slate-800 truncate">{displayName}</p>
               <p className="text-xs text-slate-400 truncate">Owner</p>
             </div>
-            <Bell size={15} className="ml-auto shrink-0 text-slate-400 hover:text-slate-600 cursor-pointer" />
+            <button
+              onClick={() => signOut({ redirectUrl: '/login' })}
+              className="ml-auto shrink-0 text-slate-400 hover:text-slate-600 cursor-pointer"
+              title="Sign out"
+            >
+              <LogOut size={15} />
+            </button>
           </div>
         </div>
       </aside>
@@ -122,7 +146,7 @@ export function Shell() {
                 location.pathname.startsWith('/settings')
                   ? 'bg-blue-600 text-white ring-2 ring-blue-200'
                   : 'bg-slate-800 text-white'
-              }`}>MO</span>
+              }`}>{initials}</span>
               <span className={`absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full border border-white ${
                 location.pathname.startsWith('/settings') ? 'bg-blue-600' : 'bg-slate-600'
               }`}>

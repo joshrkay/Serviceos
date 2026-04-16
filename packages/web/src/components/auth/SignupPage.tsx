@@ -1,7 +1,10 @@
-import { SignUp } from '@clerk/clerk-react';
+import { SignUp, useAuth } from '@clerk/clerk-react';
+import { Navigate } from 'react-router';
 import { Zap } from 'lucide-react';
 
 export function SignupPage() {
+  const { isLoaded, isSignedIn } = useAuth();
+  if (isLoaded && isSignedIn) return <Navigate to="/" replace />;
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Header */}
