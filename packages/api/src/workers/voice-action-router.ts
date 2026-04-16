@@ -7,6 +7,7 @@ import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
+import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
 import { ProposalType } from '../proposals/proposal';
 
@@ -19,6 +20,7 @@ import { ProposalType } from '../proposals/proposal';
  *   draft_estimate      → draft_estimate proposal  (Phase 1)
  *   create_appointment  → create_appointment       (Phase 1)
  *   update_invoice      → update_invoice           (Phase 2 — add/remove line item)
+ *   update_estimate     → update_estimate          (Phase 2b — add/remove line item)
  *
  * Anything classified as `unknown` or below the confidence threshold
  * is dropped with an info log. The operator sees nothing in their
@@ -44,6 +46,7 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   draft_estimate: 'draft_estimate',
   create_appointment: 'create_appointment',
   update_invoice: 'update_invoice',
+  update_estimate: 'update_estimate',
 };
 
 function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
@@ -52,6 +55,7 @@ function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
   handlers.set('draft_estimate', new EstimateTaskHandler(gateway));
   handlers.set('create_appointment', new CreateAppointmentAITaskHandler(gateway));
   handlers.set('update_invoice', new InvoiceEditTaskHandler(gateway));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(gateway));
   return handlers;
 }
 

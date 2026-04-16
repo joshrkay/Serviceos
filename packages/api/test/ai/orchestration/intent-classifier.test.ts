@@ -130,6 +130,30 @@ describe('intent-classifier — classifyIntent', () => {
         },
       },
     },
+    {
+      transcript: 'Add a site visit for 150 to estimate EST-0001',
+      expectedIntent: 'update_estimate',
+      llmResponse: {
+        intentType: 'update_estimate',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'EST-0001',
+          lineItemDescriptions: ['site visit'],
+        },
+      },
+    },
+    {
+      transcript: 'Remove the old heater from estimate EST-0001',
+      expectedIntent: 'update_estimate',
+      llmResponse: {
+        intentType: 'update_estimate',
+        confidence: 0.86,
+        extractedEntities: {
+          jobReference: 'EST-0001',
+          lineItemDescriptions: ['old heater'],
+        },
+      },
+    },
   ];
 
   for (const { transcript, expectedIntent, llmResponse } of cases) {
