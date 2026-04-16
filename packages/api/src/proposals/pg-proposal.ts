@@ -42,17 +42,15 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
 
   async create(proposal: Proposal): Promise<Proposal> {
     return this.withTenantTransaction(proposal.tenantId, async (client) => {
-      if (proposal.idempotencyKey) {
-        const existing = await client.query(
-          'SELECT id FROM proposals WHERE tenant_id = $1 AND idempotency_key = $2',
-          [proposal.tenantId, proposal.idempotencyKey]
-        );
-        if (existing.rows.length > 0) {
-          throw new ConflictError(
-            `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
-          );
-        }
-      }
+      // Idempotency is enforced by the unique index
+      // idx_proposals_idempotency(tenant_id, idempotency_key). Using
+      // ON CONFLICT DO NOTHING avoids the check-then-insert race where
+      // two concurrent transactions would both pass a SELECT check,
+      // then one INSERT would throw a raw duplicate-key error (SQLSTATE
+      // 23505) that surfaces as a 500 instead of a 409 ConflictError.
+      const conflictClause = proposal.idempotencyKey
+        ? 'ON CONFLICT (tenant_id, idempotency_key) DO NOTHING'
+        : '';
 
       const result = await client.query(
         `INSERT INTO proposals (
@@ -69,7 +67,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           $16, $17, $18, $19,
           $20, $21, $22, $23, $24,
           $25, $26, $27
-        ) RETURNING *`,
+        ) ${conflictClause} RETURNING *`,
         [
           proposal.id,
           proposal.tenantId,
@@ -100,6 +98,14 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           proposal.updatedAt,
         ]
       );
+      if (result.rows.length === 0) {
+        // ON CONFLICT DO NOTHING returned no row — another transaction
+        // committed an insert with the same (tenant_id, idempotency_key)
+        // while we were racing. Surface as ConflictError → 409.
+        throw new ConflictError(
+          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
+        );
+      }
       return mapRow(result.rows[0]);
     });
   }
@@ -198,9 +204,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // Status transitions MUST go through updateStatus() which uses
+      // SELECT ... FOR UPDATE. Excluded here so the generic path can't
+      // race against concurrent status changes.
       const fieldMap: Record<string, string> = {
         proposalType: 'proposal_type',
-        status: 'status',
         payload: 'payload',
         summary: 'summary',
         explanation: 'explanation',
