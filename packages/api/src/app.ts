@@ -334,6 +334,7 @@ export function createApp() {
   }
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
+    invoiceRepo,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
   const executionWorkerLogger = createLogger({

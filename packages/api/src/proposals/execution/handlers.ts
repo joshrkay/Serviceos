@@ -1,11 +1,13 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
+import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
 import { AppointmentRepository } from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
+import { InvoiceRepository } from '../../invoices/invoice';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -110,6 +112,7 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
 export function createExecutionHandlerRegistry(deps?: {
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
+  invoiceRepo?: InvoiceRepository;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
@@ -123,6 +126,13 @@ export function createExecutionHandlerRegistry(deps?: {
     new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
   ];
+
+  // UpdateInvoiceExecutionHandler needs an invoiceRepo — register only
+  // when one was wired in so in-memory tests that don't touch invoices
+  // don't have to provide the dep.
+  if (deps?.invoiceRepo) {
+    handlers.push(new UpdateInvoiceExecutionHandler(deps.invoiceRepo));
+  }
 
   const registry = new Map<ProposalType, ExecutionHandler>();
   for (const handler of handlers) {
