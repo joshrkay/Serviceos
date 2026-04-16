@@ -314,8 +314,27 @@ describe('D3 — Trust model per action class', () => {
     'per-tenant trust ladder: operator approvals on a class raise that class autonomy over time'
   );
 
+  it('AI task call sites pass sourceTrustTier so production proposals exercise the wiring', async () => {
+    // EstimateTaskHandler and InvoiceTaskHandler run on the capture
+    // pipeline. They must pass sourceTrustTier so decideInitialStatus
+    // actually fires in production. Runtime coverage lives in
+    // test/ai/estimate-task.test.ts ("D3: high-confidence
+    // draft_estimate auto-approves"); this assertion locks the
+    // source-level invariant so the adoption cannot silently regress.
+    const estimate = await fs.readFile(
+      path.resolve(API_SRC, 'ai/tasks/estimate-task.ts'),
+      'utf8'
+    );
+    const invoice = await fs.readFile(
+      path.resolve(API_SRC, 'ai/tasks/invoice-task.ts'),
+      'utf8'
+    );
+    expect(estimate).toMatch(/sourceTrustTier:\s*'autonomous'/);
+    expect(invoice).toMatch(/sourceTrustTier:\s*'autonomous'/);
+  });
+
   it.todo(
-    'AI task call sites pass sourceTrustTier so production proposals exercise the wiring'
+    'onboarding proposers do NOT auto-approve (operator reviews each step of the interview flow)'
   );
 });
 
