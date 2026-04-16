@@ -223,6 +223,18 @@ export interface ProposalRepository {
     id: string,
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
   ): Promise<Proposal | null>;
+
+  /**
+   * System-level query for the auto-delivery worker. Returns all
+   * proposals in 'approved' status whose `approvedAt` + `windowMs`
+   * has passed — i.e., the 5-second undo window has closed and they
+   * are ready for execution. Does NOT filter by tenant — this is a
+   * privileged background sweep, not an API route.
+   *
+   * Proposals without `approvedAt` (historical, pre-undo-window-slice)
+   * are included — they have no window and should execute immediately.
+   */
+  findReadyForExecution(windowMs: number): Promise<Proposal[]>;
 }
 
 export function validateProposalInput(input: CreateProposalInput): string[] {
@@ -380,5 +392,17 @@ export class InMemoryProposalRepository implements ProposalRepository {
     Object.assign(proposal, updates, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
+  }
+
+  async findReadyForExecution(windowMs: number): Promise<Proposal[]> {
+    const now = Date.now();
+    return Array.from(this.proposals.values())
+      .filter((p) => {
+        if (p.status !== 'approved') return false;
+        // No approvedAt → historical proposal, treat as past-window.
+        if (!p.approvedAt) return true;
+        return now - p.approvedAt.getTime() >= windowMs;
+      })
+      .map((p) => ({ ...p }));
   }
 }

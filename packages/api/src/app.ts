@@ -80,6 +80,10 @@ import { PgQueue } from './queues/pg-queue';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { runExecutionSweep } from './workers/execution-worker';
+import { InMemoryProposalRepository } from './proposals/proposal';
+import { ProposalExecutor } from './proposals/execution/executor';
+import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { createLogger } from './logging/logger';
 
 // Auth middleware
@@ -255,6 +259,33 @@ export function createApp() {
       workerLogger.error('Queue poll failed', { error: err instanceof Error ? err.message : String(err) });
     }
   }, 250);
+
+  // ── Auto-delivery worker: sweeps approved proposals past the 5-second
+  // undo window and hands them to the executor. Closes the operational
+  // question from the D9 undo-window slice: "who kicks execution after
+  // the window closes?" The answer is this poll, on a 1-second interval.
+  const proposalRepo = new InMemoryProposalRepository();
+  const executionHandlers = createExecutionHandlerRegistry({
+    appointmentRepo,
+  });
+  const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  const executionWorkerLogger = createLogger({
+    service: 'execution-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runExecutionSweep({
+        proposalRepo,
+        executor: proposalExecutor,
+        logger: executionWorkerLogger,
+      });
+    } catch (err) {
+      executionWorkerLogger.error('Execution sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 1000);
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
