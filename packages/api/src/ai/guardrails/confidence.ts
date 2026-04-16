@@ -1,8 +1,23 @@
 /**
- * IMPORTANT: Confidence is advisory only.
- * These functions NEVER trigger auto-approval or auto-execution.
- * Confidence metadata is for display and informational purposes only.
- * All proposals must still go through the standard human-review approval flow.
+ * Confidence scoring is ONE input to the trust-tier decision in
+ * `proposals/proposal.ts:decideInitialStatus`. That function is the
+ * single place where (action class, trust tier, confidence) maps to
+ * an initial proposal status — see Decision 3 in the founding decisions.
+ *
+ * Confidence on its own does NOT auto-approve. Auto-approval requires
+ * all three of:
+ *   - the calling agent declares `sourceTrustTier === 'autonomous'`
+ *   - the proposal type belongs to the `'capture'` action class
+ *   - the confidence score is ≥ 0.9
+ *
+ * Money-moving and irreversible actions never auto-approve regardless
+ * of confidence. The MCP money_server
+ * (service-os-agent/mcp_servers/money_server.py) provides a second
+ * gate at the tool layer for money-moving actions.
+ *
+ * The functions below produce confidence metadata + display labels.
+ * They are pure observers — neither this file nor any caller of these
+ * functions should set proposal status directly.
  */
 
 export interface ConfidenceMetadata {

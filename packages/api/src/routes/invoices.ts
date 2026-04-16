@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createInvoiceSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
+import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoice,
   getInvoice,
@@ -17,7 +18,8 @@ import { getNextInvoiceNumber, SettingsRepository } from '../settings/settings';
 export function createInvoiceRouter(
   invoiceRepo: InvoiceRepository,
   settingsRepo: SettingsRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  ownership: TenantOwnership
 ): Router {
   const router = Router();
 
@@ -29,6 +31,13 @@ export function createInvoiceRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createInvoiceSchema.parse(req.body);
+        // Cross-entity tenant guard: jobId must belong to the
+        // requesting tenant. estimateId is optional — guard it only
+        // when present.
+        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
+        if (parsed.estimateId) {
+          await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
+        }
         const invoiceNumber = await getNextInvoiceNumber(req.auth!.tenantId, settingsRepo);
         const result = await createInvoice(
           {

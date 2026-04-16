@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Job, JobStatus, JobRepository } from './job';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { NotFoundError } from '../shared/errors';
 
 export interface JobTimelineEntry {
   id: string;
@@ -44,7 +45,7 @@ export async function transitionJobStatus(
   auditRepo?: AuditRepository
 ): Promise<{ job: Job; timelineEntry: JobTimelineEntry }> {
   const job = await jobRepo.findById(tenantId, jobId);
-  if (!job) throw new Error('Job not found');
+  if (!job) throw new NotFoundError('Job', jobId);
 
   if (!isValidTransition(job.status, newStatus)) {
     throw new Error(`Invalid transition from ${job.status} to ${newStatus}`);

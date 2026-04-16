@@ -78,11 +78,17 @@ import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
+import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { runExecutionSweep } from './workers/execution-worker';
+import { InMemoryProposalRepository } from './proposals/proposal';
+import { ProposalExecutor } from './proposals/execution/executor';
+import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { createLogger } from './logging/logger';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
+import { requireAuth } from './middleware/auth';
 
 export function createApp() {
   const app = express();
@@ -146,12 +152,29 @@ export function createApp() {
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
+  // The settings repo is constructed early so the Clerk webhook tenant
+  // bootstrap can seed a default TenantSettings row alongside the new
+  // tenant — closes the onboarding hole where a new operator would 500
+  // on their first POST /api/estimates.
   const tenantRepo = pool ? new PgTenantRepository(pool) : undefined;
-  app.use('/webhooks', createWebhookRouter(config, { tenantRepo }));
+  const webhookSettingsRepo = pool
+    ? new PgSettingsRepository(pool)
+    : new InMemorySettingsRepository();
+  app.use(
+    '/webhooks',
+    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+  );
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
+  // Fail-closed: every /api/* request must carry a valid Clerk session.
+  // Individual routes still apply requireAuth/requireTenant/requirePermission
+  // as defense in depth, but this line makes it architecturally impossible
+  // for a new route to be silently public just because the author forgot
+  // to opt into the per-route gate. The decisions test suite guards this
+  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
+  app.use('/api', requireAuth);
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
@@ -237,15 +260,55 @@ export function createApp() {
     }
   }, 250);
 
+  // ── Auto-delivery worker: sweeps approved proposals past the 5-second
+  // undo window and hands them to the executor. Closes the operational
+  // question from the D9 undo-window slice: "who kicks execution after
+  // the window closes?" The answer is this poll, on a 1-second interval.
+  const proposalRepo = new InMemoryProposalRepository();
+  const executionHandlers = createExecutionHandlerRegistry({
+    appointmentRepo,
+  });
+  const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  const executionWorkerLogger = createLogger({
+    service: 'execution-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runExecutionSweep({
+        proposalRepo,
+        executor: proposalExecutor,
+        logger: executionWorkerLogger,
+      });
+    } catch (err) {
+      executionWorkerLogger.error('Execution sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 1000);
+
+  // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
+  // jobs.customerId) through validation against the requesting tenant
+  // before creating child entities — closes the cross-entity reference
+  // forgery class flagged by the tenant-isolation adversarial suite.
+  const ownership = createTenantOwnership({
+    customerRepo,
+    locationRepo,
+    jobRepo,
+    estimateRepo,
+    invoiceRepo,
+    appointmentRepo,
+  });
+
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/locations', createLocationRouter(locationRepo));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo));
-  app.use('/api/appointments', createAppointmentRouter(appointmentRepo));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo));
+  app.use('/api/locations', createLocationRouter(locationRepo, ownership));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
-  app.use('/api/notes', createNoteRouter(noteRepo));
+  app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));

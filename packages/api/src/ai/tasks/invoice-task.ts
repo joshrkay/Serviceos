@@ -106,6 +106,12 @@ export class InvoiceTaskHandler implements TaskHandler {
       confidenceFactors: confidence.factors,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      // D3: draft_invoice is capture-class — drafting moves no money.
+      // Sending an invoice is a separate proposal (and would be
+      // money-class, gated). Passing the autonomous tier lets
+      // decideInitialStatus auto-approve the DRAFT when confidence is
+      // ≥ 0.9. Operator approval still required to issue/send.
+      sourceTrustTier: 'autonomous',
     };
 
     const proposal = createProposal(input);

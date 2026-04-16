@@ -3,6 +3,7 @@ import { AppConfig } from '../shared/config';
 import { verifyWebhookSignature, handleWebhookEvent, InMemoryWebhookRepository } from './webhook-handler';
 import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
+import { SettingsRepository } from '../settings/settings';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -11,6 +12,7 @@ const webhookRepo = new InMemoryWebhookRepository();
 
 export interface WebhookRouterDeps {
   tenantRepo?: TenantRepository;
+  settingsRepo?: SettingsRepository;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -91,10 +93,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         logger.info('user.created webhook received', { userId, email: primaryEmail });
 
         if (deps.tenantRepo && primaryEmail) {
-          const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo);
+          const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
+            settingsRepository: deps.settingsRepo,
+          });
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
             created: result.created,
+            settingsSeeded: Boolean(deps.settingsRepo),
           });
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
