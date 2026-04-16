@@ -72,10 +72,12 @@ async function createSignedAudioUpload(blob: Blob) {
   const payload = await response.json();
   const fileId = payload.fileId ?? payload.fileRecord?.id;
   const uploadUrl = payload.uploadUrl;
-  const audioUrl = payload.audioUrl ?? payload.downloadUrl ?? payload.fileUrl;
+  const downloadUrl = payload.downloadUrl ?? payload.audioUrl ?? payload.fileUrl;
 
   if (!fileId || !uploadUrl) throw new Error('Upload URL response is missing required fields.');
 
+  // Content-Type must match what was signed server-side; blob.type is the
+  // same value we sent in the upload-url request body.
   const uploadResult = await fetch(uploadUrl, {
     method: 'PUT',
     headers: { 'Content-Type': blob.type || 'audio/webm' },
@@ -84,7 +86,7 @@ async function createSignedAudioUpload(blob: Blob) {
 
   if (!uploadResult.ok) throw new Error('Audio upload failed. Please retry.');
 
-  return { fileId, audioUrl: audioUrl ?? uploadUrl.split('?')[0] };
+  return { fileId, audioUrl: downloadUrl ?? uploadUrl.split('?')[0] };
 }
 
 async function pollRecordingUntilDone(recordingId: string) {
@@ -126,6 +128,15 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
 
   const uploadAndTranscribe = useCallback(async (audioBlob: Blob) => {
     const { fileId, audioUrl } = await createSignedAudioUpload(audioBlob);
+    // Reconcile declared vs. actual uploaded size. The signed URL does not
+    // bind content length, so the API HEADs the object and rejects over-max
+    // payloads. A non-2xx here means the upload exceeded the size ceiling
+    // or storage was otherwise unhappy; treat it as a hard failure.
+    const verifyRes = await fetch(`/api/files/${fileId}/verify`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!verifyRes.ok) throw new Error('Upload verification failed.');
     const idempotencyKey = typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;

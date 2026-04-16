@@ -1,5 +1,5 @@
 import { Proposal, ProposalRepository } from '../proposal';
-import { transitionProposal } from '../lifecycle';
+import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
@@ -19,6 +19,23 @@ export class ProposalExecutor {
         'INVALID_STATUS',
         `Proposal must be in 'approved' status to execute, but is '${proposal.status}'`,
         400
+      );
+    }
+
+    // Decision 9: 5-second undo window. If the proposal was approved
+    // recently AND `approvedAt` is set, refuse to execute. The
+    // operator still has time to call undoProposal. Historical
+    // proposals without `approvedAt` are treated as past-window
+    // (backward compatible — existing tests and pre-slice approved
+    // proposals execute normally).
+    if (isInUndoWindow(proposal)) {
+      const elapsed = Date.now() - (proposal.approvedAt?.getTime() ?? Date.now());
+      const remaining = Math.max(0, UNDO_WINDOW_MS - elapsed);
+      throw new AppError(
+        'UNDO_WINDOW_OPEN',
+        `Proposal is still in the 5-second undo window (${remaining}ms remaining). ` +
+          `Retry after the window closes, or call undoProposal to cancel.`,
+        409
       );
     }
 

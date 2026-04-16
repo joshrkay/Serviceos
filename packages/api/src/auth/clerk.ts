@@ -1,5 +1,11 @@
 import * as crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
+import { createLogger } from '../logging/logger';
+
+const authLogger = createLogger({
+  service: 'auth',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 export interface ClerkUser {
   id: string;
@@ -44,8 +50,17 @@ export function verifyClerkSession(clerkSecretKey: string) {
       };
       next();
     } catch (err) {
+      // Do NOT set req.auth. Do NOT short-circuit here — the global
+      // requireAuth middleware downstream will return 401 because
+      // req.auth is unset. Log the reason so bad tokens aren't
+      // silently indistinguishable from missing tokens.
       const message = err instanceof Error ? err.message : 'Authentication failed';
       req.authError = message;
+      authLogger.warn('Clerk token rejected', {
+        reason: message,
+        ip: req.ip,
+        path: req.path,
+      });
       next();
     }
   };
@@ -115,10 +130,22 @@ export interface TenantBootstrapResult {
   created: boolean;
 }
 
+export interface TenantBootstrapDeps {
+  /**
+   * Optional. If provided, bootstrapTenant will also seed a default
+   * TenantSettings row for the new tenant via ensureTenantSettings.
+   * This closes the onboarding hole where a brand-new operator would
+   * see a 500 the first time they tried to create an estimate or
+   * invoice because no settings row existed yet.
+   */
+  settingsRepository?: import('../settings/settings').SettingsRepository;
+}
+
 export async function bootstrapTenant(
   userId: string,
   email: string,
-  tenantRepository: TenantRepository
+  tenantRepository: TenantRepository,
+  deps: TenantBootstrapDeps = {}
 ): Promise<TenantBootstrapResult> {
   if (!userId || !email) {
     throw new Error('userId and email are required for tenant bootstrap');
@@ -126,6 +153,12 @@ export async function bootstrapTenant(
 
   const existing = await tenantRepository.findByOwner(userId);
   if (existing) {
+    if (deps.settingsRepository) {
+      // Idempotent: also ensures settings exist for an already-bootstrapped
+      // tenant whose webhook fired before this code rolled out.
+      const { ensureTenantSettings } = await import('../settings/settings');
+      await ensureTenantSettings(existing.id, deps.settingsRepository);
+    }
     return { tenantId: existing.id, ownerId: userId, created: false };
   }
 
@@ -134,6 +167,13 @@ export async function bootstrapTenant(
     ownerEmail: email,
     name: email.split('@')[0] + "'s Organization",
   });
+
+  if (deps.settingsRepository) {
+    const { ensureTenantSettings } = await import('../settings/settings');
+    await ensureTenantSettings(tenant.id, deps.settingsRepository, {
+      businessName: tenant.name,
+    });
+  }
 
   return { tenantId: tenant.id, ownerId: userId, created: true };
 }

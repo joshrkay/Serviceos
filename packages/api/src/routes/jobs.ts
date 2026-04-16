@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createJobSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
+import { TenantOwnership } from '../shared/tenant-ownership';
 import { createJob, getJob, updateJob, listJobs, JobRepository } from '../jobs/job';
 import {
   transitionJobStatus,
@@ -13,7 +14,8 @@ import { AuditRepository } from '../audit/audit';
 export function createJobRouter(
   jobRepo: JobRepository,
   timelineRepo: JobTimelineRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  ownership: TenantOwnership
 ): Router {
   const router = Router();
 
@@ -25,6 +27,10 @@ export function createJobRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createJobSchema.parse(req.body);
+        // Cross-entity tenant guard: both customerId and locationId
+        // must belong to the requesting tenant.
+        await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
+        await ownership.requireExists(req.auth!.tenantId, 'location', parsed.locationId);
         const result = await createJob(
           {
             ...parsed,

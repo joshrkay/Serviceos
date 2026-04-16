@@ -68,6 +68,22 @@ When implementing a story and facing an architectural choice not covered by the 
 
 ---
 
+## Founding Sentence
+
+**Locked: 2026-04-14** — from the Service OS Idea Crystallization document.
+
+> **You learned the trade. We'll run the business.**
+
+Every feature ships through this filter. Features that make the operator
+work more *in* the business don't ship. Features that let the operator stay
+*in the trade* do. This sentence is enforced in
+`packages/api/test/decisions/decisions.test.ts` (see D12) so that
+deleting it from the repo surface produces a failing test. The 12 founding
+decisions from the same document are each encoded as their own acceptance
+test in that file.
+
+---
+
 ## Implementation Decisions (add during build)
 
 ### D-011: [Template — copy for new decisions]

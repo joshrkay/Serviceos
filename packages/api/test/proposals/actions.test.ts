@@ -4,8 +4,14 @@ import {
   CreateProposalInput,
   Proposal,
 } from '../../src/proposals/proposal';
-import { approveProposal, rejectProposal, editProposal } from '../../src/proposals/actions';
-import { ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
+import {
+  approveProposal,
+  rejectProposal,
+  editProposal,
+  undoProposal,
+} from '../../src/proposals/actions';
+import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
+import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
 
 describe('P2-005 — Approve / reject / edit interactions', () => {
   const tenantId = 'tenant-1';
@@ -138,5 +144,64 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     await expect(
       editProposal(repo, tenantId, 'nonexistent-id', actorId, 'owner', { name: 'Test' })
     ).rejects.toThrow(NotFoundError);
+  });
+
+  // ── Decision 9: undoProposal ────────────────────────────────────────
+
+  describe('undoProposal — 5-second undo window', () => {
+    it('happy path — owner undoes freshly-approved proposal within window', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      expect(approved.status).toBe('approved');
+      expect(approved.approvedAt).toBeInstanceOf(Date);
+
+      const undone = await undoProposal(repo, tenantId, proposal.id, actorId, 'owner');
+      expect(undone.status).toBe('undone');
+      expect(undone.undoneAt).toBeInstanceOf(Date);
+      expect(undone.undoneBy).toBe(actorId);
+    });
+
+    it('undoProposal fails after the window closes (UNDO_WINDOW_CLOSED)', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+      // Simulate the window having closed by backdating approvedAt.
+      await repo.updateStatus(tenantId, proposal.id, 'approved', {
+        approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      });
+
+      await expect(
+        undoProposal(repo, tenantId, proposal.id, actorId, 'owner')
+      ).rejects.toMatchObject({ code: 'UNDO_WINDOW_CLOSED' });
+    });
+
+    it('undoProposal rejects technicians (permission gate)', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+      await expect(
+        undoProposal(repo, tenantId, proposal.id, actorId, 'technician')
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    it('undoProposal rejects non-approved proposals (e.g., still draft)', async () => {
+      const repo = makeRepo();
+      const proposal = createProposal(baseInput);
+      await repo.create(proposal);
+      // Leave in 'draft' — undoProposal must refuse.
+      await expect(
+        undoProposal(repo, tenantId, proposal.id, actorId, 'owner')
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it('undoProposal returns NotFoundError for unknown ids', async () => {
+      const repo = makeRepo();
+      await expect(
+        undoProposal(repo, tenantId, 'nonexistent-id', actorId, 'owner')
+      ).rejects.toThrow(NotFoundError);
+    });
   });
 });

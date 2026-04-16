@@ -1,8 +1,8 @@
 import { Proposal, ProposalRepository } from './proposal';
-import { transitionProposal } from './lifecycle';
+import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
-import { ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
+import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 
 export async function approveProposal(
   proposalRepo: ProposalRepository,
@@ -22,7 +22,63 @@ export async function approveProposal(
 
   const transitioned = transitionProposal(proposal, 'approved', actorId);
 
-  const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved');
+  // D9 undo window: stamp `approvedAt` on the persisted row so the
+  // executor and undoProposal can agree on when the window opened.
+  const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved', {
+    approvedAt: transitioned.approvedAt,
+  });
+  if (!updated) {
+    throw new NotFoundError('Proposal', proposalId);
+  }
+
+  return updated;
+}
+
+/**
+ * Decision 9 — 5-second undo window.
+ *
+ * Reverse an approval that was made in the last UNDO_WINDOW_MS.
+ * Transitions an approved proposal to 'undone' (terminal). After the
+ * window passes, undo fails — the only way to "undo" then is to
+ * reverse the underlying entity via a new proposal.
+ */
+export async function undoProposal(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  proposalId: string,
+  actorId: string,
+  actorRole: Role
+): Promise<Proposal> {
+  if (!hasPermission(actorRole, 'proposals:approve')) {
+    // Same permission as approve — if you can approve you can undo.
+    throw new ForbiddenError();
+  }
+
+  const proposal = await proposalRepo.findById(tenantId, proposalId);
+  if (!proposal) {
+    throw new NotFoundError('Proposal', proposalId);
+  }
+
+  if (proposal.status !== 'approved') {
+    throw new ValidationError(
+      `Cannot undo proposal in '${proposal.status}' status — only 'approved' proposals can be undone`
+    );
+  }
+
+  if (!isInUndoWindow(proposal)) {
+    throw new AppError(
+      'UNDO_WINDOW_CLOSED',
+      `Undo window has closed (${UNDO_WINDOW_MS}ms). To reverse the action, create a new proposal.`,
+      409
+    );
+  }
+
+  const transitioned = transitionProposal(proposal, 'undone', actorId);
+
+  const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'undone', {
+    undoneAt: transitioned.undoneAt,
+    undoneBy: transitioned.undoneBy,
+  });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
   }

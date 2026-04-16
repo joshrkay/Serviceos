@@ -147,4 +147,54 @@ describe('P2-016 — Estimate draft proposal generation', () => {
     expect(result.proposal.payload.customerId).toBeUndefined();
     expect(result.proposal.payload.notes).toBe('Some notes but no lineItems or customerId');
   });
+
+  // ── D3 trust-tier adoption ─────────────────────────────────────────
+  //
+  // EstimateTaskHandler is called from the CaptureAgent pipeline.
+  // draft_estimate is capture-class. The handler passes
+  // sourceTrustTier='autonomous', so proposals at confidence ≥ 0.9
+  // land in 'approved' status without human review. Confidence < 0.9
+  // still goes through the human gate. This proves the D3 wiring from
+  // step 5b fires on the production AI path.
+
+  it('D3: high-confidence draft_estimate auto-approves (capture + autonomous + ≥0.9)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        jobId: '660e8400-e29b-41d4-a716-446655440000',
+        lineItems: [
+          { description: 'Pipe repair', quantity: 1, unitPrice: 75.0 },
+        ],
+        confidence_score: 0.95,
+      }),
+    });
+    const gateway = makeGateway(stub);
+    const handler = new EstimateTaskHandler(gateway);
+
+    const result = await handler.handle(makeContext());
+
+    expect(result.proposal.proposalType).toBe('draft_estimate');
+    expect(result.proposal.confidenceScore).toBe(0.95);
+    expect(result.proposal.status).toBe('approved');
+  });
+
+  it('D3: low-confidence draft_estimate still lands in draft for review', async () => {
+    // 0.5 is below the 0.9 threshold even with autonomous tier.
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        customerId: '550e8400-e29b-41d4-a716-446655440000',
+        lineItems: [{ description: 'Maybe something', quantity: 1, unitPrice: 50.0 }],
+        confidence_score: 0.5,
+      }),
+    });
+    const gateway = makeGateway(stub);
+    const handler = new EstimateTaskHandler(gateway);
+
+    const result = await handler.handle(makeContext());
+
+    expect(result.proposal.confidenceScore).toBe(0.5);
+    expect(result.proposal.status).toBe('draft');
+  });
 });

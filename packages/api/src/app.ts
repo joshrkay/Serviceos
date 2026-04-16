@@ -28,6 +28,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
+import { createFilesRouter, createDevStorageRouter } from './routes/files';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -73,16 +74,25 @@ import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
+import { InMemoryFileRepository } from './files/file-service';
 import { PgFileRepository } from './files/pg-file';
+import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
+import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { runExecutionSweep } from './workers/execution-worker';
+import { InMemoryProposalRepository } from './proposals/proposal';
+import { PgProposalRepository } from './proposals/pg-proposal';
+import { ProposalExecutor } from './proposals/execution/executor';
+import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { createLogger } from './logging/logger';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
+import { requireAuth } from './middleware/auth';
 
 export function createApp() {
   const app = express();
@@ -90,20 +100,18 @@ export function createApp() {
   // Body parsing
   app.use(express.json());
 
-  // CORS
-  // Allow explicit origin override, or fall back to allowing all origins.
-  // Credentials require an explicit origin (not '*'), so in prod set CORS_ORIGIN to the web URL.
-  const corsOrigin = process.env.CORS_ORIGIN || true;
-  app.use(cors({
-    origin: corsOrigin,
-    credentials: true,
-  }));
+  // Load validated config — must happen before CORS so validateProductionConfig()
+  // can throw on missing CORS_ORIGIN before we wire the middleware.
+  const config = loadConfig();
 
   // Swagger UI — no auth required
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
-  // Load validated config
-  const config = loadConfig();
+  // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
+  app.use(cors({
+    origin: config.CORS_ORIGIN ?? true,
+    credentials: true,
+  }));
 
   // Rate limiting — applied before auth to protect all routes
   app.use('/api', rateLimit({
@@ -146,12 +154,37 @@ export function createApp() {
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
+  // The settings repo is constructed early so the Clerk webhook tenant
+  // bootstrap can seed a default TenantSettings row alongside the new
+  // tenant — closes the onboarding hole where a new operator would 500
+  // on their first POST /api/estimates.
   const tenantRepo = pool ? new PgTenantRepository(pool) : undefined;
-  app.use('/webhooks', createWebhookRouter(config, { tenantRepo }));
+  const webhookSettingsRepo = pool
+    ? new PgSettingsRepository(pool)
+    : new InMemorySettingsRepository();
+  app.use(
+    '/webhooks',
+    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+  );
+
+  // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
+  // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
+  // succeed in local development. In prod/staging, createStorageProvider
+  // refuses to return a DevStorageProvider, so this route is dormant.
+  if (config.NODE_ENV !== 'prod' && config.NODE_ENV !== 'staging') {
+    app.use('/storage-dev', createDevStorageRouter());
+  }
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
+  // Fail-closed: every /api/* request must carry a valid Clerk session.
+  // Individual routes still apply requireAuth/requireTenant/requirePermission
+  // as defense in depth, but this line makes it architecturally impossible
+  // for a new route to be silently public just because the author forgot
+  // to opt into the per-route gate. The decisions test suite guards this
+  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
+  app.use('/api', requireAuth);
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
@@ -173,6 +206,11 @@ export function createApp() {
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
+  const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+
+  const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
+    process.env as NodeJS.ProcessEnv
+  );
 
   const canonicalPackRegistry = pool
     ? new PgVerticalPackRegistry(pool)
@@ -237,15 +275,71 @@ export function createApp() {
     }
   }, 250);
 
+  // ── Auto-delivery worker: sweeps approved proposals past the 5-second
+  // undo window and hands them to the executor. Closes the operational
+  // question from the D9 undo-window slice: "who kicks execution after
+  // the window closes?" The answer is this poll, on a 1-second interval.
+  let proposalRepo: InMemoryProposalRepository | PgProposalRepository;
+  if (pool) {
+    proposalRepo = new PgProposalRepository(pool);
+  } else {
+    proposalRepo = new InMemoryProposalRepository();
+    if (config.NODE_ENV !== 'test') {
+      // Loud warning: silent InMemory fallback in dev causes "works in dev,
+      // broken in prod" bugs (proposals disappear on restart, no RLS enforcement,
+      // no cross-tenant sweep). If you see this outside of tests, set DATABASE_URL.
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[app] ⚠️  DATABASE_URL unset — using InMemoryProposalRepository. ' +
+        'Proposals will NOT persist across restarts and the auto-delivery worker ' +
+        'will behave differently than in prod. Set DATABASE_URL to use Postgres.'
+      );
+    }
+  }
+  const executionHandlers = createExecutionHandlerRegistry({
+    appointmentRepo,
+  });
+  const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  const executionWorkerLogger = createLogger({
+    service: 'execution-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runExecutionSweep({
+        proposalRepo,
+        executor: proposalExecutor,
+        logger: executionWorkerLogger,
+      });
+    } catch (err) {
+      executionWorkerLogger.error('Execution sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 1000);
+
+  // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
+  // jobs.customerId) through validation against the requesting tenant
+  // before creating child entities — closes the cross-entity reference
+  // forgery class flagged by the tenant-isolation adversarial suite.
+  const ownership = createTenantOwnership({
+    customerRepo,
+    locationRepo,
+    jobRepo,
+    estimateRepo,
+    invoiceRepo,
+    appointmentRepo,
+  });
+
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/locations', createLocationRouter(locationRepo));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo));
-  app.use('/api/appointments', createAppointmentRouter(appointmentRepo));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo));
+  app.use('/api/locations', createLocationRouter(locationRepo, ownership));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
-  app.use('/api/notes', createNoteRouter(noteRepo));
+  app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
@@ -254,6 +348,10 @@ export function createApp() {
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  app.use(
+    '/api/files',
+    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
+  );
   app.use('/api/assistant', createAssistantRouter());
 
   // Global error handler

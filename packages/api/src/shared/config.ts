@@ -86,6 +86,9 @@ function validateProductionConfig(config: AppConfig): void {
   // AI provider
   if (!config.AI_PROVIDER_API_KEY) missing.push('AI_PROVIDER_API_KEY');
 
+  // CORS — must be an explicit origin, not the wildcard fallback
+  if (!config.CORS_ORIGIN) missing.push('CORS_ORIGIN');
+
   if (missing.length > 0) {
     throw new Error(
       `Production configuration is missing required values:\n  ${missing.join('\n  ')}\n` +

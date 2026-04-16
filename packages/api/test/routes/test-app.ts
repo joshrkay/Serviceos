@@ -18,6 +18,7 @@ import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
+import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 
 export const TEST_TENANT_ID = 'tenant-test-1';
 export const TEST_USER_ID = 'user-test-1';
@@ -74,10 +75,16 @@ export async function buildTestApp(): Promise<TestApp> {
   // Estimates and invoices need settings for number generation
   await settingsRepo.create(makeSeedSettings(TEST_TENANT_ID));
 
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo));
+  // Route shape tests use literal string ids without seeding parents,
+  // so the cross-entity ownership guard is stubbed permissively here.
+  // The real impl is exercised via createApp() in
+  // packages/api/test/decisions/tenant-isolation.test.ts.
+  const ownership = permissiveTenantOwnership();
+
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
 
   return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, settingsRepo, auditRepo };
 }

@@ -108,6 +108,12 @@ export class EstimateTaskHandler implements TaskHandler {
       confidenceFactors: confidence.factors,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      // D3: this handler is called by the CaptureAgent pipeline. Drafting
+      // an estimate is capture-class (no money is moved). Passing the
+      // autonomous tier lets decideInitialStatus auto-approve the draft
+      // when the LLM's confidence is ≥ 0.9; lower confidence still lands
+      // in 'draft' for operator review.
+      sourceTrustTier: 'autonomous',
     };
 
     const proposal = createProposal(input);

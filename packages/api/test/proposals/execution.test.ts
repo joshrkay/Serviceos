@@ -4,7 +4,7 @@ import {
   InMemoryProposalRepository,
   Proposal,
 } from '../../src/proposals/proposal';
-import { transitionProposal } from '../../src/proposals/lifecycle';
+import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import {
   createExecutionHandlerRegistry,
@@ -31,6 +31,15 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     let proposal = createProposal(input);
     proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
     proposal = transitionProposal(proposal, 'approved', 'user-1');
+    // Decision 9 5-second undo window: executor refuses within-window
+    // proposals. Existing execution tests assume an approved proposal
+    // is immediately executable, so backdate approvedAt past the
+    // window. The undo-window behavior is covered explicitly in the
+    // "undo window" describe block below.
+    proposal = {
+      ...proposal,
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    };
     return proposal;
   }
 
@@ -154,5 +163,44 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
     await expect(executor.execute(proposal, context)).rejects.toThrow(
       "Proposal must be in 'approved' status to execute, but is 'draft'"
     );
+  });
+
+  // ── Decision 9: 5-second undo window ────────────────────────────────
+
+  describe('5-second undo window', () => {
+    it('executor refuses to run a proposal still inside the undo window', async () => {
+      const { repo, executor } = await setupExecutor();
+      // Fresh approval — approvedAt = now, inside the window.
+      const proposal: Proposal = {
+        ...makeApprovedProposal(),
+        approvedAt: new Date(), // override the backdated helper
+      };
+      await repo.create(proposal);
+
+      await expect(executor.execute(proposal, context)).rejects.toMatchObject({
+        code: 'UNDO_WINDOW_OPEN',
+      });
+    });
+
+    it('executor runs a proposal whose window has closed', async () => {
+      const { repo, executor } = await setupExecutor();
+      const proposal = makeApprovedProposal(); // helper backdates past window
+      await repo.create(proposal);
+
+      const { result } = await executor.execute(proposal, context);
+      expect(result.success).toBe(true);
+    });
+
+    it('executor runs historical proposals without approvedAt (backward compat)', async () => {
+      const { repo, executor } = await setupExecutor();
+      const proposal: Proposal = {
+        ...makeApprovedProposal(),
+        approvedAt: undefined, // simulate pre-undo-window-slice proposal
+      };
+      await repo.create(proposal);
+
+      const { result } = await executor.execute(proposal, context);
+      expect(result.success).toBe(true);
+    });
   });
 });

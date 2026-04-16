@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createAppointmentSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
+import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createAppointment,
   getAppointment,
@@ -11,7 +12,10 @@ import {
   AppointmentRepository,
 } from '../appointments/appointment';
 
-export function createAppointmentRouter(appointmentRepo: AppointmentRepository): Router {
+export function createAppointmentRouter(
+  appointmentRepo: AppointmentRepository,
+  ownership: TenantOwnership
+): Router {
   const router = Router();
 
   router.post(
@@ -22,6 +26,8 @@ export function createAppointmentRouter(appointmentRepo: AppointmentRepository):
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createAppointmentSchema.parse(req.body);
+        // Cross-entity tenant guard: jobId must belong to the requesting tenant.
+        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
         const result = await createAppointment(
           {
             ...parsed,
