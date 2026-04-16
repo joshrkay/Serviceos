@@ -3,10 +3,10 @@ import {
   X, Search, Check, ArrowLeft, Mic, StopCircle, Sparkles,
   RotateCcw, Calendar, Clock, User, AlertCircle, MapPin,
   ChevronRight, ClipboardList, Pencil, Zap, Send, FileText,
-  Plus, ChevronDown,
+  Plus,
 } from 'lucide-react';
 import { customers, technicians } from '../../data/mock-data';
-import type { ServiceType } from '../../data/mock-data';
+import type { Customer, ServiceType } from '../../data/mock-data';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FlowStep   = 'start' | 'voice' | 'customer' | 'details' | 'schedule' | 'done';
@@ -50,11 +50,38 @@ const VOICE_SAMPLES = [
   "Exterior painting job for the Chen family on Friday at 10am. Assign Sarah Lin. They need the south wall repainted.",
 ];
 
+function normalizeAddress(address: string): string {
+  return address.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function markLocationAsOldAddress(customer: Customer, address: string): Customer {
+  const normalized = normalizeAddress(address);
+  const nextLocations = customer.locations.map((location) => {
+    if (normalizeAddress(location.address) !== normalized) return location;
+    return {
+      ...location,
+      isPrimary: false,
+      nickname: location.nickname.toLowerCase().includes('old') ? location.nickname : `Old ${location.nickname}`,
+    };
+  });
+
+  const hasPrimary = nextLocations.some((location) => location.isPrimary);
+  if (!hasPrimary && nextLocations.length > 0) {
+    nextLocations[0] = { ...nextLocations[0], isPrimary: true };
+  }
+
+  return {
+    ...customer,
+    locations: nextLocations,
+    address: nextLocations.find((location) => location.isPrimary)?.address ?? customer.address,
+  };
+}
+
 // ─── Voice parser (mock AI) ───────────────────────────────────────────────────
-function parseVoice(input: string): ParsedJob {
+function parseVoice(input: string, customerPool: Customer[]): ParsedJob {
   const t = input.toLowerCase();
 
-  const matchedCustomer = customers.find(c =>
+  const matchedCustomer = customerPool.find(c =>
     t.includes(c.name.toLowerCase()) ||
     t.includes(c.name.split(' ')[0].toLowerCase()) ||
     t.includes((c.name.split(' ')[1] ?? '').toLowerCase())
@@ -237,6 +264,7 @@ export function NewJobFlow({
     ? preCustomer.locations[0].id : null;
 
   const [step,     setStep]     = useState<FlowStep>('start');
+  const [customerOptions, setCustomerOptions] = useState<Customer[]>(customers);
   const [draft,    setDraft]    = useState<JobDraft>({
     ...BLANK,
     customerId:  preSelectedCustomerId ?? null,
@@ -247,6 +275,13 @@ export function NewJobFlow({
   const [search,   setSearch]   = useState('');
   const [creating, setCreating] = useState(false);
   const [jobNum,   setJobNum]   = useState('');
+  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [newCustomerEmail, setNewCustomerEmail] = useState('');
+  const [newCustomerAddress, setNewCustomerAddress] = useState('');
+  const [newCustomerError, setNewCustomerError] = useState('');
+  const [addressConflictNote, setAddressConflictNote] = useState('');
 
   // Voice state
   const [vPhase,      setVPhase]      = useState<VoicePhase>('idle');
@@ -269,7 +304,7 @@ export function NewJobFlow({
     setTimeout(() => { setVTranscript(sample); setVPhase('parsed'); }, 1800);
   }
   function buildFromVoice() {
-    const result = parseVoice(vTranscript);
+    const result = parseVoice(vTranscript, customerOptions);
     setParsed(result);
     setDraft(d => ({
       ...d,
@@ -286,7 +321,7 @@ export function NewJobFlow({
   }
 
   // Derived
-  const customer   = customers.find(c => c.id === draft.customerId);
+  const customer   = customerOptions.find(c => c.id === draft.customerId);
   const multiLoc   = (customer?.locations.length ?? 0) > 1;
   const location   = customer?.locations.find(l => l.id === draft.locationId);
   const primaryLoc = customer?.locations.find(l => l.isPrimary) ?? customer?.locations[0];
@@ -294,14 +329,14 @@ export function NewJobFlow({
   const tech       = technicians.find(t => t.name === draft.assignedTech);
 
   const filteredCustomers = search
-    ? customers.filter(c =>
+    ? customerOptions.filter(c =>
         c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.phone.includes(search) ||
         c.address.toLowerCase().includes(search.toLowerCase()))
-    : customers;
+    : customerOptions;
 
-  function selectCustomer(id: string) {
-    const c = customers.find(c => c.id === id);
+  function selectCustomer(id: string, source: Customer[] = customerOptions) {
+    const c = source.find(c => c.id === id);
     setDraft(d => ({
       ...d,
       customerId:  id,
@@ -312,6 +347,78 @@ export function NewJobFlow({
 
   function setField<K extends keyof JobDraft>(k: K, v: JobDraft[K]) {
     setDraft(d => ({ ...d, [k]: v }));
+  }
+
+  function getPrimaryLocation(c: Customer) {
+    return c.locations.find(l => l.isPrimary) ?? c.locations[0];
+  }
+
+  function createCustomerFromFlow() {
+    setNewCustomerError('');
+    const trimmedName = newCustomerName.trim();
+    const trimmedAddress = newCustomerAddress.trim();
+
+    if (!trimmedName) {
+      setNewCustomerError('Customer name is required.');
+      return;
+    }
+    if (!trimmedAddress) {
+      setNewCustomerError('Address is required.');
+      return;
+    }
+
+    const normalizedAddress = normalizeAddress(trimmedAddress);
+    const conflictingCustomers = customerOptions.filter(existingCustomer =>
+      existingCustomer.locations.some(location => normalizeAddress(location.address) === normalizedAddress)
+    );
+
+    const updatedCustomers = customerOptions.map((existingCustomer) =>
+      conflictingCustomers.some((conflict) => conflict.id === existingCustomer.id)
+        ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
+        : existingCustomer
+    );
+
+    const [firstName = '', ...rest] = trimmedName.split(/\s+/);
+    const lastName = rest.join(' ');
+    const newId = `c${Date.now()}`;
+    const createdCustomer: Customer = {
+      id: newId,
+      name: trimmedName,
+      phone: newCustomerPhone.trim() || '(000) 000-0000',
+      email: newCustomerEmail.trim() || `${firstName.toLowerCase() || 'new'}.${lastName.toLowerCase() || 'customer'}@example.com`,
+      address: trimmedAddress,
+      serviceType: draft.serviceType ?? 'HVAC',
+      locations: [
+        {
+          id: `${newId}-loc-1`,
+          nickname: 'Current',
+          address: trimmedAddress,
+          serviceTypes: [draft.serviceType ?? 'HVAC'],
+          isPrimary: true,
+          jobCount: 0,
+        },
+      ],
+      jobCount: 0,
+      openJobs: 0,
+      tags: ['New'],
+      memberSince: 'Today',
+      notes: '',
+    };
+
+    const nextCustomers = [createdCustomer, ...updatedCustomers];
+    setCustomerOptions(nextCustomers);
+    selectCustomer(createdCustomer.id, nextCustomers);
+    if (conflictingCustomers.length > 0) {
+      setAddressConflictNote('Address already existed and was marked old for previous customer records.');
+    } else {
+      setAddressConflictNote('');
+    }
+    setShowNewCustomerForm(false);
+    setSearch('');
+    setNewCustomerName('');
+    setNewCustomerPhone('');
+    setNewCustomerEmail('');
+    setNewCustomerAddress('');
   }
 
   function createJob() {
@@ -560,8 +667,64 @@ export function NewJobFlow({
               </div>
 
               <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => {
+                    setShowNewCustomerForm(prev => !prev);
+                    setNewCustomerError('');
+                    setAddressConflictNote('');
+                  }}
+                  className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-blue-300 bg-blue-50 px-4 py-3 text-sm text-blue-700 hover:bg-blue-100 transition-colors"
+                >
+                  <Plus size={14} /> {showNewCustomerForm ? 'Cancel new customer' : 'Create new customer'}
+                </button>
+
+                {showNewCustomerForm && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-2.5">
+                    <input
+                      value={newCustomerName}
+                      onChange={e => setNewCustomerName(e.target.value)}
+                      placeholder="Full name *"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={newCustomerPhone}
+                      onChange={e => setNewCustomerPhone(e.target.value)}
+                      placeholder="Phone"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={newCustomerEmail}
+                      onChange={e => setNewCustomerEmail(e.target.value)}
+                      placeholder="Email"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={newCustomerAddress}
+                      onChange={e => {
+                        setAddressConflictNote('');
+                        setNewCustomerAddress(e.target.value);
+                      }}
+                      placeholder="Address *"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    {newCustomerError && (
+                      <p className="text-xs text-red-500">{newCustomerError}</p>
+                    )}
+                    <button
+                      onClick={createCustomerFromFlow}
+                      className="w-full rounded-lg bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-700 transition-colors"
+                    >
+                      Save customer
+                    </button>
+                  </div>
+                )}
+                {addressConflictNote && (
+                  <p className="text-xs text-amber-700">{addressConflictNote}</p>
+                )}
+
                 {filteredCustomers.map(c => {
                   const sel = draft.customerId === c.id;
+                  const currentLocation = getPrimaryLocation(c);
                   return (
                     <button key={c.id} onClick={() => selectCustomer(c.id)}
                       className={`flex items-center gap-3 rounded-xl px-4 py-3 text-left border transition-all ${
@@ -581,9 +744,14 @@ export function NewJobFlow({
                           )}
                         </div>
                         <p className="text-xs text-slate-400 mt-0.5 truncate">
-                          {c.locations.length > 1 ? `${c.locations.length} locations` : c.address}
+                          {c.locations.length > 1
+                            ? `${c.locations.length} locations`
+                            : currentLocation?.address ?? c.address}
                         </p>
                       </div>
+                      {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old address')) || !c.locations.some(loc => loc.isPrimary)) && (
+                        <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">old address</span>
+                      )}
                       {sel ? <Check size={15} className="text-blue-600 shrink-0" /> : <ChevronRight size={14} className="text-slate-300 shrink-0" />}
                     </button>
                   );
