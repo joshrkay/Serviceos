@@ -29,7 +29,7 @@ const assistantReplySchema = z.object({
   content: z.string().min(1),
   reasoning: z.string().optional(),
   autoApplied: z.boolean().optional(),
-  proposal: assistantProposalSchema.optional(),
+  proposal: assistantProposalSchema.nullable().optional(),
 });
 
 const assistantChatRequestSchema = z.object({
