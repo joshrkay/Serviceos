@@ -14,7 +14,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -24,6 +24,7 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'draft_estimate',
   'update_estimate',
   'draft_invoice',
+  'update_invoice',
   'reassign_appointment',
   'reschedule_appointment',
   'cancel_appointment',
@@ -146,6 +147,7 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'draft_estimate':
     case 'update_estimate':
     case 'draft_invoice':
+    case 'update_invoice':
     case 'reassign_appointment':
     case 'reschedule_appointment':
     case 'onboarding_tenant_settings':

@@ -1,26 +1,30 @@
 import { LLMGateway } from '../gateway/gateway';
 
 /**
- * Phase 1 — voice-to-action intent classifier.
+ * Voice-to-action intent classifier.
  *
  * Takes a voice transcript, returns a structured classification that
  * the voice-action-router uses to dispatch to the right AI task.
  *
- * Only the 3 Phase-1 intents are recognized. Phase-2/3/4 intents
- * (send_invoice, update_invoice, query_*) return 'unknown' today so
- * the classifier doesn't hallucinate coverage it can't actually execute.
+ * Phase 1 handled: create_invoice, draft_estimate, create_appointment.
+ * Phase 2 adds:    update_invoice (add/remove line item).
+ * Phase 3/4 intents (send_invoice, query_*) still return 'unknown'
+ * today so the classifier doesn't hallucinate coverage it can't
+ * actually execute.
  */
 
 export type IntentType =
   | 'create_invoice'
   | 'draft_estimate'
   | 'create_appointment'
+  | 'update_invoice'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_invoice',
   'draft_estimate',
   'create_appointment',
+  'update_invoice',
   'unknown',
 ] as const;
 
@@ -55,12 +59,24 @@ const SYSTEM_PROMPT = `You are an intent classifier for a field service operatin
 Given a voice transcript from a field service operator, decide which action they intend to take.
 
 Supported intents (return exactly ONE):
-- "create_invoice"      — user wants to draft a new invoice for work completed
-- "draft_estimate"      — user wants to draft an estimate/quote before work starts
-- "create_appointment"  — user wants to schedule a new appointment or follow-up
-- "unknown"             — anything else, including queries ("when is my next appointment"),
-                          edit commands ("add/remove line item"), send commands,
-                          or ambiguous transcripts
+- "create_invoice"      — user wants to draft a NEW invoice for work completed.
+                           Example: "Create an invoice for Acme for 450 dollars"
+- "draft_estimate"      — user wants to draft a new estimate/quote before work starts.
+                           Example: "Draft an estimate for the Johnson water heater"
+- "create_appointment"  — user wants to schedule a new appointment or follow-up.
+                           Example: "Schedule a follow-up for Mrs Lee next Tuesday at 2pm"
+- "update_invoice"      — user wants to ADD or REMOVE a line item on an EXISTING
+                           draft invoice. Requires an explicit invoice reference
+                           (number or customer name).
+                           Examples: "Add a trip fee to invoice INV-0042"
+                                     "Remove the diagnostic from the Smith invoice"
+- "unknown"             — anything else: send commands, queries ("when is my next
+                           appointment"), ambiguous transcripts, or invoice edits
+                           without a clear invoice reference.
+
+Distinction that matters: "create an invoice" vs "add to invoice" — the word
+"add/remove/update" plus a reference to an existing invoice = update_invoice.
+Any phrasing starting a NEW invoice = create_invoice.
 
 Return valid JSON with exactly this shape (no prose, no markdown fences):
 {

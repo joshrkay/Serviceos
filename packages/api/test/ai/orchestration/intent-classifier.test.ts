@@ -106,6 +106,30 @@ describe('intent-classifier — classifyIntent', () => {
         },
       },
     },
+    {
+      transcript: 'Add a water heater install for 850 to invoice INV-0042',
+      expectedIntent: 'update_invoice',
+      llmResponse: {
+        intentType: 'update_invoice',
+        confidence: 0.9,
+        extractedEntities: {
+          jobReference: 'INV-0042',
+          lineItemDescriptions: ['water heater install'],
+        },
+      },
+    },
+    {
+      transcript: 'Remove the plumbing repair from invoice INV-0042',
+      expectedIntent: 'update_invoice',
+      llmResponse: {
+        intentType: 'update_invoice',
+        confidence: 0.88,
+        extractedEntities: {
+          jobReference: 'INV-0042',
+          lineItemDescriptions: ['plumbing repair'],
+        },
+      },
+    },
   ];
 
   for (const { transcript, expectedIntent, llmResponse } of cases) {
