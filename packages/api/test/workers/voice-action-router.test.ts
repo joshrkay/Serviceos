@@ -125,6 +125,80 @@ describe('voice-action-router worker', () => {
     expect(byTenant[0].proposalType).toBe('create_appointment');
   });
 
+  it('classifies "add item to invoice" and persists an update_invoice proposal', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'update_invoice',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'INV-0042', lineItemDescriptions: ['trip fee'] },
+      }),
+      JSON.stringify({
+        invoiceReference: 'INV-0042',
+        editActions: [
+          {
+            type: 'add_line_item',
+            lineItem: { description: 'Trip fee', quantity: 1, unitPrice: 7500 },
+          },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Add a trip fee for 75 to invoice INV-0042',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('update_invoice');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.invoiceReference).toBe('INV-0042');
+  });
+
+  it('classifies "add item to estimate" and persists an update_estimate proposal', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'update_estimate',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'EST-0001', lineItemDescriptions: ['site visit'] },
+      }),
+      JSON.stringify({
+        estimateReference: 'EST-0001',
+        editActions: [
+          {
+            type: 'add_line_item',
+            lineItem: { description: 'Site visit', quantity: 1, unitPrice: 15000 },
+          },
+        ],
+        confidence_score: 0.9,
+      }),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Add a site visit for 150 to estimate EST-0001',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('update_estimate');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.estimateReference).toBe('EST-0001');
+  });
+
   it('classifies "draft estimate" and persists a draft_estimate proposal', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({ intentType: 'draft_estimate', confidence: 0.9 }),

@@ -59,10 +59,29 @@ export const draftEstimatePayloadSchema = z.object({
   validUntil: z.string().optional(),
 });
 
+// Edit-action schema for update_estimate proposals. Same discriminated
+// union shape as invoiceEditActionSchema below. Voice-driven estimate
+// edits = add / remove / update a single line item; notes/wording edits
+// stay at draft_estimate creation time.
+export const estimateEditActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('add_line_item'),
+    lineItem: lineItemSchema,
+  }),
+  z.object({
+    type: z.literal('remove_line_item'),
+    index: z.number().int().min(0),
+  }),
+  z.object({
+    type: z.literal('update_line_item'),
+    index: z.number().int().min(0),
+    lineItem: lineItemSchema,
+  }),
+]);
+
 export const updateEstimatePayloadSchema = z.object({
   estimateId: z.string().uuid(),
-  lineItems: z.array(lineItemSchema).optional(),
-  notes: z.string().optional(),
+  editActions: z.array(estimateEditActionSchema).min(1),
 });
 
 export const draftInvoicePayloadSchema = z.object({
@@ -77,6 +96,32 @@ export const draftInvoicePayloadSchema = z.object({
   internalNotes: z.string().optional(),
 });
 
+// Edit-action schema for update_invoice proposals. Mirrors the
+// estimate-editor pattern but scoped to invoice line items: Phase-2
+// voice flows only add, remove, or replace a line item. Notes/wording
+// edits are out of scope for this iteration — the draft_invoice path
+// still owns those at creation time.
+export const invoiceEditActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('add_line_item'),
+    lineItem: lineItemSchema,
+  }),
+  z.object({
+    type: z.literal('remove_line_item'),
+    index: z.number().int().min(0),
+  }),
+  z.object({
+    type: z.literal('update_line_item'),
+    index: z.number().int().min(0),
+    lineItem: lineItemSchema,
+  }),
+]);
+
+export const updateInvoicePayloadSchema = z.object({
+  invoiceId: z.string().uuid(),
+  editActions: z.array(invoiceEditActionSchema).min(1),
+});
+
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
@@ -85,6 +130,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   draft_estimate: draftEstimatePayloadSchema,
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,
+  update_invoice: updateInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,

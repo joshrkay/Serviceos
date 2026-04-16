@@ -77,13 +77,15 @@ describe('P2-002 — Typed proposal contracts', () => {
     expect(result.errors).toBeUndefined();
   });
 
-  it('happy path — validates update_estimate payload', () => {
+  it('happy path — validates update_estimate payload with editActions', () => {
     const result = validateProposalPayload('update_estimate', {
       estimateId: validEstimateId,
-      lineItems: [
-        { description: 'Revised labor', quantity: 3, unitPrice: 75 },
+      editActions: [
+        {
+          type: 'add_line_item',
+          lineItem: { description: 'Revised labor', quantity: 3, unitPrice: 75 },
+        },
       ],
-      notes: 'Updated estimate',
     });
     expect(result.valid).toBe(true);
     expect(result.errors).toBeUndefined();
