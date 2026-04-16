@@ -18,6 +18,7 @@ export type IntentType =
   | 'draft_estimate'
   | 'create_appointment'
   | 'update_invoice'
+  | 'update_estimate'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -25,6 +26,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'draft_estimate',
   'create_appointment',
   'update_invoice',
+  'update_estimate',
   'unknown',
 ] as const;
 
@@ -70,13 +72,24 @@ Supported intents (return exactly ONE):
                            (number or customer name).
                            Examples: "Add a trip fee to invoice INV-0042"
                                      "Remove the diagnostic from the Smith invoice"
+- "update_estimate"     — user wants to ADD or REMOVE a line item on an EXISTING
+                           draft estimate. Requires an explicit estimate reference
+                           (number or customer name).
+                           Examples: "Add a site visit to estimate EST-0001"
+                                     "Remove the old heater from the Johnson estimate"
 - "unknown"             — anything else: send commands, queries ("when is my next
-                           appointment"), ambiguous transcripts, or invoice edits
-                           without a clear invoice reference.
+                           appointment"), ambiguous transcripts, or edit commands
+                           without a clear invoice/estimate reference.
 
-Distinction that matters: "create an invoice" vs "add to invoice" — the word
-"add/remove/update" plus a reference to an existing invoice = update_invoice.
-Any phrasing starting a NEW invoice = create_invoice.
+Distinctions that matter:
+- "create an invoice/estimate" vs "add to invoice/estimate" — the word
+  "add/remove/update" plus a reference to an EXISTING invoice or estimate
+  = update_invoice or update_estimate. Any phrasing starting a NEW one
+  = create_invoice or draft_estimate.
+- Invoice vs estimate — the operator usually says which. When they say
+  "invoice" or use an "INV-" prefix, use the invoice intent; when they say
+  "estimate/quote" or "EST-", use the estimate intent. When genuinely
+  ambiguous, prefer "unknown".
 
 Return valid JSON with exactly this shape (no prose, no markdown fences):
 {
