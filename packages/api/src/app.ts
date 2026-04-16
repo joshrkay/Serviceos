@@ -28,6 +28,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
+import { createFilesRouter, createDevStorageRouter } from './routes/files';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -73,7 +74,9 @@ import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
+import { InMemoryFileRepository } from './files/file-service';
 import { PgFileRepository } from './files/pg-file';
+import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
 
@@ -165,6 +168,14 @@ export function createApp() {
     createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
   );
 
+  // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
+  // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
+  // succeed in local development. In prod/staging, createStorageProvider
+  // refuses to return a DevStorageProvider, so this route is dormant.
+  if (config.NODE_ENV !== 'prod' && config.NODE_ENV !== 'staging') {
+    app.use('/storage-dev', createDevStorageRouter());
+  }
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -196,6 +207,11 @@ export function createApp() {
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
+  const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+
+  const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
+    process.env as NodeJS.ProcessEnv
+  );
 
   const canonicalPackRegistry = pool
     ? new PgVerticalPackRegistry(pool)
@@ -317,6 +333,10 @@ export function createApp() {
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  app.use(
+    '/api/files',
+    createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket })
+  );
   app.use('/api/assistant', createAssistantRouter());
 
   // Global error handler
