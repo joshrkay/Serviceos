@@ -279,7 +279,23 @@ export function createApp() {
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
   // the window closes?" The answer is this poll, on a 1-second interval.
-  const proposalRepo = pool ? new PgProposalRepository(pool) : new InMemoryProposalRepository();
+  let proposalRepo: InMemoryProposalRepository | PgProposalRepository;
+  if (pool) {
+    proposalRepo = new PgProposalRepository(pool);
+  } else {
+    proposalRepo = new InMemoryProposalRepository();
+    if (config.NODE_ENV !== 'test') {
+      // Loud warning: silent InMemory fallback in dev causes "works in dev,
+      // broken in prod" bugs (proposals disappear on restart, no RLS enforcement,
+      // no cross-tenant sweep). If you see this outside of tests, set DATABASE_URL.
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[app] ⚠️  DATABASE_URL unset — using InMemoryProposalRepository. ' +
+        'Proposals will NOT persist across restarts and the auto-delivery worker ' +
+        'will behave differently than in prod. Set DATABASE_URL to use Postgres.'
+      );
+    }
+  }
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
   });
