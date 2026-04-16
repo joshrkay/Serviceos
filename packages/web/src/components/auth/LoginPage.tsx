@@ -1,7 +1,22 @@
-import { SignIn } from '@clerk/clerk-react';
+import { SignIn, useAuth } from '@clerk/clerk-react';
+import { Navigate, useLocation } from 'react-router';
 import { Zap } from 'lucide-react';
 
+export type LocationState = { from?: { pathname?: string; search?: string; hash?: string } } | null;
+
+export function extractFromPath(state: LocationState): string {
+  const from = state?.from;
+  if (!from?.pathname) return '/';
+  // Block external URLs — only accept in-app paths (start with '/' but not '//').
+  if (!from.pathname.startsWith('/') || from.pathname.startsWith('//')) return '/';
+  return `${from.pathname}${from.search ?? ''}${from.hash ?? ''}`;
+}
+
 export function LoginPage() {
+  const { isLoaded, isSignedIn } = useAuth();
+  const location = useLocation();
+  const redirectTarget = extractFromPath(location.state as LocationState);
+  if (isLoaded && isSignedIn) return <Navigate to={redirectTarget} replace />;
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Header */}
@@ -16,7 +31,7 @@ export function LoginPage() {
       <div className="flex-1 flex items-center justify-center px-5 py-12">
         <SignIn
           signUpUrl="/signup"
-          fallbackRedirectUrl="/"
+          fallbackRedirectUrl={redirectTarget}
           appearance={{
             elements: {
               rootBox: 'w-full max-w-sm',

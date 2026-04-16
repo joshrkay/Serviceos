@@ -18,6 +18,7 @@ import { InteractionsPage } from './components/interactions/InteractionsPage';
 import { LeadsPage } from './components/leads/LeadsPage';
 import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
+import { ProtectedRoute } from './components/auth/ProtectedRoute';
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
@@ -30,11 +31,14 @@ export const router = createBrowserRouter([
   { path: '/pay/:id',    Component: InvoicePaymentPage },
   { path: '/intake',     Component: IntakeFormPage },
 
-  // ── App (with Shell nav) ─────────────────────────────────────────────────
+  // ── App (with Shell nav, auth-gated) ────────────────────────────────────
   {
     path: '/',
-    Component: Shell,
-    children: [
+    Component: ProtectedRoute,
+    children: [{
+      path: '/',
+      Component: Shell,
+      children: [
       { index: true,            Component: HomePage        },
       { path: 'assistant',      Component: AssistantPage   },
       { path: 'jobs',           Component: JobsPage        },
@@ -49,5 +53,6 @@ export const router = createBrowserRouter([
       { path: 'settings',       Component: SettingsPage    },
       { path: 'settings/templates', Component: TemplatesPage   },
     ],
+    }],
   },
 ]);

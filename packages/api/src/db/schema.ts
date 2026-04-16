@@ -903,6 +903,26 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_pack_act ON pack_activations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '039_proposals_v2': `
+    ALTER TABLE proposals
+      ADD COLUMN IF NOT EXISTS summary TEXT,
+      ADD COLUMN IF NOT EXISTS explanation TEXT,
+      ADD COLUMN IF NOT EXISTS confidence_factors JSONB,
+      ADD COLUMN IF NOT EXISTS source_context JSONB,
+      ADD COLUMN IF NOT EXISTS prompt_version_id UUID,
+      ADD COLUMN IF NOT EXISTS result_entity_id TEXT,
+      ADD COLUMN IF NOT EXISTS rejection_details TEXT,
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS executed_by TEXT,
+      ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS undone_by TEXT;
+    ALTER TABLE proposals ALTER COLUMN idempotency_key DROP NOT NULL;
+    ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
+    ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

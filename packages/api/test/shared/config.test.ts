@@ -26,6 +26,7 @@ describe('P0-006 — Secrets/config framework', () => {
       CLERK_WEBHOOK_SECRET: 'whsec_test',
       AI_PROVIDER_API_KEY: 'ak_test',
       AI_PROVIDER_BASE_URL: 'https://ai.example.com',
+      CORS_ORIGIN: 'https://app.example.com',
       LOG_LEVEL: 'debug',
     });
     expect(config.NODE_ENV).toBe('staging');
