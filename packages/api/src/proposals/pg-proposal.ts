@@ -1,0 +1,280 @@
+import { Pool } from 'pg';
+import { ConflictError } from '../shared/errors';
+import { PgBaseRepository } from '../db/pg-base';
+import { Proposal, ProposalRepository, ProposalStatus } from './proposal';
+
+function mapRow(row: Record<string, unknown>): Proposal {
+  return {
+    id: row.id as string,
+    tenantId: row.tenant_id as string,
+    proposalType: row.proposal_type as Proposal['proposalType'],
+    status: row.status as ProposalStatus,
+    payload: row.payload as Record<string, unknown>,
+    summary: row.summary as string,
+    explanation: (row.explanation as string) ?? undefined,
+    confidenceScore: row.confidence_score != null ? Number(row.confidence_score) : undefined,
+    confidenceFactors: (row.confidence_factors as string[]) ?? undefined,
+    sourceContext: (row.source_context as Record<string, unknown>) ?? undefined,
+    aiRunId: (row.ai_run_id as string) ?? undefined,
+    promptVersionId: (row.prompt_version_id as string) ?? undefined,
+    targetEntityType: (row.target_entity_type as string) ?? undefined,
+    targetEntityId: (row.target_entity_id as string) ?? undefined,
+    resultEntityId: (row.result_entity_id as string) ?? undefined,
+    rejectionReason: (row.rejection_reason as string) ?? undefined,
+    rejectionDetails: (row.rejection_details as string) ?? undefined,
+    idempotencyKey: (row.idempotency_key as string) ?? undefined,
+    expiresAt: row.expires_at ? new Date(row.expires_at as string) : undefined,
+    approvedAt: row.approved_at ? new Date(row.approved_at as string) : undefined,
+    executedAt: row.executed_at ? new Date(row.executed_at as string) : undefined,
+    executedBy: (row.executed_by as string) ?? undefined,
+    undoneAt: row.undone_at ? new Date(row.undone_at as string) : undefined,
+    undoneBy: (row.undone_by as string) ?? undefined,
+    createdBy: row.created_by as string,
+    createdAt: new Date(row.created_at as string),
+    updatedAt: new Date(row.updated_at as string),
+  };
+}
+
+export class PgProposalRepository extends PgBaseRepository implements ProposalRepository {
+  constructor(pool: Pool) {
+    super(pool);
+  }
+
+  async create(proposal: Proposal): Promise<Proposal> {
+    return this.withTenantTransaction(proposal.tenantId, async (client) => {
+      // Idempotency is enforced by the unique index
+      // idx_proposals_idempotency(tenant_id, idempotency_key). Using
+      // ON CONFLICT DO NOTHING avoids the check-then-insert race where
+      // two concurrent transactions would both pass a SELECT check,
+      // then one INSERT would throw a raw duplicate-key error (SQLSTATE
+      // 23505) that surfaces as a 500 instead of a 409 ConflictError.
+      const conflictClause = proposal.idempotencyKey
+        ? 'ON CONFLICT (tenant_id, idempotency_key) DO NOTHING'
+        : '';
+
+      const result = await client.query(
+        `INSERT INTO proposals (
+          id, tenant_id, proposal_type, status, payload, summary, explanation,
+          confidence_score, confidence_factors, source_context, ai_run_id, prompt_version_id,
+          target_entity_type, target_entity_id, result_entity_id,
+          rejection_reason, rejection_details, idempotency_key, expires_at,
+          approved_at, executed_at, executed_by, undone_at, undone_by,
+          created_by, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10, $11, $12,
+          $13, $14, $15,
+          $16, $17, $18, $19,
+          $20, $21, $22, $23, $24,
+          $25, $26, $27
+        ) ${conflictClause} RETURNING *`,
+        [
+          proposal.id,
+          proposal.tenantId,
+          proposal.proposalType,
+          proposal.status,
+          JSON.stringify(proposal.payload),
+          proposal.summary,
+          proposal.explanation ?? null,
+          proposal.confidenceScore ?? null,
+          proposal.confidenceFactors ? JSON.stringify(proposal.confidenceFactors) : null,
+          proposal.sourceContext ? JSON.stringify(proposal.sourceContext) : null,
+          proposal.aiRunId ?? null,
+          proposal.promptVersionId ?? null,
+          proposal.targetEntityType ?? null,
+          proposal.targetEntityId ?? null,
+          proposal.resultEntityId ?? null,
+          proposal.rejectionReason ?? null,
+          proposal.rejectionDetails ?? null,
+          proposal.idempotencyKey ?? null,
+          proposal.expiresAt ?? null,
+          proposal.approvedAt ?? null,
+          proposal.executedAt ?? null,
+          proposal.executedBy ?? null,
+          proposal.undoneAt ?? null,
+          proposal.undoneBy ?? null,
+          proposal.createdBy,
+          proposal.createdAt,
+          proposal.updatedAt,
+        ]
+      );
+      if (result.rows.length === 0) {
+        // ON CONFLICT DO NOTHING returned no row — another transaction
+        // committed an insert with the same (tenant_id, idempotency_key)
+        // while we were racing. Surface as ConflictError → 409.
+        throw new ConflictError(
+          `Proposal with idempotency key '${proposal.idempotencyKey}' already exists for this tenant`
+        );
+      }
+      return mapRow(result.rows[0]);
+    });
+  }
+
+  async findById(tenantId: string, id: string): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 AND id = $2',
+        [tenantId, id]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async findByTenant(tenantId: string): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 ORDER BY created_at DESC',
+        [tenantId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 AND status = $2 ORDER BY created_at DESC',
+        [tenantId, status]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async findByAiRun(tenantId: string, aiRunId: string): Promise<Proposal[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 AND ai_run_id = $2 ORDER BY created_at DESC',
+        [tenantId, aiRunId]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  async updateStatus(
+    tenantId: string,
+    id: string,
+    status: ProposalStatus,
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
+  ): Promise<Proposal | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const lock = await client.query(
+        'SELECT id FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [tenantId, id]
+      );
+      if (lock.rows.length === 0) return null;
+
+      const setClauses = ['status = $3', 'updated_at = NOW()'];
+      const params: unknown[] = [tenantId, id, status];
+      let p = 4;
+
+      if (updates?.rejectionReason !== undefined) { setClauses.push(`rejection_reason = $${p++}`); params.push(updates.rejectionReason); }
+      if (updates?.rejectionDetails !== undefined) { setClauses.push(`rejection_details = $${p++}`); params.push(updates.rejectionDetails); }
+      if (updates?.resultEntityId !== undefined)   { setClauses.push(`result_entity_id = $${p++}`); params.push(updates.resultEntityId); }
+      if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
+      if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
+      if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+
+      const result = await client.query(
+        `UPDATE proposals SET ${setClauses.join(', ')}
+         WHERE tenant_id = $1 AND id = $2
+         RETURNING *`,
+        params
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async update(
+    tenantId: string,
+    id: string,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+  ): Promise<Proposal | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // Status transitions MUST go through updateStatus() which uses
+      // SELECT ... FOR UPDATE. Excluded here so the generic path can't
+      // race against concurrent status changes.
+      const fieldMap: Record<string, string> = {
+        proposalType: 'proposal_type',
+        payload: 'payload',
+        summary: 'summary',
+        explanation: 'explanation',
+        confidenceScore: 'confidence_score',
+        confidenceFactors: 'confidence_factors',
+        sourceContext: 'source_context',
+        aiRunId: 'ai_run_id',
+        promptVersionId: 'prompt_version_id',
+        targetEntityType: 'target_entity_type',
+        targetEntityId: 'target_entity_id',
+        resultEntityId: 'result_entity_id',
+        rejectionReason: 'rejection_reason',
+        rejectionDetails: 'rejection_details',
+        idempotencyKey: 'idempotency_key',
+        expiresAt: 'expires_at',
+        approvedAt: 'approved_at',
+        executedAt: 'executed_at',
+        executedBy: 'executed_by',
+        undoneAt: 'undone_at',
+        undoneBy: 'undone_by',
+      };
+
+      const setClauses: string[] = ['updated_at = NOW()'];
+      const params: unknown[] = [tenantId, id];
+      let p = 3;
+
+      for (const [key, column] of Object.entries(fieldMap)) {
+        if (key in updates) {
+          const val = (updates as Record<string, unknown>)[key];
+          const serialized =
+            key === 'payload' || key === 'confidenceFactors' || key === 'sourceContext'
+              ? val != null ? JSON.stringify(val) : null
+              : val ?? null;
+          setClauses.push(`${column} = $${p++}`);
+          params.push(serialized);
+        }
+      }
+
+      if (setClauses.length === 1) return this.findById(tenantId, id);
+
+      const result = await client.query(
+        `UPDATE proposals SET ${setClauses.join(', ')}
+         WHERE tenant_id = $1 AND id = $2
+         RETURNING *`,
+        params
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async findReadyForExecution(windowMs: number): Promise<Proposal[]> {
+    // Privileged cross-tenant sweep — uses withClient() intentionally.
+    // withTenant() would arm RLS and silently filter to a single tenant,
+    // causing the auto-delivery worker to miss proposals from all others.
+    return this.withClient(async (client) => {
+      const result = await client.query(
+        `SELECT * FROM proposals
+         WHERE status = 'approved'
+           AND (
+             approved_at IS NULL
+             OR approved_at <= NOW() - ($1 || ' milliseconds')::INTERVAL
+           )
+         ORDER BY approved_at ASC NULLS FIRST`,
+        [windowMs]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+}

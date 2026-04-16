@@ -85,6 +85,7 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { runExecutionSweep } from './workers/execution-worker';
 import { InMemoryProposalRepository } from './proposals/proposal';
+import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { createLogger } from './logging/logger';
@@ -99,20 +100,18 @@ export function createApp() {
   // Body parsing
   app.use(express.json());
 
-  // CORS
-  // Allow explicit origin override, or fall back to allowing all origins.
-  // Credentials require an explicit origin (not '*'), so in prod set CORS_ORIGIN to the web URL.
-  const corsOrigin = process.env.CORS_ORIGIN || true;
-  app.use(cors({
-    origin: corsOrigin,
-    credentials: true,
-  }));
+  // Load validated config — must happen before CORS so validateProductionConfig()
+  // can throw on missing CORS_ORIGIN before we wire the middleware.
+  const config = loadConfig();
 
   // Swagger UI — no auth required
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
-  // Load validated config
-  const config = loadConfig();
+  // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
+  app.use(cors({
+    origin: config.CORS_ORIGIN ?? true,
+    credentials: true,
+  }));
 
   // Rate limiting — applied before auth to protect all routes
   app.use('/api', rateLimit({
@@ -280,7 +279,7 @@ export function createApp() {
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
   // the window closes?" The answer is this poll, on a 1-second interval.
-  const proposalRepo = new InMemoryProposalRepository();
+  const proposalRepo = pool ? new PgProposalRepository(pool) : new InMemoryProposalRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
   });
