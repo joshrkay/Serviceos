@@ -1,7 +1,19 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 
-export type ProposalStatus = 'draft' | 'ready_for_review' | 'approved' | 'rejected' | 'expired' | 'executed' | 'execution_failed';
+export type ProposalStatus =
+  | 'draft'
+  | 'ready_for_review'
+  | 'approved'
+  | 'rejected'
+  | 'expired'
+  | 'executed'
+  | 'execution_failed'
+  // Undone: the operator pressed "undo" during the 5-second window
+  // after approval. Terminal — an undone proposal cannot be reapproved
+  // or re-executed. If the operator wants to proceed after undoing,
+  // they draft a new proposal. Decision 9 ("5-second undo window").
+  | 'undone';
 export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
@@ -42,8 +54,27 @@ export interface Proposal {
   rejectionDetails?: string;
   idempotencyKey?: string;
   expiresAt?: Date;
+  /**
+   * When the proposal transitioned into 'approved' (either via
+   * operator approval or via auto-approval by the trust-tier wiring).
+   * Used by the 5-second undo window — a proposal cannot be executed
+   * while `Date.now() - approvedAt < UNDO_WINDOW_MS`, and
+   * `undoProposal` only succeeds inside that window.
+   *
+   * Undefined on historical proposals (pre-undo-window slice) — the
+   * executor treats missing `approvedAt` as "no window" and runs
+   * immediately, preserving backward compatibility.
+   */
+  approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  /**
+   * Stamped when a proposal transitions to 'undone'. Distinct from
+   * rejection: rejection means "never execute"; undo means "we
+   * approved, then changed our mind within 5s".
+   */
+  undoneAt?: Date;
+  undoneBy?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -173,7 +204,19 @@ export interface ProposalRepository {
     tenantId: string,
     id: string,
     status: ProposalStatus,
-    updates?: Partial<Pick<Proposal, 'rejectionReason' | 'rejectionDetails' | 'resultEntityId' | 'executedAt' | 'executedBy'>>
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
   ): Promise<Proposal | null>;
   update(
     tenantId: string,
@@ -216,6 +259,12 @@ export function createProposal(input: CreateProposalInput): Proposal {
     sourceTrustTier: input.sourceTrustTier,
     confidenceScore: input.confidenceScore,
   });
+  // D9 undo window: auto-approved proposals stamp `approvedAt` at
+  // creation so the 5-second undo window starts ticking immediately.
+  // Without this stamp, the executor would run without any hold — the
+  // whole point of the window is to give the operator a chance to
+  // reverse a machine-approved action.
+  const approvedAt = status === 'approved' ? now : undefined;
   return {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -233,6 +282,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
     targetEntityId: input.targetEntityId,
     idempotencyKey: input.idempotencyKey,
     expiresAt: input.expiresAt,
+    approvedAt,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -285,7 +335,19 @@ export class InMemoryProposalRepository implements ProposalRepository {
     tenantId: string,
     id: string,
     status: ProposalStatus,
-    updates?: Partial<Pick<Proposal, 'rejectionReason' | 'rejectionDetails' | 'resultEntityId' | 'executedAt' | 'executedBy'>>
+    updates?: Partial<
+      Pick<
+        Proposal,
+        | 'rejectionReason'
+        | 'rejectionDetails'
+        | 'resultEntityId'
+        | 'approvedAt'
+        | 'executedAt'
+        | 'executedBy'
+        | 'undoneAt'
+        | 'undoneBy'
+      >
+    >
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
@@ -296,8 +358,11 @@ export class InMemoryProposalRepository implements ProposalRepository {
       if (updates.rejectionReason !== undefined) proposal.rejectionReason = updates.rejectionReason;
       if (updates.rejectionDetails !== undefined) proposal.rejectionDetails = updates.rejectionDetails;
       if (updates.resultEntityId !== undefined) proposal.resultEntityId = updates.resultEntityId;
+      if (updates.approvedAt !== undefined) proposal.approvedAt = updates.approvedAt;
       if (updates.executedAt !== undefined) proposal.executedAt = updates.executedAt;
       if (updates.executedBy !== undefined) proposal.executedBy = updates.executedBy;
+      if (updates.undoneAt !== undefined) proposal.undoneAt = updates.undoneAt;
+      if (updates.undoneBy !== undefined) proposal.undoneBy = updates.undoneBy;
     }
 
     this.proposals.set(id, proposal);

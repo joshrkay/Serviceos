@@ -633,9 +633,48 @@ describe('D9 — Hard gates at MCP tool layer', () => {
     expect(handlerIdx).toBeGreaterThan(ceilingIdx);
   });
 
-  it.todo(
-    '5-second undo window on reversible execution with rollback support'
-  );
+  it('5-second undo window: executor refuses inside window; undoProposal transitions to undone', async () => {
+    // The full runtime coverage lives in:
+    //   - packages/api/test/proposals/lifecycle.test.ts
+    //       ("5-second undo window (Decision 9)" describe)
+    //   - packages/api/test/proposals/execution.test.ts
+    //       ("5-second undo window" describe — executor refusal)
+    //   - packages/api/test/proposals/actions.test.ts
+    //       ("undoProposal — 5-second undo window" describe)
+    //
+    // This assertion locks the architectural shape at the source
+    // level: the constant, the status, the helper, and the action
+    // all exist and are wired together. A refactor that removes any
+    // one link fails this test.
+    const lifecycleSrc = await fs.readFile(
+      path.resolve(API_SRC, 'proposals/lifecycle.ts'),
+      'utf8'
+    );
+    const executorSrc = await fs.readFile(
+      path.resolve(API_SRC, 'proposals/execution/executor.ts'),
+      'utf8'
+    );
+    const actionsSrc = await fs.readFile(
+      path.resolve(API_SRC, 'proposals/actions.ts'),
+      'utf8'
+    );
+
+    // Constant and helper live in lifecycle.
+    expect(lifecycleSrc).toMatch(/export const UNDO_WINDOW_MS\s*=\s*5000/);
+    expect(lifecycleSrc).toMatch(/export function isInUndoWindow/);
+    // New 'undone' state is terminal.
+    expect(lifecycleSrc).toMatch(/'undone'/);
+    expect(lifecycleSrc).toMatch(/TERMINAL_STATUSES[\s\S]*'undone'/);
+
+    // Executor consults the window.
+    expect(executorSrc).toMatch(/isInUndoWindow/);
+    expect(executorSrc).toMatch(/UNDO_WINDOW_OPEN/);
+
+    // undoProposal action exists and enforces the window at the
+    // permission layer.
+    expect(actionsSrc).toMatch(/export async function undoProposal/);
+    expect(actionsSrc).toMatch(/UNDO_WINDOW_CLOSED/);
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
