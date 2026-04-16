@@ -83,7 +83,9 @@ import { PgQueue } from './queues/pg-queue';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
 import { runExecutionSweep } from './workers/execution-worker';
+import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
@@ -255,25 +257,59 @@ export function createApp() {
           };
         },
       };
-  const transcriptionWorker = createTranscriptionWorker(voiceRepo, transcriptionProvider);
+  // LLM gateway — single instance shared across intent classifier,
+  // voice-action-router task handlers, and future AI features.
+  // Falls back to a MockLLMProvider in dev/test so the app boots
+  // without an AI_PROVIDER_API_KEY.
+  const llmGateway = config.AI_PROVIDER_API_KEY
+    ? createLLMGateway(config)
+    : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
+
   const workerLogger = createLogger({
     service: 'transcription-worker',
     environment: process.env.NODE_ENV || 'development',
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
 
-  setInterval(async () => {
-    try {
-      const message = await queue.receive();
-      if (!message) return;
-      const processed = await processMessage(message, transcriptionWorker, workerLogger);
-      if (processed) {
-        await queue.delete(message.id);
-      }
-    } catch (err) {
-      workerLogger.error('Queue poll failed', { error: err instanceof Error ? err.message : String(err) });
+  const transcriptionWorker = createTranscriptionWorker(
+    voiceRepo,
+    transcriptionProvider,
+    {
+      onTranscribed: async (event, hookLogger) => {
+        // Enqueue the downstream voice-action-router job. A separate
+        // poll loop (below) picks it up and runs intent classification.
+        // Keeping it on the queue instead of running inline means:
+        //   1) transcription success isn't blocked by classifier latency
+        //   2) router failures are retried by the queue, not stalled
+        //   3) transcription and router workers can scale independently
+        const routerPayload: VoiceActionRouterPayload = {
+          tenantId: event.tenantId,
+          userId: event.userId ?? 'system',
+          transcript: event.transcript,
+          conversationId: event.conversationId,
+          recordingId: event.recordingId,
+        };
+        await queue.send(
+          'voice_action_router',
+          routerPayload,
+          `${event.tenantId}:${event.recordingId}:voice_action_router`
+        );
+        hookLogger.info('voice_action_router enqueued', {
+          recordingId: event.recordingId,
+        });
+      },
     }
-  }, 250);
+  );
+
+  // Worker dispatch — one poll loop routes messages to handlers by
+  // message.type. The queue doesn't filter by type on receive, so
+  // dispatching here keeps the queue interface simple and lets us
+  // register additional workers without spawning more poll loops.
+  const workerRegistry = new Map<string, import('./queues/queue').WorkerHandler<unknown>>();
+  workerRegistry.set(
+    transcriptionWorker.type,
+    transcriptionWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
 
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
   // undo window and hands them to the executor. Closes the operational
@@ -298,6 +334,8 @@ export function createApp() {
   }
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
+    invoiceRepo,
+    estimateRepo,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
   const executionWorkerLogger = createLogger({
@@ -317,6 +355,44 @@ export function createApp() {
       });
     }
   }, 1000);
+
+  // voice-action-router — consumes transcripts enqueued by the
+  // transcription worker's onTranscribed hook, classifies intent,
+  // and persists a proposal via proposalRepo. Registered now that
+  // proposalRepo is available.
+  const voiceActionRouterWorker = createVoiceActionRouterWorker({
+    gateway: llmGateway,
+    proposalRepo,
+  });
+  workerRegistry.set(
+    voiceActionRouterWorker.type,
+    voiceActionRouterWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
+  // Unified queue poll loop: receives any message type and routes to the
+  // matching worker by message.type. This is the single consumer for the
+  // queue — multiple setInterval poll loops would race for the same row
+  // under PgQueue's FOR UPDATE SKIP LOCKED semantics and waste cycles.
+  setInterval(async () => {
+    try {
+      const message = await queue.receive();
+      if (!message) return;
+      const handler = workerRegistry.get(message.type);
+      if (!handler) {
+        workerLogger.warn('No worker registered for message type', { type: message.type });
+        await queue.delete(message.id);
+        return;
+      }
+      const processed = await processMessage(message, handler, workerLogger);
+      if (processed) {
+        await queue.delete(message.id);
+      }
+    } catch (err) {
+      workerLogger.error('Queue poll failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 250);
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
