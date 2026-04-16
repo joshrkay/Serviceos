@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Plus, Clock, User } from 'lucide-react';
-import { technicians } from '../../data/mock-data';
+import { ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle } from 'lucide-react';
+import { technicians, jobs as mockJobs } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
@@ -44,6 +44,7 @@ export function SchedulePage() {
   const navigate = useNavigate();
   const today = useMemo(() => new Date(), []);
   const weekDays = useMemo(() => buildWeekDays(today), [today]);
+  const todayIso = useMemo(() => today.toISOString().split('T')[0], [today]);
   const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate); // today
   const [techFilter, setTechFilter] = useState<string>('All');
 
@@ -56,10 +57,37 @@ export function SchedulePage() {
     setFilters({ scheduledDate: isoDate });
   }
 
+  const fallbackJobs: ApiJob[] = useMemo(() => {
+    if (selectedIso !== todayIso) return [];
+    return mockJobs.map((job, idx) => {
+      const assignedTech = technicians.find((t) => t.name === job.assignedTech);
+      const hourToken = (job.scheduledTime ?? '').match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
+      const hour = hourToken ? Number(hourToken[1]) % 12 + (hourToken[3].toUpperCase() === 'PM' ? 12 : 0) : 9 + idx;
+      const minute = hourToken?.[2] ? Number(hourToken[2]) : 0;
+      const start = new Date(`${selectedIso}T00:00:00`);
+      start.setHours(hour, minute, 0, 0);
+      return {
+        id: `fallback-${job.id}`,
+        jobNumber: job.jobNumber,
+        summary: job.description,
+        status: job.status.toLowerCase().replace(/\s+/g, '_'),
+        serviceType: job.serviceType,
+        scheduledStart: start.toISOString(),
+        customer: { id: job.customerId, displayName: job.customer },
+        technician: assignedTech
+          ? { id: assignedTech.id, firstName: assignedTech.name.split(' ')[0], lastName: assignedTech.name.split(' ').slice(1).join(' '), color: assignedTech.color }
+          : undefined,
+      };
+    });
+  }, [selectedIso, todayIso]);
+
+  const activeData = error ? fallbackJobs : data;
+  const isFallbackMode = Boolean(error);
+
   // Client-side tech filter
   const dayJobs = techFilter === 'All'
-    ? data
-    : data.filter(j => {
+    ? activeData
+    : activeData.filter(j => {
         const techName = j.technician
           ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
           : null;
@@ -168,17 +196,22 @@ export function SchedulePage() {
         </div>
       )}
       {error && (
-        <div className="flex flex-col items-center py-12 gap-2 text-center">
-          <p className="text-sm text-red-500">Failed to load schedule</p>
-          <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry</button>
+        <div className="flex flex-col items-center py-4 gap-2 text-center mb-2 rounded-xl border border-amber-200 bg-amber-50 px-4">
+          <p className="text-sm text-red-500">Failed to load live schedule</p>
+          <p className="text-xs text-amber-700 flex items-center gap-1.5">
+            <AlertTriangle size={12} /> Showing fallback schedule view while we reconnect.
+          </p>
+          <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry live data</button>
         </div>
       )}
 
       {/* Jobs */}
-      {!isLoading && !error && (dayJobs.length === 0 ? (
+      {!isLoading && (dayJobs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <span className="text-4xl mb-3">📅</span>
-          <p className="text-sm text-slate-500 mb-1">Nothing scheduled</p>
+          <p className="text-sm text-slate-500 mb-1">
+            {isFallbackMode ? 'No fallback schedule for this day' : 'Nothing scheduled'}
+          </p>
           <p className="text-xs text-slate-400">Tap "New job" to schedule something</p>
         </div>
       ) : (
@@ -272,7 +305,7 @@ export function SchedulePage() {
         <h4 className="text-slate-700 mb-3">Team today</h4>
         <div className="flex flex-col gap-3">
           {technicians.map(tech => {
-            const techJobs = data.filter(j => {
+              const techJobs = activeData.filter(j => {
               const name = j.technician
                 ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
                 : null;

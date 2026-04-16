@@ -11,6 +11,20 @@ vi.mock('../../data/mock-data', () => ({
     { id: 't2', name: 'Marcus Webb',  initials: 'MW', color: '#22C55E' },
     { id: 't3', name: 'Sarah Lin',    initials: 'SL', color: '#8B5CF6' },
   ],
+  jobs: [
+    {
+      id: 'seed-1',
+      jobNumber: '1042',
+      customer: 'Alice Smith',
+      customerId: 'c1',
+      description: 'Fix AC unit not cooling',
+      status: 'Scheduled',
+      serviceType: 'HVAC',
+      assignedTech: 'Carlos Reyes',
+      scheduledDate: 'Today',
+      scheduledTime: '9:00 AM',
+    },
+  ],
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
@@ -113,8 +127,9 @@ describe('SchedulePage', () => {
   it('shows error state with retry', () => {
     vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, error: 'HTTP 500', data: [] });
     renderPage();
-    expect(screen.getByText('Failed to load schedule')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Retry'));
+    expect(screen.getByText('Failed to load live schedule')).toBeInTheDocument();
+    expect(screen.getByText('Showing fallback schedule view while we reconnect.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Retry live data'));
     expect(defaultListResult.refetch).toHaveBeenCalled();
   });
 
