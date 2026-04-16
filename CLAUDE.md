@@ -22,6 +22,11 @@
 - Use the async worker pattern (P0-009) for background jobs
 - Use the webhook base (P0-014) for all external webhook handlers
 
+## gstack
+- Use the `/browse` skill from gstack for all web browsing
+- Never use `mcp__claude-in-chrome__*` tools
+- Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-design-review, /design-consultation, /design-shotgun, /design-html, /review, /ship, /land-and-deploy, /canary, /benchmark, /browse, /connect-chrome, /qa, /qa-only, /design-review, /setup-browser-cookies, /setup-deploy, /retro, /investigate, /document-release, /codex, /cso, /autoplan, /plan-devex-review, /devex-review, /careful, /freeze, /guard, /unfreeze, /gstack-upgrade, /learn
+
 ## Build Verification (mandatory)
 Before marking any story complete or pushing code, run:
 ```
