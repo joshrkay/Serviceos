@@ -29,6 +29,7 @@ import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
+import { createDispatchRoutes } from './dispatch/routes';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -36,6 +37,7 @@ import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
 import { InMemoryJobTimelineRepository } from './jobs/job-lifecycle';
 import { InMemoryAppointmentRepository } from './appointments/appointment';
+import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
 import { InMemoryPaymentRepository } from './invoices/payment';
@@ -94,6 +96,11 @@ import { createLogger } from './logging/logger';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
+import {
+  devAuthBypass,
+  isDevAuthBypassEnabled,
+  DevInMemoryTenantRepository,
+} from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
 
 export function createApp() {
@@ -180,6 +187,22 @@ export function createApp() {
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
+
+  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
+  // Accepts Clerk tokens without RS256/JWKS verification and
+  // auto-bootstraps a tenant per Clerk user. Exists because
+  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
+  // algorithm) — tracked as a production bug. No-op in non-dev.
+  if (isDevAuthBypassEnabled()) {
+    const devTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
+    app.use('/api', devAuthBypass({ tenantRepo: devTenantRepo }));
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
+      'Never enable this outside local dev.'
+    );
+  }
+
   // Fail-closed: every /api/* request must carry a valid Clerk session.
   // Individual routes still apply requireAuth/requireTenant/requirePermission
   // as defense in depth, but this line makes it architecturally impossible
@@ -193,6 +216,7 @@ export function createApp() {
   const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
+  const assignmentRepo     = new InMemoryAssignmentRepository();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
@@ -334,6 +358,7 @@ export function createApp() {
   }
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
+    assignmentRepo,
     invoiceRepo,
     estimateRepo,
   });
@@ -412,6 +437,7 @@ export function createApp() {
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership));
+  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
