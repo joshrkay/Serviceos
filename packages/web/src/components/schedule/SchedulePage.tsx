@@ -5,6 +5,7 @@ import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { useNavigate } from 'react-router';
+import { apiFetch } from '../../utils/api-fetch';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -27,6 +28,29 @@ interface ApiJob {
   technician?: { id: string; firstName?: string; lastName?: string; color?: string };
 }
 
+type ScheduleViewMode = 'personal' | 'team';
+
+function readRuntimePermissions(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  const raw = window.localStorage.getItem('serviceos.permissions');
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return new Set(parsed.filter((p): p is string => typeof p === 'string'));
+  } catch {
+    return new Set(raw.split(',').map((x) => x.trim()).filter(Boolean));
+  }
+  return new Set();
+}
+
+function toLocalDatetimeInputValue(isoDateTime?: string): string {
+  if (!isoDateTime) return '';
+  const d = new Date(isoDateTime);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /** Build a 7-day window starting from today */
 function buildWeekDays(today: Date) {
   return Array.from({ length: 7 }, (_, i) => {
@@ -46,25 +70,71 @@ export function SchedulePage() {
   const weekDays = useMemo(() => buildWeekDays(today), [today]);
   const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate); // today
   const [techFilter, setTechFilter] = useState<string>('All');
+  const [viewMode, setViewMode] = useState<ScheduleViewMode>('team');
+  const [isSaving, setIsSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [showNewEvent, setShowNewEvent] = useState(false);
+  const [newEventJobId, setNewEventJobId] = useState('');
+  const [newEventTechnicianId, setNewEventTechnicianId] = useState(technicians[0]?.id ?? '');
+  const [newEventStart, setNewEventStart] = useState('');
 
   const { data, isLoading, error, refetch, setFilters } = useListQuery<ApiJob>('/api/jobs', {
     filters: { scheduledDate: selectedIso },
   });
+
+  const runtimePermissions = useMemo(() => readRuntimePermissions(), []);
+  const canManageSchedule = runtimePermissions.size === 0 || runtimePermissions.has('jobs:update');
+  const canViewTeamSchedule = runtimePermissions.size === 0
+    || runtimePermissions.has('schedule:view:team')
+    || runtimePermissions.has('jobs:view');
+  const myTechnicianId = useMemo(() => {
+    if (typeof window !== 'undefined') {
+      const fromStorage = window.localStorage.getItem('serviceos.technicianId');
+      if (fromStorage) return fromStorage;
+    }
+    return technicians[0]?.id ?? '';
+  }, []);
+
+  async function updateSchedule(
+    jobId: string,
+    payload: { assignedTechnicianId?: string; scheduledStart?: string | null; status?: string },
+    successMessage: string
+  ) {
+    setIsSaving(true);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const res = await apiFetch(`/api/jobs/${jobId}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setActionSuccess(successMessage);
+      await refetch();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to save schedule');
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
   function selectDay(isoDate: string) {
     setSelectedIso(isoDate);
     setFilters({ scheduledDate: isoDate });
   }
 
-  // Client-side tech filter
+  const scopedJobs = viewMode === 'personal'
+    ? data.filter((j) => (j.technician?.id || j.assignedTechnicianId) === myTechnicianId)
+    : data;
   const dayJobs = techFilter === 'All'
-    ? data
-    : data.filter(j => {
-        const techName = j.technician
-          ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
-          : null;
-        return techName === techFilter;
-      });
+    ? scopedJobs
+    : scopedJobs.filter(j => {
+      const techName = j.technician
+        ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
+        : null;
+      return techName === techFilter;
+    });
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
@@ -72,10 +142,73 @@ export function SchedulePage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <h1 className="text-slate-900">Schedule</h1>
-        <button className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors">
-          <Plus size={14} /> New job
+        <button
+          onClick={() => setShowNewEvent((v) => !v)}
+          className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+        >
+          <Plus size={14} /> New event
         </button>
       </div>
+
+      <div className="mb-4 flex items-center gap-2">
+        <button
+          onClick={() => setViewMode('personal')}
+          className={`rounded-full px-3 py-1.5 text-xs border ${viewMode === 'personal' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200'}`}
+        >
+          My schedule
+        </button>
+        <button
+          onClick={() => canViewTeamSchedule && setViewMode('team')}
+          disabled={!canViewTeamSchedule}
+          className={`rounded-full px-3 py-1.5 text-xs border ${viewMode === 'team' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200'} disabled:opacity-50`}
+        >
+          Team schedule
+        </button>
+      </div>
+
+      {showNewEvent && canManageSchedule && (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
+          <h4 className="text-sm text-slate-800 mb-3">Schedule event</h4>
+          <div className="grid md:grid-cols-3 gap-2">
+            <input
+              value={newEventJobId}
+              onChange={(e) => setNewEventJobId(e.target.value)}
+              placeholder="Job ID"
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            />
+            <select
+              value={newEventTechnicianId}
+              onChange={(e) => setNewEventTechnicianId(e.target.value)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            >
+              <option value="">Unassigned</option>
+              {technicians.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <input
+              type="datetime-local"
+              value={newEventStart}
+              onChange={(e) => setNewEventStart(e.target.value)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="mt-3">
+            <button
+              disabled={!newEventJobId || !newEventStart || isSaving}
+              onClick={() => updateSchedule(
+                newEventJobId,
+                { status: 'scheduled', assignedTechnicianId: newEventTechnicianId || undefined, scheduledStart: new Date(newEventStart).toISOString() },
+                'Scheduled event updated'
+              )}
+              className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white disabled:opacity-50"
+            >
+              Save event
+            </button>
+          </div>
+        </div>
+      )}
+
+      {actionError && <p className="text-xs text-red-600 mb-2">{actionError}</p>}
+      {actionSuccess && <p className="text-xs text-green-600 mb-2">{actionSuccess}</p>}
 
       {/* Week nav */}
       <div className="flex items-center gap-2 mb-4">
@@ -260,6 +393,41 @@ export function SchedulePage() {
                         </span>
                       )}
                     </div>
+                    {canManageSchedule && (
+                      <div className="mt-3 grid md:grid-cols-[1fr_1fr_auto_auto] gap-2 items-center">
+                        <select
+                          defaultValue={job.technician?.id ?? job.assignedTechnicianId ?? ''}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            const nextTechId = e.target.value || undefined;
+                            updateSchedule(job.id, { assignedTechnicianId: nextTechId }, 'Technician assignment updated');
+                          }}
+                          className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs"
+                        >
+                          <option value="">Unassigned</option>
+                          {technicians.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                        </select>
+                        <input
+                          type="datetime-local"
+                          defaultValue={toLocalDatetimeInputValue(job.scheduledStart)}
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={(e) => {
+                            const iso = e.target.value ? new Date(e.target.value).toISOString() : null;
+                            updateSchedule(job.id, { scheduledStart: iso, status: iso ? 'scheduled' : 'new' }, iso ? 'Event rescheduled' : 'Event unscheduled');
+                          }}
+                          className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs"
+                        />
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            updateSchedule(job.id, { scheduledStart: null, status: 'new' }, 'Event removed from calendar');
+                          }}
+                          className="rounded-lg border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </button>
               );
