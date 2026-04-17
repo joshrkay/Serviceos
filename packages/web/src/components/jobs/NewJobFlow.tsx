@@ -255,7 +255,7 @@ export function NewJobFlow({
   preSelectedCustomerId,
 }: {
   onClose:          () => void;
-  onCreated:        () => void;
+  onCreated:        (nextFilter?: 'All' | 'New' | 'Scheduled') => void;
   onOpenEstimate?:  () => void;
   preSelectedCustomerId?: string;
 }) {
@@ -427,6 +427,8 @@ export function NewJobFlow({
     setJobNum(num);
     setTimeout(() => { setCreating(false); setStep('done'); }, 1400);
   }
+
+  const createdJobFilter: 'New' | 'Scheduled' = draft.scheduledDate ? 'Scheduled' : 'New';
 
   const canCreate = !!draft.customerId && !!draft.serviceType && !!draft.description.trim();
 
@@ -1059,7 +1061,7 @@ export function NewJobFlow({
                 <p className="text-xs text-slate-400 text-center mb-3">What would you like to do next?</p>
                 <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => { onCreated(); onClose(); }}
+                    onClick={() => { onCreated(createdJobFilter); onClose(); }}
                     className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-blue-300 hover:bg-blue-50/60 active:scale-[0.97] transition-all group"
                   >
                     <div className="flex size-11 items-center justify-center rounded-xl bg-blue-100 group-hover:bg-blue-200 transition-colors">
@@ -1073,7 +1075,7 @@ export function NewJobFlow({
 
                   {onOpenEstimate ? (
                     <button
-                      onClick={() => { onCreated(); onOpenEstimate(); }}
+                      onClick={() => { onCreated(createdJobFilter); onOpenEstimate(); }}
                       className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-indigo-300 hover:bg-indigo-50/60 active:scale-[0.97] transition-all group"
                     >
                       <div className="flex size-11 items-center justify-center rounded-xl bg-indigo-100 group-hover:bg-indigo-200 transition-colors">
@@ -1086,7 +1088,7 @@ export function NewJobFlow({
                     </button>
                   ) : (
                     <button
-                      onClick={() => { onCreated(); onClose(); }}
+                      onClick={() => { onCreated(createdJobFilter); onClose(); }}
                       className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-green-300 hover:bg-green-50/60 active:scale-[0.97] transition-all group"
                     >
                       <div className="flex size-11 items-center justify-center rounded-xl bg-green-100 group-hover:bg-green-200 transition-colors">
