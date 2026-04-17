@@ -371,9 +371,7 @@ export function NewJobFlow({
 
     const normalizedAddress = normalizeAddress(trimmedAddress);
     const conflictingCustomers = customerOptions.filter(existingCustomer =>
-      existingCustomer.locations.some(
-        location => location.isPrimary && normalizeAddress(location.address) === normalizedAddress
-      )
+      existingCustomer.locations.some(location => normalizeAddress(location.address) === normalizedAddress)
     );
 
     const updatedCustomers = customerOptions.map((existingCustomer) =>
@@ -753,7 +751,7 @@ export function NewJobFlow({
                             : currentLocation?.address ?? c.address}
                         </p>
                       </div>
-                      {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old')) || !c.locations.some(loc => loc.isPrimary)) && (
+                      {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old address')) || !c.locations.some(loc => loc.isPrimary)) && (
                         <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">old address</span>
                       )}
                       {sel ? <Check size={15} className="text-blue-600 shrink-0" /> : <ChevronRight size={14} className="text-slate-300 shrink-0" />}
