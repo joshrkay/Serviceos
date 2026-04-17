@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { customers, technicians } from '../../data/mock-data';
 import type { Customer, ServiceType } from '../../data/mock-data';
+import { useMutation } from '../../hooks/useMutation';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FlowStep   = 'start' | 'voice' | 'customer' | 'details' | 'schedule' | 'done';
@@ -27,6 +28,19 @@ interface JobDraft {
 interface ParsedJob extends JobDraft {
   customerName: string;
   address:      string;
+}
+
+interface CreateJobRequest {
+  customerId: string;
+  locationId: string;
+  summary: string;
+  problemDescription?: string;
+  priority?: 'low' | 'normal' | 'high' | 'urgent';
+}
+
+interface CreateJobResponse {
+  id: string;
+  jobNumber: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -275,6 +289,7 @@ export function NewJobFlow({
   const [search,   setSearch]   = useState('');
   const [creating, setCreating] = useState(false);
   const [jobNum,   setJobNum]   = useState('');
+  const [createError, setCreateError] = useState('');
   const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
@@ -282,6 +297,7 @@ export function NewJobFlow({
   const [newCustomerAddress, setNewCustomerAddress] = useState('');
   const [newCustomerError, setNewCustomerError] = useState('');
   const [addressConflictNote, setAddressConflictNote] = useState('');
+  const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
 
   // Voice state
   const [vPhase,      setVPhase]      = useState<VoicePhase>('idle');
@@ -421,16 +437,38 @@ export function NewJobFlow({
     setNewCustomerAddress('');
   }
 
-  function createJob() {
+  async function createJob() {
+    if (!draft.customerId || !draft.locationId) {
+      setCreateError('Please choose a customer and service location before creating the job.');
+      return;
+    }
+    if (!draft.description.trim()) {
+      setCreateError('Please add a job description before creating the job.');
+      return;
+    }
+
+    setCreateError('');
     setCreating(true);
-    const num = `10${50 + Math.floor(Math.random() * 9)}`;
-    setJobNum(num);
-    setTimeout(() => { setCreating(false); setStep('done'); }, 1400);
+    try {
+      const created = await createJobMutation({
+        customerId: draft.customerId,
+        locationId: draft.locationId,
+        summary: draft.description.trim(),
+        problemDescription: draft.notes.trim() || undefined,
+        priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
+      });
+      setJobNum(created.jobNumber);
+      setStep('done');
+    } catch {
+      setCreateError('Could not save the job. Please verify API auth and database connectivity.');
+    } finally {
+      setCreating(false);
+    }
   }
 
   const createdJobFilter: 'New' | 'Scheduled' = draft.scheduledDate ? 'Scheduled' : 'New';
 
-  const canCreate = !!draft.customerId && !!draft.serviceType && !!draft.description.trim();
+  const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
   // Step labels
   const STEP_DOTS: FlowStep[] = ['customer', 'details', 'schedule'];
@@ -751,7 +789,7 @@ export function NewJobFlow({
                             : currentLocation?.address ?? c.address}
                         </p>
                       </div>
-                      {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old address')) || !c.locations.some(loc => loc.isPrimary)) && (
+                      {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old')) || !c.locations.some(loc => loc.isPrimary)) && (
                         <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">old address</span>
                       )}
                       {sel ? <Check size={15} className="text-blue-600 shrink-0" /> : <ChevronRight size={14} className="text-slate-300 shrink-0" />}
@@ -1127,6 +1165,9 @@ export function NewJobFlow({
             {!parsed.customerId && (
               <p className="text-xs text-amber-600 text-center mt-2">Couldn't detect customer — use "Fill it in" for manual entry</p>
             )}
+            {createError && (
+              <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
+            )}
           </div>
         )}
 
@@ -1171,6 +1212,9 @@ export function NewJobFlow({
                   </>
               }
             </button>
+            {createError && (
+              <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
+            )}
           </div>
         )}
 
