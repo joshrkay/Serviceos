@@ -12,6 +12,7 @@ This file is only an inventory. The actual source of truth is the migration SQL 
 2. (Optional) Validate migration SQL generation without touching DB:
    - `npm --prefix packages/api run migrate:dryrun`
 3. Apply migrations to the target database:
+   - `npm --prefix packages/api run migrate:apply` (uses `DATABASE_URL` with ts-node in dev/CI)
    - `DATABASE_URL=... node packages/api/dist/src/db/migrate.js` (compiled runtime path)
    - or during container startup, `packages/api/docker-entrypoint.sh` runs this automatically before starting the API.
 4. Verify tables in Postgres:

@@ -13,7 +13,8 @@
     "lint": "tsc --noEmit -p tsconfig.lint.json",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
-    "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts"
+    "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
+    "migrate:apply": "ts-node src/db/migrate.ts"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",
