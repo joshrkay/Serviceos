@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
+import { apiFetch } from '../../utils/api-fetch';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
 
@@ -49,17 +50,19 @@ function getSupportedAudioMimeType(): string | null {
 
 async function createSignedAudioUpload(blob: Blob) {
   const filename = `voice-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
+  // MediaRecorder emits "audio/webm;codecs=opus" but the backend whitelist
+  // keys on the base type only. Strip codec params before sending.
+  const contentType = (blob.type || 'audio/webm').split(';')[0].trim();
   const body = JSON.stringify({
     filename,
-    contentType: blob.type || 'audio/webm',
+    contentType,
     sizeBytes: blob.size,
     entityType: 'voice_recording',
   });
 
-  const requestSigned = async (url: string) => fetch(url, {
+  const requestSigned = async (url: string) => apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
     body,
   });
 
@@ -76,11 +79,12 @@ async function createSignedAudioUpload(blob: Blob) {
 
   if (!fileId || !uploadUrl) throw new Error('Upload URL response is missing required fields.');
 
-  // Content-Type must match what was signed server-side; blob.type is the
-  // same value we sent in the upload-url request body.
+  // Content-Type must match what was signed server-side — we used the
+  // normalized (no-codec-params) value in the upload-url request, so
+  // echo that here.
   const uploadResult = await fetch(uploadUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': blob.type || 'audio/webm' },
+    headers: { 'Content-Type': contentType },
     body: blob,
   });
 
@@ -92,7 +96,7 @@ async function createSignedAudioUpload(blob: Blob) {
 async function pollRecordingUntilDone(recordingId: string) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < VOICE_POLL_TIMEOUT_MS) {
-    const res = await fetch(`/api/voice/recordings/${recordingId}`, { credentials: 'include' });
+    const res = await apiFetch(`/api/voice/recordings/${recordingId}`);
     if (!res.ok) throw new Error('Could not fetch transcription status.');
 
     const status = await res.json();
@@ -132,19 +136,17 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
     // bind content length, so the API HEADs the object and rejects over-max
     // payloads. A non-2xx here means the upload exceeded the size ceiling
     // or storage was otherwise unhappy; treat it as a hard failure.
-    const verifyRes = await fetch(`/api/files/${fileId}/verify`, {
+    const verifyRes = await apiFetch(`/api/files/${fileId}/verify`, {
       method: 'POST',
-      credentials: 'include',
     });
     if (!verifyRes.ok) throw new Error('Upload verification failed.');
     const idempotencyKey = typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-    const createRes = await fetch('/api/voice/recordings', {
+    const createRes = await apiFetch('/api/voice/recordings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ fileId, audioUrl, idempotencyKey }),
     });
 

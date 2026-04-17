@@ -2,6 +2,7 @@ import {
   validateUpload,
   createFileRecord,
   sanitizeFilename,
+  normalizeContentType,
   InMemoryFileRepository,
   UploadRequest,
 } from '../../src/files/file-service';
@@ -28,6 +29,24 @@ describe('P0-010 — File upload and attachment storage', () => {
   it('validation — rejects invalid content type', () => {
     const errors = validateUpload({ ...validRequest, contentType: 'application/x-malware' });
     expect(errors.some((e) => e.includes('Content type not allowed'))).toBe(true);
+  });
+
+  it('validation — accepts content types with MIME codec params (audio/webm;codecs=opus)', () => {
+    // MediaRecorder emits codec-parameterized MIME types. The whitelist
+    // keys on the base type only, so the validator must normalize.
+    const errors = validateUpload({
+      ...validRequest,
+      filename: 'voice.webm',
+      contentType: 'audio/webm;codecs=opus',
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('normalizeContentType — strips codec params and lowercases', () => {
+    expect(normalizeContentType('audio/webm;codecs=opus')).toBe('audio/webm');
+    expect(normalizeContentType('AUDIO/WEBM')).toBe('audio/webm');
+    expect(normalizeContentType('audio/webm ; codecs=opus')).toBe('audio/webm');
+    expect(normalizeContentType('image/jpeg')).toBe('image/jpeg');
   });
 
   it('validation — rejects oversized files', () => {
