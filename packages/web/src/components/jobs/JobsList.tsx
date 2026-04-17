@@ -61,6 +61,15 @@ export function JobsList() {
 
   const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<ApiJob>('/api/jobs');
 
+  const applyTabFilter = (nextTab: JobStatus | 'All') => {
+    setTab(nextTab);
+    if (nextTab !== 'All') {
+      setFilters({ status: TAB_API_STATUS[nextTab] ?? nextTab.toLowerCase() });
+    } else {
+      setFilters({});
+    }
+  };
+
   const normalizedData = data.map(j => ({
     ...j,
     uiStatus: normalizeJobStatus(j.status),
@@ -124,14 +133,7 @@ export function JobsList() {
           {TABS.map(t => (
             <button
               key={t.value}
-              onClick={() => {
-                setTab(t.value);
-                if (t.value !== 'All') {
-                  setFilters({ status: TAB_API_STATUS[t.value] ?? t.value.toLowerCase() });
-                } else {
-                  setFilters({});
-                }
-              }}
+              onClick={() => applyTabFilter(t.value)}
               className={`shrink-0 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value
                   ? 'bg-slate-900 text-white'
@@ -268,7 +270,10 @@ export function JobsList() {
       {showNew && (
         <NewJobFlow
           onClose={() => setShowNew(false)}
-          onCreated={() => { setShowNew(false); refetch(); }}
+          onCreated={(nextTab = 'All') => {
+            applyTabFilter(nextTab);
+            setShowNew(false);
+          }}
         />
       )}
     </div>
