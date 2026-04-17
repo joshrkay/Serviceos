@@ -6,10 +6,12 @@ import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
-import { AppointmentRepository } from '../../appointments/appointment';
-import { AssignmentRepository } from '../../appointments/assignment';
+import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { EstimateRepository } from '../../estimates/estimate';
+import { detectOverlappingAppointments } from '../../dispatch/validation';
+import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -69,7 +71,13 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
 export class CreateAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_appointment';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly assignmentRepo?: AssignmentRepository,
+    private readonly confirmationNotifier: SchedulingConfirmationNotifier = new NoopSchedulingConfirmationNotifier(),
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.jobId || typeof payload.jobId !== 'string') {
       return { success: false, error: 'Payload must include a valid jobId' };
@@ -80,7 +88,79 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     if (!payload.scheduledEnd || typeof payload.scheduledEnd !== 'string') {
       return { success: false, error: 'Payload must include a valid scheduledEnd' };
     }
-    return { success: true, resultEntityId: uuidv4() };
+
+    if (!this.appointmentRepo) {
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    const scheduledStart = new Date(payload.scheduledStart);
+    const scheduledEnd = new Date(payload.scheduledEnd);
+    if (isNaN(scheduledStart.getTime()) || isNaN(scheduledEnd.getTime())) {
+      return { success: false, error: 'Payload contains invalid appointment times' };
+    }
+
+    const timezone = typeof payload.timezone === 'string' ? payload.timezone : 'UTC';
+
+    if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
+      const techAssignments = await this.assignmentRepo.findByTechnician(context.tenantId, payload.technicianId);
+      const techAppointments = await Promise.all(
+        techAssignments.map((a) => this.appointmentRepo!.findById(context.tenantId, a.appointmentId))
+      );
+      const existingAppts = techAppointments
+        .filter((a): a is NonNullable<typeof a> => a !== null)
+        .map((a) => ({
+          id: a.id,
+          technicianId: payload.technicianId as string,
+          scheduledStart: a.scheduledStart,
+          scheduledEnd: a.scheduledEnd,
+          status: a.status,
+        }));
+      const conflicts = detectOverlappingAppointments(
+        payload.technicianId,
+        scheduledStart,
+        scheduledEnd,
+        existingAppts,
+      );
+      const blocking = conflicts.find((c) => c.severity === 'blocking');
+      if (blocking) {
+        return { success: false, error: blocking.message };
+      }
+    }
+
+    const appointment = await createAppointment({
+      tenantId: context.tenantId,
+      jobId: payload.jobId,
+      scheduledStart,
+      scheduledEnd,
+      timezone,
+      notes: typeof payload.notes === 'string' ? payload.notes : undefined,
+      createdBy: context.executedBy,
+    }, this.appointmentRepo);
+
+    if (this.assignmentRepo && payload.technicianId && typeof payload.technicianId === 'string') {
+      await assignTechnician({
+        tenantId: context.tenantId,
+        appointmentId: appointment.id,
+        technicianId: payload.technicianId,
+        technicianRole: 'technician',
+        assignedBy: context.executedBy,
+      }, this.assignmentRepo);
+    }
+
+    const channels: Array<'sms' | 'email'> = Array.isArray(payload.notificationChannels)
+      ? payload.notificationChannels.filter((c): c is 'sms' | 'email' => c === 'sms' || c === 'email')
+      : ['sms', 'email'];
+    const shouldSendConfirmation = payload.sendConfirmation !== false;
+    if (shouldSendConfirmation && channels.length > 0) {
+      await this.confirmationNotifier.enqueue({
+        tenantId: context.tenantId,
+        appointmentId: appointment.id,
+        jobId: appointment.jobId,
+        channels,
+      });
+    }
+
+    return { success: true, resultEntityId: appointment.id };
   }
 }
 
@@ -104,12 +184,13 @@ export function createExecutionHandlerRegistry(deps?: {
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
+  schedulingNotifier?: SchedulingConfirmationNotifier;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(),
     new CreateJobExecutionHandler(),
-    new CreateAppointmentExecutionHandler(),
+    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
