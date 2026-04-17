@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { apiFetch } from '../../utils/api-fetch';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
@@ -64,10 +65,9 @@ async function sendToConversationAPI(
     const body: Record<string, unknown> = { content: text, messageType: 'text' };
     if (conversationId) body.conversationId = conversationId;
 
-    const res = await fetch('/api/conversations/message', {
+    const res = await apiFetch('/api/conversations/message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(body),
     });
 
@@ -319,17 +319,19 @@ function getSupportedAudioMimeType(): string | null {
 
 async function createSignedAudioUpload(blob: Blob) {
   const filename = `voice-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
+  // MediaRecorder emits "audio/webm;codecs=opus" but the backend whitelist
+  // keys on the base type only. Strip codec params before sending.
+  const contentType = (blob.type || 'audio/webm').split(';')[0].trim();
   const body = JSON.stringify({
     filename,
-    contentType: blob.type || 'audio/webm',
+    contentType,
     sizeBytes: blob.size,
     entityType: 'voice_recording',
   });
 
-  const requestSigned = async (url: string) => fetch(url, {
+  const requestSigned = async (url: string) => apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
     body,
   });
 
@@ -352,7 +354,7 @@ async function createSignedAudioUpload(blob: Blob) {
 
   const uploadResult = await fetch(uploadUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': blob.type || 'audio/webm' },
+    headers: { 'Content-Type': contentType },
     body: blob,
   });
 
@@ -367,9 +369,8 @@ async function pollRecordingUntilDone(recordingId: string) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < VOICE_POLL_TIMEOUT_MS) {
-    const res = await fetch(`/api/voice/recordings/${recordingId}`, {
+    const res = await apiFetch(`/api/voice/recordings/${recordingId}`, {
       method: 'GET',
-      credentials: 'include',
     });
 
     if (!res.ok) {
@@ -416,10 +417,9 @@ function VoiceRecordingBar({ onCancel, onSend }: {
         ? crypto.randomUUID()
         : `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-      const createRes = await fetch('/api/voice/recordings', {
+      const createRes = await apiFetch('/api/voice/recordings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ fileId, audioUrl, idempotencyKey }),
       });
 

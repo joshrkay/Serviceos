@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../../utils/api-fetch';
 
 export interface TechnicianAppointment {
   id: string;
@@ -35,7 +36,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       setError(null);
       try {
         const dateStr = selectedDate.toISOString().split('T')[0];
-        const response = await fetch(
+        const response = await apiFetch(
           `/api/dispatch/technician/${technicianId}/appointments?date=${dateStr}`
         );
         if (!response.ok) {

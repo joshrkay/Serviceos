@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { DragResult } from './useDragDrop';
+import { apiFetch } from '../../utils/api-fetch';
 
 export interface ScheduleProposalResult {
   success: boolean;
@@ -79,7 +80,7 @@ export function useCreateScheduleProposal(): UseCreateScheduleProposalResult {
       }
       const { proposalType, payload, summary } = proposalData;
 
-      const response = await fetch('/api/proposals', {
+      const response = await apiFetch('/api/proposals', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
