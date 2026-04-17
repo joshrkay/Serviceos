@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router';
+import { apiFetch } from '../../utils/api-fetch';
 import {
   Mic, Keyboard, Check, ArrowRight, Sparkles, ChevronRight,
   Zap, Clock, Receipt, AlertTriangle, MessageSquare, Eye, Camera,
@@ -167,13 +168,17 @@ function VoiceAnswer({
     setPhase('transcribing');
     recorder.onstop = async () => {
       recorder.stream.getTracks().forEach(t => t.stop());
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      // MediaRecorder may emit "audio/webm;codecs=opus" — backend
+      // whitelist keys on the base type only.
+      const contentType = (recorder.mimeType || 'audio/webm').split(';')[0].trim();
+      const audioBlob = new Blob(audioChunksRef.current, { type: contentType });
       try {
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
-        const res = await fetch('/api/voice/transcribe', {
+        // apiFetch attaches the Clerk Bearer token; the previous
+        // `credentials: 'include'` cookie path never worked with Clerk SPA auth.
+        const res = await apiFetch('/api/voice/transcribe', {
           method: 'POST',
-          credentials: 'include',
           body: formData,
         });
         if (res.ok) {

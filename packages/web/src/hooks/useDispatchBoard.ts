@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { TechnicianLaneData, BoardSummary, DispatchBoardData } from '../types/dispatch';
+import { apiFetch } from '../utils/api-fetch';
 
 export type { TechnicianLaneData, BoardSummary, DispatchBoardData };
 
@@ -37,7 +38,7 @@ export function useDispatchBoard(
         params.set('timezone', timezone);
       }
 
-      const response = await fetch(`/api/dispatch/board?${params.toString()}`);
+      const response = await apiFetch(`/api/dispatch/board?${params.toString()}`);
       if (!response.ok) {
         throw new Error(`Failed to load dispatch board: ${response.statusText}`);
       }

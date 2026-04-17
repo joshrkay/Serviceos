@@ -201,19 +201,38 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
 }
 
 // Dev-only receiver that accepts PUTs from the DevStorageProvider upload URLs.
-// The payload is discarded — the dev transcription provider does not fetch
-// audio bytes, so persistence is not required. Mounted outside /api so it
-// bypasses Clerk auth (the signed URL itself is the authorization in prod;
-// in dev this is best-effort and gated by NODE_ENV in createApp).
+// Keeps uploaded bytes in an in-memory map so later GETs (e.g. the
+// transcription worker fetching audio before sending to Whisper) see the
+// actual bytes, not a 204 empty body. Mounted outside /api so it bypasses
+// Clerk auth — the signed URL itself is the authorization in prod; in dev
+// this is best-effort and gated by NODE_ENV in createApp.
 export function createDevStorageRouter(): Router {
   const router = Router();
+  const store = new Map<string, { bytes: Buffer; contentType: string }>();
+
   router.put('/*', (req, res) => {
-    req.on('data', () => {});
-    req.on('end', () => res.status(200).end());
-    req.on('error', () => res.status(200).end());
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const key = req.path;
+      const bytes = Buffer.concat(chunks);
+      const contentType = (req.headers['content-type'] as string) || 'application/octet-stream';
+      store.set(key, { bytes, contentType });
+      res.status(200).end();
+    });
+    req.on('error', () => res.status(500).end());
   });
-  router.get('/*', (_req, res) => {
-    res.status(204).end();
+
+  router.get('/*', (req, res) => {
+    const entry = store.get(req.path);
+    if (!entry) {
+      res.status(404).end();
+      return;
+    }
+    res.setHeader('Content-Type', entry.contentType);
+    res.setHeader('Content-Length', String(entry.bytes.length));
+    res.status(200).end(entry.bytes);
   });
+
   return router;
 }

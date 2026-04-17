@@ -96,6 +96,11 @@ import { createLogger } from './logging/logger';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
+import {
+  devAuthBypass,
+  isDevAuthBypassEnabled,
+  DevInMemoryTenantRepository,
+} from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
 
 export function createApp() {
@@ -182,6 +187,22 @@ export function createApp() {
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
+
+  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
+  // Accepts Clerk tokens without RS256/JWKS verification and
+  // auto-bootstraps a tenant per Clerk user. Exists because
+  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
+  // algorithm) — tracked as a production bug. No-op in non-dev.
+  if (isDevAuthBypassEnabled()) {
+    const devTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
+    app.use('/api', devAuthBypass({ tenantRepo: devTenantRepo }));
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
+      'Never enable this outside local dev.'
+    );
+  }
+
   // Fail-closed: every /api/* request must carry a valid Clerk session.
   // Individual routes still apply requireAuth/requireTenant/requirePermission
   // as defense in depth, but this line makes it architecturally impossible

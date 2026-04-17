@@ -81,6 +81,17 @@ export function sanitizeFilename(filename: string): string {
     .trim();
 }
 
+/**
+ * Normalize a Content-Type header into its base type (strip codec
+ * params). Browsers' MediaRecorder emits values like
+ * `audio/webm;codecs=opus` per RFC 2045; the whitelist below keys on
+ * the base type only. Normalizing here means the web client doesn't
+ * have to remember to strip params before every upload.
+ */
+export function normalizeContentType(contentType: string): string {
+  return contentType.split(';')[0].trim().toLowerCase();
+}
+
 export function validateUpload(request: UploadRequest): string[] {
   const errors: string[] = [];
   if (!request.filename || request.filename.trim().length === 0) {
@@ -96,7 +107,7 @@ export function validateUpload(request: UploadRequest): string[] {
   }
   if (!request.contentType) {
     errors.push('Content type is required');
-  } else if (!ALLOWED_CONTENT_TYPES.includes(request.contentType)) {
+  } else if (!ALLOWED_CONTENT_TYPES.includes(normalizeContentType(request.contentType))) {
     errors.push(`Content type not allowed: ${request.contentType}`);
   }
   if (!request.sizeBytes || request.sizeBytes <= 0) {
