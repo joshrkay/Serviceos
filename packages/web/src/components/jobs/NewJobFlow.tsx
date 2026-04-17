@@ -61,9 +61,7 @@ function markLocationAsOldAddress(customer: Customer, address: string): Customer
     return {
       ...location,
       isPrimary: false,
-      nickname: location.nickname.toLowerCase().includes('old address')
-        ? location.nickname
-        : `${location.nickname} (Old address)`,
+      nickname: location.nickname.toLowerCase().includes('old') ? location.nickname : `Old ${location.nickname}`,
     };
   });
 
