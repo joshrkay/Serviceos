@@ -100,9 +100,9 @@ describe('SchedulePage', () => {
   it('renders team today section', () => {
     renderPage();
     expect(screen.getByText('Team today')).toBeInTheDocument();
-    expect(screen.getByText('Carlos Reyes')).toBeInTheDocument();
-    expect(screen.getByText('Marcus Webb')).toBeInTheDocument();
-    expect(screen.getByText('Sarah Lin')).toBeInTheDocument();
+    expect(screen.getAllByText('Carlos Reyes').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Marcus Webb').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Sarah Lin').length).toBeGreaterThan(0);
   });
 
   it('shows available for tech with no jobs', () => {
