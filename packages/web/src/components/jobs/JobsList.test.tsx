@@ -5,7 +5,13 @@ import { MemoryRouter } from 'react-router';
 import { JobsList } from './JobsList';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
-vi.mock('./NewJobFlow', () => ({ NewJobFlow: () => null }));
+vi.mock('./NewJobFlow', () => ({
+  NewJobFlow: ({ onCreated }: { onCreated: (nextFilter?: 'All' | 'New' | 'Scheduled') => void }) => (
+    <button type="button" onClick={() => onCreated('Scheduled')}>
+      Mock create job
+    </button>
+  ),
+}));
 
 import { useListQuery } from '../../hooks/useListQuery';
 
@@ -142,5 +148,12 @@ describe('JobsList', () => {
   it('uses /api/jobs endpoint', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs');
+  });
+
+  it('applies created job filter after creating a new job', () => {
+    renderPage();
+    fireEvent.click(screen.getByText('New job'));
+    fireEvent.click(screen.getByText('Mock create job'));
+    expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'scheduled' });
   });
 });
