@@ -4,12 +4,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TechnicianDayView } from './TechnicianDayView';
 
 describe('P6-019 — Technician day-of assigned-work view', () => {
+  let onPositionSuccess: ((position: GeolocationPosition) => void) | null = null;
+
   const mockAppointments = [
     {
       id: 'appt-2',
       jobId: 'job-2',
       customerName: 'Bob Wilson',
       locationAddress: '456 Oak Ave',
+      locationLatitude: 40.7155,
+      locationLongitude: -74.0022,
       scheduledStart: '2026-03-14T14:00:00Z',
       scheduledEnd: '2026-03-14T16:00:00Z',
       status: 'scheduled',
@@ -19,6 +23,8 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
       jobId: 'job-1',
       customerName: 'Jane Doe',
       locationAddress: '123 Main St',
+      locationLatitude: 40.7128,
+      locationLongitude: -74.0060,
       scheduledStart: '2026-03-14T09:00:00Z',
       scheduledEnd: '2026-03-14T11:00:00Z',
       status: 'confirmed',
@@ -31,7 +37,10 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
 
     Object.defineProperty(global.navigator, 'geolocation', {
       value: {
-        watchPosition: vi.fn().mockReturnValue(1),
+        watchPosition: vi.fn().mockImplementation((success: (position: GeolocationPosition) => void) => {
+          onPositionSuccess = success;
+          return 1;
+        }),
         clearWatch: vi.fn(),
       },
       configurable: true,
@@ -128,4 +137,55 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     expect(await screen.findByTestId('technician-day-empty')).toBeInTheDocument();
     expect(screen.getByText('No appointments scheduled for today')).toBeInTheDocument();
   });
+
+  it('ignores low-accuracy GPS pings for lateness prompting', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
+    render(<TechnicianDayView technicianId="tech-1" />);
+    await screen.findByText('Jane Doe');
+
+    onPositionSuccess?.({
+      coords: {
+        latitude: 40.7128,
+        longitude: -74.0060,
+        accuracy: 150,
+      } as GeolocationCoordinates,
+      timestamp: Date.now(),
+    } as GeolocationPosition);
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(screen.queryByTestId('technician-day-delay-prompt')).not.toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it('escalates to dispatcher queue after technician response timeout', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
+    render(<TechnicianDayView technicianId="tech-1" />);
+    await screen.findByText('Jane Doe');
+
+    const staleBaseTime = Date.now() - (20 * 60 * 1000);
+    for (let i = 0; i < 5; i += 1) {
+      onPositionSuccess?.({
+        coords: {
+          latitude: 40.7128,
+          longitude: -74.0060,
+          accuracy: 20,
+        } as GeolocationCoordinates,
+        timestamp: staleBaseTime + (i * 1000),
+      } as GeolocationPosition);
+    }
+
+    expect(await screen.findByTestId('technician-day-delay-prompt')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/dispatch/delay-escalations'),
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+    vi.useRealTimers();
+  }, 15000);
 });

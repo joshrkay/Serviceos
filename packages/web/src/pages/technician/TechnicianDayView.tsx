@@ -22,11 +22,29 @@ interface Coordinates {
   latitude: number;
   longitude: number;
   timestamp: number;
+  accuracyMeters: number;
 }
 
 const OVERDUE_PROMPT_MINUTES = 15;
 const NO_MOVEMENT_PROMPT_MINUTES = 20;
 const ARRIVAL_RADIUS_METERS = 120;
+const GPS_ACCURACY_THRESHOLD_METERS = 75;
+const STATE_CONFIRMATION_WINDOW = 5;
+const STATE_CONFIRMATION_MIN = 3;
+const PROMPT_COOLDOWN_MINUTES = 12;
+const MAX_PROMPTS_PER_APPOINTMENT_PER_DAY = 3;
+const TECHNICIAN_RESPONSE_TIMEOUT_MINUTES = 5;
+const HIGH_CONFIDENCE_AUTO_NOTIFY = 0.82;
+const MIN_CONFIDENCE_FOR_CUSTOMER_NOTIFY = 0.65;
+
+interface ReliabilityDecision {
+  shouldPrompt: boolean;
+  shouldAutoNotify: boolean;
+  shouldEscalate: boolean;
+  confidence: number;
+  reason: string;
+  sampleCount: number;
+}
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -89,6 +107,7 @@ function isNearAppointment(coordinates: Coordinates, appointment: TechnicianAppo
     latitude: appointment.locationLatitude,
     longitude: appointment.locationLongitude,
     timestamp: coordinates.timestamp,
+    accuracyMeters: coordinates.accuracyMeters,
   }) <= ARRIVAL_RADIUS_METERS;
 }
 
@@ -99,6 +118,23 @@ function hasMovedRecently(history: Coordinates[]): boolean {
   const latest = history[history.length - 1];
   const movedMeters = haversineDistanceMeters(earliest, latest);
   return movedMeters > 40;
+}
+
+function clamp(value: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function computePromptConfidence(history: Coordinates[]): number {
+  if (history.length === 0) return 0;
+
+  const latest = history[history.length - 1];
+  const ageSeconds = Math.max(0, (Date.now() - latest.timestamp) / 1000);
+  const recencyScore = clamp(1 - (ageSeconds / (8 * 60)));
+  const avgAccuracy = history.reduce((sum, ping) => sum + ping.accuracyMeters, 0) / history.length;
+  const accuracyScore = clamp(1 - ((avgAccuracy - 5) / 80));
+  const movementConsistency = hasMovedRecently(history) ? 0.35 : 0.95;
+
+  return clamp((recencyScore * 0.4) + (accuracyScore * 0.4) + (movementConsistency * 0.2));
 }
 
 function answerScheduleQuestion(question: string, appointments: TechnicianAppointment[], now: Date): string {
@@ -144,6 +180,9 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [activeAppointmentId, setActiveAppointmentId] = useState<string | null>(null);
   const [showDelayPrompt, setShowDelayPrompt] = useState(false);
   const [delayPromptAcknowledged, setDelayPromptAcknowledged] = useState(false);
+  const [promptConfidence, setPromptConfidence] = useState(0);
+  const [promptRaisedAt, setPromptRaisedAt] = useState<number | null>(null);
+  const [promptStats, setPromptStats] = useState<Record<string, { count: number; lastRaisedAt: number; lastConfidence: number }>>({});
   const [aiQuestion, setAiQuestion] = useState('Where is my next appointment?');
   const [aiAnswer, setAiAnswer] = useState<string | null>(null);
 
@@ -188,6 +227,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
               latitude: position.coords.latitude,
               longitude: position.coords.longitude,
               timestamp: position.timestamp,
+              accuracyMeters: position.coords.accuracy ?? GPS_ACCURACY_THRESHOLD_METERS + 1,
             },
           ].filter((entry) => entry.timestamp >= cutoff);
           return next;
@@ -219,6 +259,10 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
 
     const now = Date.now();
     const currentPosition = positionHistory[positionHistory.length - 1];
+    if (currentPosition.accuracyMeters > GPS_ACCURACY_THRESHOLD_METERS) {
+      return;
+    }
+
     const active = sortedAppointments.find((appt) => isNearAppointment(currentPosition, appt));
 
     if (!active) {
@@ -229,13 +273,133 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     setActiveAppointmentId(active.id);
 
     const scheduledEndTime = new Date(active.scheduledEnd).getTime();
-    const overdue = now - scheduledEndTime >= OVERDUE_PROMPT_MINUTES * 60 * 1000;
-    const stationary = !hasMovedRecently(positionHistory);
+    const confirmationSlice = positionHistory
+      .slice(-STATE_CONFIRMATION_WINDOW)
+      .filter((ping) => ping.accuracyMeters <= GPS_ACCURACY_THRESHOLD_METERS);
+    const triggeredSignals = confirmationSlice.filter((ping) => {
+      const overdue = now - scheduledEndTime >= OVERDUE_PROMPT_MINUTES * 60 * 1000;
+      const stationary = !hasMovedRecently(positionHistory.filter((entry) => entry.timestamp <= ping.timestamp));
+      return overdue && stationary && isNearAppointment(ping, active);
+    }).length;
 
-    if (overdue && stationary) {
+    if (confirmationSlice.length === 0 || triggeredSignals < STATE_CONFIRMATION_MIN) {
+      return;
+    }
+
+    const confidence = computePromptConfidence(confirmationSlice);
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const promptKey = `${active.id}:${todayKey}`;
+    const promptHistory = promptStats[promptKey];
+    const withinCooldown = promptHistory
+      ? (now - promptHistory.lastRaisedAt) < PROMPT_COOLDOWN_MINUTES * 60 * 1000
+      : false;
+    const overDailyLimit = promptHistory ? promptHistory.count >= MAX_PROMPTS_PER_APPOINTMENT_PER_DAY : false;
+    const hasWorsened = promptHistory ? confidence >= (promptHistory.lastConfidence + 0.08) : true;
+
+    if (overDailyLimit || (withinCooldown && !hasWorsened)) {
+      return;
+    }
+
+    const decision: ReliabilityDecision = {
+      shouldPrompt: confidence < HIGH_CONFIDENCE_AUTO_NOTIFY,
+      shouldAutoNotify: confidence >= HIGH_CONFIDENCE_AUTO_NOTIFY,
+      shouldEscalate: false,
+      confidence,
+      reason: `threshold_breached: overdue+stationary with ${triggeredSignals}/${confirmationSlice.length} valid pings`,
+      sampleCount: confirmationSlice.length,
+    };
+
+    setPromptConfidence(decision.confidence);
+    setPromptRaisedAt(now);
+    setPromptStats((prev) => ({
+      ...prev,
+      [promptKey]: {
+        count: (promptHistory?.count ?? 0) + 1,
+        lastRaisedAt: now,
+        lastConfidence: decision.confidence,
+      },
+    }));
+
+    void apiFetch('/api/dispatch/delay-prompt-audits', {
+      method: 'POST',
+      body: JSON.stringify({
+        technicianId,
+        appointmentId: active.id,
+        eventType: decision.shouldAutoNotify ? 'auto_notify' : 'prompt_raised',
+        reason: decision.reason,
+        confidence: decision.confidence,
+        sampleCount: decision.sampleCount,
+        thresholds: {
+          gpsAccuracyMeters: GPS_ACCURACY_THRESHOLD_METERS,
+          stateConfirmMin: STATE_CONFIRMATION_MIN,
+          stateConfirmWindow: STATE_CONFIRMATION_WINDOW,
+        },
+      }),
+    });
+
+    if (decision.shouldAutoNotify && decision.confidence >= MIN_CONFIDENCE_FOR_CUSTOMER_NOTIFY) {
+      setDelayPromptAcknowledged(true);
+      setShowDelayPrompt(false);
+      void apiFetch(`/api/appointments/${active.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: 'running_late', confidence: decision.confidence }),
+      });
+      return;
+    }
+
+    if (decision.shouldPrompt) {
       setShowDelayPrompt(true);
     }
   }, [delayPromptAcknowledged, positionHistory, sortedAppointments]);
+
+  useEffect(() => {
+    if (!showDelayPrompt || !activeAppointmentId || delayPromptAcknowledged || !promptRaisedAt) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (delayPromptAcknowledged) {
+        return;
+      }
+
+      setShowDelayPrompt(false);
+      setDelayPromptAcknowledged(true);
+
+      void apiFetch('/api/dispatch/delay-escalations', {
+        method: 'POST',
+        body: JSON.stringify({
+          technicianId,
+          appointmentId: activeAppointmentId,
+          reason: 'no_technician_response',
+          timeoutMinutes: TECHNICIAN_RESPONSE_TIMEOUT_MINUTES,
+          confidence: promptConfidence,
+          promptedAt: new Date(promptRaisedAt).toISOString(),
+        }),
+      });
+
+      void apiFetch('/api/dispatch/delay-prompt-audits', {
+        method: 'POST',
+        body: JSON.stringify({
+          technicianId,
+          appointmentId: activeAppointmentId,
+          eventType: 'escalated_dispatcher_queue',
+          reason: 'technician_response_timeout',
+          confidence: promptConfidence,
+          sampleCount: Math.min(positionHistory.length, STATE_CONFIRMATION_WINDOW),
+        }),
+      });
+    }, TECHNICIAN_RESPONSE_TIMEOUT_MINUTES * 60 * 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activeAppointmentId,
+    delayPromptAcknowledged,
+    positionHistory.length,
+    promptConfidence,
+    promptRaisedAt,
+    showDelayPrompt,
+    technicianId,
+  ]);
 
   const today = selectedDate.toLocaleDateString(undefined, {
     weekday: 'long',
@@ -290,7 +454,18 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
 
     await apiFetch(`/api/appointments/${activeAppointmentId}`, {
       method: 'PUT',
-      body: JSON.stringify({ status: 'running_late' }),
+      body: JSON.stringify({ status: 'running_late', confidence: promptConfidence }),
+    });
+    await apiFetch('/api/dispatch/delay-prompt-audits', {
+      method: 'POST',
+      body: JSON.stringify({
+        technicianId,
+        appointmentId: activeAppointmentId,
+        eventType: 'technician_confirmed_notify',
+        reason: 'technician_confirmed_delay',
+        confidence: promptConfidence,
+        sampleCount: Math.min(positionHistory.length, STATE_CONFIRMATION_WINDOW),
+      }),
     });
   }
 
@@ -353,6 +528,9 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       {showDelayPrompt && (
         <div className="technician-day-view__delay-prompt" data-testid="technician-day-delay-prompt">
           You appear to still be on-site and running 15-20 minutes behind. Notify upcoming customers?
+          <div data-testid="technician-day-delay-confidence">
+            Reliability confidence: {Math.round(promptConfidence * 100)}%
+          </div>
           <div>
             <button type="button" onClick={() => void sendDelayNotification(true)} data-testid="technician-day-delay-accept">Accept</button>
             <button type="button" onClick={() => void sendDelayNotification(false)} data-testid="technician-day-delay-decline">Decline</button>
