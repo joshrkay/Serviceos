@@ -150,4 +150,38 @@ describe('P6-006 — Day-scoped dispatch board query', () => {
     expect(lane.appointments[0].id).toBe(appt2.id);
     expect(lane.appointments[1].id).toBe(appt1.id);
   });
+
+  it('includes lateness intelligence payload on lane appointments', async () => {
+    const appt = await createAppointment({
+      tenantId,
+      jobId: 'job-late',
+      scheduledStart: new Date(2026, 2, 14, 9, 0),
+      scheduledEnd: new Date(2026, 2, 14, 10, 0),
+      timezone: 'America/New_York',
+      createdBy: 'user-1',
+    }, appointmentRepo);
+
+    await assignTechnician({
+      tenantId,
+      appointmentId: appt.id,
+      technicianId: techId,
+      technicianRole: 'technician',
+      isPrimary: true,
+      assignedBy: 'user-1',
+    }, assignmentRepo);
+
+    deps.getAppointmentLateness = async (appointment, technicianId) => ({
+      progressState: technicianId ? 'at_site' : 'unknown',
+      latenessState: appointment.id === appt.id ? 'late_prompt_required' : 'on_track',
+      expectedDurationMinutes: 60,
+      elapsedOnSiteMinutes: 70,
+      promptRequired: true,
+      promptSuppressedByCooldown: false,
+    });
+
+    const result = await getDispatchBoardData(tenantId, '2026-03-14', deps);
+    expect(result.technicianLanes).toHaveLength(1);
+    expect(result.technicianLanes[0].appointments[0].lateness?.progressState).toBe('at_site');
+    expect(result.technicianLanes[0].appointments[0].lateness?.latenessState).toBe('late_prompt_required');
+  });
 });
