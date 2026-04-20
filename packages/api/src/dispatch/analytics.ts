@@ -5,7 +5,9 @@ export type DispatchEventType =
   | 'reassigned'
   | 'rescheduled'
   | 'canceled'
-  | 'conflict_detected';
+  | 'conflict_detected'
+  | 'delay_notice_sent'
+  | 'delay_notice_failed';
 
 export interface DispatchMetric {
   id: string;
