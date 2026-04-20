@@ -189,6 +189,22 @@ export const createAppointmentSchema = z.object({
   notes: z.string().optional(),
 });
 
+export const delayMinutesSchema = z.union([
+  z.literal(10),
+  z.literal(15),
+  z.literal(20),
+  z.literal(60),
+]);
+
+export const delayAcknowledgmentSchema = z.object({
+  appointmentId: z.string().min(1),
+  isRunningBehind: z.boolean(),
+  delayMinutes: delayMinutesSchema.optional(),
+  reasonCode: z.string().min(1).optional(),
+});
+
+export type DelayAcknowledgment = z.infer<typeof delayAcknowledgmentSchema>;
+
 export const createNoteSchema = z.object({
   entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
   entityId: z.string().min(1),
