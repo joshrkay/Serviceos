@@ -40,6 +40,10 @@ function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+function formatDateTime(isoDate: string): string {
+  return new Date(isoDate).toLocaleString();
+}
+
 function formatPaymentMethod(method: string): string {
   const normalized = method.trim().toLowerCase();
   const labels: Record<string, string> = {
@@ -79,6 +83,9 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
   const recordedPayments = data.payments ?? [];
   const settledPayments = recordedPayments.filter((payment) => isSettledPayment(payment.status));
   const paymentMethodLabels = Array.from(new Set(settledPayments.map((payment) => formatPaymentMethod(payment.method))));
+  const mostRecentSettledPayment = settledPayments
+    .slice()
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
   const paymentAuditSummary = settledPayments.length === 0
     ? 'Not paid yet'
     : `Paid via ${paymentMethodLabels.join(', ')}`;
@@ -103,8 +110,11 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
               <p>Job: {data.jobId}</p>
               <p><strong>Invoice Status:</strong> {formatPaymentStatus(data.status)}</p>
               <p><strong>Payment Status:</strong> {paymentAuditSummary}</p>
-              {data.dueDate && <p>Due Date: {new Date(data.dueDate).toLocaleDateString()}</p>}
-              <p>Created: {new Date(data.createdAt).toLocaleDateString()}</p>
+              {mostRecentSettledPayment && (
+                <p><strong>Last Paid At:</strong> {formatDateTime(mostRecentSettledPayment.createdAt)}</p>
+              )}
+              {data.dueDate && <p>Due Date: {formatDateTime(data.dueDate)}</p>}
+              <p>Created: {formatDateTime(data.createdAt)}</p>
             </div>
           ),
         },
@@ -165,7 +175,7 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
               <tbody>
                 {recordedPayments.map((p) => (
                   <tr key={p.id}>
-                    <td>{new Date(p.createdAt).toLocaleDateString()}</td>
+                    <td>{formatDateTime(p.createdAt)}</td>
                     <td>{formatCents(p.amountCents)}</td>
                     <td>{formatPaymentMethod(p.method)}</td>
                     <td>{formatPaymentStatus(p.status)}</td>

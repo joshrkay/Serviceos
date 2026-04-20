@@ -46,9 +46,18 @@ describe('InvoiceDetail', () => {
 
   it('renders payment audit status in invoice info', () => {
     render(<InvoiceDetail invoiceId="1" />);
+    const paidTimestamp = new Date('2026-01-20T00:00:00Z').toLocaleString();
     expect(screen.getByText('Invoice Status:')).toBeInTheDocument();
     expect(screen.getByText('Payment Status:')).toBeInTheDocument();
     expect(screen.getByText('Paid via Credit Card')).toBeInTheDocument();
+    expect(screen.getByText('Last Paid At:')).toBeInTheDocument();
+    expect(screen.getAllByText(paidTimestamp).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders payment row with timestamp (date + time)', () => {
+    render(<InvoiceDetail invoiceId="1" />);
+    const paidTimestamp = new Date('2026-01-20T00:00:00Z').toLocaleString();
+    expect(screen.getAllByText(paidTimestamp).length).toBeGreaterThanOrEqual(2);
   });
 
   it('renders balance details', () => {
