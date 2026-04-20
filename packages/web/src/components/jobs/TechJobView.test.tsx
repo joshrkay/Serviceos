@@ -1,12 +1,10 @@
-import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { TechJobView } from './TechJobView';
 
 describe('TechJobView delay acknowledgement prompt', () => {
   it('renders fixed delay options and toggles with Yes/No', async () => {
-    const user = userEvent.setup();
     render(
       <MemoryRouter>
         <TechJobView id="j1" />
@@ -27,17 +25,17 @@ describe('TechJobView delay acknowledgement prompt', () => {
     expect(chip20).toBeDisabled();
     expect(chip60).toBeDisabled();
 
-    await user.click(yesButton);
+    fireEvent.click(yesButton);
 
     expect(chip10).toBeEnabled();
     expect(chip15).toBeEnabled();
     expect(chip20).toBeEnabled();
     expect(chip60).toBeEnabled();
 
-    await user.click(chip20);
+    fireEvent.click(chip20);
     expect(chip20).toHaveClass('bg-indigo-600');
 
-    await user.click(noButton);
+    fireEvent.click(noButton);
     expect(chip10).toBeDisabled();
     expect(chip15).toBeDisabled();
     expect(chip20).toBeDisabled();
