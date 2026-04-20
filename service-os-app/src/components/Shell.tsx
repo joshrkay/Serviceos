@@ -2,11 +2,12 @@
 
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
-import { MessageCircle, Users, Settings } from 'lucide-react';
+import { MessageCircle, Users, Receipt, Settings } from 'lucide-react';
 
 const TABS = [
   { href: '/', label: 'Conversation', icon: MessageCircle },
   { href: '/customers', label: 'Customers', icon: Users },
+  { href: '/invoices', label: 'Invoices', icon: Receipt },
   { href: '/settings', label: 'Settings', icon: Settings },
 ] as const;
 
