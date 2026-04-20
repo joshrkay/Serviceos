@@ -89,7 +89,7 @@ export async function buildTestApp(): Promise<TestApp> {
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership));
+  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
 
   return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, appointmentRepo, settingsRepo, auditRepo };
 }

@@ -22,6 +22,11 @@ export interface JobTimelineRepository {
   findByJob(tenantId: string, jobId: string): Promise<JobTimelineEntry[]>;
 }
 
+export const JOB_TIMELINE_EVENT_TYPES = {
+  STATUS_CHANGE: 'status_change',
+  DELAY_ACKNOWLEDGED: 'delay_acknowledged',
+} as const;
+
 export const JOB_STATUS_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
   new: ['scheduled', 'canceled'],
   scheduled: ['in_progress', 'canceled'],
@@ -61,7 +66,7 @@ export async function transitionJobStatus(
     id: uuidv4(),
     tenantId,
     jobId,
-    eventType: 'status_change',
+    eventType: JOB_TIMELINE_EVENT_TYPES.STATUS_CHANGE,
     fromStatus: oldStatus,
     toStatus: newStatus,
     description: `Status changed from ${oldStatus} to ${newStatus}`,
