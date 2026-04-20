@@ -533,6 +533,7 @@ const SVC_BG:   Record<ServiceType, string> = {
   Plumbing: 'bg-green-900/40',
   Painting: 'bg-violet-900/40',
 };
+const DELAY_OPTIONS = [10, 15, 20, 60] as const;
 
 export function TechJobView({ id }: { id: string }) {
   const navigate = useNavigate();
@@ -553,6 +554,8 @@ export function TechJobView({ id }: { id: string }) {
   );
   const [notes,   setNotes]   = useState<FieldNote[]>([]);
   const [cameraOpen, setCam] = useState(false);
+  const [isRunningBehind, setIsRunningBehind] = useState<boolean | null>(null);
+  const [delayMinutes, setDelayMinutes] = useState<(typeof DELAY_OPTIONS)[number] | null>(null);
 
   if (!job) return (
     <div className="flex h-full items-center justify-center">
@@ -763,6 +766,45 @@ export function TechJobView({ id }: { id: string }) {
 
             {/* ── Quick action chips ── */}
             <div className="px-4 mt-3">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3.5 mb-3">
+                <p className="text-xs text-slate-500 mb-2.5">Running behind?</p>
+                <div className="flex items-center gap-2">
+                  {(['Yes', 'No'] as const).map((label) => {
+                    const selected =
+                      (label === 'Yes' && isRunningBehind === true) ||
+                      (label === 'No' && isRunningBehind === false);
+                    return (
+                      <button
+                        key={label}
+                        onClick={() => setIsRunningBehind(label === 'Yes')}
+                        className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
+                          selected
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap gap-2 mt-2.5">
+                  {DELAY_OPTIONS.map((minutes) => (
+                    <button
+                      key={minutes}
+                      onClick={() => setDelayMinutes(minutes)}
+                      disabled={isRunningBehind !== true}
+                      className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
+                        delayMinutes === minutes
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-slate-600 border-slate-200'
+                      } ${isRunningBehind === true ? 'hover:bg-slate-50' : 'opacity-50 cursor-not-allowed'}`}
+                    >
+                      {minutes}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <p className="text-xs text-slate-400 mb-2 px-1">Or tap to add manually</p>
               <div className="grid grid-cols-4 gap-2">
                 {[
