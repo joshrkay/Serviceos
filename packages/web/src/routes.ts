@@ -19,6 +19,7 @@ import { LeadsPage } from './components/leads/LeadsPage';
 import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
+import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
@@ -52,6 +53,7 @@ export const router = createBrowserRouter([
       { path: 'interactions',   Component: InteractionsPage },
       { path: 'settings',       Component: SettingsPage    },
       { path: 'settings/templates', Component: TemplatesPage   },
+      { path: 'technician/day', Component: TechnicianDayPage },
     ],
     }],
   },

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TechnicianDayView } from './TechnicianDayView';
 
@@ -27,10 +27,20 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
   ];
 
   beforeEach(() => {
+    vi.useRealTimers();
+
+    Object.defineProperty(global.navigator, 'geolocation', {
+      value: {
+        watchPosition: vi.fn().mockReturnValue(1),
+        clearWatch: vi.fn(),
+      },
+      configurable: true,
+    });
+
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ appointments: mockAppointments }),
-    });
+    } as never);
   });
 
   it('renders the technician day view', async () => {
@@ -60,11 +70,47 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     expect(screen.getByText('456 Oak Ave')).toBeInTheDocument();
   });
 
+  it('shows map link for next appointment', async () => {
+    vi.setSystemTime(new Date('2026-03-14T08:00:00Z'));
+    render(<TechnicianDayView technicianId="tech-1" />);
+
+    const link = await screen.findByTestId('technician-day-next-map-link');
+    expect(link).toHaveAttribute('href', expect.stringContaining('google.com/maps'));
+  });
+
+  it('answers AI question about next appointment', async () => {
+    vi.setSystemTime(new Date('2026-03-14T08:00:00Z'));
+    render(<TechnicianDayView technicianId="tech-1" />);
+
+    await screen.findByText('Jane Doe');
+    fireEvent.click(screen.getByTestId('technician-day-ask-ai'));
+
+    expect(await screen.findByTestId('technician-day-ai-answer')).toHaveTextContent('Jane Doe');
+  });
+
+  it('allows editing appointment time', async () => {
+    render(<TechnicianDayView technicianId="tech-1" />);
+
+    await screen.findByText('Jane Doe');
+    fireEvent.click(screen.getAllByTestId('technician-day-edit')[0]);
+
+    fireEvent.change(screen.getByTestId('technician-day-edit-start'), { target: { value: '2026-03-14T10:30' } });
+    fireEvent.change(screen.getByTestId('technician-day-edit-end'), { target: { value: '2026-03-14T12:30' } });
+    fireEvent.click(screen.getByTestId('technician-day-save'));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/appointments/appt-1'),
+        expect.objectContaining({ method: 'PUT' })
+      );
+    });
+  });
+
   it('shows error state on fetch failure', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       statusText: 'Internal Server Error',
-    });
+    } as never);
 
     render(<TechnicianDayView technicianId="tech-1" />);
 
@@ -75,7 +121,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ appointments: [] }),
-    });
+    } as never);
 
     render(<TechnicianDayView technicianId="tech-1" />);
 
