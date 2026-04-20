@@ -40,7 +40,15 @@ describe('InvoiceDetail', () => {
   it('renders line item and payment data', () => {
     render(<InvoiceDetail invoiceId="1" />);
     expect(screen.getByText('Labor')).toBeInTheDocument();
-    expect(screen.getByText('credit_card')).toBeInTheDocument();
+    expect(screen.getByText('Credit Card')).toBeInTheDocument();
+    expect(screen.getByText('Completed')).toBeInTheDocument();
+  });
+
+  it('renders payment audit status in invoice info', () => {
+    render(<InvoiceDetail invoiceId="1" />);
+    expect(screen.getByText('Invoice Status:')).toBeInTheDocument();
+    expect(screen.getByText('Payment Status:')).toBeInTheDocument();
+    expect(screen.getByText('Paid via Credit Card')).toBeInTheDocument();
   });
 
   it('renders balance details', () => {

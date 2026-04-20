@@ -40,6 +40,30 @@ function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+function formatPaymentMethod(method: string): string {
+  const normalized = method.trim().toLowerCase();
+  const labels: Record<string, string> = {
+    cash: 'Cash',
+    check: 'Check',
+    credit_card: 'Credit Card',
+    card: 'Credit Card',
+    ach: 'ACH',
+    bank_transfer: 'ACH / Bank Transfer',
+    zelle: 'Zelle',
+    other: 'Other',
+  };
+  return labels[normalized] ?? method.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatPaymentStatus(status: string): string {
+  return status.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function isSettledPayment(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized === 'completed' || normalized === 'succeeded' || normalized === 'paid';
+}
+
 interface InvoiceDetailProps {
   invoiceId: string;
   onBack?: () => void;
@@ -51,6 +75,13 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
   if (!data) {
     return <DetailPage title="Invoice" sections={[]} isLoading={isLoading} error={error} onBack={onBack} onRetry={refetch} />;
   }
+
+  const recordedPayments = data.payments ?? [];
+  const settledPayments = recordedPayments.filter((payment) => isSettledPayment(payment.status));
+  const paymentMethodLabels = Array.from(new Set(settledPayments.map((payment) => formatPaymentMethod(payment.method))));
+  const paymentAuditSummary = settledPayments.length === 0
+    ? 'Not paid yet'
+    : `Paid via ${paymentMethodLabels.join(', ')}`;
 
   return (
     <DetailPage
@@ -70,6 +101,8 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
           content: (
             <div>
               <p>Job: {data.jobId}</p>
+              <p><strong>Invoice Status:</strong> {formatPaymentStatus(data.status)}</p>
+              <p><strong>Payment Status:</strong> {paymentAuditSummary}</p>
               {data.dueDate && <p>Due Date: {new Date(data.dueDate).toLocaleDateString()}</p>}
               <p>Created: {new Date(data.createdAt).toLocaleDateString()}</p>
             </div>
@@ -117,7 +150,7 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
         },
         {
           title: 'Payments',
-          content: (data.payments ?? []).length === 0 ? (
+          content: recordedPayments.length === 0 ? (
             <p>No payments recorded.</p>
           ) : (
             <table className="list-table">
@@ -130,12 +163,12 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
                 </tr>
               </thead>
               <tbody>
-                {(data.payments ?? []).map((p) => (
+                {recordedPayments.map((p) => (
                   <tr key={p.id}>
                     <td>{new Date(p.createdAt).toLocaleDateString()}</td>
                     <td>{formatCents(p.amountCents)}</td>
-                    <td>{p.method}</td>
-                    <td>{p.status}</td>
+                    <td>{formatPaymentMethod(p.method)}</td>
+                    <td>{formatPaymentStatus(p.status)}</td>
                   </tr>
                 ))}
               </tbody>
