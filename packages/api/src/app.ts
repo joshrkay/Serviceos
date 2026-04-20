@@ -28,6 +28,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
+import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createDispatchRoutes } from './dispatch/routes';
 
@@ -49,6 +50,7 @@ import { InMemoryEstimateTemplateRepository } from './templates/estimate-templat
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository } from './voice/voice-service';
+import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
@@ -72,6 +74,7 @@ import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
+import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
@@ -228,6 +231,9 @@ export function createApp() {
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
+  const technicianLocationPingRepo = pool
+    ? new PgTechnicianLocationPingRepository(pool)
+    : new InMemoryTechnicianLocationPingRepository();
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
@@ -450,6 +456,7 @@ export function createApp() {
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  app.use('/api/technician-location', createTechnicianLocationRouter(technicianLocationPingRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })

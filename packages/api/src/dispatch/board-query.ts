@@ -2,6 +2,7 @@ import { AppointmentRepository, Appointment, AppointmentStatus } from '../appoin
 import { AssignmentRepository, AppointmentAssignment } from '../appointments/assignment';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import { DispatchLatenessResult } from './lateness';
 
 export interface BoardAppointment {
   id: string;
@@ -16,6 +17,7 @@ export interface BoardAppointment {
   arrivalWindowStart?: string;
   arrivalWindowEnd?: string;
   status: string;
+  lateness?: DispatchLatenessResult;
 }
 
 export interface TechnicianLane {
@@ -54,6 +56,7 @@ export interface BoardQueryDependencies {
     locationAddress?: string;
     jobSummary?: string;
   }>;
+  getAppointmentLateness?: (appointment: Appointment, technicianId?: string) => Promise<DispatchLatenessResult | undefined>;
 }
 
 function getTimezoneOffsetMs(date: Date, timezone: string): number {
@@ -81,6 +84,7 @@ function toBoardAppointment(
   context?: { customerName?: string; locationAddress?: string; jobSummary?: string },
   technicianId?: string,
   technicianName?: string,
+  lateness?: DispatchLatenessResult,
 ): BoardAppointment {
   return {
     id: appointment.id,
@@ -95,6 +99,7 @@ function toBoardAppointment(
     arrivalWindowStart: appointment.arrivalWindowStart ? toISOString(appointment.arrivalWindowStart) : undefined,
     arrivalWindowEnd: appointment.arrivalWindowEnd ? toISOString(appointment.arrivalWindowEnd) : undefined,
     status: appointment.status,
+    lateness,
   };
 }
 
@@ -169,8 +174,17 @@ export async function getDispatchBoardData(
   }
 
   // Build unassigned list
+  const unassignedLatenessResults = deps.getAppointmentLateness
+    ? await Promise.all(
+      unassigned.map((appt) => deps.getAppointmentLateness!(appt).then((lateness) => ({ apptId: appt.id, lateness })))
+    )
+    : [];
+  const unassignedLatenessMap = new Map<string, DispatchLatenessResult | undefined>(
+    unassignedLatenessResults.map((result) => [result.apptId, result.lateness])
+  );
+
   const unassignedBoard: BoardAppointment[] = unassigned.map((appt) =>
-    toBoardAppointment(appt, displayContextMap.get(appt.id))
+    toBoardAppointment(appt, displayContextMap.get(appt.id), undefined, undefined, unassignedLatenessMap.get(appt.id))
   );
 
   // Fetch technician names in parallel
@@ -190,8 +204,24 @@ export async function getDispatchBoardData(
   for (const [techId, items] of technicianAppointments) {
     const techName = techNameMap.get(techId) ?? techId;
 
+    const latenessResults = deps.getAppointmentLateness
+      ? await Promise.all(
+        items.map(({ appointment }) => deps.getAppointmentLateness!(appointment, techId)
+          .then((lateness) => ({ apptId: appointment.id, lateness })))
+      )
+      : [];
+    const latenessByApptId = new Map<string, DispatchLatenessResult | undefined>(
+      latenessResults.map((result) => [result.apptId, result.lateness])
+    );
+
     const laneAppointments: BoardAppointment[] = items.map(({ appointment }) =>
-      toBoardAppointment(appointment, displayContextMap.get(appointment.id), techId, techName)
+      toBoardAppointment(
+        appointment,
+        displayContextMap.get(appointment.id),
+        techId,
+        techName,
+        latenessByApptId.get(appointment.id),
+      )
     );
 
     const lane: TechnicianLane = {
