@@ -2,15 +2,15 @@
  * One-time seeder for the QA matrix tenants.
  *
  * Run against Railway dev DB BEFORE the matrix:
- *   tsx e2e/qa-matrix/fixtures/seed.ts
+ *   E2E_DB_URL_READWRITE='postgres://...' npx tsx e2e/qa-matrix/fixtures/seed.ts
  *
  * Emits the env-var lines tokens.ts expects (tenant / customer / job ids)
  * so you can paste them into your shell before running the matrix.
  *
- * Seeds two tenants (A and B) with one customer + one open job each.
- * Idempotent: re-running with the same QA_MATRIX_SEED_PREFIX re-uses
- * existing rows. Uses the service role connection string via
- * E2E_DB_URL_READWRITE (distinct from the read-only one Agent C uses).
+ * Seeds two tenants (A and B) with one customer + one service location +
+ * one open job each. Idempotent on QA_MATRIX_SEED_PREFIX — re-runnable.
+ * Uses the service-role connection via E2E_DB_URL_READWRITE (distinct from
+ * the read-only one Agent C uses).
  */
 
 import { Client } from 'pg';
@@ -53,48 +53,80 @@ interface Fixture {
 }
 
 async function ensureTenantFixture(client: Client, slug: string): Promise<Fixture> {
-  const existing = await client.query(
-    `SELECT id FROM tenants WHERE slug = $1 LIMIT 1`,
-    [slug]
+  // Tenants are identified by owner_id (UNIQUE, TEXT). We use a synthetic
+  // owner_id derived from the slug so re-runs are idempotent.
+  const ownerId = `qa:${slug}`;
+  const ownerEmail = `${slug}@qa.serviceos.local`;
+  const systemUser = `qa-matrix-seeder`;
+
+  const existingTenant = await client.query(
+    `SELECT id FROM tenants WHERE owner_id = $1 LIMIT 1`,
+    [ownerId]
   );
   const tenantId =
-    existing.rows[0]?.id ??
+    existingTenant.rows[0]?.id ??
     (await client
       .query(
-        `INSERT INTO tenants (id, slug, name, created_at, updated_at)
-         VALUES ($1, $2, $3, now(), now())
+        `INSERT INTO tenants (id, owner_id, owner_email, name, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, now(), now())
          RETURNING id`,
-        [randomUUID(), slug, `QA Matrix ${slug}`]
+        [randomUUID(), ownerId, ownerEmail, `QA Matrix ${slug}`]
       )
       .then((r) => r.rows[0].id));
 
-  const customerRes = await client.query(
-    `SELECT id FROM customers WHERE tenant_id = $1 AND name = $2 LIMIT 1`,
-    [tenantId, `${slug}-customer`]
+  // Customer: display_name is the idempotency handle here.
+  const customerDisplay = `${slug}-customer`;
+  const existingCustomer = await client.query(
+    `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
+    [tenantId, customerDisplay]
   );
   const customerId =
-    customerRes.rows[0]?.id ??
+    existingCustomer.rows[0]?.id ??
     (await client
       .query(
-        `INSERT INTO customers (id, tenant_id, name, created_at, updated_at)
-         VALUES ($1, $2, $3, now(), now())
+        `INSERT INTO customers
+           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
+            sms_consent, is_archived, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())
          RETURNING id`,
-        [randomUUID(), tenantId, `${slug}-customer`]
+        [randomUUID(), tenantId, 'QA', slug, customerDisplay, '555-0100', systemUser]
       )
       .then((r) => r.rows[0].id));
 
-  const jobRes = await client.query(
-    `SELECT id FROM jobs WHERE tenant_id = $1 AND title = $2 LIMIT 1`,
-    [tenantId, `${slug}-job`]
+  // Service location (jobs require a location_id).
+  const locationLabel = `${slug}-location`;
+  const existingLocation = await client.query(
+    `SELECT id FROM service_locations WHERE tenant_id = $1 AND customer_id = $2 AND label = $3 LIMIT 1`,
+    [tenantId, customerId, locationLabel]
   );
-  const jobId =
-    jobRes.rows[0]?.id ??
+  const locationId =
+    existingLocation.rows[0]?.id ??
     (await client
       .query(
-        `INSERT INTO jobs (id, tenant_id, customer_id, title, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'open', now(), now())
+        `INSERT INTO service_locations
+           (id, tenant_id, customer_id, label, street1, city, state, postal_code, country, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, '1 QA Way', 'Testville', 'CA', '90001', 'US', now(), now())
          RETURNING id`,
-        [randomUUID(), tenantId, customerId, `${slug}-job`]
+        [randomUUID(), tenantId, customerId, locationLabel]
+      )
+      .then((r) => r.rows[0].id));
+
+  // Job: unique by (tenant_id, job_number).
+  const jobNumber = `${slug}-job-1`;
+  const existingJob = await client.query(
+    `SELECT id FROM jobs WHERE tenant_id = $1 AND job_number = $2 LIMIT 1`,
+    [tenantId, jobNumber]
+  );
+  const jobId =
+    existingJob.rows[0]?.id ??
+    (await client
+      .query(
+        `INSERT INTO jobs
+           (id, tenant_id, customer_id, location_id, job_number, summary, status, priority, created_by,
+            created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'new', 'normal', $7, now(), now())
+         RETURNING id`,
+        [randomUUID(), tenantId, customerId, locationId, jobNumber, `QA Matrix job for ${slug}`, systemUser]
       )
       .then((r) => r.rows[0].id));
 
