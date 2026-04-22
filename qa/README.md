@@ -49,14 +49,17 @@ open qa/reports/*/QA-REPORT.md
 | `E2E_API_URL` | Railway dev API URL (e.g. `https://serviceos-api-dev.up.railway.app`) |
 | `E2E_DB_URL_READONLY` | Direct PG read connection for Agent C |
 | `E2E_DB_URL_READWRITE` | Service-role PG connection (for `fixtures/seed.ts` only) |
-| `E2E_CLERK_TEST_TOKEN_A` | Clerk test-mode session JWT for Tenant A |
-| `E2E_CLERK_TEST_TOKEN_B` | Clerk test-mode session JWT for Tenant B |
+| `E2E_CLERK_HMAC_SECRET` | Same value the deployed API reads as `CLERK_SECRET_KEY`. Tokens for Tenant A and B are minted at runtime (see `fixtures/tokens.ts`). |
 | `E2E_TENANT_A_ID` | UUID of QA Tenant A (from seeder output) |
 | `E2E_TENANT_A_CUSTOMER_ID` | Tenant A's seeded customer |
 | `E2E_TENANT_A_JOB_ID` | Tenant A's seeded job |
 | `E2E_TENANT_B_ID` / `E2E_TENANT_B_CUSTOMER_ID` / `E2E_TENANT_B_JOB_ID` | Same for Tenant B |
 
-Clerk testing-tokens setup: https://clerk.com/docs/testing/playwright
+The API's auth layer is a custom HMAC JWT verifier, not the Clerk SDK
+proper. `fixtures/tokens.ts` mints short-lived tokens on demand signed
+with `E2E_CLERK_HMAC_SECRET`, so no Clerk backend account / signin flow
+is needed for the matrix. Make sure the secret you export here is the
+exact same value the deployed Railway dev API reads as `CLERK_SECRET_KEY`.
 
 Stripe for INV-05/06: use `stripe listen --forward-to $E2E_API_URL/webhooks/stripe`
 during the run. The harness constructs a synthetic payload with an
