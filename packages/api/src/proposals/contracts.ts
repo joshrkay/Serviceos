@@ -123,7 +123,7 @@ export const updateInvoicePayloadSchema = z.object({
 });
 
 export const issueInvoicePayloadSchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.string().min(1),
   paymentTermDays: z.number().int().min(1).max(365).optional(),
 });
 

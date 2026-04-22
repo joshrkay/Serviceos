@@ -10,13 +10,15 @@ import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { Proposal } from '../../src/proposals/proposal';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
 
+const INVOICE_ID = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+
 function makeInvoice(overrides: Partial<Invoice> = {}): Invoice {
   const lineItems: LineItem[] = [
     buildLineItem('li-1', 'Labor', 1, 15000, 0, true, 'labor'),
   ];
   const totals = calculateDocumentTotals(lineItems, 0, 0);
   return {
-    id: 'inv-1',
+    id: INVOICE_ID,
     tenantId: 't-1',
     jobId: 'job-1',
     invoiceNumber: 'INV-0001',
@@ -38,7 +40,7 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     tenantId: 't-1',
     proposalType: 'issue_invoice',
     status: 'approved',
-    payload: { invoiceId: 'inv-1' },
+    payload: { invoiceId: INVOICE_ID },
     summary: 'Issue invoice INV-0001',
     createdBy: 'u-1',
     createdAt: new Date(),
@@ -62,13 +64,13 @@ describe('AST-04 — IssueInvoiceExecutionHandler', () => {
       const result = await handler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
 
       expect(result.success).toBe(true);
-      expect(result.resultEntityId).toBe('inv-1');
+      expect(result.resultEntityId).toBe(INVOICE_ID);
     });
 
     it('transitions the invoice to open status', async () => {
       await handler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
 
-      const issued = await invoiceRepo.findById('t-1', 'inv-1');
+      const issued = await invoiceRepo.findById('t-1', INVOICE_ID);
       expect(issued).not.toBeNull();
       expect(issued!.status).toBe('open');
       expect(issued!.issuedAt).toBeInstanceOf(Date);
@@ -76,10 +78,10 @@ describe('AST-04 — IssueInvoiceExecutionHandler', () => {
     });
 
     it('uses provided paymentTermDays when set', async () => {
-      const proposal = makeProposal({ payload: { invoiceId: 'inv-1', paymentTermDays: 14 } });
+      const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, paymentTermDays: 14 } });
       await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
 
-      const issued = await invoiceRepo.findById('t-1', 'inv-1');
+      const issued = await invoiceRepo.findById('t-1', INVOICE_ID);
       const diffDays =
         Math.round(
           (issued!.dueDate!.getTime() - issued!.issuedAt!.getTime()) / (1000 * 60 * 60 * 24)
@@ -113,11 +115,27 @@ describe('AST-04 — IssueInvoiceExecutionHandler', () => {
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/not found/i);
     });
+
+    it('resolves invoice by human-readable number (e.g. "INV-0001")', async () => {
+      const proposal = makeProposal({ payload: { invoiceId: 'INV-0001' } });
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.resultEntityId).toBe(INVOICE_ID);
+    });
+
+    it('resolves invoice by bare number without INV- prefix (e.g. "0001")', async () => {
+      const proposal = makeProposal({ payload: { invoiceId: '0001' } });
+      const result = await handler.execute(proposal, { tenantId: 't-1', executedBy: 'u-1' });
+
+      expect(result.success).toBe(true);
+      expect(result.resultEntityId).toBe(INVOICE_ID);
+    });
   });
 
   describe('wrong status', () => {
     it('returns a friendly error for an already-open invoice', async () => {
-      await invoiceRepo.update('t-1', 'inv-1', { status: 'open' });
+      await invoiceRepo.update('t-1', INVOICE_ID, { status: 'open' });
       const result = await handler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
 
       expect(result.success).toBe(false);
@@ -127,7 +145,7 @@ describe('AST-04 — IssueInvoiceExecutionHandler', () => {
     });
 
     it('returns a friendly error for a void invoice', async () => {
-      await invoiceRepo.update('t-1', 'inv-1', { status: 'void' });
+      await invoiceRepo.update('t-1', INVOICE_ID, { status: 'void' });
       const result = await handler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
 
       expect(result.success).toBe(false);
@@ -136,7 +154,7 @@ describe('AST-04 — IssueInvoiceExecutionHandler', () => {
     });
 
     it('returns a friendly error for a paid invoice', async () => {
-      await invoiceRepo.update('t-1', 'inv-1', { status: 'paid' });
+      await invoiceRepo.update('t-1', INVOICE_ID, { status: 'paid' });
       const result = await handler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
 
       expect(result.success).toBe(false);
