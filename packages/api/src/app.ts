@@ -461,7 +461,7 @@ export function createApp() {
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
-  app.use('/api/assistant', createAssistantRouter());
+  app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

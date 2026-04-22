@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
-  ArrowUpRight,
+  ArrowUpRight, UserPlus,
 } from 'lucide-react';
 import type { AIProposal, ProposalType } from '../../data/mock-data';
 
@@ -16,6 +16,7 @@ const TYPE_CONFIG: Record<ProposalType, {
   'Follow-up':{ color: 'text-violet-700', bg: 'bg-violet-50', border: 'border-violet-200',icon: MessageCircle,   label: 'Follow-up' },
   Alert:      { color: 'text-red-700',    bg: 'bg-red-50',    border: 'border-red-200',   icon: AlertCircle,     label: 'Alert' },
   Duplicate:  { color: 'text-slate-600',  bg: 'bg-slate-50',  border: 'border-slate-200', icon: Copy,            label: 'Duplicate' },
+  Customer:   { color: 'text-emerald-700',bg: 'bg-emerald-50',border: 'border-emerald-200',icon: UserPlus,       label: 'New customer' },
 };
 
 const CONFIDENCE_CONFIG = {
