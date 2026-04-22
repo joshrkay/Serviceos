@@ -16,3 +16,9 @@ coverage/
 /playwright-report/
 /test-results/
 /playwright/.cache/
+
+# QA matrix run artifacts (reports folders are kept; transient outputs ignored)
+/qa/artifacts/*
+!/qa/artifacts/.gitkeep
+/qa/reports/*/
+!/qa/reports/.gitkeep

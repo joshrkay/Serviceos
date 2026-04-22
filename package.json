@@ -19,10 +19,13 @@
     "e2e": "playwright test",
     "e2e:smoke": "playwright test e2e/smoke.spec.ts",
     "e2e:ui": "playwright test --ui",
-    "e2e:report": "playwright show-report"
+    "e2e:report": "playwright show-report",
+    "e2e:qa-matrix": "QA_MATRIX=1 playwright test --project=qa-matrix"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@types/pg": "^8.18.0",
+    "pg": "^8.20.0",
     "typescript": "^5.4.0"
   }
 }

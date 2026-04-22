@@ -17,6 +17,7 @@ const skipWebServer = !!process.env.E2E_BASE_URL;
 
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: ['**/qa-matrix/**'],
   fullyParallel: false,
   forbidOnly: isCI,
   retries: isCI ? 2 : 1,
@@ -39,9 +40,26 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testDir: './e2e',
+      testIgnore: ['**/qa-matrix/**'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      // 4-agent swarm QA matrix (Estimates, Invoices, Assistant).
+      // Run with: npm run e2e:qa-matrix
+      // Requires: E2E_BASE_URL, E2E_API_URL, Clerk tokens for two tenants,
+      // Stripe test keys on the API, and E2E_DB_URL_READONLY for Agent C.
+      // See qa/README.md.
+      name: 'qa-matrix',
+      testDir: './e2e/qa-matrix',
+      testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
       use: { ...devices['Desktop Chrome'] },
     },
   ],
+
+  globalTeardown: process.env.QA_MATRIX === '1'
+    ? './e2e/qa-matrix/helpers/report-builder.ts'
+    : undefined,
 
   webServer: skipWebServer
     ? undefined
