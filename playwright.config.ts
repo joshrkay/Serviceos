@@ -52,6 +52,7 @@ export default defineConfig({
       // See qa/README.md.
       name: 'qa-matrix',
       testDir: './e2e/qa-matrix',
+      testIgnore: [],
       testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
       use: { ...devices['Desktop Chrome'] },
     },
