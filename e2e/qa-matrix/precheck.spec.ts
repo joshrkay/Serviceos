@@ -24,9 +24,24 @@ test('precheck — required env vars are set', () => {
   expect(missing, `Missing env: ${missing.join(', ')}. See qa/README.md.`).toEqual([]);
 });
 
+test('precheck — URLs are well-formed', () => {
+  for (const name of ['E2E_BASE_URL', 'E2E_API_URL'] as const) {
+    const v = process.env[name];
+    expect(v, `${name} is empty`).toBeTruthy();
+    try {
+      // Catches literal placeholders like `https://<your-api-service>.up.railway.app`.
+      // Also catches typos like a missing scheme.
+      new URL(v!);
+    } catch (err) {
+      throw new Error(`${name} is not a valid URL: "${v}". ${(err as Error).message}`);
+    }
+    expect(v!.includes('<'), `${name} looks like a placeholder (contains "<"): ${v}`).toBe(false);
+  }
+});
+
 test('precheck — API /health responds 200', async ({ request }) => {
   const apiUrl = process.env.E2E_API_URL!;
-  const res = await request.get(`${apiUrl}/health`);
+  const res = await request.get(`${apiUrl.replace(/\/$/, '')}/health`);
   expect(res.status()).toBe(200);
 });
 
