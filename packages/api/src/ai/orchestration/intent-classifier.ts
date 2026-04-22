@@ -8,9 +8,8 @@ import { LLMGateway } from '../gateway/gateway';
  *
  * Phase 1 handled: create_invoice, draft_estimate, create_appointment.
  * Phase 2 adds:    update_invoice (add/remove line item).
- * Phase 3/4 intents (send_invoice, query_*) still return 'unknown'
- * today so the classifier doesn't hallucinate coverage it can't
- * actually execute.
+ * Phase 3 adds:    issue_invoice (send a drafted invoice to the customer).
+ * Phase 4 intents (query_*) still return 'unknown'.
  */
 
 export type IntentType =
@@ -19,6 +18,7 @@ export type IntentType =
   | 'create_appointment'
   | 'update_invoice'
   | 'update_estimate'
+  | 'issue_invoice'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -27,6 +27,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_appointment',
   'update_invoice',
   'update_estimate',
+  'issue_invoice',
   'unknown',
 ] as const;
 
@@ -77,19 +78,30 @@ Supported intents (return exactly ONE):
                            (number or customer name).
                            Examples: "Add a site visit to estimate EST-0001"
                                      "Remove the old heater from the Johnson estimate"
-- "unknown"             — anything else: send commands, queries ("when is my next
-                           appointment"), ambiguous transcripts, or edit commands
-                           without a clear invoice/estimate reference.
+- "issue_invoice"       — user wants to SEND/ISSUE an existing DRAFT invoice to
+                           the customer. May reference the invoice explicitly by
+                           number or customer name, or implicitly ("the one we
+                           just drafted", "that invoice", "the Acme invoice").
+                           Examples: "Send invoice 1024 to the customer"
+                                     "Issue the Acme invoice"
+                                     "Send the invoice we just drafted"
+- "unknown"             — anything else: queries ("when is my next appointment"),
+                           genuinely ambiguous transcripts, or commands without
+                           a clear target.
 
 Distinctions that matter:
 - "create an invoice/estimate" vs "add to invoice/estimate" — the word
   "add/remove/update" plus a reference to an EXISTING invoice or estimate
   = update_invoice or update_estimate. Any phrasing starting a NEW one
   = create_invoice or draft_estimate.
+- "send/issue/deliver an invoice" = issue_invoice, NOT create_invoice.
 - Invoice vs estimate — the operator usually says which. When they say
   "invoice" or use an "INV-" prefix, use the invoice intent; when they say
   "estimate/quote" or "EST-", use the estimate intent. When genuinely
   ambiguous, prefer "unknown".
+- For issue_invoice, put the invoice number or reference in jobReference.
+  If the user says "the one we just drafted" with no explicit ID, omit
+  jobReference — the router resolves it from conversation context.
 
 Return valid JSON with exactly this shape (no prose, no markdown fences):
 {

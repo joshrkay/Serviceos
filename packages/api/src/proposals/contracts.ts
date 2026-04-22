@@ -122,6 +122,11 @@ export const updateInvoicePayloadSchema = z.object({
   editActions: z.array(invoiceEditActionSchema).min(1),
 });
 
+export const issueInvoicePayloadSchema = z.object({
+  invoiceId: z.string().uuid(),
+  paymentTermDays: z.number().int().min(1).max(365).optional(),
+});
+
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
@@ -131,6 +136,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,
   update_invoice: updateInvoicePayloadSchema,
+  issue_invoice: issueInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,

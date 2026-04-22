@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
+import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
@@ -203,6 +204,7 @@ export function createExecutionHandlerRegistry(deps?: {
   // touch these don't have to provide the dep.
   if (deps?.invoiceRepo) {
     handlers.push(new UpdateInvoiceExecutionHandler(deps.invoiceRepo));
+    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(deps.estimateRepo));
