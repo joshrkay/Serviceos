@@ -103,13 +103,20 @@ async function correctTranscript(input: {
     });
 
     const corrected = response.content.trim();
-    // Guardrail: correction should not silently truncate. If it's
-    // shorter by more than 40% of the raw length, assume the model
-    // mis-interpreted the instructions and fall back.
-    if (corrected.length === 0 || corrected.length < raw.length * 0.4) {
+    // Guardrail: correction should not silently truncate. Fall back
+    // to the raw transcript when the correction is either
+    // proportionally too short (< 40% of raw length, catching obvious
+    // model mis-interpretation on longer utterances) OR absolutely
+    // too short (< MIN_CORRECTED_CHARS, catching the short-input
+    // edge case where 40% of a 3-char "yes" is 1.2 chars — a 1-char
+    // "y" would falsely pass the ratio check).
+    const MIN_CORRECTED_CHARS = 4;
+    const floor = Math.max(MIN_CORRECTED_CHARS, Math.ceil(raw.length * 0.4));
+    if (corrected.length === 0 || corrected.length < floor) {
       logger.warn('Transcription correction produced suspiciously short output; keeping raw', {
         rawLen: raw.length,
         correctedLen: corrected.length,
+        floor,
       });
       return { corrected: raw, glossary: terms };
     }

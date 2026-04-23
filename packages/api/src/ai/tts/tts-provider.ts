@@ -81,8 +81,25 @@ export class OpenAiTtsProvider implements TtsProvider {
 /**
  * Dev/test provider that returns a zero-byte "audio" response so
  * tests can exercise readback plumbing without calling the real API.
+ *
+ * SAFETY: this MUST NOT be wired in production. If an operator
+ * approves a voice-approvable proposal in production and the
+ * readback is silent fake audio, they won't know the assistant
+ * "said" anything — they'll think their speech wasn't heard and
+ * either re-speak (duplicating the mutation on another tenant's
+ * pipeline) or abandon the task. The constructor throws in
+ * production so this failure mode is loud at wire-up, not silent
+ * at runtime.
  */
 export class NoopTtsProvider implements TtsProvider {
+  constructor() {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'NoopTtsProvider cannot be used in production — wire a real TtsProvider (e.g., OpenAiTtsProvider) instead.'
+      );
+    }
+  }
+
   async synthesize(input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> {
     return {
       audio: Buffer.from(`noop-tts:${input.text.slice(0, 40)}`, 'utf-8'),

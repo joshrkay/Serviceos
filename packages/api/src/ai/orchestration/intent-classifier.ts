@@ -112,6 +112,16 @@ export interface IntentClassification {
   extractedEntities?: ExtractedEntities;
   unknownReason?: UnknownReason;
   lowConfidenceIntent?: IntentType;
+  /**
+   * Enum-typed fields the LLM returned with a value outside the
+   * allowed set (e.g., `cancellationType: "weather"` when only
+   * customer_request / technician_unavailable / scheduling_conflict /
+   * other are valid). Preserved here so the router can emit a
+   * structured warn log instead of silently dropping the field —
+   * helps diagnose LLM prompting drift without blocking the
+   * pipeline. Empty / undefined when every enum is valid.
+   */
+  invalidEnumFields?: Array<{ field: string; value: unknown }>;
 }
 
 export interface ClassifyContext {
@@ -293,6 +303,12 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     result.reasoning = obj.reasoning;
   }
 
+  // Enum-typed fields that the LLM returned with an invalid value
+  // are collected here so the router can emit a structured warn log
+  // (P1-5). Silent drops hide classifier-prompt drift; loud-but-
+  // non-blocking logging gives us visibility without breaking flow.
+  const invalidEnumFields: Array<{ field: string; value: unknown }> = [];
+
   if (typeof obj.extractedEntities === 'object' && obj.extractedEntities !== null) {
     const ee = obj.extractedEntities as Record<string, unknown>;
     const extracted: ExtractedEntities = {};
@@ -320,6 +336,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
       ee.cancellationType === 'other'
     ) {
       extracted.cancellationType = ee.cancellationType;
+    } else if (ee.cancellationType !== undefined) {
+      invalidEnumFields.push({ field: 'cancellationType', value: ee.cancellationType });
     }
     // add_note fields
     if (typeof ee.noteBody === 'string') extracted.noteBody = ee.noteBody;
@@ -331,10 +349,14 @@ export function parseClassifierJson(content: string): IntentClassification | nul
       ee.noteTargetKind === 'appointment'
     ) {
       extracted.noteTargetKind = ee.noteTargetKind;
+    } else if (ee.noteTargetKind !== undefined) {
+      invalidEnumFields.push({ field: 'noteTargetKind', value: ee.noteTargetKind });
     }
     // send_invoice fields
     if (ee.sendChannel === 'email' || ee.sendChannel === 'sms') {
       extracted.sendChannel = ee.sendChannel;
+    } else if (ee.sendChannel !== undefined) {
+      invalidEnumFields.push({ field: 'sendChannel', value: ee.sendChannel });
     }
     // record_payment fields
     if (
@@ -344,6 +366,8 @@ export function parseClassifierJson(content: string): IntentClassification | nul
       ee.paymentMethod === 'other'
     ) {
       extracted.paymentMethod = ee.paymentMethod;
+    } else if (ee.paymentMethod !== undefined) {
+      invalidEnumFields.push({ field: 'paymentMethod', value: ee.paymentMethod });
     }
     if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
     // create_job fields
@@ -351,6 +375,10 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }
+  }
+
+  if (invalidEnumFields.length > 0) {
+    result.invalidEnumFields = invalidEnumFields;
   }
 
   return result;

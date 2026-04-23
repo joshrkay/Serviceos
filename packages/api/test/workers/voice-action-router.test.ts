@@ -360,6 +360,79 @@ describe('voice-action-router worker', () => {
     expect(payload.reason).toBe('parse_failed');
   });
 
+  // Classifier reasoning is LLM-generated from user input and could
+  // include control characters or runaway length. The router must
+  // sanitize before persisting to the proposal payload — log-injection
+  // payloads and terminal escapes should never reach the DB or any
+  // downstream renderer unfiltered. (P1-3 fix.)
+  it('sanitizes classifier reasoning before persisting to the clarification payload', async () => {
+    const longReasoning = 'A'.repeat(500);
+    const withControls = `hello\x00\x1bworld${longReasoning}`;
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.3,
+        reasoning: withControls,
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'um, thing',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    const stored = payload.classifierReasoning as string;
+    // Length is bounded.
+    expect(stored.length).toBeLessThanOrEqual(200);
+    // Control characters stripped.
+    expect(stored).not.toMatch(/[\x00-\x1f\x7f]/);
+  });
+
+  // P1-5: when the LLM returns an enum value outside the allowed set
+  // for `cancellationType` (or other enum fields), the field is
+  // dropped from extractedEntities AND a structured invalidEnumFields
+  // array is surfaced on the classification so the router can
+  // emit a warn log instead of silently swallowing the drift.
+  it('surfaces invalidEnumFields when classifier returns a bad cancellationType', async () => {
+    // We can't easily assert the warn log itself, but we can verify
+    // the underlying mechanism produces the expected proposal
+    // (cancel_appointment, with cancellationType defaulted to 'other'
+    // by the task handler since the bad value was dropped).
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'cancel_appointment',
+        confidence: 0.95,
+        extractedEntities: {
+          appointmentReference: 'tomorrow 3pm',
+          cancellationType: 'weather_emergency',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'cancel tomorrow 3pm, weather closed us down',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    const p = byTenant[0].payload as Record<string, unknown>;
+    // Bad enum dropped; task handler defaulted to 'other'.
+    expect(p.cancellationType).toBe('other');
+  });
+
   // ─── Stage 2: new intent coverage ─────────────────────────────
   // Each of these tests shows that a classifier result for a Stage-2
   // intent produces the right ProposalType and that any required

@@ -10,17 +10,34 @@ import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers'
  * NotesRepository, email/SMS provider, PaymentsRepository) will
  * replace these in follow-up slices.
  *
- * Why stubs and not deferred? The voice pipeline must produce a
- * proposal → executed transition for observability and audit events.
- * Without any handler the executor would throw HANDLER_NOT_FOUND and
- * the proposal would stick in 'approved' forever — worse UX than a
- * recorded no-op.
+ * SAFETY GATE
+ * -----------
+ * In production these handlers MUST NOT run. A stub that transitions
+ * a proposal to `executed` while not actually recording a payment or
+ * sending an invoice writes a lie into the audit trail — operators
+ * think the job is done, reconciliation later discovers it isn't.
+ * `assertStubAllowed` throws in production unless
+ * `ENABLE_VOICE_STUBS=1` is set explicitly (used by staging to
+ * exercise the pipeline end-to-end). The flag is removed when the
+ * real handlers land.
  */
+function assertStubAllowed(): ExecutionResult | null {
+  if (process.env.NODE_ENV === 'production' && process.env.ENABLE_VOICE_STUBS !== '1') {
+    return {
+      success: false,
+      error:
+        'Handler not yet implemented — stub disabled in production. Set ENABLE_VOICE_STUBS=1 on staging to exercise the pipeline.',
+    };
+  }
+  return null;
+}
 
 export class AddNoteExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'add_note';
 
   async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+    const gate = assertStubAllowed();
+    if (gate) return gate;
     const { payload } = proposal;
     if (typeof payload.body !== 'string' || payload.body.length === 0) {
       return { success: false, error: 'Payload must include a non-empty body' };
@@ -32,7 +49,8 @@ export class AddNoteExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'Payload must include targetId or targetReference' };
     }
     // TODO(follow-up): wire NotesRepository.create — for now return a
-    // synthetic id so the proposal transitions to executed cleanly.
+    // synthetic id so the proposal transitions to executed cleanly in
+    // dev/test/staging. Production is blocked by assertStubAllowed().
     return { success: true, resultEntityId: uuidv4() };
   }
 }
@@ -41,6 +59,8 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_invoice';
 
   async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+    const gate = assertStubAllowed();
+    if (gate) return gate;
     const { payload } = proposal;
     if (!payload.invoiceId && !payload.invoiceReference) {
       return { success: false, error: 'Payload must include invoiceId or invoiceReference' };
@@ -59,6 +79,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'record_payment';
 
   async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+    const gate = assertStubAllowed();
+    if (gate) return gate;
     const { payload } = proposal;
     if (!payload.invoiceId && !payload.invoiceReference) {
       return { success: false, error: 'Payload must include invoiceId or invoiceReference' };
@@ -77,7 +99,7 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     // TODO(follow-up): route to PaymentsRepository.create — money
     // moves only after this succeeds. The existing /api/payments
     // route (routes/payments.ts) is the reference for how to wire
-    // this properly.
+    // this properly. Production is blocked by assertStubAllowed().
     return { success: true, resultEntityId: uuidv4() };
   }
 }

@@ -133,6 +133,23 @@ function entitiesForProposal(
 }
 
 /**
+ * Sanitize the classifier's free-text reasoning before persisting it
+ * on a proposal. Bounds length and strips control characters so the
+ * LLM can't inject terminal escapes, log-split payloads, or excessive
+ * content into the audit trail. Safe to render in HTML because
+ * control characters are removed; downstream renderers still own
+ * HTML escaping.
+ */
+const CLASSIFIER_REASONING_MAX_CHARS = 200;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_REGEX = /[\x00-\x1f\x7f]/g;
+export function sanitizeReasoning(raw: string): string {
+  const stripped = raw.replace(CONTROL_CHAR_REGEX, ' ').trim();
+  if (stripped.length <= CLASSIFIER_REASONING_MAX_CHARS) return stripped;
+  return `${stripped.slice(0, CLASSIFIER_REASONING_MAX_CHARS - 1)}…`;
+}
+
+/**
  * Build a short, operator-friendly summary for a clarification card.
  * Keeps the transcript prefix short so the summary fits in the feed
  * row without truncation.
@@ -189,11 +206,21 @@ async function emitClarification(
     suggestedIntents.push(classification.lowConfidenceIntent);
   }
 
+  // classifierReasoning is LLM-generated text — derived from a
+  // user-controlled transcript, so it's semi-untrusted. Truncate to
+  // bound DB growth and strip control characters so it can't carry
+  // terminal escapes or log-injection payloads into downstream
+  // consumers. The full raw reasoning is still available in the
+  // structured info log emitted below for debugging.
+  const sanitizedReasoning = classification.reasoning
+    ? sanitizeReasoning(classification.reasoning)
+    : undefined;
+
   const payload = {
     transcript: transcript.trim(),
     reason,
     ...(suggestedIntents.length > 0 ? { suggestedIntents } : {}),
-    ...(classification.reasoning ? { classifierReasoning: classification.reasoning } : {}),
+    ...(sanitizedReasoning ? { classifierReasoning: sanitizedReasoning } : {}),
     ...(classification.confidence > 0
       ? { classifierConfidence: classification.confidence }
       : {}),
@@ -284,6 +311,17 @@ export function createVoiceActionRouterWorker(
       }
 
       const classification = await classifyIntent(effectiveTranscript, { tenantId }, deps.gateway);
+
+      // Surface enum-validation drift from the classifier so prompt
+      // regressions are debuggable. Dropped-value behavior (field
+      // left undefined on the extracted entities) is preserved —
+      // we just no longer do it silently.
+      if (classification.invalidEnumFields && classification.invalidEnumFields.length > 0) {
+        log.warn('voice-action-router: classifier returned invalid enum values', {
+          invalidEnumFields: classification.invalidEnumFields,
+          intentType: classification.intentType,
+        });
+      }
 
       if (classification.intentType === 'unknown') {
         // Emit a clarification proposal instead of dropping. The
