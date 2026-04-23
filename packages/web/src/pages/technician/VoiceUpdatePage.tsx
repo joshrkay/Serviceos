@@ -34,16 +34,61 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
   const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus | undefined>();
   const [transcript, setTranscript] = useState<string | undefined>();
   const [transcriptionError, setTranscriptionError] = useState<string | undefined>();
-  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Recursive setTimeout — a new tick is only scheduled *after* the previous
+  // fetch resolves (or fails), so slow Whisper responses can't produce
+  // overlapping in-flight requests. cancelled flips to true on unmount or
+  // on a completed/failed status, which short-circuits late responses.
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollCancelled = useRef<boolean>(false);
 
   const clearPoll = () => {
+    pollCancelled.current = true;
     if (pollTimer.current) {
-      clearInterval(pollTimer.current);
+      clearTimeout(pollTimer.current);
       pollTimer.current = null;
     }
   };
 
   useEffect(() => () => clearPoll(), []);
+
+  const beginPolling = (id: string) => {
+    clearPoll();
+    pollCancelled.current = false;
+
+    const tick = async () => {
+      if (pollCancelled.current) return;
+      try {
+        const res = await fetch(`/api/voice/recordings/${id}`);
+        if (pollCancelled.current) return;
+        if (res.ok) {
+          const r = (await res.json()) as RecordingResponse;
+          if (pollCancelled.current) return;
+          if (r.status) setTranscriptionStatus(r.status);
+          if (r.transcript) setTranscript(r.transcript);
+          if (r.error) setTranscriptionError(r.error);
+
+          if (r.status === 'completed') {
+            clearPoll();
+            if (onTranscribed && r.transcript) {
+              onTranscribed(id, r.transcript);
+            }
+            return;
+          }
+          if (r.status === 'failed') {
+            clearPoll();
+            return;
+          }
+        }
+      } catch {
+        // Transient poll failures are ignored — the next tick retries.
+      }
+      if (!pollCancelled.current) {
+        pollTimer.current = setTimeout(tick, POLL_INTERVAL_MS);
+      }
+    };
+
+    pollTimer.current = setTimeout(tick, POLL_INTERVAL_MS);
+  };
 
   const uploadRecording = useCallback(
     async (jobId: string, blob: Blob): Promise<string> => {
@@ -68,31 +113,6 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
     },
     []
   );
-
-  const beginPolling = (id: string) => {
-    clearPoll();
-    pollTimer.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/voice/recordings/${id}`);
-        if (!res.ok) return;
-        const r = (await res.json()) as RecordingResponse;
-        if (r.status) setTranscriptionStatus(r.status);
-        if (r.transcript) setTranscript(r.transcript);
-        if (r.error) setTranscriptionError(r.error);
-
-        if (r.status === 'completed') {
-          clearPoll();
-          if (onTranscribed && r.transcript) {
-            onTranscribed(id, r.transcript);
-          }
-        } else if (r.status === 'failed') {
-          clearPoll();
-        }
-      } catch {
-        // Transient poll failures are ignored — the next tick retries.
-      }
-    }, POLL_INTERVAL_MS);
-  };
 
   const retryTranscription = useCallback(async (id: string) => {
     setTranscriptionError(undefined);

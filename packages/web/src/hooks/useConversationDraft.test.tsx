@@ -56,6 +56,30 @@ describe('P3-011 — useConversationDraft', () => {
     // No key should be written when no conversationId.
     expect(window.localStorage.getItem('serviceos.draft.undefined')).toBeNull();
   });
+
+  it('clears in-memory draft when switching to a conversation with no stored value', () => {
+    window.localStorage.setItem('serviceos.draft.conv-a', 'text from A');
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useConversationDraft(id),
+      { initialProps: { id: 'conv-a' } }
+    );
+    expect(result.current.draft).toBe('text from A');
+
+    rerender({ id: 'conv-b' });
+    expect(result.current.draft).toBe('');
+  });
+
+  it('clears in-memory draft when conversationId becomes undefined', () => {
+    window.localStorage.setItem('serviceos.draft.conv-a', 'text from A');
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string | undefined }) => useConversationDraft(id),
+      { initialProps: { id: 'conv-a' as string | undefined } }
+    );
+    expect(result.current.draft).toBe('text from A');
+    rerender({ id: undefined });
+    expect(result.current.draft).toBe('');
+  });
 });
 
 describe('P3-011 — useScrollRecovery', () => {
@@ -84,11 +108,36 @@ describe('P3-011 — useScrollRecovery', () => {
     expect(el.scrollTop).toBe(250);
   });
 
-  it('persists scroll offset on scroll events', () => {
+  it('persists scroll offset on scroll events via rAF', async () => {
     const { getByTestId } = render(<Harness conversationId="conv-2" />);
     const el = getByTestId('scroll-container') as HTMLDivElement;
     el.scrollTop = 123;
     el.dispatchEvent(new Event('scroll'));
+    // rAF writes are deferred; wait for the next frame to complete.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     expect(window.localStorage.getItem('serviceos.scroll.conv-2')).toBe('123');
+  });
+
+  it('coalesces a burst of scroll events into a single localStorage write', async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+    const { getByTestId } = render(<Harness conversationId="conv-burst" />);
+    const el = getByTestId('scroll-container') as HTMLDivElement;
+
+    const baseline = setItemSpy.mock.calls.filter((c) =>
+      String(c[0]).startsWith('serviceos.scroll.conv-burst')
+    ).length;
+
+    for (let i = 0; i < 10; i++) {
+      el.scrollTop = 10 * (i + 1);
+      el.dispatchEvent(new Event('scroll'));
+    }
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const after = setItemSpy.mock.calls.filter((c) =>
+      String(c[0]).startsWith('serviceos.scroll.conv-burst')
+    ).length;
+    // Only one write should have landed despite 10 events.
+    expect(after - baseline).toBe(1);
+    setItemSpy.mockRestore();
   });
 });
