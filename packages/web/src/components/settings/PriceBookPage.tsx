@@ -80,11 +80,18 @@ function parseCsvText(csvText: string): string[][] {
 }
 
 export function PriceBookPage() {
-  const { data, isLoading, error, refetch } = useListQuery<CatalogItem>('/api/catalog/items');
+  const listQuery = useListQuery<CatalogItem>('/api/catalog/items');
+  const {
+    data = [],
+    isLoading = false,
+    error = null,
+    refetch = async () => {},
+  } = listQuery ?? {};
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [progressText, setProgressText] = useState<string>('');
   const [isImporting, setIsImporting] = useState(false);
+  const [showAddItemForm, setShowAddItemForm] = useState(false);
 
   const handleCsvImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -210,6 +217,13 @@ export function PriceBookPage() {
             }}
           />
         </>
+        <button
+          type="button"
+          onClick={() => setShowAddItemForm((current) => !current)}
+          className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
+        >
+          Add item
+        </button>
       </div>
 
       {isImporting || progressText ? (
@@ -227,6 +241,16 @@ export function PriceBookPage() {
         </div>
       ) : null}
 
+
+      {showAddItemForm ? (
+        <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
+          <p className="text-sm text-slate-900 mb-3">Add price book item</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input aria-label="Item name" className="rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder="Name" />
+            <input aria-label="Unit price" className="rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder="Unit price" />
+          </div>
+        </div>
+      ) : null}
       {isLoading ? <p className="text-slate-500">Loading items...</p> : null}
       {error ? <p className="text-red-600">Failed to load price book.</p> : null}
 
