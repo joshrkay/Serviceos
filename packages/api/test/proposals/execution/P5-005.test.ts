@@ -1,6 +1,11 @@
 import { CreateInvoiceExecutionHandler } from '../../../src/proposals/execution/invoice-execution-handler';
 import { createExecutionHandlerRegistry } from '../../../src/proposals/execution/handlers';
 import { Proposal } from '../../../src/proposals/proposal';
+import { InMemoryInvoiceRepository } from '../../../src/invoices/invoice';
+import {
+  InMemorySettingsRepository,
+  TenantSettings,
+} from '../../../src/settings/settings';
 
 describe('P5-005 — Deterministic invoice proposal execution', () => {
   let handler: CreateInvoiceExecutionHandler;
@@ -101,5 +106,92 @@ describe('P5-005 — Deterministic invoice proposal execution', () => {
 
     expect(registeredHandler).toBeDefined();
     expect(registeredHandler).toBeInstanceOf(CreateInvoiceExecutionHandler);
+  });
+
+  describe('real persistence path (invoiceRepo + settingsRepo wired)', () => {
+    function makeSettingsRepo(): InMemorySettingsRepository {
+      const repo = new InMemorySettingsRepository();
+      const seeded: TenantSettings = {
+        id: 'settings-1',
+        tenantId,
+        businessName: 'Test Co',
+        timezone: 'UTC',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      void repo.create(seeded);
+      return repo;
+    }
+
+    it('creates a real invoice row in the repository when deps are wired', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const settingsRepo = makeSettingsRepo();
+      const handlerWithDeps = new CreateInvoiceExecutionHandler(invoiceRepo, settingsRepo);
+
+      const proposal = makeProposal();
+      const result = await handlerWithDeps.execute(proposal, {
+        tenantId,
+        executedBy: 'user-1',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.resultEntityId).toBeTruthy();
+
+      const stored = await invoiceRepo.findById(tenantId, result.resultEntityId!);
+      expect(stored).not.toBeNull();
+      expect(stored!.jobId).toBe('job-1');
+      expect(stored!.invoiceNumber).toMatch(/^INV-/);
+      expect(stored!.lineItems).toHaveLength(1);
+      expect(stored!.status).toBe('draft');
+      expect(stored!.createdBy).toBe('user-1');
+    });
+
+    it('auto-increments the invoice number across executions', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const settingsRepo = makeSettingsRepo();
+      const handlerWithDeps = new CreateInvoiceExecutionHandler(invoiceRepo, settingsRepo);
+
+      const r1 = await handlerWithDeps.execute(makeProposal({ id: 'p1' }), {
+        tenantId,
+        executedBy: 'user-1',
+      });
+      const r2 = await handlerWithDeps.execute(makeProposal({ id: 'p2' }), {
+        tenantId,
+        executedBy: 'user-1',
+      });
+
+      const inv1 = await invoiceRepo.findById(tenantId, r1.resultEntityId!);
+      const inv2 = await invoiceRepo.findById(tenantId, r2.resultEntityId!);
+
+      expect(inv1!.invoiceNumber).toBe('INV-0001');
+      expect(inv2!.invoiceNumber).toBe('INV-0002');
+    });
+
+    it('returns an error when invoice creation fails downstream', async () => {
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const settingsRepo = makeSettingsRepo();
+      const handlerWithDeps = new CreateInvoiceExecutionHandler(invoiceRepo, settingsRepo);
+
+      // Force createInvoice to reject validation by passing through the
+      // existing validation path (empty lineItems is already caught before
+      // persistence, so we simulate a different failure — non-string jobId
+      // will still pass our guard but createInvoice.validateInvoiceInput
+      // requires a non-empty jobId string; cast to force the repo-level
+      // error).
+      const proposal = makeProposal();
+      (proposal.payload.lineItems as unknown) = 'not an array';
+      const result = await handlerWithDeps.execute(proposal, {
+        tenantId,
+        executedBy: 'user-1',
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBeTruthy();
+    });
   });
 });

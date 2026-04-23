@@ -359,6 +359,7 @@ export function createApp() {
     assignmentRepo,
     invoiceRepo,
     estimateRepo,
+    settingsRepo,
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,

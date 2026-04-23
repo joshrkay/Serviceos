@@ -18,6 +18,7 @@ import { AppointmentRepository, createAppointment } from '../../appointments/app
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { EstimateRepository } from '../../estimates/estimate';
+import { SettingsRepository } from '../../settings/settings';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 
@@ -192,6 +193,7 @@ export function createExecutionHandlerRegistry(deps?: {
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
+  settingsRepo?: SettingsRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
@@ -203,7 +205,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateJobExecutionHandler(),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new DraftEstimateExecutionHandler(),
-    new CreateInvoiceExecutionHandler(),
+    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
