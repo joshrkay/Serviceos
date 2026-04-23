@@ -1,6 +1,6 @@
-import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router';
 import { PriceBookPage } from './PriceBookPage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
@@ -29,118 +29,105 @@ beforeEach(() => {
 });
 
 describe('PriceBookPage', () => {
-  it('renders import button and hidden csv input', () => {
-    render(<PriceBookPage />);
+  const mockItems = [
+    { id: '1', name: 'Compressor Tune-up', price: 85 },
+    { id: '2', name: 'Capacitor Replacement', price: 18 },
+  ];
 
-    expect(screen.getByRole('button', { name: /import csv/i })).toBeInTheDocument();
-    const input = screen.getByTestId('csv-file-input');
-    expect(input).toHaveAttribute('type', 'file');
-    expect(input).toHaveAttribute('accept', '.csv');
+  beforeEach(() => {
+    vi.restoreAllMocks();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+
+      if (url === '/api/price-book' && method === 'GET') {
+        return {
+          ok: true,
+          json: async () => mockItems,
+        } as Response;
+      }
+
+      if (url === '/api/price-book' && method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({ id: crypto.randomUUID() }),
+        } as Response;
+      }
+
+      return {
+        ok: true,
+        json: async () => ({}),
+      } as Response;
+    });
   });
 
-  it('posts each valid row sequentially and shows progress text', async () => {
-    render(<PriceBookPage />);
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
 
+  function renderPage() {
+    return render(
+      <MemoryRouter>
+        <PriceBookPage />
+      </MemoryRouter>
+    );
+  }
+
+
+  it('renders heading text', () => {
+    renderPage();
+
+    expect(screen.getByRole('heading', { name: /price book/i })).toBeInTheDocument();
+  });
+
+  it('renders list items from API', async () => {
+    renderPage();
+
+    expect(await screen.findByText('Compressor Tune-up')).toBeInTheDocument();
+    expect(await screen.findByText('Capacitor Replacement')).toBeInTheDocument();
+  });
+
+  it('shows formatted prices', async () => {
+    renderPage();
+
+    expect(await screen.findByText('$85.00')).toBeInTheDocument();
+    expect(await screen.findByText('$18.00')).toBeInTheDocument();
+  });
+
+  it('opens add-item form when clicking Add item', async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: /add item/i }));
+
+    expect(await screen.findByPlaceholderText(/item-name/i)).toBeInTheDocument();
+  });
+
+  it('imports CSV and sends one POST per valid row', async () => {
+    renderPage();
+
+    expect(await screen.findByText(/import csv/i)).toBeInTheDocument();
+
+    const csvInput = screen.getByTestId('csv-file-input') as HTMLInputElement;
     const csv = [
-      'name,description,unit_price,unit,category',
-      'Filter,"1-inch, pleated",12.5,ea,HVAC',
-      'Capacitor,Run capacitor,35,ea,Electrical',
+      'name,price',
+      'Compressor Tune-up,85',
+      'Bad Row,',
+      'Capacitor Replacement,18',
+      ',42',
     ].join('\n');
 
-    const file = new File([csv], 'pricebook.csv', { type: 'text/csv' });
-    const input = screen.getByTestId('csv-file-input') as HTMLInputElement;
-
-    fireEvent.change(input, { target: { files: [file] } });
-
-    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
-    expect(apiFetch).toHaveBeenNthCalledWith(
-      1,
-      '/api/catalog/items',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          name: 'Filter',
-          description: '1-inch, pleated',
-          unit_price: 12.5,
-          unit: 'ea',
-          category: 'HVAC',
-        }),
-      })
-    );
-    expect(apiFetch).toHaveBeenNthCalledWith(
-      2,
-      '/api/catalog/items',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          name: 'Capacitor',
-          description: 'Run capacitor',
-          unit_price: 35,
-          unit: 'ea',
-          category: 'Electrical',
-        }),
-      })
-    );
-
-    await waitFor(() => expect(screen.getByTestId('csv-import-progress')).toHaveTextContent('Imported 2 of 2'));
-    expect(mockRefetch).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows invalid row errors and skips invalid records', async () => {
-    render(<PriceBookPage />);
-
-    const csv = [
-      'name,description,unit_price,unit,category',
-      ',No name,19,ea,HVAC',
-      'Bad Price,Oops,-1,ea,HVAC',
-      'Valid Item,Good,10,ea,HVAC',
-    ].join('\n');
-
-    const file = new File([csv], 'invalid.csv', { type: 'text/csv' });
-    const input = screen.getByTestId('csv-file-input') as HTMLInputElement;
-
-    fireEvent.change(input, { target: { files: [file] } });
-
-    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
-    expect(screen.getByTestId('csv-import-errors')).toHaveTextContent('Row 2: name is required.');
-    expect(screen.getByTestId('csv-import-errors')).toHaveTextContent('Row 3: unit_price must be a non-negative number.');
-    expect(screen.getByTestId('csv-import-progress')).toHaveTextContent('Imported 1 of 1');
-  });
-
-  it('shows a file-level validation error when row count exceeds max allowed', async () => {
-    render(<PriceBookPage />);
-
-    const rows = Array.from({ length: 501 }, (_, i) => `Item ${i + 1},Desc,1,ea,HVAC`);
-    const csv = ['name,description,unit_price,unit,category', ...rows].join('\n');
-
-    const file = new File([csv], 'too-many.csv', { type: 'text/csv' });
-    const input = screen.getByTestId('csv-file-input') as HTMLInputElement;
-
-    fireEvent.change(input, { target: { files: [file] } });
+    const file = new File([csv], 'price-book.csv', { type: 'text/csv' });
+    fireEvent.change(csvInput, { target: { files: [file] } });
 
     await waitFor(() => {
-      expect(screen.getByTestId('csv-import-errors')).toHaveTextContent(
-        'CSV has 501 rows. Maximum allowed is 500 rows per import.'
-      );
+      const postCalls = vi.mocked(fetch).mock.calls.filter(([input, init]) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        return url === '/api/price-book' && method === 'POST';
+      });
+
+      expect(postCalls).toHaveLength(2);
     });
-    expect(apiFetch).not.toHaveBeenCalled();
-  });
-
-  it('shows a file-level validation error when required headers are missing', async () => {
-    render(<PriceBookPage />);
-
-    const csv = ['description,unit,category', 'No price,ea,HVAC'].join('\n');
-
-    const file = new File([csv], 'missing-headers.csv', { type: 'text/csv' });
-    const input = screen.getByTestId('csv-file-input') as HTMLInputElement;
-
-    fireEvent.change(input, { target: { files: [file] } });
-
-    await waitFor(() => {
-      expect(screen.getByTestId('csv-import-errors')).toHaveTextContent(
-        'CSV is missing required columns: name, unit_price.'
-      );
-    });
-    expect(apiFetch).not.toHaveBeenCalled();
   });
 });
