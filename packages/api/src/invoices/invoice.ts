@@ -137,6 +137,13 @@ export async function createInvoice(
   return created;
 }
 
+export async function listInvoices(
+  tenantId: string,
+  repository: InvoiceRepository
+): Promise<Invoice[]> {
+  return repository.findByTenant(tenantId);
+}
+
 export async function getInvoice(
   tenantId: string,
   id: string,

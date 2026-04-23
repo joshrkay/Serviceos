@@ -152,7 +152,6 @@ export const createJobSchema = z.object({
 
 export const createEstimateSchema = z.object({
   jobId: z.string().min(1),
-  estimateNumber: z.string().min(1),
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
@@ -164,7 +163,6 @@ export const createEstimateSchema = z.object({
 export const createInvoiceSchema = z.object({
   jobId: z.string().min(1),
   estimateId: z.string().optional(),
-  invoiceNumber: z.string().min(1),
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),

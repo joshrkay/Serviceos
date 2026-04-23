@@ -6,6 +6,7 @@ import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoice,
+  listInvoices,
   getInvoice,
   updateInvoice,
   issueInvoice,
@@ -50,6 +51,22 @@ export function createInvoiceRouter(
           auditRepo
         );
         res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.get(
+    '/',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const result = await listInvoices(req.auth!.tenantId, invoiceRepo);
+        res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
