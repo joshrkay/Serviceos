@@ -11,6 +11,7 @@ import { InvoicesPage } from './components/invoices/InvoicesPage';
 import { SettingsPage } from './components/settings/SettingsPage';
 import { TemplatesPage } from './components/settings/TemplatesPage';
 import { PriceBookPage } from './components/settings/PriceBookPage';
+import { FeedbackDashboard } from './components/settings/FeedbackDashboard';
 import { OnboardingPage } from './components/onboarding/OnboardingPage';
 import { EstimateApprovalPage } from './components/customer/EstimateApprovalPage';
 import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
@@ -57,6 +58,7 @@ export const router = createBrowserRouter([
       { path: 'settings',       Component: SettingsPage    },
       { path: 'settings/templates', Component: TemplatesPage   },
       { path: 'settings/price-book', Component: PriceBookPage },
+      { path: 'settings/feedback', Component: FeedbackDashboard },
       { path: 'technician/day', Component: TechnicianDayPage },
     ],
     }],

@@ -79,6 +79,12 @@ export function SettingsPage() {
       ],
     },
     {
+      title: 'Customer experience',
+      items: [
+        { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
+      ],
+    },
+    {
       title: 'Payments & billing',
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Card, ACH · Stripe connected',  action: () => {} },
