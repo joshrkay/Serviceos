@@ -210,6 +210,16 @@ export const createNoteSchema = z.object({
   isPinned: z.boolean().optional(),
 });
 
+export const createCatalogItemSchema = z.object({
+  name: z.string().trim().min(1),
+  description: z.string().trim().optional(),
+  category: z.enum(['Labor', 'Parts', 'Materials']),
+  unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
+  unitPriceCents: z.number().int().nonnegative(),
+});
+
+export const updateCatalogItemSchema = createCatalogItemSchema.partial();
+
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
   businessPhone: z.string().optional(),
