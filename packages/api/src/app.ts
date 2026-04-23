@@ -95,6 +95,7 @@ import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
+import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
 import { createLogger } from './logging/logger';
 
 // Auth middleware
@@ -362,11 +363,20 @@ export function createApp() {
       );
     }
   }
+  // Voice intents (add_note, send_invoice, record_payment) execute
+  // against real domain repositories. Note + payment use the same
+  // in-memory or Pg repos already wired above; invoice delivery is
+  // currently a Noop (logs the dispatch shape, never sends bytes)
+  // until an outbound comms provider is integrated as a follow-up.
+  const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
     estimateRepo,
+    noteRepo,
+    paymentRepo,
+    invoiceDeliveryProvider,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
   const executionWorkerLogger = createLogger({
