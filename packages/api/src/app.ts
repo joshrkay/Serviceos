@@ -53,6 +53,12 @@ import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository } from './voice/voice-service';
 import { createTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
+import {
+  InMemoryFeatureFlagStore,
+  InMemoryFeatureFlagRepository,
+  hydrateStoreFromRepository,
+} from './flags/feature-flags';
+import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { InMemoryApprovalRepository } from './estimates/approval';
@@ -469,6 +475,15 @@ export function createApp() {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  const featureFlagRepo = new InMemoryFeatureFlagRepository();
+  const featureFlagStore = new InMemoryFeatureFlagStore();
+  // Hydration is fire-and-forget on boot — the store starts empty and is
+  // refilled from the repo asynchronously. isFeatureEnabled returns false
+  // for missing flags, so the worst case during the hydration window is
+  // that a flag reads as disabled for a few ms.
+  void hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
