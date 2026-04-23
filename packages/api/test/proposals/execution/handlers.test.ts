@@ -3,6 +3,7 @@ import {
   CreateCustomerExecutionHandler,
   UpdateCustomerExecutionHandler,
   CreateJobExecutionHandler,
+  DraftEstimateExecutionHandler,
 } from '../../../src/proposals/execution/handlers';
 import { Proposal, ProposalType } from '../../../src/proposals/proposal';
 import {
@@ -14,6 +15,8 @@ import {
   createLocation,
 } from '../../../src/locations/location';
 import { InMemoryJobRepository } from '../../../src/jobs/job';
+import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
+import { InMemorySettingsRepository } from '../../../src/settings/settings';
 
 const tenantId = '550e8400-e29b-41d4-a716-446655440000';
 const context = { tenantId, executedBy: 'user-1' };
@@ -325,6 +328,146 @@ describe('CreateJobExecutionHandler', () => {
     const proposal = makeProposal('create_job', {
       customerId: 'cust-1',
       title: 'Legacy path',
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
+  });
+});
+
+describe('DraftEstimateExecutionHandler', () => {
+  let estimateRepo: InMemoryEstimateRepository;
+  let settingsRepo: InMemorySettingsRepository;
+
+  const lineItems = [
+    {
+      id: 'li-1',
+      description: 'Labor',
+      quantity: 2,
+      unitPriceCents: 15000,
+      totalCents: 30000,
+      sortOrder: 0,
+      taxable: true,
+    },
+  ];
+
+  beforeEach(() => {
+    estimateRepo = new InMemoryEstimateRepository();
+    settingsRepo = new InMemorySettingsRepository();
+  });
+
+  it('persists the estimate with an auto-incremented number and returns the persisted id', async () => {
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+    const proposal = makeProposal('draft_estimate', {
+      customerId: 'cust-1',
+      jobId: 'job-1',
+      lineItems,
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
+
+    const persisted = await estimateRepo.findById(tenantId, result.resultEntityId!);
+    expect(persisted).not.toBeNull();
+    expect(persisted!.jobId).toBe('job-1');
+    expect(persisted!.estimateNumber).toMatch(/^EST-?\d{4}$/i);
+    expect(persisted!.lineItems).toHaveLength(1);
+    expect(persisted!.status).toBe('draft');
+  });
+
+  it('auto-increments the estimate number across calls', async () => {
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+    const first = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId: 'cust-1',
+        jobId: 'job-1',
+        lineItems,
+      }),
+      context
+    );
+    const second = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId: 'cust-1',
+        jobId: 'job-2',
+        lineItems,
+      }),
+      context
+    );
+
+    const a = await estimateRepo.findById(tenantId, first.resultEntityId!);
+    const b = await estimateRepo.findById(tenantId, second.resultEntityId!);
+    expect(a!.estimateNumber).not.toBe(b!.estimateNumber);
+  });
+
+  it('fails loud when jobId is missing', async () => {
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+    const proposal = makeProposal('draft_estimate', {
+      customerId: 'cust-1',
+      lineItems,
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('jobId');
+  });
+
+  it('rejects a payload missing customerId', async () => {
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+    const proposal = makeProposal('draft_estimate', {
+      jobId: 'job-1',
+      lineItems,
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('customerId');
+  });
+
+  it('rejects a payload with empty lineItems', async () => {
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+    const proposal = makeProposal('draft_estimate', {
+      customerId: 'cust-1',
+      jobId: 'job-1',
+      lineItems: [],
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('lineItem');
+  });
+
+  it('is idempotent on proposals with a pre-existing resultEntityId', async () => {
+    const handler = new DraftEstimateExecutionHandler(estimateRepo, settingsRepo);
+    const proposal = {
+      ...makeProposal('draft_estimate', {
+        customerId: 'cust-1',
+        jobId: 'job-1',
+        lineItems,
+      }),
+      resultEntityId: 'already-assigned-id',
+    };
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBe('already-assigned-id');
+    const persisted = await estimateRepo.findById(tenantId, 'already-assigned-id');
+    expect(persisted).toBeNull();
+  });
+
+  it('returns a synthetic id when no repos are wired (legacy in-memory tests)', async () => {
+    const handler = new DraftEstimateExecutionHandler();
+    const proposal = makeProposal('draft_estimate', {
+      customerId: 'cust-1',
+      jobId: 'job-1',
+      lineItems,
     });
 
     const result = await handler.execute(proposal, context);

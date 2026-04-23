@@ -17,8 +17,16 @@ import { PaymentRepository } from '../../invoices/payment';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
-import { EstimateRepository } from '../../estimates/estimate';
-import { SettingsRepository } from '../../settings/settings';
+import {
+  EstimateRepository,
+  CreateEstimateInput,
+  createEstimate,
+} from '../../estimates/estimate';
+import { LineItem } from '../../shared/billing-engine';
+import {
+  SettingsRepository,
+  getNextEstimateNumber,
+} from '../../settings/settings';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
@@ -337,15 +345,70 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(
+    private readonly estimateRepo?: EstimateRepository,
+    private readonly settingsRepo?: SettingsRepository
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
+    // jobId is REQUIRED by CreateEstimateInput — estimates key off a
+    // specific job for billing, numbering, and acceptance. Fail loud
+    // rather than fabricating a phantom job; the classifier /
+    // proposal-review UI is responsible for attaching one.
+    if (!payload.jobId || typeof payload.jobId !== 'string') {
+      return {
+        success: false,
+        error:
+          'Estimate requires a jobId — pick a job before drafting',
+      };
+    }
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
     }
-    return { success: true, resultEntityId: uuidv4() };
+
+    if (proposal.resultEntityId) {
+      return { success: true, resultEntityId: proposal.resultEntityId };
+    }
+
+    // Legacy synthetic-id fallback for in-memory tests.
+    if (!this.estimateRepo || !this.settingsRepo) {
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    try {
+      const estimateNumber = await getNextEstimateNumber(
+        context.tenantId,
+        this.settingsRepo
+      );
+
+      const input: CreateEstimateInput = {
+        tenantId: context.tenantId,
+        jobId: payload.jobId,
+        estimateNumber,
+        lineItems: payload.lineItems as LineItem[],
+        discountCents:
+          typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
+        taxRateBps:
+          typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
+        customerMessage:
+          typeof payload.customerMessage === 'string' ? payload.customerMessage : undefined,
+        internalNotes:
+          typeof payload.internalNotes === 'string' ? payload.internalNotes : undefined,
+        createdBy: context.executedBy,
+      };
+
+      const estimate = await createEstimate(input, this.estimateRepo);
+      return { success: true, resultEntityId: estimate.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
@@ -369,7 +432,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
-    new DraftEstimateExecutionHandler(),
+    new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
     new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
