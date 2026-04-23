@@ -30,6 +30,7 @@ import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
+import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createDispatchRoutes } from './dispatch/routes';
 
@@ -92,6 +93,8 @@ import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
 import { InMemoryFileRepository } from './files/file-service';
 import { PgFileRepository } from './files/pg-file';
+import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
+import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
@@ -256,6 +259,7 @@ export function createApp() {
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -471,6 +475,7 @@ export function createApp() {
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
   app.use('/api/technician-location', createTechnicianLocationRouter(technicianLocationPingRepo));
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
