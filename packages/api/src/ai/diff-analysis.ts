@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { WorkerHandler, QueueMessage } from '../queues/queue';
+import { Queue, WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { DocumentRevision, DocumentRevisionRepository } from './document-revision';
 
@@ -108,6 +108,56 @@ export interface DiffAnalysisJobPayload {
   documentId: string;
   fromRevisionId: string;
   toRevisionId: string;
+}
+
+export interface EnqueueDiffAnalysisInput {
+  tenantId: string;
+  documentType: string;
+  documentId: string;
+  fromRevisionId: string;
+  toRevisionId: string;
+}
+
+/**
+ * Create a pending DiffAnalysis row and enqueue the worker to process it.
+ *
+ * The same (from, to) revision pair is processed at most once — the
+ * idempotency key is the analysis id itself, which the queue enforces
+ * via its unique index on idempotency_key.
+ */
+export async function enqueueDiffAnalysis(
+  diffRepository: DiffAnalysisRepository,
+  queue: Queue,
+  input: EnqueueDiffAnalysisInput
+): Promise<DiffAnalysis> {
+  const analysis: DiffAnalysis = {
+    id: uuidv4(),
+    tenantId: input.tenantId,
+    documentType: input.documentType,
+    documentId: input.documentId,
+    fromRevisionId: input.fromRevisionId,
+    toRevisionId: input.toRevisionId,
+    diff: [],
+    status: 'pending',
+    createdAt: new Date(),
+  };
+
+  await diffRepository.create(analysis);
+
+  await queue.send<DiffAnalysisJobPayload>(
+    'diff_analysis',
+    {
+      tenantId: input.tenantId,
+      analysisId: analysis.id,
+      documentType: input.documentType,
+      documentId: input.documentId,
+      fromRevisionId: input.fromRevisionId,
+      toRevisionId: input.toRevisionId,
+    },
+    analysis.id
+  );
+
+  return analysis;
 }
 
 export function createDiffAnalysisWorker(

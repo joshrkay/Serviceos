@@ -2,6 +2,11 @@ import { LLMGateway } from './gateway';
 import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
 import { MockLLMProvider } from '../providers/mock';
+import {
+  ShadowComparisonGateway,
+  InMemoryShadowComparisonStore,
+  ShadowComparisonStore,
+} from '../evaluation/shadow-comparison';
 import type { AppConfig } from '../../shared/config';
 
 /**
@@ -21,19 +26,39 @@ import type { AppConfig } from '../../shared/config';
  *
  *   Any other OpenAI-compatible endpoint works the same way.
  */
-export function createLLMGateway(config: AppConfig, logger?: LLMGatewayLogger): LLMGateway {
+export interface CreateLLMGatewayOptions {
+  /**
+   * Optional P2-030 shadow-comparison store. When supplied together with
+   * shadow env vars (SHADOW_LLM_ENABLED=true + SHADOW_LLM_API_KEY etc.),
+   * the primary provider is wrapped so a sampled percentage of requests
+   * are replayed against the shadow model and persisted here.
+   */
+  shadowStore?: ShadowComparisonStore;
+  logger?: LLMGatewayLogger;
+}
+
+export function createLLMGateway(
+  config: AppConfig,
+  loggerOrOpts?: LLMGatewayLogger | CreateLLMGatewayOptions
+): LLMGateway {
   if (!config.AI_PROVIDER_API_KEY) {
     throw new Error(
       'AI_PROVIDER_API_KEY is not set. Add it to .env to enable AI features.'
     );
   }
 
+  const opts: CreateLLMGatewayOptions = !loggerOrOpts
+    ? {}
+    : 'shadowStore' in (loggerOrOpts as CreateLLMGatewayOptions) ||
+        'logger' in (loggerOrOpts as CreateLLMGatewayOptions)
+      ? (loggerOrOpts as CreateLLMGatewayOptions)
+      : { logger: loggerOrOpts as LLMGatewayLogger };
+
   const baseURL = config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1';
 
-  const provider = new OpenAICompatibleProvider({
+  const primaryProvider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
     baseURL,
-    // OpenRouter requires these headers to identify your app
     defaultHeaders:
       baseURL.includes('openrouter.ai')
         ? {
@@ -43,12 +68,48 @@ export function createLLMGateway(config: AppConfig, logger?: LLMGatewayLogger): 
         : undefined,
   });
 
+  // P2-030 — optional shadow-comparison wrapper. Opt in by setting
+  // SHADOW_LLM_ENABLED=true + SHADOW_LLM_API_KEY (+ optional
+  // SHADOW_LLM_BASE_URL, SHADOW_LLM_MODEL, SHADOW_LLM_SAMPLING_RATE).
+  // When disabled, the primary provider is used as-is — zero overhead.
+  const provider: LLMProvider = maybeWrapWithShadow(primaryProvider, opts.shadowStore);
+
   const providers = new Map<string, LLMProvider>([[provider.name, provider]]);
   const gatewayConfig: LLMGatewayConfig = {
     defaultProvider: provider.name,
     defaultModel: config.AI_DEFAULT_MODEL,
   };
-  return new LLMGateway(gatewayConfig, providers, logger);
+  return new LLMGateway(gatewayConfig, providers, opts.logger);
+}
+
+function maybeWrapWithShadow(
+  primary: LLMProvider,
+  explicitStore?: ShadowComparisonStore
+): LLMProvider {
+  if (process.env.SHADOW_LLM_ENABLED !== 'true') return primary;
+
+  const shadowKey = process.env.SHADOW_LLM_API_KEY;
+  if (!shadowKey) return primary;
+
+  const shadowBaseURL =
+    process.env.SHADOW_LLM_BASE_URL ?? 'https://api.openai.com/v1';
+  const samplingRate = Number(process.env.SHADOW_LLM_SAMPLING_RATE ?? '0.1');
+
+  const shadow = new OpenAICompatibleProvider({
+    apiKey: shadowKey,
+    baseURL: shadowBaseURL,
+  });
+
+  return new ShadowComparisonGateway(
+    primary,
+    shadow,
+    explicitStore ?? new InMemoryShadowComparisonStore(),
+    {
+      enabled: true,
+      samplingRate: Number.isFinite(samplingRate) ? samplingRate : 0.1,
+      shadowProvider: shadow.name,
+    }
+  );
 }
 
 /** Create a mock gateway for tests — no API key needed */

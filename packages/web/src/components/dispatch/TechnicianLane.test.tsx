@@ -66,4 +66,60 @@ describe('P6-004 — Technician lanes', () => {
     const lane = screen.getByTestId('technician-lane');
     expect(lane).toHaveAttribute('data-technician-id', 'tech-1');
   });
+
+  describe('P6-020 — within-lane reorder UI', () => {
+    it('does not render reorder controls when onReorderWithinLane is not supplied', () => {
+      render(<TechnicianLane technician={technician} appointments={appointments} />);
+      expect(screen.queryByTestId('lane-reorder-controls')).toBeNull();
+    });
+
+    it('renders reorder controls on every card when callback is supplied', () => {
+      render(
+        <TechnicianLane
+          technician={technician}
+          appointments={appointments}
+          onReorderWithinLane={vi.fn()}
+        />
+      );
+      const groups = screen.getAllByTestId('lane-reorder-controls');
+      expect(groups).toHaveLength(2);
+    });
+
+    it('disables move-up on the first card and move-down on the last card', () => {
+      render(
+        <TechnicianLane
+          technician={technician}
+          appointments={appointments}
+          onReorderWithinLane={vi.fn()}
+        />
+      );
+      const ups = screen.getAllByTestId('lane-reorder-up');
+      const downs = screen.getAllByTestId('lane-reorder-down');
+      // sorted order: appt-1 (09:00) first, appt-2 (14:00) last
+      expect(ups[0]).toBeDisabled();
+      expect(ups[1]).not.toBeDisabled();
+      expect(downs[0]).not.toBeDisabled();
+      expect(downs[1]).toBeDisabled();
+    });
+
+    it('fires onReorderWithinLane with appointment id and target index', () => {
+      const onReorder = vi.fn();
+      render(
+        <TechnicianLane
+          technician={technician}
+          appointments={appointments}
+          onReorderWithinLane={onReorder}
+        />
+      );
+      // Move the second card (appt-2) up → from index 1 to 0.
+      const ups = screen.getAllByTestId('lane-reorder-up');
+      ups[1].click();
+      expect(onReorder).toHaveBeenCalledWith('appt-2', 1, 0);
+
+      // Move the first card (appt-1) down → from 0 to 1.
+      const downs = screen.getAllByTestId('lane-reorder-down');
+      downs[0].click();
+      expect(onReorder).toHaveBeenCalledWith('appt-1', 0, 1);
+    });
+  });
 });
