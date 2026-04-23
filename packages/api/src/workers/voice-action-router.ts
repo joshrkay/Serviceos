@@ -1,7 +1,7 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository, createProposal } from '../proposals/proposal';
+import { ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import {
   classifyIntent,
   ExtractedEntities,
@@ -17,7 +17,7 @@ import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { CreateCustomerTaskHandler, TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
+import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
 import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
@@ -27,7 +27,6 @@ import {
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
-import { ProposalType } from '../proposals/proposal';
 
 /**
  * voice-action-router — the bridge between "Whisper gave us a
@@ -82,6 +81,7 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   create_appointment: 'create_appointment',
   update_invoice: 'update_invoice',
   update_estimate: 'update_estimate',
+  issue_invoice: 'issue_invoice',
   create_customer: 'create_customer',
   create_job: 'create_job',
   reschedule_appointment: 'reschedule_appointment',
@@ -92,13 +92,69 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   record_payment: 'record_payment',
 };
 
-function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
+/**
+ * Handles "send/issue invoice" voice commands. No LLM call needed —
+ * the payload is just { invoiceId }. The invoice ID is resolved from:
+ *   1. extractedEntities.jobReference (explicit mention like "invoice 1024")
+ *   2. The most recent draft_invoice proposal in the same conversation
+ *      (handles "the one we just drafted")
+ * If neither resolves, the proposal is created with an empty invoiceId
+ * so the execution handler can return a clear validation failure.
+ */
+class IssueInvoiceTaskHandler implements TaskHandler {
+  readonly taskType: ProposalType = 'issue_invoice';
+
+  constructor(private readonly proposalRepo: ProposalRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    let invoiceId: string | undefined;
+
+    if (
+      context.existingEntities?.jobReference &&
+      typeof context.existingEntities.jobReference === 'string'
+    ) {
+      invoiceId = context.existingEntities.jobReference;
+    }
+
+    if (!invoiceId && context.conversationId) {
+      const all = await this.proposalRepo.findByTenant(context.tenantId);
+      const recentDraft = all
+        .filter(
+          (p) =>
+            p.proposalType === 'draft_invoice' &&
+            p.sourceContext?.conversationId === context.conversationId &&
+            p.resultEntityId
+        )
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+      if (recentDraft?.resultEntityId) {
+        invoiceId = recentDraft.resultEntityId;
+      }
+    }
+
+    const input: CreateProposalInput = {
+      tenantId: context.tenantId,
+      proposalType: 'issue_invoice',
+      payload: invoiceId ? { invoiceId } : {},
+      summary: invoiceId
+        ? `Issue invoice ${invoiceId}`
+        : context.message,
+      sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+      createdBy: context.userId,
+    };
+
+    const proposal = createProposal(input);
+    return { proposal, taskType: 'issue_invoice' };
+  }
+}
+
+function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandler> {
   const handlers = new Map<ProposalType, TaskHandler>();
-  handlers.set('draft_invoice', new InvoiceTaskHandler(gateway));
-  handlers.set('draft_estimate', new EstimateTaskHandler(gateway));
-  handlers.set('create_appointment', new CreateAppointmentAITaskHandler(gateway));
-  handlers.set('update_invoice', new InvoiceEditTaskHandler(gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(gateway));
+  handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway));
+  handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
+  handlers.set('create_appointment', new CreateAppointmentAITaskHandler(deps.gateway));
+  handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
+  handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
+  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
@@ -262,7 +318,7 @@ async function emitClarification(
 export function createVoiceActionRouterWorker(
   deps: VoiceActionRouterDeps
 ): WorkerHandler<VoiceActionRouterPayload> {
-  const handlers = buildHandlers(deps.gateway);
+  const handlers = buildHandlers(deps);
 
   return {
     type: 'voice_action_router',

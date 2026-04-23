@@ -125,6 +125,11 @@ export const updateInvoicePayloadSchema = z.object({
   editActions: z.array(invoiceEditActionSchema).min(1),
 });
 
+export const issueInvoicePayloadSchema = z.object({
+  invoiceId: z.string().min(1),
+  paymentTermDays: z.number().int().min(1).max(365).optional(),
+});
+
 // voice_clarification: emitted when the voice classifier cannot route
 // a transcript (intent='unknown' OR confidence below threshold). It is
 // NOT a mutation — it surfaces in the operator's feed as "I heard X
@@ -167,6 +172,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,
   update_invoice: updateInvoicePayloadSchema,
+  issue_invoice: issueInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
