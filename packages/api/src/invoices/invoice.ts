@@ -95,7 +95,7 @@ export async function createInvoice(
   auditRepo?: AuditRepository
 ): Promise<Invoice> {
   const errors = validateInvoiceInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,
@@ -137,6 +137,13 @@ export async function createInvoice(
   return created;
 }
 
+export async function listInvoices(
+  tenantId: string,
+  repository: InvoiceRepository
+): Promise<Invoice[]> {
+  return repository.findByTenant(tenantId);
+}
+
 export async function getInvoice(
   tenantId: string,
   id: string,
@@ -153,6 +160,10 @@ export async function updateInvoice(
 ): Promise<Invoice | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
+
+  if (existing.status !== 'draft') {
+    throw new ValidationError(`Cannot edit invoice in '${existing.status}' status`);
+  }
 
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
