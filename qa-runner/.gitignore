@@ -1,0 +1,9 @@
+artifacts/api/*
+artifacts/ui/*
+artifacts/db/*
+reports/*.json
+reports/*.md
+!artifacts/api/.gitkeep
+!artifacts/ui/.gitkeep
+!artifacts/db/.gitkeep
+!reports/.gitkeep
