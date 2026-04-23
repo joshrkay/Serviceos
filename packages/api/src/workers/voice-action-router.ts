@@ -2,13 +2,13 @@ import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
-import { classifyIntent, IntentType } from '../ai/orchestration/intent-classifier';
+import { classifyIntent, ExtractedEntities, IntentType } from '../ai/orchestration/intent-classifier';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
+import { CreateCustomerTaskHandler, TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
 import { ProposalType } from '../proposals/proposal';
 
 /**
@@ -21,6 +21,7 @@ import { ProposalType } from '../proposals/proposal';
  *   create_appointment  → create_appointment       (Phase 1)
  *   update_invoice      → update_invoice           (Phase 2 — add/remove line item)
  *   update_estimate     → update_estimate          (Phase 2b — add/remove line item)
+ *   create_customer     → create_customer          (AST-01 — CRM record)
  *
  * Anything classified as `unknown` or below the confidence threshold
  * is dropped with an info log. The operator sees nothing in their
@@ -47,6 +48,7 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   create_appointment: 'create_appointment',
   update_invoice: 'update_invoice',
   update_estimate: 'update_estimate',
+  create_customer: 'create_customer',
 };
 
 function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
@@ -56,7 +58,30 @@ function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
   handlers.set('create_appointment', new CreateAppointmentAITaskHandler(gateway));
   handlers.set('update_invoice', new InvoiceEditTaskHandler(gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(gateway));
+  handlers.set('create_customer', new CreateCustomerTaskHandler());
   return handlers;
+}
+
+/**
+ * The classifier surfaces the new customer's name as `displayName` to
+ * keep it distinct from `customerName` (which references an existing
+ * customer on invoice/estimate/appointment intents). The
+ * create_customer proposal contract expects `name`, so we translate
+ * here — at the router boundary — so the task handler stays a dumb
+ * passthrough and every downstream payload matches the Zod schema.
+ */
+function entitiesForProposal(
+  intent: Exclude<IntentType, 'unknown'>,
+  entities: ExtractedEntities | undefined
+): Record<string, unknown> | undefined {
+  if (intent !== 'create_customer' || !entities) {
+    return entities as Record<string, unknown> | undefined;
+  }
+  const payload: Record<string, unknown> = {};
+  if (entities.displayName) payload.name = entities.displayName;
+  if (entities.email) payload.email = entities.email;
+  if (entities.phone) payload.phone = entities.phone;
+  return payload;
 }
 
 export function createVoiceActionRouterWorker(
@@ -103,7 +128,10 @@ export function createVoiceActionRouterWorker(
         userId,
         message: transcript,
         conversationId,
-        existingEntities: classification.extractedEntities as Record<string, unknown> | undefined,
+        existingEntities: entitiesForProposal(
+          classification.intentType,
+          classification.extractedEntities
+        ),
       };
 
       const { proposal } = await handler.handle(context);

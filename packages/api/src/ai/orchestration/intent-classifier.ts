@@ -19,6 +19,7 @@ export type IntentType =
   | 'create_appointment'
   | 'update_invoice'
   | 'update_estimate'
+  | 'create_customer'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -27,6 +28,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'create_appointment',
   'update_invoice',
   'update_estimate',
+  'create_customer',
   'unknown',
 ] as const;
 
@@ -36,6 +38,13 @@ export interface ExtractedEntities {
   amount?: number; // integer cents
   dateTimeDescription?: string; // raw natural language — downstream task parses
   lineItemDescriptions?: string[];
+  // create_customer fields. `displayName` is the new customer's name; it is
+  // intentionally distinct from `customerName` (which refers to an EXISTING
+  // customer on invoice/estimate/appointment intents). `email` / `phone`
+  // are optional — missing fields flow to clarification, not to 'unknown'.
+  displayName?: string;
+  email?: string;
+  phone?: string;
 }
 
 export interface IntentClassification {
@@ -77,6 +86,18 @@ Supported intents (return exactly ONE):
                            (number or customer name).
                            Examples: "Add a site visit to estimate EST-0001"
                                      "Remove the old heater from the Johnson estimate"
+- "create_customer"     — user wants to create a NEW customer record in the CRM.
+                           Trigger phrasings include "create/add/new customer".
+                           Extract the customer's displayName plus any stated
+                           email or phone. When only the name is given, still
+                           classify as create_customer so the downstream flow
+                           can ask a clarifying question — do NOT fall back
+                           to "unknown" just because email/phone are missing.
+                           Examples: "Create a new customer named Alex"
+                                     "Add customer Acme Corp, email alex@acme.com"
+                                     "New customer: Sarah, phone 555-0100"
+                                     "Add a customer called Jordan Lee"
+                                     "Create customer Maria Gomez at maria@gomez.co"
 - "unknown"             — anything else: send commands, queries ("when is my next
                            appointment"), ambiguous transcripts, or edit commands
                            without a clear invoice/estimate reference.
@@ -90,6 +111,10 @@ Distinctions that matter:
   "invoice" or use an "INV-" prefix, use the invoice intent; when they say
   "estimate/quote" or "EST-", use the estimate intent. When genuinely
   ambiguous, prefer "unknown".
+- "add customer <name>" = create_customer (CRM record).
+  "add a <thing> to <existing invoice/estimate>" = update_invoice/update_estimate.
+  When "add" refers to a line item, money, or an existing document, it is
+  NOT create_customer even if a customer name appears in the sentence.
 
 Return valid JSON with exactly this shape (no prose, no markdown fences):
 {
@@ -97,11 +122,14 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
   "confidence": <number between 0 and 1>,
   "reasoning": "<one sentence explaining the classification>",
   "extractedEntities": {
-    "customerName": "<string, optional>",
+    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment>",
     "jobReference": "<string, optional>",
     "amount": <integer cents, optional>,
     "dateTimeDescription": "<verbatim date/time phrase from transcript, optional>",
-    "lineItemDescriptions": ["<string>", ...]
+    "lineItemDescriptions": ["<string>", ...],
+    "displayName": "<string, optional — NEW customer's name on create_customer>",
+    "email": "<string, optional — NEW customer's email on create_customer>",
+    "phone": "<string, optional — NEW customer's phone on create_customer>"
   }
 }
 
@@ -159,6 +187,9 @@ export function parseClassifierJson(content: string): IntentClassification | nul
         (s): s is string => typeof s === 'string'
       );
     }
+    if (typeof ee.displayName === 'string') extracted.displayName = ee.displayName;
+    if (typeof ee.email === 'string') extracted.email = ee.email;
+    if (typeof ee.phone === 'string') extracted.phone = ee.phone;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

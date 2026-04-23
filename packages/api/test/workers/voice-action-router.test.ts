@@ -225,6 +225,44 @@ describe('voice-action-router worker', () => {
     expect(byTenant[0].proposalType).toBe('draft_estimate');
   });
 
+  it('classifies "create customer" and persists a create_customer proposal with mapped name', async () => {
+    // Only one LLM call — the customer task handler is a pure passthrough,
+    // no second provider round-trip needed.
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: {
+          displayName: 'Acme Corp',
+          email: 'alex@acme.com',
+          phone: '555-0100',
+        },
+      } satisfies IntentClassification),
+    ]);
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Add customer Acme Corp, email alex@acme.com, phone 555-0100',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('create_customer');
+    expect(byTenant[0].status).toBe('draft'); // human approval required — no auto-execute
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    // Router maps classifier's `displayName` to the contract's `name`.
+    expect(payload.name).toBe('Acme Corp');
+    expect(payload.email).toBe('alex@acme.com');
+    expect(payload.phone).toBe('555-0100');
+    expect(payload.displayName).toBeUndefined();
+  });
+
   it('drops low-confidence classifications without creating a proposal', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({ intentType: 'create_invoice', confidence: 0.3 }),
