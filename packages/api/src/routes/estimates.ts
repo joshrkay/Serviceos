@@ -6,6 +6,7 @@ import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createEstimate,
+  listEstimates,
   getEstimate,
   updateEstimate,
   transitionEstimateStatus,
@@ -45,6 +46,22 @@ export function createEstimateRouter(
           auditRepo
         );
         res.status(201).json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.get(
+    '/',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const result = await listEstimates(req.auth!.tenantId, estimateRepo);
+        res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
