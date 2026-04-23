@@ -44,7 +44,8 @@ export class InMemoryShadowComparisonStore implements ShadowComparisonStore {
   }
 }
 
-export class ShadowComparisonGateway {
+export class ShadowComparisonGateway implements LLMProvider {
+  public readonly name: string;
   private readonly primaryProvider: LLMProvider;
   private readonly shadowProvider: LLMProvider;
   private readonly store: ShadowComparisonStore;
@@ -58,11 +59,16 @@ export class ShadowComparisonGateway {
     store: ShadowComparisonStore,
     config: ShadowComparisonConfig
   ) {
+    this.name = primaryProvider.name;
     this.primaryProvider = primaryProvider;
     this.shadowProvider = shadowProvider;
     this.store = store;
     this.config = config;
     this.sampleFn = config.sampleFn || Math.random;
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return this.primaryProvider.isAvailable();
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {

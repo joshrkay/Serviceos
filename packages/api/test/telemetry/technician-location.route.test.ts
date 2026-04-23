@@ -7,6 +7,13 @@ import { InMemoryTechnicianLocationPingRepository } from '../../src/telemetry/te
 
 describe('POST /api/technician-location', () => {
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  // Pings older than 24h are rejected by createTechnicianLocationPing's
+  // stale-window check (DEFAULT_MAX_STALE_MS). Earlier versions of
+  // this test used hardcoded 2026-04 ISO strings that rotted past the
+  // window as wall-clock time advanced. Relative-to-now dates keep
+  // the test deterministic against the stale-window guard.
+  const RECENT_PING_ISO = new Date(Date.now() - 60_000).toISOString();
+  const OLDER_PING_ISO = new Date(Date.now() - 120_000).toISOString();
   let app: express.Express;
   let repo: InMemoryTechnicianLocationPingRepository;
 
@@ -39,6 +46,18 @@ describe('POST /api/technician-location', () => {
       pings: [
         { lat: 37.7, lng: -122.4, recordedAt: t1, source: 'gps' },
         { lat: 37.8, lng: -122.5, recordedAt: t2, source: 'gps' },
+        {
+          lat: 37.7,
+          lng: -122.4,
+          recordedAt: OLDER_PING_ISO,
+          source: 'gps',
+        },
+        {
+          lat: 37.8,
+          lng: -122.5,
+          recordedAt: RECENT_PING_ISO,
+          source: 'gps',
+        },
       ],
     });
 
@@ -50,12 +69,26 @@ describe('POST /api/technician-location', () => {
     // listByTechnician returns newest-first
     expect(rows[0].recordedAt.toISOString()).toBe(t2);
     expect(rows[1].recordedAt.toISOString()).toBe(t1);
+    // Repository sorts reverse-chronologically — the more-recent ping
+    // comes first. Assertion is on the relative order, not the
+    // absolute timestamp, so the test stays deterministic as the
+    // wall clock advances.
+    expect(rows[0].recordedAt.toISOString()).toBe(RECENT_PING_ISO);
+    expect(rows[1].recordedAt.toISOString()).toBe(OLDER_PING_ISO);
   });
 
   it('rejects technician submissions for a different technicianId', async () => {
     const res = await request(app).post('/api/technician-location').send({
       technicianId: 'tech-2',
       pings: [{ lat: 37.7, lng: -122.4, recordedAt: t1, source: 'gps' }],
+      pings: [
+        {
+          lat: 37.7,
+          lng: -122.4,
+          recordedAt: RECENT_PING_ISO,
+          source: 'gps',
+        },
+      ],
     });
 
     expect(res.status).toBe(403);
@@ -66,6 +99,14 @@ describe('POST /api/technician-location', () => {
     const res = await request(app).post('/api/technician-location').send({
       technicianId: 'tech-1',
       pings: [{ lat: 100, lng: -122.4, recordedAt: t1, source: 'gps' }],
+      pings: [
+        {
+          lat: 100,
+          lng: -122.4,
+          recordedAt: RECENT_PING_ISO,
+          source: 'gps',
+        },
+      ],
     });
 
     expect(res.status).toBeGreaterThanOrEqual(400);
@@ -75,6 +116,14 @@ describe('POST /api/technician-location', () => {
     await request(app).post('/api/technician-location').send({
       technicianId: 'tech-1',
       pings: [{ lat: 37.7, lng: -122.4, recordedAt: t1, source: 'gps' }],
+      pings: [
+        {
+          lat: 37.7,
+          lng: -122.4,
+          recordedAt: RECENT_PING_ISO,
+          source: 'gps',
+        },
+      ],
     });
 
     const mine = await repo.listByTechnician(tenantId, 'tech-1');

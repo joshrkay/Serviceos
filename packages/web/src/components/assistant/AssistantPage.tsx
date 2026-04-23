@@ -58,17 +58,21 @@ const SUGGESTIONS = [
 // Send user messages to the backend conversation API and receive real AI responses.
 // Falls back to a simple echo if the API is unavailable.
 async function sendToConversationAPI(
-  conversationId: string | null,
+  _conversationId: string | null,
   text: string,
+  history: Array<{ role: 'user' | 'assistant'; content: string }>,
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string }> {
   try {
-    const body: Record<string, unknown> = { content: text, messageType: 'text' };
-    if (conversationId) body.conversationId = conversationId;
-
-    const res = await apiFetch('/api/conversations/message', {
+    // AST-01b: chat → /api/assistant/chat. The server runs intent
+    // classification first; recognized actions (e.g. create_customer)
+    // come back as a proposal the UI renders inline instead of as free
+    // text. Everything else falls through to the generic LLM reply.
+    const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        messages: [...history, { role: 'user', content: text }],
+      }),
     });
 
     if (!res.ok) {
@@ -76,12 +80,12 @@ async function sendToConversationAPI(
     }
 
     const data = await res.json();
+    const msg = data.message ?? {};
     return {
-      content: data.content || data.message || 'I received your message but could not generate a response.',
-      reasoning: data.reasoning,
-      proposal: data.proposal,
-      autoApplied: data.autoApplied,
-      newConversationId: data.conversationId,
+      content: msg.content || 'I received your message but could not generate a response.',
+      reasoning: msg.reasoning,
+      proposal: msg.proposal,
+      autoApplied: msg.autoApplied,
     };
   } catch {
     // Fallback when API is unreachable (e.g., local dev without backend)
@@ -746,6 +750,11 @@ export function AssistantPage() {
       attachments: opts?.attachments,
     };
 
+    // Snapshot prior chat (before the new user message) to send as
+    // context — the server expects the current message appended at
+    // the end of `messages`, not duplicated.
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setPendingAttachment([]);
@@ -753,7 +762,7 @@ export function AssistantPage() {
     setTypingReason('Thinking…');
 
     try {
-      const reply = await sendToConversationAPI(conversationId, text);
+      const reply = await sendToConversationAPI(conversationId, text, history);
 
       // If a new conversation was created, store it
       if (reply.newConversationId && !conversationId) {

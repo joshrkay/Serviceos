@@ -15,6 +15,13 @@ export interface TechnicianLaneProps {
   onDragOver?: (e: React.DragEvent) => void;
   onDragLeave?: (e: React.DragEvent) => void;
   onDrop?: (e: React.DragEvent) => void;
+  /**
+   * P6-020 — within-lane reorder affordance. When supplied, each card gets
+   * up/down buttons that fire a reorder request (by appointment id, from
+   * current index to the target index). The caller turns that into a
+   * reschedule_appointment proposal via useCreateScheduleProposal.
+   */
+  onReorderWithinLane?: (appointmentId: string, fromIndex: number, toIndex: number) => void;
 }
 
 export function TechnicianLane({
@@ -25,6 +32,7 @@ export function TechnicianLane({
   onDragOver,
   onDragLeave,
   onDrop,
+  onReorderWithinLane,
 }: TechnicianLaneProps) {
   const sortedAppointments = [...appointments].sort(
     (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime()
@@ -52,13 +60,51 @@ export function TechnicianLane({
             No appointments
           </div>
         ) : (
-          sortedAppointments.map((appointment) => (
-            <AppointmentCard
+          sortedAppointments.map((appointment, index) => (
+            <div
               key={appointment.id}
-              appointment={appointment}
-              draggable={true}
-              onDragStart={onDragStart}
-            />
+              className="technician-lane__appointment-row"
+              data-testid="technician-lane-appointment-row"
+            >
+              <AppointmentCard
+                appointment={appointment}
+                draggable={true}
+                onDragStart={onDragStart}
+              />
+              {onReorderWithinLane && (
+                <div
+                  className="technician-lane__reorder-controls"
+                  data-testid="lane-reorder-controls"
+                >
+                  <button
+                    type="button"
+                    data-testid="lane-reorder-up"
+                    aria-label={`Move ${appointment.jobSummary ?? 'appointment'} earlier`}
+                    disabled={index === 0}
+                    onClick={() =>
+                      onReorderWithinLane(appointment.id, index, Math.max(0, index - 1))
+                    }
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="lane-reorder-down"
+                    aria-label={`Move ${appointment.jobSummary ?? 'appointment'} later`}
+                    disabled={index === sortedAppointments.length - 1}
+                    onClick={() =>
+                      onReorderWithinLane(
+                        appointment.id,
+                        index,
+                        Math.min(sortedAppointments.length - 1, index + 1)
+                      )
+                    }
+                  >
+                    ↓
+                  </button>
+                </div>
+              )}
+            </div>
           ))
         )}
       </div>

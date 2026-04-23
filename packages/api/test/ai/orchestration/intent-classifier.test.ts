@@ -154,6 +154,33 @@ describe('intent-classifier — classifyIntent', () => {
         },
       },
     },
+    {
+      transcript: 'Create a new customer named Alex',
+      expectedIntent: 'create_customer',
+      llmResponse: {
+        intentType: 'create_customer',
+        confidence: 0.9,
+        extractedEntities: { displayName: 'Alex' },
+      },
+    },
+    {
+      transcript: 'Add customer Acme Corp, email alex@acme.com',
+      expectedIntent: 'create_customer',
+      llmResponse: {
+        intentType: 'create_customer',
+        confidence: 0.92,
+        extractedEntities: { displayName: 'Acme Corp', email: 'alex@acme.com' },
+      },
+    },
+    {
+      transcript: 'New customer: Sarah, phone 555-0100',
+      expectedIntent: 'create_customer',
+      llmResponse: {
+        intentType: 'create_customer',
+        confidence: 0.91,
+        extractedEntities: { displayName: 'Sarah', phone: '555-0100' },
+      },
+    },
   ];
 
   for (const { transcript, expectedIntent, llmResponse } of cases) {
@@ -172,6 +199,11 @@ describe('intent-classifier — classifyIntent', () => {
     const result = await classifyIntent('um, do the thing with the stuff', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
     expect(result.confidence).toBeLessThan(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    // Low-confidence path tags the reason and preserves the guessed
+    // intent so the downstream clarification proposal can render a
+    // "did you mean: create invoice?" suggestion chip.
+    expect(result.unknownReason).toBe('low_confidence');
+    expect(result.lowConfidenceIntent).toBe('create_invoice');
   });
 
   it('returns unknown when LLM returns garbage JSON', async () => {
@@ -179,13 +211,43 @@ describe('intent-classifier — classifyIntent', () => {
     const result = await classifyIntent('create an invoice', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
     expect(result.confidence).toBe(0);
+    expect(result.unknownReason).toBe('parse_failed');
+  });
+
+  it('tags unknown_intent reason when classifier picks unknown at adequate confidence', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.9 })
+    );
+    const result = await classifyIntent('send that invoice', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('unknown_intent');
+  });
+
+  it('tags empty_transcript reason without calling the LLM', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0}');
+    const result = await classifyIntent('   ', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('empty_transcript');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('passes tenantId to the gateway in request metadata', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
   it('returns unknown when LLM returns an unsupported intentType', async () => {
+    // Use a clearly-never-supported intent name so this test doesn't
+    // regress whenever we expand the supported-intent list. (Earlier
+    // it used `send_invoice`, which is now a real supported intent.)
     const gateway = mockGateway(
-      JSON.stringify({ intentType: 'send_invoice', confidence: 0.95 })
+      JSON.stringify({ intentType: 'delete_database', confidence: 0.95 })
     );
-    const result = await classifyIntent('send the invoice', { tenantId }, gateway);
+    const result = await classifyIntent('drop everything', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
   });
 
@@ -214,6 +276,65 @@ describe('intent-classifier — classifyIntent', () => {
     const result = await classifyIntent('   \n\t  ', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
     expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  describe('create_customer', () => {
+    it('extracts displayName, email, and phone into the classification', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.94,
+          extractedEntities: {
+            displayName: 'Acme Corp',
+            email: 'alex@acme.com',
+            phone: '555-0100',
+          },
+        })
+      );
+      const result = await classifyIntent(
+        'Add customer Acme Corp, email alex@acme.com, phone 555-0100',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_customer');
+      expect(result.extractedEntities?.displayName).toBe('Acme Corp');
+      expect(result.extractedEntities?.email).toBe('alex@acme.com');
+      expect(result.extractedEntities?.phone).toBe('555-0100');
+    });
+
+    it('still classifies as create_customer when only the name is given (clarification, not unknown)', async () => {
+      // Missing email/phone must NOT downgrade the intent to 'unknown' —
+      // downstream flow owns the clarification prompt.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.88,
+          extractedEntities: { displayName: 'Alex' },
+        })
+      );
+      const result = await classifyIntent('Create a new customer named Alex', { tenantId }, gateway);
+      expect(result.intentType).toBe('create_customer');
+      expect(result.extractedEntities?.displayName).toBe('Alex');
+      expect(result.extractedEntities?.email).toBeUndefined();
+      expect(result.extractedEntities?.phone).toBeUndefined();
+    });
+
+    it('routes genuinely ambiguous input to unknown so clarification can ask for the intent', async () => {
+      // "Add Jordan" could mean customer, line item, or team member.
+      // When the LLM is not confident, the threshold guardrail must
+      // send the transcript to the clarification path, not force a
+      // create_customer proposal the operator never asked for.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.45,
+          extractedEntities: { displayName: 'Jordan' },
+        })
+      );
+      const result = await classifyIntent('Add Jordan', { tenantId }, gateway);
+      expect(result.intentType).toBe('unknown');
+      expect(result.confidence).toBeLessThan(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    });
   });
 
   it('surfaces LLM errors as thrown exceptions (caller decides retry policy)', async () => {
