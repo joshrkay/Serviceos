@@ -59,13 +59,16 @@ export interface ResolutionResult {
 }
 
 // Whole-word match only; case-insensitive. Word boundaries keep us
-// from mangling "hit", "itemize", etc.
+// from mangling "hit", "itemize", etc. The /g flag is required so
+// every occurrence of a pronoun gets rewritten — without it,
+// "cancel it and reschedule it" would leave the second "it" as a
+// dangling reference that re-enters the classifier unresolved.
 const PRONOUN_PATTERNS = {
-  it: /\b(it|that|that one|this)\b/i,
-  person: /\b(them|him|her)\b/i,
-  theInvoice: /\bthe invoice\b/i,
-  theEstimate: /\b(the estimate|the quote)\b/i,
-  theAppointment: /\b(the appointment|the job)\b/i,
+  it: /\b(it|that|that one|this)\b/gi,
+  person: /\b(them|him|her)\b/gi,
+  theInvoice: /\bthe invoice\b/gi,
+  theEstimate: /\b(the estimate|the quote)\b/gi,
+  theAppointment: /\b(the appointment|the job)\b/gi,
 };
 
 function pickMostRecent(

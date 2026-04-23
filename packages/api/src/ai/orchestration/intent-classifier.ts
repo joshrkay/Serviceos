@@ -309,6 +309,46 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   // non-blocking logging gives us visibility without breaking flow.
   const invalidEnumFields: Array<{ field: string; value: unknown }> = [];
 
+  // Allowed-value tables for each enum the classifier may return.
+  // Kept close to the extraction loop so they live next to the
+  // field names they guard. Adding a new enum means adding one
+  // entry here and one line in the extraction block below — no new
+  // if/else branch required.
+  const CANCELLATION_TYPES = [
+    'customer_request',
+    'technician_unavailable',
+    'scheduling_conflict',
+    'other',
+  ] as const;
+  const NOTE_TARGET_KINDS = [
+    'job',
+    'customer',
+    'invoice',
+    'estimate',
+    'appointment',
+  ] as const;
+  const SEND_CHANNELS = ['email', 'sms'] as const;
+  const PAYMENT_METHODS = ['cash', 'check', 'card', 'other'] as const;
+
+  /**
+   * Validate an LLM-provided value against a fixed allowed-set.
+   * Returns the typed value when valid, undefined when absent, and
+   * undefined with a recorded invalid-field entry when present-but-
+   * out-of-set. Keeps the four enum-check blocks below to a single
+   * line each.
+   */
+  function pickEnum<T extends string>(
+    entity: Record<string, unknown>,
+    fieldName: string,
+    allowed: readonly T[]
+  ): T | undefined {
+    const value = entity[fieldName];
+    if (value === undefined) return undefined;
+    if ((allowed as readonly unknown[]).includes(value)) return value as T;
+    invalidEnumFields.push({ field: fieldName, value });
+    return undefined;
+  }
+
   if (typeof obj.extractedEntities === 'object' && obj.extractedEntities !== null) {
     const ee = obj.extractedEntities as Record<string, unknown>;
     const extracted: ExtractedEntities = {};
@@ -329,46 +369,18 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.newDateTimeDescription === 'string') extracted.newDateTimeDescription = ee.newDateTimeDescription;
     if (typeof ee.targetTechnicianName === 'string') extracted.targetTechnicianName = ee.targetTechnicianName;
     if (typeof ee.cancellationReason === 'string') extracted.cancellationReason = ee.cancellationReason;
-    if (
-      ee.cancellationType === 'customer_request' ||
-      ee.cancellationType === 'technician_unavailable' ||
-      ee.cancellationType === 'scheduling_conflict' ||
-      ee.cancellationType === 'other'
-    ) {
-      extracted.cancellationType = ee.cancellationType;
-    } else if (ee.cancellationType !== undefined) {
-      invalidEnumFields.push({ field: 'cancellationType', value: ee.cancellationType });
-    }
+    const cancellationType = pickEnum(ee, 'cancellationType', CANCELLATION_TYPES);
+    if (cancellationType) extracted.cancellationType = cancellationType;
     // add_note fields
     if (typeof ee.noteBody === 'string') extracted.noteBody = ee.noteBody;
-    if (
-      ee.noteTargetKind === 'job' ||
-      ee.noteTargetKind === 'customer' ||
-      ee.noteTargetKind === 'invoice' ||
-      ee.noteTargetKind === 'estimate' ||
-      ee.noteTargetKind === 'appointment'
-    ) {
-      extracted.noteTargetKind = ee.noteTargetKind;
-    } else if (ee.noteTargetKind !== undefined) {
-      invalidEnumFields.push({ field: 'noteTargetKind', value: ee.noteTargetKind });
-    }
+    const noteTargetKind = pickEnum(ee, 'noteTargetKind', NOTE_TARGET_KINDS);
+    if (noteTargetKind) extracted.noteTargetKind = noteTargetKind;
     // send_invoice fields
-    if (ee.sendChannel === 'email' || ee.sendChannel === 'sms') {
-      extracted.sendChannel = ee.sendChannel;
-    } else if (ee.sendChannel !== undefined) {
-      invalidEnumFields.push({ field: 'sendChannel', value: ee.sendChannel });
-    }
+    const sendChannel = pickEnum(ee, 'sendChannel', SEND_CHANNELS);
+    if (sendChannel) extracted.sendChannel = sendChannel;
     // record_payment fields
-    if (
-      ee.paymentMethod === 'cash' ||
-      ee.paymentMethod === 'check' ||
-      ee.paymentMethod === 'card' ||
-      ee.paymentMethod === 'other'
-    ) {
-      extracted.paymentMethod = ee.paymentMethod;
-    } else if (ee.paymentMethod !== undefined) {
-      invalidEnumFields.push({ field: 'paymentMethod', value: ee.paymentMethod });
-    }
+    const paymentMethod = pickEnum(ee, 'paymentMethod', PAYMENT_METHODS);
+    if (paymentMethod) extracted.paymentMethod = paymentMethod;
     if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
     // create_job fields
     if (typeof ee.jobTitle === 'string') extracted.jobTitle = ee.jobTitle;

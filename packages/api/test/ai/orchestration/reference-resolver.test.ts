@@ -92,6 +92,32 @@ describe('reference-resolver — resolveReferences', () => {
     expect(out.rewrote).toBe(false);
   });
 
+  // Regex patterns need the /g flag so multiple occurrences of the
+  // same pronoun get rewritten. Otherwise "cancel it and reschedule
+  // it" leaves the second "it" as a dangling pronoun that re-enters
+  // the classifier unresolved.
+  it('rewrites every occurrence of a pronoun, not just the first', () => {
+    const out = resolveReferences('cancel it and then reschedule it', {
+      recentReferents: [referent({ invoiceReference: 'INV-0042' })],
+    });
+    expect(out.rewrote).toBe(true);
+    // Count occurrences of the replacement — should be 2.
+    const matches = out.transcript.match(/invoice INV-0042/g) ?? [];
+    expect(matches.length).toBe(2);
+    // No dangling " it " should survive.
+    expect(out.transcript).not.toMatch(/\bit\b/);
+  });
+
+  it('rewrites multiple "the invoice" occurrences in one transcript', () => {
+    const out = resolveReferences('void the invoice and email the invoice to them', {
+      recentReferents: [referent({ invoiceReference: 'INV-0042', customerName: 'Rodriguez' })],
+    });
+    expect(out.rewrote).toBe(true);
+    const matches = out.transcript.match(/invoice INV-0042/gi) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(out.transcript).toContain('Rodriguez');
+  });
+
   it('handles "the job" / "the appointment" by matching appointment or job references', () => {
     const out = resolveReferences('cancel the job', {
       recentReferents: [referent({ appointmentReference: 'APT-0012' })],
