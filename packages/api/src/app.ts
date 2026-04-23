@@ -28,6 +28,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
+import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createDispatchRoutes } from './dispatch/routes';
@@ -472,6 +473,7 @@ export function createApp() {
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
