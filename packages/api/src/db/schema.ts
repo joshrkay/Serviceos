@@ -949,6 +949,30 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_technician_location_pings ON technician_location_pings
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '041_create_catalog_items': `
+    CREATE TABLE IF NOT EXISTS catalog_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL CHECK (category IN ('Labor', 'Parts', 'Materials')),
+      unit TEXT NOT NULL CHECK (unit IN ('each', 'hour', 'sq ft', 'per lb', 'per gal')),
+      unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+      product_service_type TEXT NOT NULL CHECK (product_service_type IN ('product', 'service')),
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_tenant ON catalog_items(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_tenant_category ON catalog_items(tenant_id, category);
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_active ON catalog_items(tenant_id) WHERE archived_at IS NULL;
+    ALTER TABLE catalog_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE catalog_items FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_catalog_items ON catalog_items;
+    CREATE POLICY tenant_isolation_catalog_items ON catalog_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
