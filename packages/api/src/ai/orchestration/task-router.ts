@@ -7,6 +7,11 @@ import {
 } from '../tasks/task-handlers';
 import { AppError } from '../../shared/errors';
 
+// P2-007 — single entry point that dispatches one classified conversational
+// intent to exactly one task handler, producing one bounded Proposal.
+// Unknown task types return UNSUPPORTED_TASK so malformed AI output can never
+// silently execute. Multi-step flows (e.g. onboarding) compose this router at
+// a higher layer; the router itself is deliberately one-shot.
 export class TaskRouter {
   private handlers: Map<string, TaskHandler> = new Map();
 
