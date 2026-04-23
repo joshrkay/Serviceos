@@ -124,6 +124,108 @@ describe('GET /api/invoices/:id', () => {
   });
 });
 
+describe('GET /api/invoices', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns an empty array when no invoices exist', async () => {
+    const res = await request(app).get('/api/invoices');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('returns all invoices for the tenant', async () => {
+    await createInvoice(app);
+    await createInvoice(app);
+    const res = await request(app).get('/api/invoices');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0]).toHaveProperty('invoiceNumber');
+  });
+
+  it('filters by jobId when the query parameter is provided', async () => {
+    await createInvoice(app, { jobId: 'job-1' });
+    await createInvoice(app, { jobId: 'job-2' });
+    const res = await request(app).get('/api/invoices?jobId=job-2');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].jobId).toBe('job-2');
+  });
+});
+
+describe('POST /api/invoices/:id/payment', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function createOpenInvoice(overrides: Record<string, unknown> = {}) {
+    const created = await createInvoice(app, overrides);
+    await request(app)
+      .post(`/api/invoices/${created.body.id}/issue`)
+      .send({ paymentTermDays: 30 });
+    return created.body.id as string;
+  }
+
+  it('records a full payment and transitions the invoice to paid', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 15000, method: 'cash' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.payment.amountCents).toBe(15000);
+    expect(res.body.payment.method).toBe('cash');
+    expect(res.body.invoice.status).toBe('paid');
+    expect(res.body.invoice.amountPaidCents).toBe(15000);
+    expect(res.body.invoice.amountDueCents).toBe(0);
+  });
+
+  it('records a partial payment and transitions to partially_paid', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 5000, method: 'credit_card' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.invoice.status).toBe('partially_paid');
+    expect(res.body.invoice.amountPaidCents).toBe(5000);
+    expect(res.body.invoice.amountDueCents).toBe(10000);
+  });
+
+  it('rejects payments with a non-positive amount', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 0, method: 'cash' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.body).toHaveProperty('error');
+  });
+
+  it('rejects payments that exceed the amount due', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 99999, method: 'cash' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('rejects payment when the invoice is still a draft', async () => {
+    const created = await createInvoice(app);
+    const res = await request(app)
+      .post(`/api/invoices/${created.body.id}/payment`)
+      .send({ amountCents: 1000, method: 'cash' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});
+
 describe('POST /api/invoices/:id/issue', () => {
   let app: Express;
 

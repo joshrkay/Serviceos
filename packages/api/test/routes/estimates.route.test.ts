@@ -138,6 +138,38 @@ describe('GET /api/estimates/:id', () => {
   });
 });
 
+describe('GET /api/estimates', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns an empty array when no estimates exist', async () => {
+    const res = await request(app).get('/api/estimates');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('returns all estimates for the tenant', async () => {
+    await createEstimate(app);
+    await createEstimate(app);
+    const res = await request(app).get('/api/estimates');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0]).toHaveProperty('estimateNumber');
+  });
+
+  it('filters by jobId when the query parameter is provided', async () => {
+    await createEstimate(app, { jobId: 'job-1' });
+    await createEstimate(app, { jobId: 'job-2' });
+    const res = await request(app).get('/api/estimates?jobId=job-1');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].jobId).toBe('job-1');
+  });
+});
+
 describe('POST /api/estimates/:id/transition', () => {
   let app: Express;
 

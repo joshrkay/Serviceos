@@ -53,6 +53,25 @@ export function createEstimateRouter(
   );
 
   router.get(
+    '/',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+        const result = jobId
+          ? await estimateRepo.findByJob(req.auth!.tenantId, jobId)
+          : await estimateRepo.findByTenant(req.auth!.tenantId);
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.get(
     '/:id',
     requireAuth,
     requireTenant,
