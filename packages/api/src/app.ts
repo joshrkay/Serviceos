@@ -366,6 +366,8 @@ export function createApp() {
   const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
+    jobRepo,
+    locationRepo,
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,

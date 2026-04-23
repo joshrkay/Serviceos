@@ -28,6 +28,8 @@ import {
   createCustomer,
   updateCustomer,
 } from '../../customers/customer';
+import { JobRepository, createJob } from '../../jobs/job';
+import { LocationRepository } from '../../locations/location';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -152,15 +154,87 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
 export class CreateJobExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_job';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(
+    private readonly jobRepo?: JobRepository,
+    private readonly locationRepo?: LocationRepository
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
-    if (!payload.title || typeof payload.title !== 'string') {
-      return { success: false, error: 'Payload must include a valid title' };
+
+    // Accept both `title` (voice-classifier output today) and `summary`
+    // (matches CreateJobInput's field name, likely to become the canonical
+    // payload key once the classifier is updated). Prefer an explicit
+    // summary if both are provided.
+    const summary =
+      typeof payload.summary === 'string'
+        ? payload.summary
+        : typeof payload.title === 'string'
+          ? payload.title
+          : undefined;
+    if (!summary) {
+      return {
+        success: false,
+        error: 'Payload must include a valid title or summary',
+      };
     }
-    return { success: true, resultEntityId: uuidv4() };
+
+    if (proposal.resultEntityId) {
+      return { success: true, resultEntityId: proposal.resultEntityId };
+    }
+
+    // Legacy synthetic-id path for in-memory tests that don't exercise
+    // persistence. Production always wires both repos in app.ts.
+    if (!this.jobRepo || !this.locationRepo) {
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    // Resolve locationId. The voice classifier never captures a
+    // location, so the handler picks the customer's primary service
+    // location. A dispatcher UI may pre-select a different site by
+    // attaching `payload.locationId`; in that case we honor it
+    // verbatim (still tenant-scoped — the FK in the jobs table
+    // enforces that the location belongs to this tenant).
+    let locationId: string;
+    if (typeof payload.locationId === 'string') {
+      locationId = payload.locationId;
+    } else {
+      const locations = await this.locationRepo.findByCustomer(
+        context.tenantId,
+        payload.customerId
+      );
+      const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
+      if (!primary) {
+        return {
+          success: false,
+          error:
+            'Customer has no service location — add one before opening a job',
+        };
+      }
+      locationId = primary.id;
+    }
+
+    try {
+      const job = await createJob(
+        {
+          tenantId: context.tenantId,
+          customerId: payload.customerId,
+          locationId,
+          summary,
+          createdBy: context.executedBy,
+        },
+        this.jobRepo
+      );
+      return { success: true, resultEntityId: job.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
@@ -277,6 +351,8 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 
 export function createExecutionHandlerRegistry(deps?: {
   customerRepo?: CustomerRepository;
+  jobRepo?: JobRepository;
+  locationRepo?: LocationRepository;
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
@@ -291,7 +367,7 @@ export function createExecutionHandlerRegistry(deps?: {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(deps?.customerRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
-    new CreateJobExecutionHandler(),
+    new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
