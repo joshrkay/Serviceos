@@ -17,11 +17,6 @@ describe('POST /api/technician-location', () => {
   let app: express.Express;
   let repo: InMemoryTechnicianLocationPingRepository;
 
-  // Use timestamps within the 24-hour staleness window so the tests
-  // don't break as the hardcoded date ages out.
-  const t1 = new Date(Date.now() - 2 * 60 * 1000).toISOString(); // 2 min ago
-  const t2 = new Date(Date.now() - 1 * 60 * 1000).toISOString(); // 1 min ago
-
   beforeEach(() => {
     app = express();
     app.use(express.json());
@@ -44,8 +39,6 @@ describe('POST /api/technician-location', () => {
     const res = await request(app).post('/api/technician-location').send({
       technicianId: 'tech-1',
       pings: [
-        { lat: 37.7, lng: -122.4, recordedAt: t1, source: 'gps' },
-        { lat: 37.8, lng: -122.5, recordedAt: t2, source: 'gps' },
         {
           lat: 37.7,
           lng: -122.4,
@@ -66,9 +59,6 @@ describe('POST /api/technician-location', () => {
 
     const rows = await repo.listByTechnician(tenantId, 'tech-1');
     expect(rows).toHaveLength(2);
-    // listByTechnician returns newest-first
-    expect(rows[0].recordedAt.toISOString()).toBe(t2);
-    expect(rows[1].recordedAt.toISOString()).toBe(t1);
     // Repository sorts reverse-chronologically — the more-recent ping
     // comes first. Assertion is on the relative order, not the
     // absolute timestamp, so the test stays deterministic as the
@@ -80,7 +70,6 @@ describe('POST /api/technician-location', () => {
   it('rejects technician submissions for a different technicianId', async () => {
     const res = await request(app).post('/api/technician-location').send({
       technicianId: 'tech-2',
-      pings: [{ lat: 37.7, lng: -122.4, recordedAt: t1, source: 'gps' }],
       pings: [
         {
           lat: 37.7,
@@ -98,7 +87,6 @@ describe('POST /api/technician-location', () => {
   it('rejects invalid ping payloads', async () => {
     const res = await request(app).post('/api/technician-location').send({
       technicianId: 'tech-1',
-      pings: [{ lat: 100, lng: -122.4, recordedAt: t1, source: 'gps' }],
       pings: [
         {
           lat: 100,
@@ -115,7 +103,6 @@ describe('POST /api/technician-location', () => {
   it('keeps tenant isolation across repositories', async () => {
     await request(app).post('/api/technician-location').send({
       technicianId: 'tech-1',
-      pings: [{ lat: 37.7, lng: -122.4, recordedAt: t1, source: 'gps' }],
       pings: [
         {
           lat: 37.7,

@@ -1,9 +1,7 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository, createProposal, CreateProposalInput } from '../proposals/proposal';
-import { classifyIntent, IntentType } from '../ai/orchestration/intent-classifier';
-import { ProposalRepository, createProposal } from '../proposals/proposal';
+import { ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
 import {
   classifyIntent,
   ExtractedEntities,
@@ -19,8 +17,7 @@ import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
-import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
-import { CreateCustomerTaskHandler, TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
+import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
 import {
   RescheduleAppointmentTaskHandler,
   CancelAppointmentTaskHandler,
@@ -30,7 +27,6 @@ import {
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
-import { ProposalType } from '../proposals/proposal';
 
 /**
  * voice-action-router — the bridge between "Whisper gave us a
@@ -159,11 +155,6 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo));
-  handlers.set('draft_invoice', new InvoiceTaskHandler(gateway));
-  handlers.set('draft_estimate', new EstimateTaskHandler(gateway));
-  handlers.set('create_appointment', new CreateAppointmentAITaskHandler(gateway));
-  handlers.set('update_invoice', new InvoiceEditTaskHandler(gateway));
-  handlers.set('update_estimate', new EstimateEditTaskHandler(gateway));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
