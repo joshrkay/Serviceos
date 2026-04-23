@@ -6,6 +6,11 @@ import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
+import {
+  AddNoteExecutionHandler,
+  SendInvoiceExecutionHandler,
+  RecordPaymentExecutionHandler,
+} from './voice-extended-handlers';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
@@ -196,6 +201,14 @@ export function createExecutionHandlerRegistry(deps?: {
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
+    // Stage-2 voice handlers — currently stubs that validate payload
+    // shape and return a synthetic result-entity-id. Real domain
+    // wire-up (notes repo, comms gateway, payments repo) is a
+    // follow-up slice; the handlers must exist so the proposal
+    // lifecycle completes cleanly.
+    new AddNoteExecutionHandler(),
+    new SendInvoiceExecutionHandler(),
+    new RecordPaymentExecutionHandler(),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

@@ -241,10 +241,13 @@ describe('intent-classifier — classifyIntent', () => {
   });
 
   it('returns unknown when LLM returns an unsupported intentType', async () => {
+    // Use a clearly-never-supported intent name so this test doesn't
+    // regress whenever we expand the supported-intent list. (Earlier
+    // it used `send_invoice`, which is now a real supported intent.)
     const gateway = mockGateway(
-      JSON.stringify({ intentType: 'send_invoice', confidence: 0.95 })
+      JSON.stringify({ intentType: 'delete_database', confidence: 0.95 })
     );
-    const result = await classifyIntent('send the invoice', { tenantId }, gateway);
+    const result = await classifyIntent('drop everything', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
   });
 

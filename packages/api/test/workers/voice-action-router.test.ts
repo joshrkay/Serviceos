@@ -360,6 +360,246 @@ describe('voice-action-router worker', () => {
     expect(payload.reason).toBe('parse_failed');
   });
 
+  // ─── Stage 2: new intent coverage ─────────────────────────────
+  // Each of these tests shows that a classifier result for a Stage-2
+  // intent produces the right ProposalType and that any required
+  // fields the classifier couldn't supply are listed on
+  // sourceContext.missingFields — the signal the review UI uses to
+  // block Approve until the operator fills them in.
+
+  it('routes reschedule_appointment and marks ISO times as missing when only a description is given', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'reschedule_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          appointmentReference: 'the Miller job',
+          newDateTimeDescription: 'Thursday at 2pm',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Move the Miller job to Thursday at 2pm',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    const p = byTenant[0];
+    expect(p.proposalType).toBe('reschedule_appointment');
+    expect(p.status).toBe('draft');
+    expect(p.sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['newScheduledStart', 'newScheduledEnd'])
+    );
+    const payload = p.payload as Record<string, unknown>;
+    expect(payload.appointmentReference).toBe('the Miller job');
+    expect(payload.newDateTimeDescription).toBe('Thursday at 2pm');
+  });
+
+  it('routes cancel_appointment and stays in draft even at high confidence (irreversible class)', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'cancel_appointment',
+        confidence: 0.98,
+        extractedEntities: {
+          appointmentReference: 'tomorrow 3pm',
+          cancellationReason: 'customer called out',
+          cancellationType: 'customer_request',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: "Cancel tomorrow's 3pm, the customer called out",
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('cancel_appointment');
+    // Even at 0.98 confidence, irreversible actions must land in draft
+    // for screen-tap approval per CLAUDE.md.
+    expect(byTenant[0].status).toBe('draft');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.cancellationType).toBe('customer_request');
+    expect(payload.reason).toBe('customer called out');
+  });
+
+  it('routes reassign_appointment with target technician name', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'reassign_appointment',
+        confidence: 0.9,
+        extractedEntities: {
+          appointmentReference: "Tuesday's Davis job",
+          targetTechnicianName: 'Mike',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: "Give Tuesday's Davis job to Mike",
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('reassign_appointment');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.targetTechnicianName).toBe('Mike');
+    // Technician name → ID resolution happens at review time;
+    // toTechnicianId is listed as missing.
+    expect(byTenant[0].sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['toTechnicianId'])
+    );
+  });
+
+  it('routes add_note with a body and target reference', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'add_note',
+        confidence: 0.9,
+        extractedEntities: {
+          noteBody: 'customer wants a call before arrival',
+          noteTargetKind: 'job',
+          customerName: 'Rodriguez',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Note on the Rodriguez job: customer wants a call before we arrive',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('add_note');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.body).toBe('customer wants a call before arrival');
+    expect(payload.targetKind).toBe('job');
+    expect(payload.targetReference).toBe('Rodriguez');
+  });
+
+  it('routes send_invoice as comms (draft-only, never auto-approves)', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'send_invoice',
+        confidence: 0.95,
+        extractedEntities: { jobReference: 'INV-0042', sendChannel: 'email' },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Email invoice INV-0042',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('send_invoice');
+    // Comms actions require screen-tap even at 0.95 confidence.
+    expect(byTenant[0].status).toBe('draft');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.channel).toBe('email');
+    expect(payload.invoiceReference).toBe('INV-0042');
+  });
+
+  it('routes record_payment as money (draft-only) with amount as integer cents', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'record_payment',
+        confidence: 0.96,
+        extractedEntities: {
+          jobReference: 'INV-0042',
+          amount: 45000,
+          paymentMethod: 'cash',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Mark INV-0042 paid — 450 cash',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('record_payment');
+    // Money actions ALWAYS draft, regardless of confidence.
+    expect(byTenant[0].status).toBe('draft');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.amountCents).toBe(45000);
+    expect(payload.paymentMethod).toBe('cash');
+    expect(payload.invoiceReference).toBe('INV-0042');
+  });
+
+  it('routes create_job when the classifier returns title + customerName', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_job',
+        confidence: 0.9,
+        extractedEntities: {
+          customerName: 'Smith',
+          jobTitle: 'Kitchen drain replacement',
+        },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Start a new job for Smith — kitchen drain replacement',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('create_job');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.title).toBe('Kitchen drain replacement');
+    expect(payload.customerReference).toBe('Smith');
+    // customerId is listed as missing until the review UI resolves
+    // 'Smith' to a concrete customer record.
+    expect(byTenant[0].sourceContext?.missingFields).toEqual(
+      expect.arrayContaining(['customerId'])
+    );
+  });
+
   // ─── tenantId threading ──────────────────────────────────────
   // The classifier must pass tenantId to the gateway so per-tenant
   // cache keys, cost accounting, and future routing scope correctly.

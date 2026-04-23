@@ -3,6 +3,9 @@ import { ProposalType } from './proposal';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
+import { addNotePayloadSchema } from './contracts/notes';
+import { sendInvoicePayloadSchema } from './contracts/send-invoice';
+import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -168,6 +171,9 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
   voice_clarification: voiceClarificationPayloadSchema,
+  add_note: addNotePayloadSchema,
+  send_invoice: sendInvoicePayloadSchema,
+  record_payment: recordPaymentPayloadSchema,
   onboarding_tenant_settings: onboardingTenantSettingsPayloadSchema,
   onboarding_service_category: onboardingServiceCategoryPayloadSchema,
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,

@@ -14,6 +14,15 @@ import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-t
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
+import {
+  RescheduleAppointmentTaskHandler,
+  CancelAppointmentTaskHandler,
+  ReassignAppointmentTaskHandler,
+  AddNoteTaskHandler,
+  SendInvoiceTaskHandler,
+  RecordPaymentTaskHandler,
+  CreateJobVoiceTaskHandler,
+} from '../ai/tasks/voice-extended-tasks';
 import { ProposalType } from '../proposals/proposal';
 
 /**
@@ -57,6 +66,13 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   update_invoice: 'update_invoice',
   update_estimate: 'update_estimate',
   create_customer: 'create_customer',
+  create_job: 'create_job',
+  reschedule_appointment: 'reschedule_appointment',
+  cancel_appointment: 'cancel_appointment',
+  reassign_appointment: 'reassign_appointment',
+  add_note: 'add_note',
+  send_invoice: 'send_invoice',
+  record_payment: 'record_payment',
 };
 
 function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
@@ -67,6 +83,13 @@ function buildHandlers(gateway: LLMGateway): Map<ProposalType, TaskHandler> {
   handlers.set('update_invoice', new InvoiceEditTaskHandler(gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(gateway));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
+  handlers.set('create_job', new CreateJobVoiceTaskHandler());
+  handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
+  handlers.set('cancel_appointment', new CancelAppointmentTaskHandler());
+  handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
+  handlers.set('add_note', new AddNoteTaskHandler());
+  handlers.set('send_invoice', new SendInvoiceTaskHandler());
+  handlers.set('record_payment', new RecordPaymentTaskHandler());
   return handlers;
 }
 

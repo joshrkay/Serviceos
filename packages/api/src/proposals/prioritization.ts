@@ -22,6 +22,12 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // prompts for the operator, not queued work; stale clarifications
   // are useless, so we want them top of feed while fresh.
   voice_clarification: 0,
+  // Money-moving / comms proposals surface high — they require
+  // screen-tap and usually have same-day relevance.
+  record_payment: 1,
+  send_invoice: 1,
+  // Notes are low priority — they never gate other work.
+  add_note: 5,
   onboarding_tenant_settings: 6,
   onboarding_service_category: 7,
   onboarding_estimate_template: 8,

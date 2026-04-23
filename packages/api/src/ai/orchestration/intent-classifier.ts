@@ -20,6 +20,13 @@ export type IntentType =
   | 'update_invoice'
   | 'update_estimate'
   | 'create_customer'
+  | 'create_job'
+  | 'reschedule_appointment'
+  | 'cancel_appointment'
+  | 'reassign_appointment'
+  | 'add_note'
+  | 'send_invoice'
+  | 'record_payment'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -29,6 +36,13 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'update_invoice',
   'update_estimate',
   'create_customer',
+  'create_job',
+  'reschedule_appointment',
+  'cancel_appointment',
+  'reassign_appointment',
+  'add_note',
+  'send_invoice',
+  'record_payment',
   'unknown',
 ] as const;
 
@@ -45,6 +59,29 @@ export interface ExtractedEntities {
   displayName?: string;
   email?: string;
   phone?: string;
+  // Scheduling-edit intents (reschedule / cancel / reassign). Either
+  // an appointment reference ("tomorrow's 3pm", "the Miller job",
+  // "APT-0012") or a newDateTimeDescription for reschedule. Target
+  // technician for reassign is a name — the review UI resolves names
+  // to IDs since the classifier never touches the DB.
+  appointmentReference?: string;
+  newDateTimeDescription?: string;
+  targetTechnicianName?: string;
+  cancellationReason?: string;
+  cancellationType?: 'customer_request' | 'technician_unavailable' | 'scheduling_conflict' | 'other';
+  // add_note intent. `noteTargetKind` disambiguates whether the note
+  // attaches to a job, customer, invoice, estimate, or appointment.
+  noteBody?: string;
+  noteTargetKind?: 'job' | 'customer' | 'invoice' | 'estimate' | 'appointment';
+  // send_invoice intent: channel hints ("email", "sms"). Defaults
+  // are resolved by the execution handler when unspecified.
+  sendChannel?: 'email' | 'sms';
+  // record_payment intent. paymentMethod = cash / check / card / other.
+  // paymentReference = check number or memo the operator stated.
+  paymentMethod?: 'cash' | 'check' | 'card' | 'other';
+  paymentReference?: string;
+  // create_job intent: title of the new job.
+  jobTitle?: string;
 }
 
 /**
@@ -121,9 +158,56 @@ Supported intents (return exactly ONE):
                                      "New customer: Sarah, phone 555-0100"
                                      "Add a customer called Jordan Lee"
                                      "Create customer Maria Gomez at maria@gomez.co"
-- "unknown"             — anything else: send commands, queries ("when is my next
-                           appointment"), ambiguous transcripts, or edit commands
-                           without a clear invoice/estimate reference.
+- "create_job"          — user wants to open a NEW job record (distinct from
+                           scheduling an appointment). Extract customerName
+                           and jobTitle.
+                           Examples: "Start a new job for Bob's water heater"
+                                     "Create a job for Smith plumbing — kitchen drain"
+- "reschedule_appointment" — user wants to move an EXISTING appointment to a
+                           different time. Extract appointmentReference
+                           (the old slot or the job/customer identifier)
+                           and newDateTimeDescription (the new time).
+                           Examples: "Move the Miller job to Thursday at 2pm"
+                                     "Push tomorrow's 10am to 3pm"
+                                     "Reschedule the Davis appointment to next Monday"
+- "cancel_appointment"  — user wants to CANCEL an existing appointment.
+                           Extract appointmentReference and, when stated,
+                           cancellationReason. This is irreversible — never
+                           auto-execute.
+                           Examples: "Cancel tomorrow's 3pm, the customer called out"
+                                     "Kill the Johnson appointment"
+                                     "Cancel the Wilson job — weather closed us down"
+- "reassign_appointment" — user wants to assign an EXISTING appointment to a
+                           different technician. Extract appointmentReference
+                           and targetTechnicianName.
+                           Examples: "Give Tuesday's Davis job to Mike"
+                                     "Reassign the 2pm to Sarah"
+- "add_note"            — user wants to attach a note to an existing record.
+                           Extract noteTargetKind (job / customer / invoice /
+                           estimate / appointment) and noteBody.
+                           Examples: "Note on the Rodriguez job: customer
+                                      wants a call before we arrive"
+                                     "Add a note to Smith's file: prefers SMS"
+- "send_invoice"        — user wants to SEND an existing invoice to a
+                           customer (email or SMS). This is a customer
+                           comms action — never auto-execute, always
+                           require a screen-tap approval. Extract the
+                           invoice reference and sendChannel.
+                           Examples: "Send invoice INV-0042 to Sarah"
+                                     "Email the Jones invoice"
+                                     "Text the Miller invoice to them"
+- "record_payment"      — user wants to log a PAYMENT received against an
+                           invoice. This is money-moving — never
+                           auto-execute, always require a screen-tap
+                           approval. Extract amount (integer cents),
+                           paymentMethod, paymentReference (check #),
+                           and the invoice / customer it applies to.
+                           Examples: "Mark the Jones invoice paid, 450 cash"
+                                     "Record a check for 200 from Smith, check 1042"
+                                     "Rodriguez paid the invoice in full"
+- "unknown"             — anything else: queries ("when is my next
+                           appointment"), ambiguous transcripts, or edit
+                           commands without a clear reference.
 
 Distinctions that matter:
 - "create an invoice/estimate" vs "add to invoice/estimate" — the word
@@ -152,7 +236,18 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "lineItemDescriptions": ["<string>", ...],
     "displayName": "<string, optional — NEW customer's name on create_customer>",
     "email": "<string, optional — NEW customer's email on create_customer>",
-    "phone": "<string, optional — NEW customer's phone on create_customer>"
+    "phone": "<string, optional — NEW customer's phone on create_customer>",
+    "appointmentReference": "<string, optional — existing appointment reference>",
+    "newDateTimeDescription": "<string, optional — new time for reschedule_appointment>",
+    "targetTechnicianName": "<string, optional — target technician on reassign_appointment>",
+    "cancellationReason": "<string, optional — free-text reason on cancel_appointment>",
+    "cancellationType": "<customer_request|technician_unavailable|scheduling_conflict|other, optional>",
+    "noteBody": "<string, optional — the note text on add_note>",
+    "noteTargetKind": "<job|customer|invoice|estimate|appointment, optional>",
+    "sendChannel": "<email|sms, optional — on send_invoice>",
+    "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
+    "paymentReference": "<string, optional — check number or memo on record_payment>",
+    "jobTitle": "<string, optional — title of new job on create_job>"
   }
 }
 
@@ -213,6 +308,46 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.displayName === 'string') extracted.displayName = ee.displayName;
     if (typeof ee.email === 'string') extracted.email = ee.email;
     if (typeof ee.phone === 'string') extracted.phone = ee.phone;
+    // Scheduling-edit fields
+    if (typeof ee.appointmentReference === 'string') extracted.appointmentReference = ee.appointmentReference;
+    if (typeof ee.newDateTimeDescription === 'string') extracted.newDateTimeDescription = ee.newDateTimeDescription;
+    if (typeof ee.targetTechnicianName === 'string') extracted.targetTechnicianName = ee.targetTechnicianName;
+    if (typeof ee.cancellationReason === 'string') extracted.cancellationReason = ee.cancellationReason;
+    if (
+      ee.cancellationType === 'customer_request' ||
+      ee.cancellationType === 'technician_unavailable' ||
+      ee.cancellationType === 'scheduling_conflict' ||
+      ee.cancellationType === 'other'
+    ) {
+      extracted.cancellationType = ee.cancellationType;
+    }
+    // add_note fields
+    if (typeof ee.noteBody === 'string') extracted.noteBody = ee.noteBody;
+    if (
+      ee.noteTargetKind === 'job' ||
+      ee.noteTargetKind === 'customer' ||
+      ee.noteTargetKind === 'invoice' ||
+      ee.noteTargetKind === 'estimate' ||
+      ee.noteTargetKind === 'appointment'
+    ) {
+      extracted.noteTargetKind = ee.noteTargetKind;
+    }
+    // send_invoice fields
+    if (ee.sendChannel === 'email' || ee.sendChannel === 'sms') {
+      extracted.sendChannel = ee.sendChannel;
+    }
+    // record_payment fields
+    if (
+      ee.paymentMethod === 'cash' ||
+      ee.paymentMethod === 'check' ||
+      ee.paymentMethod === 'card' ||
+      ee.paymentMethod === 'other'
+    ) {
+      extracted.paymentMethod = ee.paymentMethod;
+    }
+    if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
+    // create_job fields
+    if (typeof ee.jobTitle === 'string') extracted.jobTitle = ee.jobTitle;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

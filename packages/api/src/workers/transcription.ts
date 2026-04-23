@@ -1,6 +1,7 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { VoiceRepository, TranscriptionProvider } from '../voice/voice-service';
+import { LLMGateway } from '../ai/gateway/gateway';
 
 export interface TranscriptionJobPayload {
   tenantId: string;
@@ -24,6 +25,17 @@ export interface TranscriptionCompletionEvent {
   userId?: string;
 }
 
+/**
+ * Supplies tenant-specific vocabulary to the transcription correction
+ * pass so trade-specific terms and customer names aren't mis-heard
+ * ("pex" → "pecks", "Rodriguez" → "Roderick", etc). The provider is
+ * expected to return a short list (<= ~100 terms) to keep the prompt
+ * cheap. Empty list is fine — correction still runs on generic terms.
+ */
+export interface TranscriptionGlossaryProvider {
+  termsForTenant(tenantId: string): Promise<string[]>;
+}
+
 export interface CreateTranscriptionWorkerOptions {
   /**
    * Fired after a successful transcription is persisted. Used to hand
@@ -33,6 +45,83 @@ export interface CreateTranscriptionWorkerOptions {
    * recoverable via retry on their own queue.
    */
   onTranscribed?: (event: TranscriptionCompletionEvent, logger: Logger) => Promise<void> | void;
+  /**
+   * Optional LLM gateway. When supplied, the worker runs a
+   * `transcription_correction` pass after Whisper returns: the raw
+   * transcript is rewritten with tenant-specific trade terms and
+   * customer names in mind. The raw transcript is preserved under
+   * `transcriptMetadata.rawTranscript` for debugging and audit.
+   * Correction failures are non-fatal — we fall back to the raw
+   * Whisper output so the pipeline keeps moving.
+   */
+  gateway?: LLMGateway;
+  /**
+   * Optional glossary source used only when `gateway` is set. When
+   * omitted the correction pass runs with an empty glossary and relies
+   * on the built-in trade vocabulary baked into the system prompt.
+   */
+  glossary?: TranscriptionGlossaryProvider;
+}
+
+/**
+ * Best-effort transcription correction. Calls the gateway with
+ * `taskType: 'transcription_correction'` (system prompt configured in
+ * ai/gateway/routing-config.ts) passing the tenant glossary as context.
+ * Returns `{ corrected, glossary }`; on ANY failure, returns the raw
+ * transcript unchanged — this is a quality upgrade, not a gate.
+ */
+async function correctTranscript(input: {
+  raw: string;
+  tenantId: string;
+  gateway: LLMGateway;
+  glossary?: TranscriptionGlossaryProvider;
+  logger: Logger;
+}): Promise<{ corrected: string; glossary: string[] }> {
+  const { raw, tenantId, gateway, glossary, logger } = input;
+  let terms: string[] = [];
+  if (glossary) {
+    try {
+      terms = await glossary.termsForTenant(tenantId);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      logger.warn('Transcription glossary lookup failed', { error: error.message });
+    }
+  }
+
+  try {
+    const userPrompt =
+      terms.length > 0
+        ? `Tenant-specific vocabulary (preserve exactly when you hear a close match): ${terms.join(
+            ', '
+          )}\n\nRaw transcript: ${raw}`
+        : `Raw transcript: ${raw}`;
+
+    const response = await gateway.complete({
+      taskType: 'transcription_correction',
+      messages: [{ role: 'user', content: userPrompt }],
+      metadata: { tenantId },
+    });
+
+    const corrected = response.content.trim();
+    // Guardrail: correction should not silently truncate. If it's
+    // shorter by more than 40% of the raw length, assume the model
+    // mis-interpreted the instructions and fall back.
+    if (corrected.length === 0 || corrected.length < raw.length * 0.4) {
+      logger.warn('Transcription correction produced suspiciously short output; keeping raw', {
+        rawLen: raw.length,
+        correctedLen: corrected.length,
+      });
+      return { corrected: raw, glossary: terms };
+    }
+
+    return { corrected, glossary: terms };
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.warn('Transcription correction failed; keeping raw transcript', {
+      error: error.message,
+    });
+    return { corrected: raw, glossary: terms };
+  }
 }
 
 export function createTranscriptionWorker(
@@ -52,20 +141,47 @@ export function createTranscriptionWorker(
       try {
         const result = await transcriptionProvider.transcribe(audioUrl);
 
+        // Transcription correction pass: only runs when a gateway was
+        // wired in. The raw Whisper output is kept on
+        // transcriptMetadata.rawTranscript for debugging, and the
+        // corrected version becomes the canonical transcript the
+        // router sees. This closes the biggest quality gap: trade
+        // terms and customer names that Whisper alone gets wrong.
+        let finalTranscript = result.transcript;
+        let correctionMetadata: Record<string, unknown> = {};
+        if (options.gateway && result.transcript && result.transcript.trim().length > 0) {
+          const { corrected, glossary } = await correctTranscript({
+            raw: result.transcript,
+            tenantId,
+            gateway: options.gateway,
+            glossary: options.glossary,
+            logger,
+          });
+          finalTranscript = corrected;
+          correctionMetadata = {
+            rawTranscript: result.transcript,
+            correctionApplied: corrected !== result.transcript,
+            glossaryTerms: glossary.length,
+          };
+        }
+
         await voiceRepository.updateStatus(tenantId, recordingId, 'completed', {
-          transcript: result.transcript,
-          metadata: result.metadata,
+          transcript: finalTranscript,
+          metadata: { ...result.metadata, ...correctionMetadata },
         });
 
-        logger.info('Transcription completed', { recordingId });
+        logger.info('Transcription completed', {
+          recordingId,
+          correctionApplied: correctionMetadata.correctionApplied ?? false,
+        });
 
-        if (options.onTranscribed && result.transcript) {
+        if (options.onTranscribed && finalTranscript) {
           try {
             await options.onTranscribed(
               {
                 tenantId,
                 recordingId,
-                transcript: result.transcript,
+                transcript: finalTranscript,
                 conversationId,
                 userId,
               },
