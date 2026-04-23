@@ -220,7 +220,7 @@ export function PriceBookPage() {
         const { rowNumber, ...payload } = row;
         const response = await apiFetch('/api/catalog/items', {
           method: 'POST',
-          body: JSON.stringify(row),
+          body: JSON.stringify(payload),
         });
 
         if (response.ok) {
@@ -251,8 +251,7 @@ export function PriceBookPage() {
       <div className="p-4 md:p-6 max-w-4xl mx-auto">
         <div className="mb-6 flex items-center justify-between gap-3">
           <h1 className="text-slate-900">Price Book</h1>
-
-          <>
+          <div className="flex items-center">
             <button
               type="button"
               className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
@@ -270,9 +269,8 @@ export function PriceBookPage() {
               data-testid="csv-file-input"
               onChange={handleCsvImport}
             />
-          </>
+          </div>
         </div>
-      ) : null}
 
         {progressText && (
           <p className="mb-3 text-sm text-slate-600">{progressText}</p>
