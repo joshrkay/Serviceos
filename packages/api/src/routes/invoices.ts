@@ -78,7 +78,7 @@ export function createInvoiceRouter(
         const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
         const result = jobId
           ? await invoiceRepo.findByJob(req.auth!.tenantId, jobId)
-          : await invoiceRepo.findByTenant(req.auth!.tenantId);
+          : await listInvoices(req.auth!.tenantId, invoiceRepo);
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
