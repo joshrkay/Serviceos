@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Queue, QueueConfig, QueueMessage } from './queue';
+import { Queue, QueueConfig, QueueMessage, DeadLetterEntry } from './queue';
 import { randomUUID } from 'crypto';
 
 /**
@@ -33,6 +33,17 @@ export class PgQueue extends PgBaseRepository implements Queue {
         visible_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (idempotency_key)
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS _queue_dlq (
+        message_id UUID PRIMARY KEY,
+        type TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        attempts INTEGER NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        error TEXT NOT NULL,
+        failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
     this.initialized = true;
@@ -104,6 +115,54 @@ export class PgQueue extends PgBaseRepository implements Queue {
         `DELETE FROM _queue_messages WHERE id = $1`,
         [messageId]
       );
+    });
+  }
+
+  async moveToDeadLetter(message: QueueMessage, error: string): Promise<void> {
+    await this.withClient(async (client) => {
+      await this.ensureTable(client);
+      await client.query('BEGIN');
+      try {
+        await client.query(
+          `INSERT INTO _queue_dlq (message_id, type, payload, attempts, idempotency_key, error)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (message_id) DO NOTHING`,
+          [
+            message.id,
+            message.type,
+            JSON.stringify(message.payload),
+            message.attempts,
+            message.idempotencyKey,
+            error,
+          ]
+        );
+        await client.query(`DELETE FROM _queue_messages WHERE id = $1`, [message.id]);
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
+    });
+  }
+
+  async listDeadLetter(): Promise<DeadLetterEntry[]> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const result = await client.query(
+        `SELECT message_id, type, payload, attempts, idempotency_key, error, failed_at
+         FROM _queue_dlq
+         ORDER BY failed_at DESC`
+      );
+      return result.rows.map((row) => ({
+        messageId: row.message_id as string,
+        type: row.type as string,
+        payload:
+          typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload,
+        attempts: Number(row.attempts),
+        idempotencyKey: row.idempotency_key as string,
+        error: row.error as string,
+        failedAt: (row.failed_at as Date).toISOString(),
+      }));
     });
   }
 

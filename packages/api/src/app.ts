@@ -428,6 +428,13 @@ export function createApp() {
       const processed = await processMessage(message, handler, workerLogger);
       if (processed) {
         await queue.delete(message.id);
+      } else if (message.attempts >= message.maxAttempts) {
+        await queue.moveToDeadLetter(message, 'max attempts exceeded');
+        workerLogger.error('Message moved to DLQ', {
+          messageId: message.id,
+          type: message.type,
+          attempts: message.attempts,
+        });
       }
     } catch (err) {
       workerLogger.error('Queue poll failed', {
