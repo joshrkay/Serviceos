@@ -6,6 +6,13 @@ import {
   DraftEstimateTaskHandler,
 } from '../tasks/task-handlers';
 import { AppError } from '../../shared/errors';
+import { Proposal } from '../../proposals/proposal';
+import {
+  applyConfidencePolicy,
+  ConfidenceAction,
+  ConfidencePolicy,
+  DEFAULT_CONFIDENCE_POLICY,
+} from '../guardrails/low-confidence';
 
 // P2-007 — single entry point that dispatches one classified conversational
 // intent to exactly one task handler, producing one bounded Proposal.
@@ -43,4 +50,29 @@ export function createDefaultTaskRouter(): TaskRouter {
   router.register(new CreateAppointmentTaskHandler());
   router.register(new DraftEstimateTaskHandler());
   return router;
+}
+
+export interface GuardedRouteResult {
+  taskResult: TaskResult;
+  proposal: Proposal;
+  confidenceAction: ConfidenceAction;
+}
+
+// P2-013 — Low-confidence handling policy integration point.
+//
+// Route the task, then evaluate the resulting proposal's confidence against
+// the policy. The returned `confidenceAction` tells the caller whether to
+// mark the proposal ready for review (high/medium), emit a clarification
+// proposal alongside it (low), or abort (very low). The proposal status is
+// downgraded to draft when the confidence falls below the ready-for-review
+// threshold so nothing auto-executes on a shaky signal.
+export async function routeWithGuardrails(
+  router: TaskRouter,
+  taskType: string,
+  context: TaskContext,
+  policy: ConfidencePolicy = DEFAULT_CONFIDENCE_POLICY
+): Promise<GuardedRouteResult> {
+  const taskResult = await router.route(taskType, context);
+  const { proposal, action } = applyConfidencePolicy(taskResult.proposal, policy);
+  return { taskResult, proposal, confidenceAction: action };
 }
