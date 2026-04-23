@@ -22,7 +22,12 @@ import { SettingsRepository } from '../../settings/settings';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
-import { CustomerRepository, createCustomer } from '../../customers/customer';
+import {
+  CustomerRepository,
+  UpdateCustomerInput,
+  createCustomer,
+  updateCustomer,
+} from '../../customers/customer';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -96,12 +101,51 @@ export class CreateCustomerExecutionHandler implements ExecutionHandler {
 export class UpdateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'update_customer';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(private readonly customerRepo?: CustomerRepository) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
-    return { success: true };
+
+    if (!this.customerRepo) {
+      return { success: true };
+    }
+
+    // Map the voice-shaped payload to UpdateCustomerInput. Only keys
+    // actually present in the payload are forwarded so unrelated
+    // fields aren't accidentally cleared. `payload.name` and
+    // `payload.phone` mirror the shape used by CreateCustomer — no
+    // caller emits firstName/lastName yet, but accept both so future
+    // classifier output works too.
+    const input: UpdateCustomerInput = {};
+    if (typeof payload.name === 'string') input.firstName = payload.name;
+    if (typeof payload.firstName === 'string') input.firstName = payload.firstName;
+    if (typeof payload.lastName === 'string') input.lastName = payload.lastName;
+    if (typeof payload.companyName === 'string') input.companyName = payload.companyName;
+    if (typeof payload.email === 'string') input.email = payload.email;
+    if (typeof payload.phone === 'string') input.primaryPhone = payload.phone;
+    if (typeof payload.primaryPhone === 'string') input.primaryPhone = payload.primaryPhone;
+
+    try {
+      const updated = await updateCustomer(
+        context.tenantId,
+        payload.customerId,
+        input,
+        this.customerRepo,
+        context.executedBy
+      );
+      if (!updated) {
+        return { success: false, error: 'Customer not found' };
+      }
+      return { success: true, resultEntityId: updated.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
@@ -246,7 +290,7 @@ export function createExecutionHandlerRegistry(deps?: {
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(deps?.customerRepo),
-    new UpdateCustomerExecutionHandler(),
+    new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new DraftEstimateExecutionHandler(),

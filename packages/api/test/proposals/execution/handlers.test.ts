@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   CreateCustomerExecutionHandler,
+  UpdateCustomerExecutionHandler,
 } from '../../../src/proposals/execution/handlers';
 import { Proposal, ProposalType } from '../../../src/proposals/proposal';
-import { InMemoryCustomerRepository } from '../../../src/customers/customer';
+import {
+  InMemoryCustomerRepository,
+  createCustomer,
+} from '../../../src/customers/customer';
 
 const tenantId = '550e8400-e29b-41d4-a716-446655440000';
 const context = { tenantId, executedBy: 'user-1' };
@@ -86,5 +90,80 @@ describe('CreateCustomerExecutionHandler', () => {
     // No write should have happened — the id was already known.
     const persisted = await customerRepo.findById(tenantId, 'already-assigned-id');
     expect(persisted).toBeNull();
+  });
+});
+
+describe('UpdateCustomerExecutionHandler', () => {
+  let customerRepo: InMemoryCustomerRepository;
+
+  beforeEach(() => {
+    customerRepo = new InMemoryCustomerRepository();
+  });
+
+  async function seedCustomer() {
+    return createCustomer(
+      {
+        tenantId,
+        firstName: 'Jane',
+        lastName: 'Doe',
+        email: 'jane@example.com',
+        primaryPhone: '555-0100',
+        createdBy: 'user-1',
+      },
+      customerRepo
+    );
+  }
+
+  it('persists the patch and leaves untouched fields intact', async () => {
+    const handler = new UpdateCustomerExecutionHandler(customerRepo);
+    const seeded = await seedCustomer();
+
+    const proposal = makeProposal('update_customer', {
+      customerId: seeded.id,
+      email: 'jane.doe@acme.com',
+      phone: '555-0199',
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(true);
+    const persisted = await customerRepo.findById(tenantId, seeded.id);
+    expect(persisted!.email).toBe('jane.doe@acme.com');
+    expect(persisted!.primaryPhone).toBe('555-0199');
+    // Unchanged fields survive the patch.
+    expect(persisted!.firstName).toBe('Jane');
+    expect(persisted!.lastName).toBe('Doe');
+  });
+
+  it('returns failure when the customer does not exist', async () => {
+    const handler = new UpdateCustomerExecutionHandler(customerRepo);
+    const proposal = makeProposal('update_customer', {
+      customerId: 'does-not-exist',
+      email: 'new@example.com',
+    });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('not found');
+  });
+
+  it('rejects a payload missing customerId', async () => {
+    const handler = new UpdateCustomerExecutionHandler(customerRepo);
+    const proposal = makeProposal('update_customer', { email: 'new@example.com' });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('customerId');
+  });
+
+  it('returns success without persistence when no repo is wired', async () => {
+    const handler = new UpdateCustomerExecutionHandler();
+    const proposal = makeProposal('update_customer', { customerId: 'cust-1' });
+
+    const result = await handler.execute(proposal, context);
+
+    expect(result.success).toBe(true);
   });
 });
