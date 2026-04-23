@@ -6,7 +6,7 @@ import { createInvoiceSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
-  createInvoice,
+  createInvoiceWithNextNumber,
   listInvoices,
   getInvoice,
   updateInvoice,
@@ -15,7 +15,7 @@ import {
   InvoiceRepository,
 } from '../invoices/invoice';
 import { AuditRepository } from '../audit/audit';
-import { getNextInvoiceNumber, SettingsRepository } from '../settings/settings';
+import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 
 const nestedPaymentSchema = z.object({
@@ -49,15 +49,14 @@ export function createInvoiceRouter(
         if (parsed.estimateId) {
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
         }
-        const invoiceNumber = await getNextInvoiceNumber(req.auth!.tenantId, settingsRepo);
-        const result = await createInvoice(
+        const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
             tenantId: req.auth!.tenantId,
-            invoiceNumber,
             createdBy: req.auth!.userId,
           },
           invoiceRepo,
+          settingsRepo,
           auditRepo
         );
         res.status(201).json(result);

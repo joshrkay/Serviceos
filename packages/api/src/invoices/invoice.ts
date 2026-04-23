@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -142,6 +143,45 @@ export async function listInvoices(
   repository: InvoiceRepository
 ): Promise<Invoice[]> {
   return repository.findByTenant(tenantId);
+}
+
+/**
+ * Insert-first, then allocate — a failed createInvoice never increments
+ * the tenant's invoice counter, so there are no gaps in the user-visible
+ * sequence.
+ *
+ * Flow:
+ *   1. createInvoice with a placeholder number (passes validation but is
+ *      replaced before the row is ever read by any caller)
+ *   2. getNextInvoiceNumber — only runs when step 1 succeeded
+ *   3. invoiceRepo.update rewrites the placeholder with the real number
+ *
+ * Residual risk: a crash between step 2 and step 3 leaves the counter
+ * incremented while the row still shows the placeholder. That's a much
+ * smaller exposure than the previous ordering, where any validation or
+ * constraint failure in createInvoice burned a sequence number. A proper
+ * pg transaction (SELECT FOR UPDATE settings + INSERT invoice) is the
+ * long-term fix and lands alongside PgSettingsRepository when that ships.
+ */
+export async function createInvoiceWithNextNumber(
+  input: Omit<CreateInvoiceInput, 'invoiceNumber'>,
+  invoiceRepo: InvoiceRepository,
+  settingsRepo: SettingsRepository,
+  auditRepo?: AuditRepository
+): Promise<Invoice> {
+  const placeholderNumber = `PENDING-${uuidv4()}`;
+
+  const invoice = await createInvoice(
+    { ...input, invoiceNumber: placeholderNumber },
+    invoiceRepo,
+    auditRepo
+  );
+
+  const invoiceNumber = await getNextInvoiceNumber(input.tenantId, settingsRepo);
+  const updated = await invoiceRepo.update(input.tenantId, invoice.id, {
+    invoiceNumber,
+  });
+  return updated ?? { ...invoice, invoiceNumber };
 }
 
 export async function getInvoice(

@@ -10,7 +10,10 @@ import { randomUUID } from 'crypto';
  */
 export class PgQueue extends PgBaseRepository implements Queue {
   private config: QueueConfig;
-  private initialized = false;
+  // Promise-based init lock: the first caller kicks off the CREATE TABLE
+  // DDL, concurrent callers await the same promise, and on failure the
+  // promise is cleared so the next call retries from scratch.
+  private initPromise?: Promise<void>;
 
   constructor(pool: Pool, config?: Partial<QueueConfig>) {
     super(pool);
@@ -21,32 +24,42 @@ export class PgQueue extends PgBaseRepository implements Queue {
   }
 
   private async ensureTable(client: import('pg').PoolClient): Promise<void> {
-    if (this.initialized) return;
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS _queue_messages (
-        id UUID PRIMARY KEY,
-        type TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL DEFAULT 3,
-        idempotency_key TEXT NOT NULL,
-        visible_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (idempotency_key)
-      )
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS _queue_dlq (
-        message_id UUID PRIMARY KEY,
-        type TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        attempts INTEGER NOT NULL,
-        idempotency_key TEXT NOT NULL,
-        error TEXT NOT NULL,
-        failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    this.initialized = true;
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+    this.initPromise = (async () => {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS _queue_messages (
+          id UUID PRIMARY KEY,
+          type TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          idempotency_key TEXT NOT NULL,
+          visible_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (idempotency_key)
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS _queue_dlq (
+          message_id UUID PRIMARY KEY,
+          type TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          attempts INTEGER NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          error TEXT NOT NULL,
+          failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+    })();
+    try {
+      await this.initPromise;
+    } catch (err) {
+      // Clear the cached failure so the next caller retries.
+      this.initPromise = undefined;
+      throw err;
+    }
   }
 
   async send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> {
