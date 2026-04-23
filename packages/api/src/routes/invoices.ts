@@ -7,6 +7,7 @@ import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoice,
+  listInvoices,
   getInvoice,
   updateInvoice,
   issueInvoice,

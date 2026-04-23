@@ -123,6 +123,13 @@ export async function createEstimate(
   return created;
 }
 
+export async function listEstimates(
+  tenantId: string,
+  repository: EstimateRepository
+): Promise<Estimate[]> {
+  return repository.findByTenant(tenantId);
+}
+
 export async function getEstimate(
   tenantId: string,
   id: string,
