@@ -49,6 +49,13 @@ describe('PriceBookPage', () => {
     );
   }
 
+
+  it('renders heading text', () => {
+    renderPage();
+
+    expect(screen.getByRole('heading', { name: /price book/i })).toBeInTheDocument();
+  });
+
   it('renders list items from API', async () => {
     renderPage();
 
