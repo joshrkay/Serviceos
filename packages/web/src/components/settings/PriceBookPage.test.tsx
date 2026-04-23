@@ -19,7 +19,7 @@ describe('PriceBookPage', () => {
       if (url === '/api/price-book' && method === 'GET') {
         return {
           ok: true,
-          json: async () => ({ items: mockItems }),
+          json: async () => mockItems,
         } as Response;
       }
 
