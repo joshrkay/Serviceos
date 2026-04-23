@@ -98,6 +98,11 @@ import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import {
+  createDiffAnalysisWorker,
+  InMemoryDiffAnalysisRepository,
+} from './ai/diff-analysis';
+import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
 
 // Auth middleware
@@ -305,6 +310,21 @@ export function createApp() {
   workerRegistry.set(
     transcriptionWorker.type,
     transcriptionWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
+  // ── Diff-analysis worker (P0-018): compares two revision snapshots and
+  // persists a structured field-level delta. The worker, repo, and
+  // revision store are all in-memory today — PgDocumentRevisionRepository
+  // lands when estimate/invoice revisions graduate from dev fixtures.
+  const documentRevisionRepo = new InMemoryDocumentRevisionRepository();
+  const diffAnalysisRepo = new InMemoryDiffAnalysisRepository();
+  const diffAnalysisWorker = createDiffAnalysisWorker(
+    documentRevisionRepo,
+    diffAnalysisRepo
+  );
+  workerRegistry.set(
+    diffAnalysisWorker.type,
+    diffAnalysisWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second

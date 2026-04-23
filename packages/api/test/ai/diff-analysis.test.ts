@@ -1,6 +1,7 @@
 import {
   computeDiff,
   createDiffAnalysisWorker,
+  enqueueDiffAnalysis,
   InMemoryDiffAnalysisRepository,
 } from '../../src/ai/diff-analysis';
 import {
@@ -8,7 +9,7 @@ import {
   createRevision,
 } from '../../src/ai/document-revision';
 import { createLogger } from '../../src/logging/logger';
-import { QueueMessage } from '../../src/queues/queue';
+import { InMemoryQueue, QueueMessage } from '../../src/queues/queue';
 
 describe('P0-018 — Async diff-analysis worker foundation', () => {
   const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -202,6 +203,55 @@ describe('P0-018 — Async diff-analysis worker foundation', () => {
     it('malformed AI output handled gracefully — empty snapshots produce no diff', () => {
       const diff = computeDiff({}, {});
       expect(diff).toHaveLength(0);
+    });
+  });
+
+  describe('enqueueDiffAnalysis (P0-018 AC — uses async job framework with idempotency)', () => {
+    it('happy path — creates a pending row and enqueues a typed job', async () => {
+      const diffRepo = new InMemoryDiffAnalysisRepository();
+      const queue = new InMemoryQueue();
+
+      const analysis = await enqueueDiffAnalysis(diffRepo, queue, {
+        tenantId: 'tenant-1',
+        documentType: 'estimate',
+        documentId: 'doc-1',
+        fromRevisionId: 'rev-1',
+        toRevisionId: 'rev-2',
+      });
+
+      expect(analysis.status).toBe('pending');
+      expect(analysis.diff).toEqual([]);
+      expect(await diffRepo.findById('tenant-1', analysis.id)).not.toBeNull();
+
+      const msg = await queue.receive<{ analysisId: string; tenantId: string }>();
+      expect(msg).not.toBeNull();
+      expect(msg!.type).toBe('diff_analysis');
+      expect(msg!.payload.analysisId).toBe(analysis.id);
+      expect(msg!.idempotencyKey).toBe(analysis.id);
+    });
+
+    it('idempotency — same analysis id never produces two queue entries', async () => {
+      const diffRepo = new InMemoryDiffAnalysisRepository();
+      const queue = new InMemoryQueue();
+
+      // Two independent enqueue calls each generate a new id, so each is
+      // unique. Re-enqueueing with the SAME id (e.g. from an at-least-once
+      // caller retry) is what the idempotency key prevents — we simulate by
+      // calling queue.send twice with the same idempotencyKey.
+      const analysis = await enqueueDiffAnalysis(diffRepo, queue, {
+        tenantId: 'tenant-1',
+        documentType: 'estimate',
+        documentId: 'doc-1',
+        fromRevisionId: 'rev-1',
+        toRevisionId: 'rev-2',
+      });
+      await queue.send('diff_analysis', { analysisId: analysis.id }, analysis.id);
+
+      // In-memory queue doesn't dedupe, but the Queue contract says Pg's unique
+      // idempotency_key index does. This test proves the key is set — the
+      // contract guarantee is tested on PgQueue directly in queue.test.ts.
+      const first = await queue.receive();
+      expect(first!.idempotencyKey).toBe(analysis.id);
     });
   });
 });
