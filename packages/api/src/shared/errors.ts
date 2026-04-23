@@ -65,7 +65,7 @@ export function toErrorResponse(err: unknown): { statusCode: number; body: Recor
       body: {
         error: 'VALIDATION_ERROR',
         message: 'Invalid request data',
-        fields: err.flatten().fieldErrors,
+        details: { fields: err.flatten().fieldErrors },
       },
     };
   }

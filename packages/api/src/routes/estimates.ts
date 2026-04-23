@@ -60,7 +60,10 @@ export function createEstimateRouter(
     requirePermission('estimates:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await listEstimates(req.auth!.tenantId, estimateRepo);
+        const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+        const result = jobId
+          ? await estimateRepo.findByJob(req.auth!.tenantId, jobId)
+          : await listEstimates(req.auth!.tenantId, estimateRepo);
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -89,24 +92,34 @@ export function createEstimateRouter(
     }
   );
 
+  const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const result = await updateEstimate(req.auth!.tenantId, req.params.id, req.body, estimateRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+        return;
+      }
+      res.json(result);
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  };
+
   router.put(
     '/:id',
     requireAuth,
     requireTenant,
     requirePermission('estimates:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await updateEstimate(req.auth!.tenantId, req.params.id, req.body, estimateRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    updateHandler
+  );
+
+  router.patch(
+    '/:id',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:update'),
+    updateHandler
   );
 
   router.post(

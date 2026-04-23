@@ -128,12 +128,12 @@ describe('POST /api/jobs', () => {
     expect(r2.body.jobNumber).toBe('JOB-0002');
   });
 
-  it('returns an error for missing required fields', async () => {
+  it('returns 400 with field errors for missing required fields', async () => {
     const res = await request(app).post('/api/jobs').send({ summary: 'No customer or location' });
-    // ZodError is not mapped to AppError so the server returns 5xx — either
-    // way it must be non-2xx and include an error key
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.body).toHaveProperty('error');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fields).toHaveProperty('customerId');
+    expect(res.body.details.fields).toHaveProperty('locationId');
   });
 });
 
@@ -219,7 +219,7 @@ describe('POST /api/jobs/:id/transition', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
-  it('returns an error for an invalid status transition', async () => {
+  it('returns 400 for an invalid status transition', async () => {
     const created = await request(app).post('/api/jobs').send({
       customerId: 'c1',
       locationId: 'l1',
@@ -227,14 +227,12 @@ describe('POST /api/jobs/:id/transition', () => {
     });
     expect(created.status).toBe(201);
 
-    // new → completed is not a valid transition per the lifecycle.
-    // The lifecycle throws a plain Error (not AppError) so the server
-    // maps it to 5xx — either way it must be non-2xx.
     const res = await request(app)
       .post(`/api/jobs/${created.body.id}/transition`)
       .send({ status: 'completed' });
 
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
   it('full lifecycle: new → scheduled → in_progress → completed', async () => {
