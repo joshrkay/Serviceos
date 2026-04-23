@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
-  MapPin, Check, Store, RefreshCw, TrendingUp, Mail,
+  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen,
 } from 'lucide-react';
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
@@ -33,6 +33,7 @@ export function SettingsPage() {
         { icon: Building2, label: 'Business profile',    description: 'Name, logo, address, phone',                      action: () => {} },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español, timezone',                     action: () => {} },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => {} },
+        { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
       ],
     },
     {
