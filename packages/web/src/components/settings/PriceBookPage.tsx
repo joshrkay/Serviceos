@@ -220,7 +220,7 @@ export function PriceBookPage() {
         const { rowNumber, ...payload } = row;
         const response = await apiFetch('/api/catalog/items', {
           method: 'POST',
-          body: JSON.stringify(payload),
+          body: JSON.stringify(row),
         });
 
         if (response.ok) {
@@ -272,6 +272,7 @@ export function PriceBookPage() {
             />
           </>
         </div>
+      ) : null}
 
         {progressText && (
           <p className="mb-3 text-sm text-slate-600">{progressText}</p>
