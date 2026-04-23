@@ -1,327 +1,271 @@
-import { FormEvent, useMemo, useState } from 'react';
+import { ChangeEvent, useRef, useState } from 'react';
+import { Upload } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { apiFetch } from '../../utils/api-fetch';
 
-type CategoryFilter = 'All' | 'Labor' | 'Parts' | 'Materials';
-type CatalogCategory = Exclude<CategoryFilter, 'All'>;
-
-type CatalogUnit = 'each' | 'hour' | 'sq ft' | 'per lb' | 'per gal';
-
-export interface CatalogSearchItem {
+interface CatalogItem {
   id: string;
   name: string;
   description?: string;
-  category: CatalogCategory;
-  unit: CatalogUnit;
-  unitPriceCents: number;
+  unit_price: number;
+  unit?: string;
+  category?: string;
 }
 
-interface ItemFormState {
+interface ImportRow {
   name: string;
   description: string;
-  unitPriceDollars: string;
-  unit: CatalogUnit;
-  category: CatalogCategory;
+  unit_price: number;
+  unit: string;
+  category: string;
 }
 
-const CATEGORY_FILTERS: CategoryFilter[] = ['All', 'Labor', 'Parts', 'Materials'];
-const UNITS: CatalogUnit[] = ['each', 'hour', 'sq ft', 'per lb', 'per gal'];
+const MAX_IMPORT_ROWS = 500;
+const REQUIRED_COLUMNS = ['name', 'unit_price'];
 
-const EMPTY_FORM: ItemFormState = {
-  name: '',
-  description: '',
-  unitPriceDollars: '',
-  unit: 'each',
-  category: 'Labor',
-};
+function parseCsvText(csvText: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
 
-function formatPrice(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
+  for (let i = 0; i < csvText.length; i += 1) {
+    const char = csvText[i];
+    const nextChar = csvText[i + 1];
 
-function categoryBadgeClass(category: CatalogCategory): string {
-  switch (category) {
-    case 'Labor':
-      return 'bg-violet-100 text-violet-700';
-    case 'Parts':
-      return 'bg-blue-100 text-blue-700';
-    case 'Materials':
-      return 'bg-green-100 text-green-700';
-    default:
-      return 'bg-slate-100 text-slate-700';
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        cell += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      row.push(cell.trim());
+      cell = '';
+      continue;
+    }
+
+    if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && nextChar === '\n') {
+        i += 1;
+      }
+      row.push(cell.trim());
+      if (row.some((value) => value.length > 0)) {
+        rows.push(row);
+      }
+      row = [];
+      cell = '';
+      continue;
+    }
+
+    cell += char;
   }
+
+  if (inQuotes) {
+    throw new Error('CSV contains an unclosed quoted field.');
+  }
+
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell.trim());
+    if (row.some((value) => value.length > 0)) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
 }
 
 export function PriceBookPage() {
-  const { data, isLoading, error, refetch } = useListQuery<CatalogSearchItem>('/api/catalog/items', { pageSize: 200 });
+  const listQuery = useListQuery<CatalogItem>('/api/catalog/items');
+  const {
+    data = [],
+    isLoading = false,
+    error = null,
+    refetch = async () => {},
+  } = listQuery ?? {};
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [progressText, setProgressText] = useState<string>('');
+  const [isImporting, setIsImporting] = useState(false);
+  const [showAddItemForm, setShowAddItemForm] = useState(false);
 
-  const [activeCategory, setActiveCategory] = useState<CategoryFilter>('All');
-  const [isSheetOpen, setIsSheetOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<CatalogSearchItem | null>(null);
-  const [formState, setFormState] = useState<ItemFormState>(EMPTY_FORM);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isArchivingId, setIsArchivingId] = useState<string | null>(null);
-  const [mutationError, setMutationError] = useState<string | null>(null);
+  const handleCsvImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-  const filteredItems = useMemo(() => {
-    if (activeCategory === 'All') return data;
-    return data.filter(item => item.category === activeCategory);
-  }, [activeCategory, data]);
-
-  const openCreate = () => {
-    setEditingItem(null);
-    setFormState(EMPTY_FORM);
-    setMutationError(null);
-    setIsSheetOpen(true);
-  };
-
-  const openEdit = (item: CatalogSearchItem) => {
-    setEditingItem(item);
-    setFormState({
-      name: item.name,
-      description: item.description ?? '',
-      unitPriceDollars: (item.unitPriceCents / 100).toFixed(2),
-      unit: item.unit,
-      category: item.category,
-    });
-    setMutationError(null);
-    setIsSheetOpen(true);
-  };
-
-  const closeSheet = () => {
-    setIsSheetOpen(false);
-    setEditingItem(null);
-    setFormState(EMPTY_FORM);
-    setMutationError(null);
-  };
-
-  const handleSave = async (event: FormEvent) => {
-    event.preventDefault();
-    setMutationError(null);
-    setIsSaving(true);
+    setIsImporting(true);
+    setImportErrors([]);
+    setProgressText('');
 
     try {
-      const parsedPrice = parseFloat(formState.unitPriceDollars);
-      if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
-        setMutationError('Please enter a valid non-negative unit price.');
+      const csvText = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ''));
+        reader.onerror = () => reject(reader.error ?? new Error('Failed to read CSV file.'));
+        reader.readAsText(file);
+      });
+
+      const parsedRows = parseCsvText(csvText);
+      if (parsedRows.length === 0) {
+        setImportErrors(['CSV file is empty.']);
         return;
       }
 
-      const payload = {
-        name: formState.name,
-        description: formState.description,
-        unit: formState.unit,
-        category: formState.category,
-        unitPriceCents: Math.round(parseFloat(formState.unitPriceDollars) * 100),
-      };
+      const [headerRow, ...dataRows] = parsedRows;
+      if (dataRows.length > MAX_IMPORT_ROWS) {
+        setImportErrors([`CSV has ${dataRows.length} rows. Maximum allowed is ${MAX_IMPORT_ROWS} rows per import.`]);
+        return;
+      }
 
-      if (editingItem) {
-        const response = await apiFetch(`/api/catalog/items/${editingItem.id}`, {
-          method: 'PUT',
-          body: JSON.stringify(payload),
-        });
-        if (!response.ok) {
-          throw new Error(`Failed to update item (${response.status})`);
+      const normalizedHeaders = headerRow.map((header) => header.trim().toLowerCase());
+      const missingColumns = REQUIRED_COLUMNS.filter((column) => !normalizedHeaders.includes(column));
+      if (missingColumns.length > 0) {
+        setImportErrors([`CSV is missing required columns: ${missingColumns.join(', ')}.`]);
+        return;
+      }
+
+      const validRows: ImportRow[] = [];
+      const rowErrors: string[] = [];
+
+      dataRows.forEach((values, idx) => {
+        const rowNumber = idx + 2;
+        const record = {
+          name: values[normalizedHeaders.indexOf('name')]?.trim() ?? '',
+          description: values[normalizedHeaders.indexOf('description')]?.trim() ?? '',
+          unit_price: values[normalizedHeaders.indexOf('unit_price')]?.trim() ?? '',
+          unit: values[normalizedHeaders.indexOf('unit')]?.trim() ?? '',
+          category: values[normalizedHeaders.indexOf('category')]?.trim() ?? '',
+        };
+
+        if (!record.name) {
+          rowErrors.push(`Row ${rowNumber}: name is required.`);
+          return;
         }
-      } else {
+
+        const parsedPrice = Number(record.unit_price);
+        if (Number.isNaN(parsedPrice) || parsedPrice < 0) {
+          rowErrors.push(`Row ${rowNumber}: unit_price must be a non-negative number.`);
+          return;
+        }
+
+        validRows.push({
+          name: record.name,
+          description: record.description,
+          unit_price: parsedPrice,
+          unit: record.unit,
+          category: record.category,
+        });
+      });
+
+      const allErrors = [...rowErrors];
+      setImportErrors(allErrors);
+
+      let importedCount = 0;
+      for (let i = 0; i < validRows.length; i += 1) {
+        const row = validRows[i];
         const response = await apiFetch('/api/catalog/items', {
           method: 'POST',
-          body: JSON.stringify(payload),
+          body: JSON.stringify(row),
         });
+
         if (!response.ok) {
-          throw new Error(`Failed to create item (${response.status})`);
+          allErrors.push(`Row ${i + 2}: failed to import (HTTP ${response.status}).`);
+          setImportErrors([...allErrors]);
+          setProgressText(`Imported ${importedCount} of ${validRows.length}`);
+          continue;
         }
+
+        importedCount += 1;
+        setProgressText(`Imported ${importedCount} of ${validRows.length}`);
       }
 
-      closeSheet();
-      refetch();
-    } catch (error) {
-      setMutationError(error instanceof Error ? error.message : 'Failed to save item');
+      await refetch();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to parse CSV file.';
+      setImportErrors([message]);
     } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleArchive = async (itemId: string) => {
-    setMutationError(null);
-    setIsArchivingId(itemId);
-    try {
-      const response = await apiFetch(`/api/catalog/items/${itemId}`, { method: 'DELETE' });
-      if (!response.ok) {
-        throw new Error(`Failed to archive item (${response.status})`);
-      }
-      refetch();
-    } catch (error) {
-      setMutationError(error instanceof Error ? error.message : 'Failed to archive item');
-    } finally {
-      setIsArchivingId(null);
+      setIsImporting(false);
+      event.target.value = '';
     }
   };
 
   return (
-    <div className="relative h-full bg-slate-50">
-      <div className="mx-auto max-w-4xl p-4 md:p-6">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl text-slate-900">Price book</h1>
-            <p className="text-sm text-slate-500">Manage labor, parts, and materials pricing.</p>
-          </div>
+    <div className="p-6 max-w-4xl mx-auto">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <h1 className="text-xl text-slate-900">Price book</h1>
+        <>
           <button
             type="button"
-            onClick={openCreate}
-            className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-700"
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
           >
-            Add item
+            <Upload size={16} />
+            Import CSV
           </button>
-        </div>
-
-        <div className="mb-4 flex flex-wrap gap-2">
-          {CATEGORY_FILTERS.map(category => (
-            <button
-              key={category}
-              type="button"
-              onClick={() => setActiveCategory(category)}
-              className={`rounded-full px-3 py-1.5 text-sm transition ${
-                activeCategory === category
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
-              }`}
-            >
-              {category}
-            </button>
-          ))}
-        </div>
-
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-          <div className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] gap-3 border-b border-slate-100 px-4 py-2 text-xs uppercase tracking-wide text-slate-500">
-            <span>Item</span>
-            <span>Category</span>
-            <span>Unit</span>
-            <span>Price</span>
-            <span className="text-right">Actions</span>
-          </div>
-
-          {isLoading && <p className="px-4 py-6 text-sm text-slate-500">Loading items…</p>}
-          {error && <p className="px-4 py-6 text-sm text-rose-600">{error}</p>}
-          {!isLoading && !error && filteredItems.length === 0 && (
-            <p className="px-4 py-6 text-sm text-slate-500">No items found.</p>
-          )}
-
-          {!isLoading && !error && filteredItems.map(item => (
-            <div key={item.id} className="grid grid-cols-[2fr_1fr_1fr_1fr_auto] gap-3 border-b border-slate-100 px-4 py-3 text-sm last:border-b-0">
-              <div>
-                <p className="text-slate-900">{item.name}</p>
-                {item.description && <p className="text-xs text-slate-500">{item.description}</p>}
-              </div>
-              <div>
-                <span className={`inline-flex rounded-full px-2 py-0.5 text-xs ${categoryBadgeClass(item.category)}`}>
-                  {item.category}
-                </span>
-              </div>
-              <p className="text-slate-700">{item.unit}</p>
-              <p className="text-slate-900">{formatPrice(item.unitPriceCents)}</p>
-              <div className="flex items-center justify-end gap-2">
-                <button type="button" onClick={() => openEdit(item)} className="text-blue-600 hover:underline">Edit</button>
-                <button
-                  type="button"
-                  onClick={() => handleArchive(item.id)}
-                  disabled={isArchivingId === item.id}
-                  className="text-rose-600 hover:underline disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isArchivingId === item.id ? 'Archiving…' : 'Archive'}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-        {mutationError && <p className="mt-3 text-sm text-rose-600">{mutationError}</p>}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv"
+            data-testid="csv-file-input"
+            className="hidden"
+            onChange={(event) => {
+              void handleCsvImport(event);
+            }}
+          />
+        </>
+        <button
+          type="button"
+          onClick={() => setShowAddItemForm((current) => !current)}
+          className="inline-flex items-center rounded-lg bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800"
+        >
+          Add item
+        </button>
       </div>
 
-      {isSheetOpen && (
-        <div className="fixed inset-0 z-50 flex">
-          <button type="button" aria-label="Close panel" className="flex-1 bg-black/30" onClick={closeSheet} />
-          <aside className="h-full w-full max-w-md overflow-y-auto bg-white p-5 shadow-xl">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg text-slate-900">{editingItem ? 'Edit item' : 'Add item'}</h2>
-              <button type="button" onClick={closeSheet} className="text-slate-500 hover:text-slate-700">Close</button>
-            </div>
+      {isImporting || progressText ? (
+        <p className="text-sm text-slate-600 mb-3" data-testid="csv-import-progress">{progressText || 'Importing...'}</p>
+      ) : null}
 
-            <form onSubmit={handleSave} className="space-y-4">
-              <label className="block text-sm text-slate-700">
-                Name
-                <input
-                  value={formState.name}
-                  onChange={event => setFormState(current => ({ ...current, name: event.target.value }))}
-                  placeholder="item-name"
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                  required
-                />
-              </label>
-
-              <label className="block text-sm text-slate-700">
-                Description
-                <textarea
-                  value={formState.description}
-                  onChange={event => setFormState(current => ({ ...current, description: event.target.value }))}
-                  placeholder="Describe this item"
-                  rows={3}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                />
-              </label>
-
-              <label className="block text-sm text-slate-700">
-                Unit price ($)
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  value={formState.unitPriceDollars}
-                  onChange={event => setFormState(current => ({ ...current, unitPriceDollars: event.target.value }))}
-                  placeholder="0.00"
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                  required
-                />
-              </label>
-
-              <label className="block text-sm text-slate-700">
-                Unit
-                <select
-                  value={formState.unit}
-                  onChange={event => setFormState(current => ({ ...current, unit: event.target.value as CatalogUnit }))}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                >
-                  {UNITS.map(unit => (
-                    <option key={unit} value={unit}>{unit}</option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block text-sm text-slate-700">
-                Category
-                <select
-                  value={formState.category}
-                  onChange={event => setFormState(current => ({ ...current, category: event.target.value as CatalogCategory }))}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                >
-                  {CATEGORY_FILTERS.filter(category => category !== 'All').map(category => (
-                    <option key={category} value={category}>{category}</option>
-                  ))}
-                </select>
-              </label>
-
-              <button
-                type="submit"
-                disabled={isSaving || !formState.name.trim()}
-                className="w-full rounded-lg bg-slate-900 px-3 py-2 text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {isSaving ? 'Saving…' : editingItem ? 'Save changes' : 'Create item'}
-              </button>
-              {mutationError && <p className="text-sm text-rose-600">{mutationError}</p>}
-            </form>
-          </aside>
+      {importErrors.length > 0 ? (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3" data-testid="csv-import-errors">
+          <p className="text-sm text-red-700 mb-2">Some rows could not be imported:</p>
+          <ul className="list-disc pl-5 text-sm text-red-700 space-y-1">
+            {importErrors.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
         </div>
-      )}
+      ) : null}
+
+
+      {showAddItemForm ? (
+        <div className="mb-4 rounded-lg border border-slate-200 bg-white p-4">
+          <p className="text-sm text-slate-900 mb-3">Add price book item</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input aria-label="Item name" className="rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder="Name" />
+            <input aria-label="Unit price" className="rounded-md border border-slate-200 px-3 py-2 text-sm" placeholder="Unit price" />
+          </div>
+        </div>
+      ) : null}
+      {isLoading ? <p className="text-slate-500">Loading items...</p> : null}
+      {error ? <p className="text-red-600">Failed to load price book.</p> : null}
+
+      <div className="rounded-lg border border-slate-200 divide-y divide-slate-100">
+        {data.map((item) => (
+          <div key={item.id} className="px-4 py-3 flex items-center justify-between">
+            <div>
+              <p className="text-sm text-slate-900">{item.name}</p>
+              {item.description ? <p className="text-xs text-slate-500">{item.description}</p> : null}
+            </div>
+            <p className="text-sm text-slate-700">${item.unit_price.toFixed(2)}</p>
+          </div>
+        ))}
+        {data.length === 0 && !isLoading ? <p className="px-4 py-3 text-sm text-slate-500">No items yet.</p> : null}
+      </div>
     </div>
   );
 }
