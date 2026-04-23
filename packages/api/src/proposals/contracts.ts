@@ -3,6 +3,9 @@ import { ProposalType } from './proposal';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
+import { addNotePayloadSchema } from './contracts/notes';
+import { sendInvoicePayloadSchema } from './contracts/send-invoice';
+import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -122,6 +125,39 @@ export const updateInvoicePayloadSchema = z.object({
   editActions: z.array(invoiceEditActionSchema).min(1),
 });
 
+// voice_clarification: emitted when the voice classifier cannot route
+// a transcript (intent='unknown' OR confidence below threshold). It is
+// NOT a mutation — it surfaces in the operator's feed as "I heard X
+// but wasn't sure what to do." The operator dismisses it or speaks
+// again. Stored as a proposal so it reuses the existing tenant
+// isolation, audit, and review-card rendering; it has no execution
+// handler because there is nothing to execute.
+//
+// Reasons the router emits one:
+//   - 'unknown_intent'         — classifier said 'unknown' at any confidence
+//   - 'low_confidence'         — a real intent was picked but below threshold
+//   - 'parse_failed'           — classifier output wasn't parseable JSON
+//   - 'missing_entities'       — intent was clear but required entities absent
+//
+// suggestedIntents (optional) lets the UI render "Did you mean: create
+// invoice / schedule appointment?" chips. When the classifier picked an
+// intent but confidence was low, the low-confidence intent is the first
+// suggestion.
+export const voiceClarificationPayloadSchema = z.object({
+  transcript: z.string().min(1),
+  reason: z.enum([
+    'unknown_intent',
+    'low_confidence',
+    'parse_failed',
+    'missing_entities',
+  ]),
+  suggestedIntents: z.array(z.string()).optional(),
+  classifierReasoning: z.string().optional(),
+  classifierConfidence: z.number().min(0).max(1).optional(),
+  recordingId: z.string().optional(),
+  conversationId: z.string().optional(),
+});
+
 export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
@@ -134,6 +170,10 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
+  voice_clarification: voiceClarificationPayloadSchema,
+  add_note: addNotePayloadSchema,
+  send_invoice: sendInvoicePayloadSchema,
+  record_payment: recordPaymentPayloadSchema,
   onboarding_tenant_settings: onboardingTenantSettingsPayloadSchema,
   onboarding_service_category: onboardingServiceCategoryPayloadSchema,
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,

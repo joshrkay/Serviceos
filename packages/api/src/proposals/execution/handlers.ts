@@ -6,6 +6,14 @@ import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
+import {
+  AddNoteExecutionHandler,
+  SendInvoiceExecutionHandler,
+  RecordPaymentExecutionHandler,
+  InvoiceDeliveryProvider,
+} from './voice-extended-handlers';
+import { NoteRepository } from '../../notes/note';
+import { PaymentRepository } from '../../invoices/payment';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
@@ -185,6 +193,9 @@ export function createExecutionHandlerRegistry(deps?: {
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
+  noteRepo?: NoteRepository;
+  paymentRepo?: PaymentRepository;
+  invoiceDeliveryProvider?: InvoiceDeliveryProvider;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
@@ -196,6 +207,13 @@ export function createExecutionHandlerRegistry(deps?: {
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
+    // Stage-2 voice handlers wired against real repositories. Each
+    // handler degrades to a synthetic-id passthrough when its dep is
+    // absent (used by in-memory tests that don't exercise the
+    // mutation path). Production wires the real deps in app.ts.
+    new AddNoteExecutionHandler(deps?.noteRepo),
+    new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
+    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

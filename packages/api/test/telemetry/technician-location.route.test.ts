@@ -7,6 +7,13 @@ import { InMemoryTechnicianLocationPingRepository } from '../../src/telemetry/te
 
 describe('POST /api/technician-location', () => {
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  // Pings older than 24h are rejected by createTechnicianLocationPing's
+  // stale-window check (DEFAULT_MAX_STALE_MS). Earlier versions of
+  // this test used hardcoded 2026-04 ISO strings that rotted past the
+  // window as wall-clock time advanced. Relative-to-now dates keep
+  // the test deterministic against the stale-window guard.
+  const RECENT_PING_ISO = new Date(Date.now() - 60_000).toISOString();
+  const OLDER_PING_ISO = new Date(Date.now() - 120_000).toISOString();
   let app: express.Express;
   let repo: InMemoryTechnicianLocationPingRepository;
 
@@ -35,13 +42,13 @@ describe('POST /api/technician-location', () => {
         {
           lat: 37.7,
           lng: -122.4,
-          recordedAt: '2026-04-20T11:58:00.000Z',
+          recordedAt: OLDER_PING_ISO,
           source: 'gps',
         },
         {
           lat: 37.8,
           lng: -122.5,
-          recordedAt: '2026-04-20T11:59:00.000Z',
+          recordedAt: RECENT_PING_ISO,
           source: 'gps',
         },
       ],
@@ -52,8 +59,12 @@ describe('POST /api/technician-location', () => {
 
     const rows = await repo.listByTechnician(tenantId, 'tech-1');
     expect(rows).toHaveLength(2);
-    expect(rows[0].recordedAt.toISOString()).toBe('2026-04-20T11:59:00.000Z');
-    expect(rows[1].recordedAt.toISOString()).toBe('2026-04-20T11:58:00.000Z');
+    // Repository sorts reverse-chronologically — the more-recent ping
+    // comes first. Assertion is on the relative order, not the
+    // absolute timestamp, so the test stays deterministic as the
+    // wall clock advances.
+    expect(rows[0].recordedAt.toISOString()).toBe(RECENT_PING_ISO);
+    expect(rows[1].recordedAt.toISOString()).toBe(OLDER_PING_ISO);
   });
 
   it('rejects technician submissions for a different technicianId', async () => {
@@ -63,7 +74,7 @@ describe('POST /api/technician-location', () => {
         {
           lat: 37.7,
           lng: -122.4,
-          recordedAt: '2026-04-20T11:58:00.000Z',
+          recordedAt: RECENT_PING_ISO,
           source: 'gps',
         },
       ],
@@ -80,7 +91,7 @@ describe('POST /api/technician-location', () => {
         {
           lat: 100,
           lng: -122.4,
-          recordedAt: '2026-04-20T11:58:00.000Z',
+          recordedAt: RECENT_PING_ISO,
           source: 'gps',
         },
       ],
@@ -96,7 +107,7 @@ describe('POST /api/technician-location', () => {
         {
           lat: 37.7,
           lng: -122.4,
-          recordedAt: '2026-04-20T11:58:00.000Z',
+          recordedAt: RECENT_PING_ISO,
           source: 'gps',
         },
       ],
