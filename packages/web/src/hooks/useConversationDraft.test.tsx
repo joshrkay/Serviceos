@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { renderHook, act, render } from '@testing-library/react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useConversationDraft, useScrollRecovery } from './useConversationDraft';
 
 describe('P3-011 — useConversationDraft', () => {
@@ -123,9 +123,12 @@ describe('P3-011 — useScrollRecovery', () => {
     const { getByTestId } = render(<Harness conversationId="conv-burst" />);
     const el = getByTestId('scroll-container') as HTMLDivElement;
 
-    const baseline = setItemSpy.mock.calls.filter((c) =>
-      String(c[0]).startsWith('serviceos.scroll.conv-burst')
-    ).length;
+    const matches = (): number =>
+      setItemSpy.mock.calls.filter(
+        (c: [string, string]) => c[0].startsWith('serviceos.scroll.conv-burst')
+      ).length;
+
+    const baseline = matches();
 
     for (let i = 0; i < 10; i++) {
       el.scrollTop = 10 * (i + 1);
@@ -133,9 +136,7 @@ describe('P3-011 — useScrollRecovery', () => {
     }
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-    const after = setItemSpy.mock.calls.filter((c) =>
-      String(c[0]).startsWith('serviceos.scroll.conv-burst')
-    ).length;
+    const after = matches();
     // Only one write should have landed despite 10 events.
     expect(after - baseline).toBe(1);
     setItemSpy.mockRestore();

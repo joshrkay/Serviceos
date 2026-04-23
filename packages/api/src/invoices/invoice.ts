@@ -181,7 +181,16 @@ export async function createInvoiceWithNextNumber(
   const updated = await invoiceRepo.update(input.tenantId, invoice.id, {
     invoiceNumber,
   });
-  return updated ?? { ...invoice, invoiceNumber };
+  if (!updated) {
+    // Hard failure: the counter is now allocated but the placeholder row
+    // can't be promoted to its real number. Returning a synthetic object
+    // would desync the app state from persistence — callers must see this
+    // as an error so it can be retried or alerted on.
+    throw new Error(
+      `Allocated invoice number ${invoiceNumber} but failed to update row ${invoice.id}`
+    );
+  }
+  return updated;
 }
 
 export async function getInvoice(

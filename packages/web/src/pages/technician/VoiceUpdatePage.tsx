@@ -40,6 +40,11 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
   // on a completed/failed status, which short-circuits late responses.
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCancelled = useRef<boolean>(false);
+  // Keep the latest onTranscribed in a ref so the closure captured by tick()
+  // always calls the current version, not the one from the render cycle that
+  // started the poll.
+  const onTranscribedRef = useRef(onTranscribed);
+  onTranscribedRef.current = onTranscribed;
 
   const clearPoll = () => {
     pollCancelled.current = true;
@@ -69,8 +74,8 @@ export function VoiceUpdatePage({ jobContext, onTranscribed }: VoiceUpdatePagePr
 
           if (r.status === 'completed') {
             clearPoll();
-            if (onTranscribed && r.transcript) {
-              onTranscribed(id, r.transcript);
+            if (onTranscribedRef.current && r.transcript) {
+              onTranscribedRef.current(id, r.transcript);
             }
             return;
           }
