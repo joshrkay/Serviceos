@@ -8,6 +8,10 @@ import {
   IntentClassification,
   IntentType,
 } from '../ai/orchestration/intent-classifier';
+import {
+  resolveReferences,
+  ConversationReferent,
+} from '../ai/orchestration/reference-resolver';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
@@ -54,9 +58,22 @@ export interface VoiceActionRouterPayload {
   recordingId?: string;
 }
 
+/**
+ * Optional cross-turn referent provider. When supplied, the router
+ * rewrites pronouns in the transcript ("send it to him") with
+ * concrete referents pulled from the most recent proposals in the
+ * same conversation BEFORE calling the classifier. Keeps the
+ * classifier prompt focused on intent detection and avoids
+ * repeat-prompt gymnastics for conversational follow-ups.
+ */
+export interface RecentReferentProvider {
+  forConversation(tenantId: string, conversationId: string): Promise<ConversationReferent[]>;
+}
+
 export interface VoiceActionRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
+  recentReferents?: RecentReferentProvider;
 }
 
 const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalType> = {
@@ -240,7 +257,33 @@ export function createVoiceActionRouterWorker(
         return;
       }
 
-      const classification = await classifyIntent(transcript, { tenantId }, deps.gateway);
+      // Cross-turn reference rewrite. Pronouns and "the X" references
+      // get replaced with concrete referents from the most recent
+      // proposal in the same conversation — purely deterministic,
+      // no extra LLM call. When no referent provider is wired the
+      // transcript is unchanged (backward compatible).
+      let effectiveTranscript = transcript;
+      if (deps.recentReferents && conversationId) {
+        try {
+          const recent = await deps.recentReferents.forConversation(tenantId, conversationId);
+          const resolution = resolveReferences(transcript, { recentReferents: recent });
+          if (resolution.rewrote) {
+            effectiveTranscript = resolution.transcript;
+            log.info('voice-action-router: pronouns rewritten', {
+              substitutions: resolution.substitutions,
+            });
+          }
+        } catch (err) {
+          // Referent lookup failures are non-fatal — fall back to the
+          // raw transcript rather than breaking the pipeline.
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: reference resolver failed, continuing with raw transcript', {
+            error: error.message,
+          });
+        }
+      }
+
+      const classification = await classifyIntent(effectiveTranscript, { tenantId }, deps.gateway);
 
       if (classification.intentType === 'unknown') {
         // Emit a clarification proposal instead of dropping. The
@@ -249,7 +292,14 @@ export function createVoiceActionRouterWorker(
         // promise that every utterance has a visible outcome.
         await emitClarification(
           deps,
-          { tenantId, userId, transcript, classification, conversationId, recordingId },
+          {
+            tenantId,
+            userId,
+            transcript: effectiveTranscript,
+            classification,
+            conversationId,
+            recordingId,
+          },
           log
         );
         return;
@@ -266,7 +316,10 @@ export function createVoiceActionRouterWorker(
       const context: TaskContext = {
         tenantId,
         userId,
-        message: transcript,
+        // Task handlers see the REWRITTEN transcript so proposals
+        // that reach review carry the resolved entity names, not the
+        // original pronouns.
+        message: effectiveTranscript,
         conversationId,
         existingEntities: entitiesForProposal(
           classification.intentType,

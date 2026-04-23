@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
-  ArrowUpRight, UserPlus,
+  ArrowUpRight, UserPlus, HelpCircle, StickyNote, DollarSign, Send,
 } from 'lucide-react';
 import type { AIProposal, ProposalType } from '../../data/mock-data';
 
@@ -17,6 +17,34 @@ const TYPE_CONFIG: Record<ProposalType, {
   Alert:      { color: 'text-red-700',    bg: 'bg-red-50',    border: 'border-red-200',   icon: AlertCircle,     label: 'Alert' },
   Duplicate:  { color: 'text-slate-600',  bg: 'bg-slate-50',  border: 'border-slate-200', icon: Copy,            label: 'Duplicate' },
   Customer:   { color: 'text-emerald-700',bg: 'bg-emerald-50',border: 'border-emerald-200',icon: UserPlus,       label: 'New customer' },
+  // Clarification cards surface when the voice classifier couldn't
+  // route a transcript. They're informational prompts (no Approve)
+  // so the UI styling is softer than a mutation card.
+  Clarification: { color: 'text-slate-600', bg: 'bg-slate-50', border: 'border-slate-200', icon: HelpCircle, label: 'Didn’t catch that' },
+  Note:       { color: 'text-zinc-700',   bg: 'bg-zinc-50',   border: 'border-zinc-200',  icon: StickyNote,      label: 'Note' },
+  Payment:    { color: 'text-green-700',  bg: 'bg-green-50',  border: 'border-green-200', icon: DollarSign,      label: 'Payment' },
+  Send:       { color: 'text-sky-700',    bg: 'bg-sky-50',    border: 'border-sky-200',   icon: Send,            label: 'Send invoice' },
+};
+
+/**
+ * Friendly labels for classifier intent names, used by the
+ * "Did you mean?" chips on a Clarification card. When an intent
+ * isn't listed here we show the raw identifier — never a blank chip.
+ */
+const INTENT_LABELS: Record<string, string> = {
+  create_invoice: 'Create invoice',
+  draft_estimate: 'Draft estimate',
+  create_appointment: 'Schedule appointment',
+  update_invoice: 'Update invoice',
+  update_estimate: 'Update estimate',
+  create_customer: 'Add customer',
+  create_job: 'Create job',
+  reschedule_appointment: 'Reschedule',
+  cancel_appointment: 'Cancel appointment',
+  reassign_appointment: 'Reassign',
+  add_note: 'Add a note',
+  send_invoice: 'Send invoice',
+  record_payment: 'Record payment',
 };
 
 const CONFIDENCE_CONFIG = {
@@ -151,6 +179,46 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
               </div>
             )}
 
+            {/* Screen-tap badge for money / comms / irreversible proposals.
+                When voiceApprovable === false, we make it explicit that
+                voice "yes" is not sufficient here. */}
+            {proposal.voiceApprovable === false && (
+              <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-1">
+                <span className="text-xs text-amber-700">Tap to confirm on screen</span>
+              </div>
+            )}
+
+            {/* Missing-fields prompt. Approve is blocked until the
+                operator fills each listed field via Edit. The task
+                handler populates this when it couldn't extract a
+                required field from the transcript. */}
+            {proposal.missingFields && proposal.missingFields.length > 0 && (
+              <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                <p className="text-xs text-amber-900">
+                  Needs: {proposal.missingFields.join(', ')}
+                </p>
+                <p className="text-xs text-amber-700 mt-0.5">Tap Edit to fill before approval.</p>
+              </div>
+            )}
+
+            {/* "Did you mean?" suggestion chips on Clarification cards.
+                Clicking a chip would re-emit with that intent — wired in
+                a follow-up slice. For now the chips are display-only so
+                the operator knows what the classifier considered. */}
+            {proposal.type === 'Clarification' && proposal.suggestedIntents && proposal.suggestedIntents.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <span className="text-xs text-slate-500 mr-1">Did you mean:</span>
+                {proposal.suggestedIntents.map((intent) => (
+                  <span
+                    key={intent}
+                    className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs text-slate-700"
+                  >
+                    {INTENT_LABELS[intent] ?? intent}
+                  </span>
+                ))}
+              </div>
+            )}
+
             {/* Reasoning toggle */}
             {(proposal.explanation || proposal.reasoning) && (
               <button
@@ -183,14 +251,21 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
         </div>
       </div>
 
-      {/* Actions */}
+      {/* Actions. Clarification cards get only Dismiss — they are
+          informational prompts, not mutations, and have no
+          execution handler behind them. For real proposals,
+          Approve is disabled when there are unfilled missingFields
+          so the operator is forced through the Edit flow. */}
       <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/80 px-4 py-2.5">
-        <button
-          onClick={() => { setStatus('Approved'); onApprove?.(); }}
-          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs text-white hover:bg-blue-700 active:bg-blue-800 transition-colors"
-        >
-          <Check size={12} /> Approve
-        </button>
+        {proposal.type !== 'Clarification' && (
+          <button
+            onClick={() => { setStatus('Approved'); onApprove?.(); }}
+            disabled={Boolean(proposal.missingFields && proposal.missingFields.length > 0)}
+            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs text-white hover:bg-blue-700 active:bg-blue-800 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
+          >
+            <Check size={12} /> Approve
+          </button>
+        )}
 
         {proposal.editFields && proposal.editFields.length > 0 && (
           <button
