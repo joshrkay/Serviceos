@@ -193,5 +193,40 @@ describe('P5-005 — Deterministic invoice proposal execution', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBeTruthy();
     });
+
+    it('does not burn an invoice number when invoiceRepo.create fails', async () => {
+      const settingsRepo = makeSettingsRepo();
+      const failingRepo = new InMemoryInvoiceRepository();
+      // Make the next create() call reject so we can observe whether the
+      // settings counter was incremented before the row was persisted.
+      const origCreate = failingRepo.create.bind(failingRepo);
+      let firstCallRejected = false;
+      failingRepo.create = async (invoice) => {
+        if (!firstCallRejected) {
+          firstCallRejected = true;
+          throw new Error('simulated db failure');
+        }
+        return origCreate(invoice);
+      };
+
+      const handlerWithDeps = new CreateInvoiceExecutionHandler(failingRepo, settingsRepo);
+
+      // First execute fails mid-flight.
+      const r1 = await handlerWithDeps.execute(makeProposal({ id: 'p-fail' }), {
+        tenantId,
+        executedBy: 'user-1',
+      });
+      expect(r1.success).toBe(false);
+
+      // Counter must still be at 1 — the failed create never allocated a
+      // number, so the next successful run lands on INV-0001 (no gap).
+      const r2 = await handlerWithDeps.execute(makeProposal({ id: 'p-ok' }), {
+        tenantId,
+        executedBy: 'user-1',
+      });
+      expect(r2.success).toBe(true);
+      const invoice = await failingRepo.findById(tenantId, r2.resultEntityId!);
+      expect(invoice!.invoiceNumber).toBe('INV-0001');
+    });
   });
 });

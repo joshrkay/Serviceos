@@ -30,13 +30,26 @@ export function useConversationDraft(conversationId: string | undefined): {
   const hydrated = useRef(false);
 
   useEffect(() => {
+    if (!conversationId) {
+      // No conversation in view — clear so a previously-hydrated draft
+      // doesn't leak into an unrelated screen.
+      setDraftState('');
+      return;
+    }
     const storage = safeLocalStorage();
-    if (!storage || !conversationId) return;
+    if (!storage) {
+      // Storage unavailable — fall back to an empty draft.
+      setDraftState('');
+      return;
+    }
     try {
       const saved = storage.getItem(DRAFT_KEY(conversationId));
-      if (saved !== null) setDraftState(saved);
+      // Always reset state on conversationId change: restore a saved value
+      // when one exists, otherwise clear so the previous conversation's
+      // in-memory draft doesn't persist into the new thread.
+      setDraftState(saved ?? '');
     } catch {
-      // Ignore storage read failures — the draft just starts empty.
+      setDraftState('');
     }
     hydrated.current = true;
   }, [conversationId]);
@@ -95,14 +108,39 @@ export function useScrollRecovery(
       // Ignore storage read failures.
     }
 
-    const handler = () => {
+    // Throttle localStorage writes to one per animation frame. A naive
+    // scroll handler fires 60+ times per second on trackpads and causes
+    // measurable main-thread jank on mobile. requestAnimationFrame
+    // coalesces the bursts without needing a debounce timer.
+    const hasRaf = typeof requestAnimationFrame === 'function';
+    let pendingFrame: number | null = null;
+
+    const writeNow = () => {
       try {
         storage.setItem(SCROLL_KEY(conversationId), String(el.scrollTop));
       } catch {
         // Ignore storage write failures.
       }
     };
+
+    const handler = () => {
+      if (!hasRaf) {
+        writeNow();
+        return;
+      }
+      if (pendingFrame !== null) return;
+      pendingFrame = requestAnimationFrame(() => {
+        pendingFrame = null;
+        writeNow();
+      });
+    };
+
     el.addEventListener('scroll', handler, { passive: true });
-    return () => el.removeEventListener('scroll', handler);
+    return () => {
+      el.removeEventListener('scroll', handler);
+      if (pendingFrame !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(pendingFrame);
+      }
+    };
   }, [conversationId, containerRef]);
 }

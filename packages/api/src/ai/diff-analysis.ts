@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from 'uuid';
 import { Queue, WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { DocumentRevision, DocumentRevisionRepository } from './document-revision';
@@ -121,17 +120,45 @@ export interface EnqueueDiffAnalysisInput {
 /**
  * Create a pending DiffAnalysis row and enqueue the worker to process it.
  *
- * The same (from, to) revision pair is processed at most once — the
- * idempotency key is the analysis id itself, which the queue enforces
- * via its unique index on idempotency_key.
+ * The id is derived deterministically from (tenantId, documentType,
+ * documentId, fromRevisionId, toRevisionId) so re-enqueueing the same pair
+ * is idempotent end-to-end: the repo's findById returns the existing row
+ * instead of a duplicate create, and the queue's UNIQUE idempotency_key
+ * rejects the second queue row.
  */
+export function diffAnalysisIdFor(input: EnqueueDiffAnalysisInput): string {
+  return `diff:${input.tenantId}:${input.documentType}:${input.documentId}:${input.fromRevisionId}:${input.toRevisionId}`;
+}
+
 export async function enqueueDiffAnalysis(
   diffRepository: DiffAnalysisRepository,
   queue: Queue,
   input: EnqueueDiffAnalysisInput
 ): Promise<DiffAnalysis> {
+  const id = diffAnalysisIdFor(input);
+
+  const existing = await diffRepository.findById(input.tenantId, id);
+  if (existing) {
+    // Still enqueue with the same idempotency key — the queue will dedupe
+    // if the previous job is still pending, otherwise re-kick processing
+    // (e.g., if the row is in 'failed' status and the caller wants a retry).
+    await queue.send<DiffAnalysisJobPayload>(
+      'diff_analysis',
+      {
+        tenantId: input.tenantId,
+        analysisId: id,
+        documentType: input.documentType,
+        documentId: input.documentId,
+        fromRevisionId: input.fromRevisionId,
+        toRevisionId: input.toRevisionId,
+      },
+      id
+    );
+    return existing;
+  }
+
   const analysis: DiffAnalysis = {
-    id: uuidv4(),
+    id,
     tenantId: input.tenantId,
     documentType: input.documentType,
     documentId: input.documentId,
@@ -148,13 +175,13 @@ export async function enqueueDiffAnalysis(
     'diff_analysis',
     {
       tenantId: input.tenantId,
-      analysisId: analysis.id,
+      analysisId: id,
       documentType: input.documentType,
       documentId: input.documentId,
       fromRevisionId: input.fromRevisionId,
       toRevisionId: input.toRevisionId,
     },
-    analysis.id
+    id
   );
 
   return analysis;
