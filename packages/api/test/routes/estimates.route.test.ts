@@ -105,14 +105,65 @@ describe('POST /api/estimates', () => {
     expect(r2.body.estimateNumber).toBe('EST-0002');
   });
 
-  it('returns an error when lineItems is empty', async () => {
+  it('returns 400 with field errors when lineItems is empty', async () => {
     const res = await request(app).post('/api/estimates').send({
       jobId: 'job-1',
       estimateNumber: 'PLACEHOLDER',
       lineItems: [],  // fails min(1) validation
     });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.body).toHaveProperty('error');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details).toHaveProperty('fields');
+    expect(res.body.details.fields).toHaveProperty('lineItems');
+  });
+
+  it('returns 400 when required fields are missing', async () => {
+    const res = await request(app).post('/api/estimates').send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fields).toHaveProperty('jobId');
+  });
+});
+
+describe('PATCH /api/estimates/:id', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('updates a draft estimate and recalculates totals', async () => {
+    const created = await createEstimate(app, { taxRateBps: 0 });
+    const res = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .send({
+        lineItems: [
+          { id: 'li-1', description: 'Revised', quantity: 2, unitPriceCents: 5000, totalCents: 10000, category: 'labor', sortOrder: 0, taxable: false },
+        ],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.totals.subtotalCents).toBe(10000);
+    expect(res.body.totals.totalCents).toBe(10000);
+  });
+
+  it('returns 400 when editing an estimate that has been sent', async () => {
+    const created = await createEstimate(app);
+    await request(app)
+      .post(`/api/estimates/${created.body.id}/transition`)
+      .send({ status: 'sent' });
+
+    const res = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .send({ customerMessage: 'too late' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 404 for unknown id', async () => {
+    const res = await request(app)
+      .patch('/api/estimates/nope')
+      .send({ customerMessage: 'x' });
+    expect(res.status).toBe(404);
   });
 });
 
@@ -204,15 +255,14 @@ describe('POST /api/estimates/:id/transition', () => {
     expect(res.body.status).toBe('accepted');
   });
 
-  it('returns an error for invalid transition', async () => {
+  it('returns 400 for an invalid transition', async () => {
     const created = await createEstimate(app);
     expect(created.status).toBe(201);
-    // draft → accepted is not a valid transition.
-    // The lifecycle throws a plain Error so the server returns 5xx.
     const res = await request(app)
       .post(`/api/estimates/${created.body.id}/transition`)
       .send({ status: 'accepted' });
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
   it('returns 400 when status is missing', async () => {

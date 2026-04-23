@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ValidationError } from '../shared/errors';
 
 export type EstimateStatus = 'draft' | 'ready_for_review' | 'sent' | 'accepted' | 'rejected' | 'expired';
 
@@ -81,7 +82,7 @@ export async function createEstimate(
   auditRepo?: AuditRepository
 ): Promise<Estimate> {
   const errors = validateEstimateInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,
@@ -140,7 +141,7 @@ export async function updateEstimate(
   if (!existing) return null;
 
   if (!['draft', 'ready_for_review'].includes(existing.status)) {
-    throw new Error(`Cannot edit estimate in '${existing.status}' status`);
+    throw new ValidationError(`Cannot edit estimate in '${existing.status}' status`);
   }
 
   const lineItems = input.lineItems ?? existing.lineItems;
@@ -168,7 +169,7 @@ export async function transitionEstimateStatus(
   if (!estimate) return null;
 
   if (!isValidEstimateTransition(estimate.status, newStatus)) {
-    throw new Error(`Invalid transition from ${estimate.status} to ${newStatus}`);
+    throw new ValidationError(`Invalid transition from ${estimate.status} to ${newStatus}`);
   }
 
   return repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
