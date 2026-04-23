@@ -20,8 +20,8 @@
 | `packages/api/src/dispatch/pg-analytics.ts` | Postgres-backed `DispatchAnalyticsRepository` for reschedule/cancel/reassign counters. |
 | `packages/api/test/appointments/pg-assignment.test.ts` | Repository contract tests (RLS, tenant scoping, CRUD round-trips). |
 | `packages/api/test/dispatch/pg-analytics.test.ts` | Counter persistence + tenant isolation tests. |
-| `packages/api/migrations/20260423_assignments.sql` | Table + RLS policies for `assignments`. |
-| `packages/api/migrations/20260423_dispatch_analytics.sql` | Table + RLS policies for `dispatch_analytics`. |
+
+> **Migration mechanism:** This codebase does **not** use a `packages/api/migrations/*.sql` directory. The migration runner in `packages/api/src/db/migrate.ts` calls `getMigrationSQL()` which concatenates the `MIGRATIONS` object exported from `packages/api/src/db/schema.ts:25` (each value is a SQL string keyed by `'NNN_name'`). New migrations are added by appending entries to that object. All migration tasks below modify `schema.ts` rather than creating new SQL files.
 
 ### Modified files
 
@@ -88,6 +88,17 @@ Expected: FAIL — `repo.findById` returns `null` because the handler never writ
 
 - [ ] **Step 3: Update the handler**
 
+Note on payload shape: today the `create_customer` proposal payload carries
+`payload.name` (a single string from the voice classifier's `displayName`).
+`CreateCustomerInput` (`packages/api/src/customers/customer.ts:28-41`) expects
+`firstName` + `lastName` (or `companyName`) and `primaryPhone` instead of
+`phone`. The handler is responsible for the mapping. The minimal split below
+puts the whole transcript-supplied name into `firstName` with empty
+`lastName`; this matches the `validateCustomerInput` rule that requires
+`firstName || companyName`. A follow-up can introduce real
+firstName/lastName splitting in the classifier or the proposal-authoring
+step — that's a UX question, not a blocker.
+
 ```typescript
 // packages/api/src/proposals/execution/handlers.ts
 export class CreateCustomerExecutionHandler implements ExecutionHandler {
@@ -110,9 +121,10 @@ export class CreateCustomerExecutionHandler implements ExecutionHandler {
       const customer = await createCustomer(
         {
           tenantId: context.tenantId,
-          name: payload.name,
+          firstName: payload.name,
+          lastName: '',
           email: typeof payload.email === 'string' ? payload.email : undefined,
-          phone: typeof payload.phone === 'string' ? payload.phone : undefined,
+          primaryPhone: typeof payload.phone === 'string' ? payload.phone : undefined,
           createdBy: context.executedBy,
         },
         this.customerRepo
@@ -160,12 +172,12 @@ git commit -m "fix(proposals): persist CreateCustomerExecutionHandler when repo 
 - Modify: `packages/api/src/proposals/execution/handlers.ts`
 - Modify: `packages/api/test/proposals/execution/handlers.test.ts`
 
-**Context:** Same shape as Task 1 — `handlers.ts:54-64` validates `customerId` then returns `{ success: true }` without applying the patch. Use `updateCustomer(input, repo)` from `customers/customer.ts`.
+**Context:** Same shape as Task 1 — `handlers.ts:54-64` validates `customerId` then returns `{ success: true }` without applying the patch. The function to call is `updateCustomer(tenantId, id, input, repository, actorId?, auditRepo?)` from `packages/api/src/customers/customer.ts:201-208` (note the parameter order — `tenantId` and `id` come first, `input` is third). `UpdateCustomerInput` accepts the same `firstName`/`lastName`/`primaryPhone`/etc. fields documented in Task 1; the same payload-mapping note applies. The handler should pass `context.executedBy` as the `actorId` so audit attribution is correct.
 
-- [ ] **Step 1: Write a failing test that asserts the patched fields appear in the repo.**
+- [ ] **Step 1: Write a failing test that asserts the patched fields appear in the repo when the proposal carries `customerId` plus updated fields.**
 - [ ] **Step 2: Run to confirm failure.**
-- [ ] **Step 3: Implement constructor-injected `customerRepo` and call `updateCustomer` when present; preserve fallback when absent.**
-- [ ] **Step 4: Wire the dep in `createExecutionHandlerRegistry`.**
+- [ ] **Step 3: Implement constructor-injected `customerRepo`. Call `updateCustomer(context.tenantId, payload.customerId, mappedInput, this.customerRepo, context.executedBy)` when the repo is present; preserve the synthetic-success fallback when absent. Return `{ success: false, error: 'Customer not found' }` when `updateCustomer` returns `null`.**
+- [ ] **Step 4: Wire the dep in `createExecutionHandlerRegistry` (already added in Task 1).**
 - [ ] **Step 5: Run tests.**
 - [ ] **Step 6: Commit:** `fix(proposals): persist UpdateCustomerExecutionHandler when repo wired`
 
@@ -175,14 +187,23 @@ git commit -m "fix(proposals): persist CreateCustomerExecutionHandler when repo 
 - Modify: `packages/api/src/proposals/execution/handlers.ts`
 - Modify: `packages/api/test/proposals/execution/handlers.test.ts`
 
-**Context:** `handlers.ts:66-79` validates `customerId` and `title` then returns a synthetic uuid. Use `createJob` from `jobs/job.ts`. Pass `jobRepo` through the registry.
+**Context:** `handlers.ts:66-79` validates `customerId` and `title`, then returns a synthetic uuid. The destination function is `createJob(input, repo)` (`packages/api/src/jobs/job.ts:71-`) and `CreateJobInput` (`jobs/job.ts:24-33`) requires `tenantId`, `customerId`, **`locationId`**, **`summary`**, and `createdBy`. Two field gaps to bridge:
 
-- [ ] **Step 1: Failing test — assert the persisted job has the same id and the supplied title/customerId.**
-- [ ] **Step 2: Confirm failure.**
-- [ ] **Step 3: Implement using the same optional-repo pattern.**
-- [ ] **Step 4: Wire `jobRepo` through `createExecutionHandlerRegistry`.**
-- [ ] **Step 5: Run tests.**
-- [ ] **Step 6: Commit:** `fix(proposals): persist CreateJobExecutionHandler when repo wired`
+1. **`title` → `summary`** — the existing handler validates `payload.title` but the persistence interface uses `summary`. Map `payload.title` to `summary` (and accept either key in payload validation if older proposals are still in flight; otherwise just rename in the validation step).
+2. **`locationId` resolution** — the voice classifier never captures a location. The handler must resolve it from the customer's locations: call `locationRepo.findByCustomer(tenantId, customerId)` and pick the entry where `isPrimary === true` (`packages/api/src/locations/location.ts:17,56`). If the customer has zero locations, return `{ success: false, error: 'Customer has no service location — add one before opening a job' }` rather than fabricating a uuid. This also means `CreateJobExecutionHandler` takes **two** repo deps: `jobRepo` and `locationRepo`.
+
+Optional payload field: if a future proposal explicitly carries `payload.locationId`, prefer it over the resolved primary (lets a dispatcher pre-select a non-primary site).
+
+- [ ] **Step 1: Write a failing test that:**
+  - **(a)** Seeds a customer with a primary location in `InMemoryLocationRepository`.
+  - **(b)** Submits a `create_job` proposal with `customerId` + `title`.
+  - **(c)** Asserts the persisted job has `summary === payload.title`, `customerId` matches, and `locationId === <primary location id>`.
+- [ ] **Step 2: Add a second test for the no-locations case asserting `success === false` with a useful error.**
+- [ ] **Step 3: Confirm both fail.**
+- [ ] **Step 4: Implement the handler with optional `jobRepo` + `locationRepo` constructor args. When either is missing, fall back to the synthetic-id path; when both are wired, do the primary-location lookup then call `createJob`.**
+- [ ] **Step 5: Update `createExecutionHandlerRegistry` to accept and forward `jobRepo` + `locationRepo`. Pass both from `app.ts`.**
+- [ ] **Step 6: Run tests.**
+- [ ] **Step 7: Commit:** `fix(proposals): persist CreateJobExecutionHandler with primary-location resolution`
 
 ### Task 4: Persist `DraftEstimateExecutionHandler`
 
@@ -190,21 +211,31 @@ git commit -m "fix(proposals): persist CreateCustomerExecutionHandler when repo 
 - Modify: `packages/api/src/proposals/execution/handlers.ts`
 - Modify: `packages/api/test/proposals/execution/handlers.test.ts`
 
-**Context:** `handlers.ts:177-190` validates `customerId` and `lineItems` then returns a synthetic uuid. Use `createEstimate` from `estimates/estimate.ts`. The estimate flow needs `settingsRepo` for the auto-incremented estimate number — same dual-dep pattern as `CreateInvoiceExecutionHandler`.
+**Context:** `handlers.ts:177-190` validates `customerId` and `lineItems`, then returns a synthetic uuid. The destination function is `createEstimate` and `CreateEstimateInput` (`packages/api/src/estimates/estimate.ts:24-35`) requires `tenantId`, **`jobId`** (not just `customerId`), **`estimateNumber`**, `lineItems`, and `createdBy`. Two field gaps:
 
-- [ ] **Step 1: Failing test using `InMemoryEstimateRepository` + `InMemorySettingsRepository`.**
-- [ ] **Step 2: Confirm failure.**
-- [ ] **Step 3: Implement optional `estimateRepo` + `settingsRepo` constructor args; persist via `createEstimate`; fall back to synthetic id when either dep is absent.**
-- [ ] **Step 4: Update `createExecutionHandlerRegistry` to pass both.**
+1. **`jobId` is required.** The current `draft_estimate` proposal payload only carries `customerId` + `lineItems`. There is no clean way to draft an estimate without a job (the estimate-number sequence, billing, and acceptance flow all key off the job). The right fix is to **add `jobId` to the payload validation** in this handler and require the proposal-authoring step (voice classifier, dispatcher UI) to attach it. When the payload arrives without `jobId`, return `{ success: false, error: 'Estimate requires a jobId — pick a job before drafting' }`. This is a deliberate hard-fail — auto-creating a phantom job to satisfy the FK would corrupt the contractor's job list.
+2. **`estimateNumber` auto-increment.** Use `getNextEstimateNumber(tenantId, settingsRepo)` from `packages/api/src/settings/settings.ts:303` — same dual-dep pattern `CreateInvoiceExecutionHandler` already uses with `getNextInvoiceNumber`.
+
+So `DraftEstimateExecutionHandler` takes optional `estimateRepo` + `settingsRepo` constructor args, just like `CreateInvoiceExecutionHandler`.
+
+- [ ] **Step 1: Write three failing tests:**
+  - **(a)** Happy path with `customerId` + `jobId` + `lineItems` → asserts the persisted estimate has the auto-incremented number and the supplied jobId.
+  - **(b)** Missing `jobId` → asserts `success === false` with the specific error message.
+  - **(c)** Idempotency — second call with the same `proposal.resultEntityId` returns the same id without creating a duplicate.
+- [ ] **Step 2: Confirm failures.**
+- [ ] **Step 3: Implement optional `estimateRepo` + `settingsRepo` constructor args. Add `jobId` to validation. Call `getNextEstimateNumber` then `createEstimate`. Preserve synthetic-id fallback when either dep is absent.**
+- [ ] **Step 4: Update `createExecutionHandlerRegistry` to pass `estimateRepo` and `settingsRepo`.**
 - [ ] **Step 5: Run tests.**
 - [ ] **Step 6: Commit:** `fix(proposals): persist DraftEstimateExecutionHandler when repos wired`
+
+> **Follow-up (out of scope for this plan, but flagged here):** The classifier and dispatcher proposal-review UI need to enforce `jobId` capture for `draft_estimate`. Until that lands, voice "draft an estimate for…" without an obvious job reference will (correctly) fail at execution. Track as a separate story under voice UX hardening.
 
 ### Task 5: Wire all four handler deps in `app.ts`
 
 **Files:**
 - Modify: `packages/api/src/app.ts`
 
-**Context:** The four handlers above now accept repos but `app.ts:365-375` only passes a subset. Add `customerRepo` and `jobRepo` to the registry call (estimate is already covered by `estimateRepo`).
+**Context:** The four handlers above now accept repos but `app.ts:365-375` only passes a subset. Add `customerRepo`, `jobRepo`, and `locationRepo` to the registry call (estimate is covered once `estimateRepo` and `settingsRepo` are passed — both already exist in scope).
 
 - [ ] **Step 1: Write an integration test in `packages/api/test/integration/voice-create-customer.test.ts` that POSTs an approved `create_customer` proposal through the executor and asserts the customer appears via `GET /api/customers/:id`.**
 - [ ] **Step 2: Confirm failure (the customer 404s).**
@@ -215,6 +246,7 @@ git commit -m "fix(proposals): persist CreateCustomerExecutionHandler when repo 
 const executionHandlers = createExecutionHandlerRegistry({
   customerRepo,
   jobRepo,
+  locationRepo,
   appointmentRepo,
   assignmentRepo,
   invoiceRepo,
@@ -237,17 +269,40 @@ const executionHandlers = createExecutionHandlerRegistry({
 
 Two repositories are still constructed as `InMemory*` regardless of `DATABASE_URL` — `assignmentRepo` (`app.ts:237`) and `dispatchAnalyticsRepo` (`app.ts:364`). Both lose all data on every prod restart. Both already have an interface — they just need a `Pg*` implementation.
 
-### Task 6: Add `assignments` migration
+### Task 6: Add `assignments` migration to `schema.ts`
 
 **Files:**
-- Create: `packages/api/migrations/20260423_assignments.sql`
+- Modify: `packages/api/src/db/schema.ts` (append a new key under `MIGRATIONS`)
 
-**Context:** Mirror the column set on `InMemoryAssignmentRepository`. Apply the standard tenant-scoped RLS pattern used by `migrations/*_appointments.sql`.
+**Context:** Mirror the `AppointmentAssignment` interface (`packages/api/src/appointments/assignment.ts:5-13`) exactly. Required columns: `id`, `tenant_id`, `appointment_id`, `technician_id`, `is_primary` (BOOLEAN NOT NULL — promotion/demotion is core to the assignment flow at `assignment.ts:54-57`), `assigned_by`, `assigned_at`. The interface has **no** unassigned timestamps — removal happens via `delete()`. Apply the same tenant-scoped RLS pattern used by every other table in `schema.ts`.
 
-- [ ] **Step 1: Write the SQL — `id uuid pk`, `tenant_id`, `appointment_id`, `technician_id`, `assigned_at`, `assigned_by`, `unassigned_at`, `unassigned_by`. Add indexes on `(tenant_id, appointment_id)` and `(tenant_id, technician_id)`. Add RLS policy `assignments_tenant_isolation`.**
-- [ ] **Step 2: Apply locally:** `cd packages/api && npm run migrate:up`
-- [ ] **Step 3: Confirm via `psql` that the table + RLS policy exist.**
-- [ ] **Step 4: Commit:** `feat(db): add assignments table with RLS`
+- [ ] **Step 1: Add a new entry to the `MIGRATIONS` object — pick the next available numeric prefix (look at the highest-numbered existing key first):**
+
+```typescript
+// packages/api/src/db/schema.ts (inside MIGRATIONS, append at end)
+'NNN_create_assignments': `
+  CREATE TABLE IF NOT EXISTS assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    appointment_id UUID NOT NULL,
+    technician_id UUID NOT NULL,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    assigned_by TEXT NOT NULL,
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_assignments_tenant_appt ON assignments(tenant_id, appointment_id);
+  CREATE INDEX IF NOT EXISTS idx_assignments_tenant_tech ON assignments(tenant_id, technician_id);
+  ALTER TABLE assignments ENABLE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS tenant_isolation_assignments ON assignments;
+  CREATE POLICY tenant_isolation_assignments ON assignments
+    USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+`,
+```
+
+- [ ] **Step 2: Add a unit test in `packages/api/test/db/schema.test.ts` that asserts the new key exists and the SQL parses (follow existing test patterns in that file).**
+- [ ] **Step 3: Apply locally via the standard migration runner (whichever script the repo already uses — check `package.json` scripts).**
+- [ ] **Step 4: Confirm via `psql` that the table + RLS policy exist.**
+- [ ] **Step 5: Commit:** `feat(db): add assignments table with RLS`
 
 ### Task 7: Implement `PgAssignmentRepository`
 
@@ -272,16 +327,43 @@ Two repositories are still constructed as `InMemory*` regardless of `DATABASE_UR
 - [ ] **Step 2: Run the full API test suite to confirm no regressions.**
 - [ ] **Step 3: Commit:** `fix(app): use PgAssignmentRepository when DATABASE_URL is set`
 
-### Task 9: Add `dispatch_analytics` migration
+### Task 9: Add `dispatch_analytics` migration to `schema.ts`
 
 **Files:**
-- Create: `packages/api/migrations/20260423_dispatch_analytics.sql`
+- Modify: `packages/api/src/db/schema.ts` (append a new key under `MIGRATIONS`)
 
-**Context:** `InMemoryDispatchAnalyticsRepository` tracks reschedule/cancel/reassign counters per tenant. Schema: `id uuid pk`, `tenant_id`, `event_type` (text), `appointment_id`, `occurred_at`, `metadata jsonb`. Tenant-scoped RLS.
+**Context:** Mirror `DispatchMetric` (`packages/api/src/dispatch/analytics.ts:12-20`) exactly. Required columns: `id`, `tenant_id`, `event_type` (constrained to the `DispatchEventType` enum: `assigned`, `reassigned`, `rescheduled`, `canceled`, `conflict_detected`, `delay_notice_sent`, `delay_notice_failed`), `appointment_id` (nullable — interface has it optional), `technician_id` (**nullable but present** — execution handlers emit it for reassignments and per-technician analytics; omitting it would silently drop technician-level data), `metadata` (JSONB, nullable), `recorded_at`. Tenant-scoped RLS.
 
-- [ ] **Step 1: Write the SQL.**
-- [ ] **Step 2: Apply locally and verify.**
-- [ ] **Step 3: Commit:** `feat(db): add dispatch_analytics table with RLS`
+- [ ] **Step 1: Add the migration entry:**
+
+```typescript
+// packages/api/src/db/schema.ts (inside MIGRATIONS, append at end)
+'NNN_create_dispatch_analytics': `
+  CREATE TABLE IF NOT EXISTS dispatch_analytics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    event_type TEXT NOT NULL CHECK (event_type IN (
+      'assigned', 'reassigned', 'rescheduled', 'canceled',
+      'conflict_detected', 'delay_notice_sent', 'delay_notice_failed'
+    )),
+    appointment_id UUID,
+    technician_id UUID,
+    metadata JSONB,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded ON dispatch_analytics(tenant_id, recorded_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_type ON dispatch_analytics(tenant_id, event_type);
+  CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_tech ON dispatch_analytics(tenant_id, technician_id) WHERE technician_id IS NOT NULL;
+  ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
+  CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+    USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+`,
+```
+
+- [ ] **Step 2: Add a unit test in `packages/api/test/db/schema.test.ts` asserting the new key exists.**
+- [ ] **Step 3: Apply locally and verify via `psql`.**
+- [ ] **Step 4: Commit:** `feat(db): add dispatch_analytics table with RLS`
 
 ### Task 10: Implement `PgDispatchAnalyticsRepository`
 
