@@ -22,6 +22,7 @@ import { SettingsRepository } from '../../settings/settings';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
+import { CustomerRepository, createCustomer } from '../../customers/customer';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -42,12 +43,53 @@ export interface ExecutionHandler {
 export class CreateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_customer';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(private readonly customerRepo?: CustomerRepository) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.name || typeof payload.name !== 'string') {
       return { success: false, error: 'Payload must include a valid name' };
     }
-    return { success: true, resultEntityId: uuidv4() };
+
+    // Idempotency — a retry of an already-executed proposal returns
+    // the id produced on the first run.
+    if (proposal.resultEntityId) {
+      return { success: true, resultEntityId: proposal.resultEntityId };
+    }
+
+    // Legacy fallback — in-memory tests that exercise proposal
+    // lifecycle without persistence skip the repo. Production always
+    // wires it in (app.ts), so the synthetic id path is never hit
+    // in deployed environments.
+    if (!this.customerRepo) {
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    try {
+      // Voice classifier captures a single `displayName` string;
+      // `CreateCustomerInput` requires `firstName` + `lastName` (or
+      // `companyName`). Dump the full captured name into `firstName`
+      // with empty `lastName` — `validateCustomerInput` only requires
+      // one of them. Proper first/last splitting is a classifier/UX
+      // follow-up, not a blocker for persistence.
+      const customer = await createCustomer(
+        {
+          tenantId: context.tenantId,
+          firstName: payload.name,
+          lastName: '',
+          email: typeof payload.email === 'string' ? payload.email : undefined,
+          primaryPhone: typeof payload.phone === 'string' ? payload.phone : undefined,
+          createdBy: context.executedBy,
+        },
+        this.customerRepo
+      );
+      return { success: true, resultEntityId: customer.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
@@ -190,6 +232,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 }
 
 export function createExecutionHandlerRegistry(deps?: {
+  customerRepo?: CustomerRepository;
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
@@ -202,7 +245,7 @@ export function createExecutionHandlerRegistry(deps?: {
   analyticsRepo?: DispatchAnalyticsRepository;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
-    new CreateCustomerExecutionHandler(),
+    new CreateCustomerExecutionHandler(deps?.customerRepo),
     new UpdateCustomerExecutionHandler(),
     new CreateJobExecutionHandler(),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
