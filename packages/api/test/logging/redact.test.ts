@@ -59,4 +59,41 @@ describe('redactSecrets', () => {
     expect(isSecretKey('username')).toBe(false);
     expect(isSecretKey('tenantId')).toBe(false);
   });
+
+  it('redacts the entire value when a secret key points to an object', () => {
+    const out = redactSecrets({
+      apiKey: { v1: 'sk_live_a', v2: 'sk_live_b' },
+      authorization: ['Bearer 1', 'Bearer 2'],
+      password: 123456,
+    });
+    expect(out.apiKey).toBe('[REDACTED]');
+    expect(out.authorization).toBe('[REDACTED]');
+    expect(out.password).toBe('[REDACTED]');
+  });
+
+  it('survives circular references without throwing', () => {
+    type Node = { name: string; self?: Node; apiKey?: string };
+    const node: Node = { name: 'root', apiKey: 'sk_live_c' };
+    node.self = node;
+
+    let out: Node;
+    expect(() => {
+      out = redactSecrets(node);
+    }).not.toThrow();
+
+    expect(out!.name).toBe('root');
+    expect(out!.apiKey).toBe('[REDACTED]');
+    expect(out!.self).toBe('[Circular]');
+  });
+
+  it('handles arrays containing circular object references', () => {
+    const shared: { apiKey: string; child?: unknown } = { apiKey: 'sk_live_d' };
+    shared.child = shared;
+    const out = redactSecrets([shared, shared]);
+
+    expect((out[0] as Record<string, unknown>).apiKey).toBe('[REDACTED]');
+    // The second occurrence is the already-seen shared object, replaced by
+    // the circular sentinel to stop the walk.
+    expect(out[1]).toBe('[Circular]');
+  });
 });

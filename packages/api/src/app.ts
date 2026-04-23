@@ -57,7 +57,9 @@ import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
   hydrateStoreFromRepository,
+  FeatureFlagRepository,
 } from './flags/feature-flags';
+import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import { InMemoryQueue, processMessage } from './queues/queue';
@@ -476,7 +478,9 @@ export function createApp() {
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
-  const featureFlagRepo = new InMemoryFeatureFlagRepository();
+  const featureFlagRepo: FeatureFlagRepository = pool
+    ? new PgFeatureFlagRepository(pool)
+    : new InMemoryFeatureFlagRepository();
   const featureFlagStore = new InMemoryFeatureFlagStore();
   // Hydration is fire-and-forget on boot — the store starts empty and is
   // refilled from the repo asynchronously. isFeatureEnabled returns false

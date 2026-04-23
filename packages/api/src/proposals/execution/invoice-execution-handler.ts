@@ -2,12 +2,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import {
-  createInvoice,
+  createInvoiceWithNextNumber,
   InvoiceRepository,
   CreateInvoiceInput,
 } from '../../invoices/invoice';
 import { LineItem } from '../../shared/billing-engine';
-import { SettingsRepository, getNextInvoiceNumber } from '../../settings/settings';
+import { SettingsRepository } from '../../settings/settings';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -53,13 +53,10 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     }
 
     try {
-      const invoiceNumber = await getNextInvoiceNumber(context.tenantId, this.settingsRepo);
-
-      const input: CreateInvoiceInput = {
+      const input: Omit<CreateInvoiceInput, 'invoiceNumber'> = {
         tenantId: context.tenantId,
         jobId: payload.jobId,
         estimateId: typeof payload.estimateId === 'string' ? payload.estimateId : undefined,
-        invoiceNumber,
         lineItems: payload.lineItems as LineItem[],
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
@@ -70,7 +67,11 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
         createdBy: context.executedBy,
       };
 
-      const invoice = await createInvoice(input, this.invoiceRepo);
+      const invoice = await createInvoiceWithNextNumber(
+        input,
+        this.invoiceRepo,
+        this.settingsRepo
+      );
       return { success: true, resultEntityId: invoice.id };
     } catch (err) {
       return {
