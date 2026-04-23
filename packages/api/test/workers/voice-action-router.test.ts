@@ -263,9 +263,20 @@ describe('voice-action-router worker', () => {
     expect(payload.displayName).toBeUndefined();
   });
 
-  it('drops low-confidence classifications without creating a proposal', async () => {
+  // ─── clarification proposal: low-confidence path ────────────────
+  // When the classifier picks a real intent but falls below the 0.6
+  // threshold, we now emit a voice_clarification proposal so the
+  // operator sees the attempt in their feed (instead of a silent
+  // drop that looks like the assistant ignored them). The
+  // low-confidence intent rides along as a suggestion the UI can
+  // render as a "did you mean?" chip.
+  it('emits voice_clarification on low-confidence classification with the guessed intent as a suggestion', async () => {
     const gateway = gatewayReturning([
-      JSON.stringify({ intentType: 'create_invoice', confidence: 0.3 }),
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.3,
+        reasoning: 'mumbled — could be an invoice or an estimate',
+      }),
     ]);
     const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
 
@@ -274,15 +285,32 @@ describe('voice-action-router worker', () => {
         tenantId: 't-1',
         userId: 'u-1',
         transcript: 'um do the thing',
+        recordingId: 'rec-1',
+        conversationId: 'conv-1',
       }),
       silentLogger()
     );
 
     const byTenant = await proposalRepo.findByTenant('t-1');
-    expect(byTenant).toHaveLength(0);
+    expect(byTenant).toHaveLength(1);
+    const clar = byTenant[0];
+    expect(clar.proposalType).toBe('voice_clarification');
+    expect(clar.status).toBe('draft');
+    const payload = clar.payload as Record<string, unknown>;
+    expect(payload.reason).toBe('low_confidence');
+    expect(payload.transcript).toBe('um do the thing');
+    expect(payload.suggestedIntents).toEqual(['create_invoice']);
+    expect(payload.recordingId).toBe('rec-1');
+    expect(payload.conversationId).toBe('conv-1');
+    expect(typeof payload.classifierConfidence).toBe('number');
   });
 
-  it('drops transcripts that classify as unknown', async () => {
+  // ─── clarification proposal: unknown-intent path ────────────────
+  // "send that invoice" classifies as unknown at high confidence
+  // (supported send_invoice intent not yet wired). Rather than
+  // discard it, we surface a clarification so the operator can
+  // try a phrasing we DO support.
+  it('emits voice_clarification when the classifier returns unknown intent', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({ intentType: 'unknown', confidence: 0.9 }),
     ]);
@@ -292,13 +320,99 @@ describe('voice-action-router worker', () => {
       msg({
         tenantId: 't-1',
         userId: 'u-1',
-        transcript: 'send that invoice', // Phase 3, not supported yet
+        transcript: 'send that invoice',
       }),
       silentLogger()
     );
 
     const byTenant = await proposalRepo.findByTenant('t-1');
-    expect(byTenant).toHaveLength(0);
+    expect(byTenant).toHaveLength(1);
+    const clar = byTenant[0];
+    expect(clar.proposalType).toBe('voice_clarification');
+    expect(clar.status).toBe('draft');
+    const payload = clar.payload as Record<string, unknown>;
+    expect(payload.reason).toBe('unknown_intent');
+    expect(payload.suggestedIntents).toBeUndefined();
+    expect(payload.transcript).toBe('send that invoice');
+  });
+
+  // ─── clarification proposal: classifier returned junk ─────────
+  // When the classifier output can't be parsed as JSON, the router
+  // should still produce a visible signal to the operator.
+  it('emits voice_clarification with reason=parse_failed when classifier output is junk', async () => {
+    const gateway = gatewayReturning(['not valid json']);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'create an invoice for Acme',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    const clar = byTenant[0];
+    expect(clar.proposalType).toBe('voice_clarification');
+    const payload = clar.payload as Record<string, unknown>;
+    expect(payload.reason).toBe('parse_failed');
+  });
+
+  // ─── tenantId threading ──────────────────────────────────────
+  // The classifier must pass tenantId to the gateway so per-tenant
+  // cache keys, cost accounting, and future routing scope correctly.
+  // Without this, a cached classification for tenant A could leak
+  // to tenant B once response caching lands.
+  it('passes tenantId to the gateway in request metadata', async () => {
+    const completeMock = vi.fn(async () => ({
+      content: JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }),
+      model: 'mock',
+      provider: 'mock',
+      tokenUsage: { input: 5, output: 5, total: 10 },
+      latencyMs: 1,
+    }));
+    const gateway = { complete: completeMock } as unknown as LLMGateway;
+
+    const invoiceGateway = gatewayReturning([
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 }),
+      JSON.stringify({
+        customerId: 'c',
+        jobId: 'j',
+        lineItems: [{ description: 'x', quantity: 1, unitPrice: 1 }],
+        confidence_score: 0.9,
+      }),
+    ]);
+    // Spy on the intent-classifier's first call only — the invoice
+    // handler makes a second LLM call, but we only assert on the
+    // first call's metadata so the test stays focused.
+    void invoiceGateway;
+
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    // The router will try to call the invoice handler after the
+    // classifier succeeds — the handler expects a second gateway
+    // response. We don't wire one here; the worker may throw.
+    // Swallow any downstream error so we can still assert the
+    // classifier call was tagged with tenantId.
+    await worker
+      .handle(
+        msg({
+          tenantId: 'tenant-abc',
+          userId: 'u-1',
+          transcript: 'create an invoice for Acme',
+        }),
+        silentLogger()
+      )
+      .catch(() => {
+        /* classifier passed; handler may fail without a 2nd mock */
+      });
+
+    const firstCallArgs = completeMock.mock.calls[0]?.[0];
+    expect(firstCallArgs).toBeTruthy();
+    expect(firstCallArgs.taskType).toBe('classify_intent');
+    expect(firstCallArgs.metadata).toEqual({ tenantId: 'tenant-abc' });
   });
 
   it('skips empty transcripts without calling the classifier', async () => {

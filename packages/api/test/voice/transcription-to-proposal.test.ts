@@ -178,7 +178,15 @@ describe('integration — voice transcription → proposal', () => {
     expect(updatedRec?.transcript).toContain('Acme Plumbing');
   });
 
-  it('does not create a proposal when transcript classifies as unknown', async () => {
+  // Previously this test asserted NO proposal was created when the
+  // classifier returned 'unknown'. That silent drop hid the failure
+  // from the operator — they would record, see nothing happen, and
+  // have no idea whether the transcript was heard at all. The
+  // router now emits a voice_clarification proposal instead, which
+  // surfaces as "Didn't catch that: '<transcript>'" in the review
+  // feed. The test asserts that exactly one clarification proposal
+  // is produced and that it references the original transcript.
+  it('emits a voice_clarification proposal when transcript classifies as unknown', async () => {
     const tenantId = 'tenant-unknown';
     const userId = 'user-unknown';
     const recordingId = 'rec-unknown';
@@ -241,6 +249,13 @@ describe('integration — voice transcription → proposal', () => {
     }
 
     const proposals = await proposalRepo.findByTenant(tenantId);
-    expect(proposals).toHaveLength(0);
+    expect(proposals).toHaveLength(1);
+    const clar = proposals[0];
+    expect(clar.proposalType).toBe('voice_clarification');
+    expect(clar.status).toBe('draft');
+    const payload = clar.payload as Record<string, unknown>;
+    expect(payload.reason).toBe('unknown_intent');
+    expect(payload.transcript).toBe('uhh please do the thing');
+    expect(payload.recordingId).toBe(recordingId);
   });
 });

@@ -47,11 +47,34 @@ export interface ExtractedEntities {
   phone?: string;
 }
 
+/**
+ * When `intentType === 'unknown'` the router emits a
+ * voice_clarification proposal instead of silently dropping.
+ * `unknownReason` tells the router (and the UI) WHY routing failed
+ * so the clarification message can be phrased usefully.
+ *
+ *   - 'empty_transcript'  — nothing to classify
+ *   - 'parse_failed'      — classifier output wasn't valid JSON
+ *   - 'unknown_intent'    — classifier picked 'unknown' at any confidence
+ *   - 'low_confidence'    — classifier picked a real intent, but < 0.6
+ *
+ * `lowConfidenceIntent` is populated only on 'low_confidence': it is
+ * the intent the classifier leaned toward so the clarification card
+ * can offer it as a "did you mean?" suggestion.
+ */
+export type UnknownReason =
+  | 'empty_transcript'
+  | 'parse_failed'
+  | 'unknown_intent'
+  | 'low_confidence';
+
 export interface IntentClassification {
   intentType: IntentType;
   confidence: number; // 0-1
   reasoning?: string;
   extractedEntities?: ExtractedEntities;
+  unknownReason?: UnknownReason;
+  lowConfidenceIntent?: IntentType;
 }
 
 export interface ClassifyContext {
@@ -198,22 +221,26 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   return result;
 }
 
-function unknownResult(reason: string): IntentClassification {
+function unknownResult(
+  reason: string,
+  unknownReason: UnknownReason
+): IntentClassification {
   return {
     intentType: 'unknown',
     confidence: 0,
     reasoning: reason,
+    unknownReason,
   };
 }
 
 export async function classifyIntent(
   transcript: string,
-  _context: ClassifyContext,
+  context: ClassifyContext,
   gateway: LLMGateway
 ): Promise<IntentClassification> {
   // Cheap short-circuit: empty / whitespace transcripts never trigger an LLM call.
   if (!transcript || transcript.trim().length === 0) {
-    return unknownResult('empty transcript');
+    return unknownResult('empty transcript', 'empty_transcript');
   }
 
   const response = await gateway.complete({
@@ -223,21 +250,43 @@ export async function classifyIntent(
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
+    // Pass tenantId so gateway-layer features (per-tenant cache keys,
+    // cost accounting, future routing) can scope correctly. Without
+    // this, a cached response for tenant A could be returned to
+    // tenant B if two transcripts collide on the content hash.
+    metadata: { tenantId: context.tenantId },
   });
 
   const parsed = parseClassifierJson(response.content);
   if (!parsed) {
-    return unknownResult('could not parse classifier output');
+    return unknownResult('could not parse classifier output', 'parse_failed');
   }
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
+  // We keep the original intent and confidence in the result so the router
+  // can emit a clarification proposal that offers the low-confidence intent
+  // as a suggestion ("did you mean: create invoice?") instead of dropping.
   if (parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD) {
     return {
       intentType: 'unknown',
       confidence: parsed.confidence,
       reasoning:
-        parsed.reasoning ?? `confidence ${parsed.confidence.toFixed(2)} below threshold`,
+        parsed.reasoning ??
+        `confidence ${parsed.confidence.toFixed(2)} below threshold (intent: ${parsed.intentType})`,
       extractedEntities: parsed.extractedEntities,
+      unknownReason: 'low_confidence',
+      lowConfidenceIntent:
+        parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
+    };
+  }
+
+  // Classifier picked 'unknown' at adequate confidence — nothing to route.
+  // The router will emit a clarification so the operator is never left
+  // wondering whether their command was heard.
+  if (parsed.intentType === 'unknown') {
+    return {
+      ...parsed,
+      unknownReason: 'unknown_intent',
     };
   }
 

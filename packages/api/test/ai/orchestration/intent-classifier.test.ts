@@ -199,6 +199,11 @@ describe('intent-classifier — classifyIntent', () => {
     const result = await classifyIntent('um, do the thing with the stuff', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
     expect(result.confidence).toBeLessThan(CLASSIFIER_CONFIDENCE_THRESHOLD);
+    // Low-confidence path tags the reason and preserves the guessed
+    // intent so the downstream clarification proposal can render a
+    // "did you mean: create invoice?" suggestion chip.
+    expect(result.unknownReason).toBe('low_confidence');
+    expect(result.lowConfidenceIntent).toBe('create_invoice');
   });
 
   it('returns unknown when LLM returns garbage JSON', async () => {
@@ -206,6 +211,33 @@ describe('intent-classifier — classifyIntent', () => {
     const result = await classifyIntent('create an invoice', { tenantId }, gateway);
     expect(result.intentType).toBe('unknown');
     expect(result.confidence).toBe(0);
+    expect(result.unknownReason).toBe('parse_failed');
+  });
+
+  it('tags unknown_intent reason when classifier picks unknown at adequate confidence', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.9 })
+    );
+    const result = await classifyIntent('send that invoice', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('unknown_intent');
+  });
+
+  it('tags empty_transcript reason without calling the LLM', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0}');
+    const result = await classifyIntent('   ', { tenantId }, gateway);
+    expect(result.intentType).toBe('unknown');
+    expect(result.unknownReason).toBe('empty_transcript');
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('passes tenantId to the gateway in request metadata', async () => {
+    const gateway = mockGateway(
+      JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+    );
+    await classifyIntent('create an invoice', { tenantId: 'tenant-xyz' }, gateway);
+    const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call.metadata).toEqual({ tenantId: 'tenant-xyz' });
   });
 
   it('returns unknown when LLM returns an unsupported intentType', async () => {

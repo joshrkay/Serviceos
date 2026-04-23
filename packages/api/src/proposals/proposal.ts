@@ -14,7 +14,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -28,6 +28,7 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'reassign_appointment',
   'reschedule_appointment',
   'cancel_appointment',
+  'voice_clarification',
   'onboarding_tenant_settings',
   'onboarding_service_category',
   'onboarding_estimate_template',
@@ -155,6 +156,15 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'onboarding_estimate_template':
     case 'onboarding_team_member':
     case 'onboarding_schedule':
+      return 'capture';
+    // voice_clarification is not a mutation — it is a user-visible
+    // prompt emitted when the classifier can't confidently route a
+    // transcript. It never auto-approves and has no execution handler;
+    // it closes when the operator dismisses it or speaks again. It is
+    // bucketed as 'capture' so the D3 rules leave it in 'draft' (no
+    // sourceTrustTier is passed when it is created, so the capture
+    // bucket is effectively a formality).
+    case 'voice_clarification':
       return 'capture';
     case 'cancel_appointment':
       return 'irreversible';

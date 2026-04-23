@@ -1,8 +1,13 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { ProposalRepository } from '../proposals/proposal';
-import { classifyIntent, ExtractedEntities, IntentType } from '../ai/orchestration/intent-classifier';
+import { ProposalRepository, createProposal } from '../proposals/proposal';
+import {
+  classifyIntent,
+  ExtractedEntities,
+  IntentClassification,
+  IntentType,
+} from '../ai/orchestration/intent-classifier';
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
@@ -23,10 +28,13 @@ import { ProposalType } from '../proposals/proposal';
  *   update_estimate     → update_estimate          (Phase 2b — add/remove line item)
  *   create_customer     → create_customer          (AST-01 — CRM record)
  *
- * Anything classified as `unknown` or below the confidence threshold
- * is dropped with an info log. The operator sees nothing in their
- * inbox — future phases will turn these into clarification prompts
- * instead of silent drops.
+ * When classification fails — either the classifier returns 'unknown',
+ * confidence falls below the threshold, or the classifier output
+ * cannot be parsed — the router emits a `voice_clarification`
+ * proposal instead of silently dropping. That proposal is a prompt
+ * in the operator's feed ("I heard X but wasn't sure what to do"),
+ * not a mutation. It closes when the operator dismisses it or speaks
+ * a replacement command.
  */
 
 export interface VoiceActionRouterPayload {
@@ -84,6 +92,106 @@ function entitiesForProposal(
   return payload;
 }
 
+/**
+ * Build a short, operator-friendly summary for a clarification card.
+ * Keeps the transcript prefix short so the summary fits in the feed
+ * row without truncation.
+ */
+function clarificationSummary(transcript: string): string {
+  const trimmed = transcript.trim();
+  const head = trimmed.length > 60 ? `${trimmed.slice(0, 57)}…` : trimmed;
+  return `Didn't catch that: "${head}"`;
+}
+
+/**
+ * Human phrasing for each unknown-reason. Used as the clarification
+ * proposal's `explanation`, shown in the review card's "why this
+ * suggestion" expando.
+ */
+function clarificationExplanation(classification: IntentClassification): string {
+  switch (classification.unknownReason) {
+    case 'low_confidence':
+      return classification.lowConfidenceIntent
+        ? `Heard this as possibly "${classification.lowConfidenceIntent.replace(
+            /_/g,
+            ' '
+          )}" but not confidently (${classification.confidence.toFixed(
+            2
+          )}). Tap a suggestion below or try again.`
+        : `Not confident enough to route this (${classification.confidence.toFixed(2)}). Try again?`;
+    case 'parse_failed':
+      return 'The classifier returned an unexpected response. Try again — the transcript was heard but not understood.';
+    case 'empty_transcript':
+      return 'No speech detected in the recording.';
+    case 'unknown_intent':
+    default:
+      return 'Heard the transcript but did not recognize an action we support yet. Try rephrasing, or use the screen UI.';
+  }
+}
+
+async function emitClarification(
+  deps: VoiceActionRouterDeps,
+  input: {
+    tenantId: string;
+    userId: string;
+    transcript: string;
+    classification: IntentClassification;
+    conversationId?: string;
+    recordingId?: string;
+  },
+  log: Logger
+): Promise<void> {
+  const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
+  const reason = classification.unknownReason ?? 'unknown_intent';
+
+  const suggestedIntents: string[] = [];
+  if (classification.lowConfidenceIntent) {
+    suggestedIntents.push(classification.lowConfidenceIntent);
+  }
+
+  const payload = {
+    transcript: transcript.trim(),
+    reason,
+    ...(suggestedIntents.length > 0 ? { suggestedIntents } : {}),
+    ...(classification.reasoning ? { classifierReasoning: classification.reasoning } : {}),
+    ...(classification.confidence > 0
+      ? { classifierConfidence: classification.confidence }
+      : {}),
+    ...(recordingId ? { recordingId } : {}),
+    ...(conversationId ? { conversationId } : {}),
+  };
+
+  const proposal = createProposal({
+    tenantId,
+    proposalType: 'voice_clarification',
+    payload,
+    summary: clarificationSummary(transcript),
+    explanation: clarificationExplanation(classification),
+    confidenceScore: classification.confidence,
+    sourceContext: {
+      source: 'voice',
+      transcript: transcript.trim(),
+      ...(conversationId ? { conversationId } : {}),
+      ...(recordingId ? { recordingId } : {}),
+    },
+    createdBy: userId,
+    // Deliberately NO sourceTrustTier. decideInitialStatus will land
+    // this in 'draft' regardless of reason/confidence. A clarification
+    // is never auto-approved and has no execution handler — the only
+    // terminal transitions are `rejected` (operator dismissed) or
+    // `expired`.
+  });
+
+  await deps.proposalRepo.create(proposal);
+
+  log.info('voice-action-router: clarification proposal emitted', {
+    proposalId: proposal.id,
+    reason,
+    confidence: classification.confidence,
+    lowConfidenceIntent: classification.lowConfidenceIntent,
+  });
+}
+
 export function createVoiceActionRouterWorker(
   deps: VoiceActionRouterDeps
 ): WorkerHandler<VoiceActionRouterPayload> {
@@ -100,6 +208,10 @@ export function createVoiceActionRouterWorker(
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
       log.info('voice-action-router: classifying transcript');
 
+      // Empty/whitespace transcripts carry no intent and nothing for
+      // the operator to clarify — skip silently. Upstream voice
+      // recording validation already rejects <500ms audio and
+      // surfaces that to the UI.
       if (!transcript || transcript.trim().length === 0) {
         log.info('voice-action-router: empty transcript, skipping');
         return;
@@ -108,10 +220,15 @@ export function createVoiceActionRouterWorker(
       const classification = await classifyIntent(transcript, { tenantId }, deps.gateway);
 
       if (classification.intentType === 'unknown') {
-        log.info('voice-action-router: classified as unknown, dropping', {
-          confidence: classification.confidence,
-          reasoning: classification.reasoning,
-        });
+        // Emit a clarification proposal instead of dropping. The
+        // operator sees "I heard X but wasn't sure what to do",
+        // tries again or dismisses. Silent drops break the product
+        // promise that every utterance has a visible outcome.
+        await emitClarification(
+          deps,
+          { tenantId, userId, transcript, classification, conversationId, recordingId },
+          log
+        );
         return;
       }
 
