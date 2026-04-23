@@ -52,6 +52,7 @@ import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository } from './voice/voice-service';
 import { createTranscriptionProvider } from './voice/transcription-providers';
+import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { InMemoryApprovalRepository } from './estimates/approval';
@@ -354,6 +355,7 @@ export function createApp() {
   // currently a Noop (logs the dispatch shape, never sends bytes)
   // until an outbound comms provider is integrated as a follow-up.
   const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
+  const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
@@ -363,6 +365,7 @@ export function createApp() {
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,
+    analyticsRepo: dispatchAnalyticsRepo,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
   const executionWorkerLogger = createLogger({

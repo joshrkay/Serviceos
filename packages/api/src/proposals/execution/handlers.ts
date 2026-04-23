@@ -19,6 +19,7 @@ import { AssignmentRepository, assignTechnician } from '../../appointments/assig
 import { InvoiceRepository } from '../../invoices/invoice';
 import { EstimateRepository } from '../../estimates/estimate';
 import { SettingsRepository } from '../../settings/settings';
+import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 
@@ -198,6 +199,7 @@ export function createExecutionHandlerRegistry(deps?: {
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
+  analyticsRepo?: DispatchAnalyticsRepository;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
@@ -206,9 +208,9 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
-    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
-    new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
+    new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is
     // absent (used by in-memory tests that don't exercise the
