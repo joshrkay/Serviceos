@@ -27,6 +27,7 @@ interface InvalidRow {
 }
 
 const EXPECTED_COLUMNS = ['name', 'description', 'unit_price', 'unit', 'category'] as const;
+const MAX_IMPORT_ROWS = 500;
 
 function parseCsvRecords(csvText: string): string[] {
   const records: string[] = [];
@@ -103,6 +104,7 @@ export function PriceBookPage() {
   const [invalidRows, setInvalidRows] = useState<InvalidRow[]>([]);
   const [progressText, setProgressText] = useState<string>('');
   const [isImporting, setIsImporting] = useState(false);
+  const [showAddItemForm, setShowAddItemForm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const sortedItems = useMemo(
@@ -158,7 +160,14 @@ export function PriceBookPage() {
 
       const missingColumns = EXPECTED_COLUMNS.filter(column => headerIndex[column] === undefined);
       if (missingColumns.length > 0) {
-        setInvalidRows([{ rowNumber: 1, reason: `Missing columns: ${missingColumns.join(', ')}` }]);
+        setInvalidRows([{ rowNumber: 1, reason: `CSV is missing required columns: ${missingColumns.join(', ')}.` }]);
+        return;
+      }
+
+      const dataRows = lines.length - 1;
+      if (dataRows > MAX_IMPORT_ROWS) {
+        setInvalidRows([{ rowNumber: 0, reason: `CSV has ${dataRows} rows. Maximum allowed is 500 rows per import.` }]);
+        setProgressText('');
         return;
       }
 
@@ -200,7 +209,7 @@ export function PriceBookPage() {
           continue;
         }
 
-        validRows.push({ rowNumber, name, description, unitPriceCents, unit, category });
+        validRows.push({ rowNumber, name, description, unit_price: unitPrice, unit, category });
       }
 
       setInvalidRows(rowErrors);
@@ -250,8 +259,15 @@ export function PriceBookPage() {
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="p-4 md:p-6 max-w-4xl mx-auto">
         <div className="mb-6 flex items-center justify-between gap-3">
-          <h1 className="text-slate-900">Price Book</h1>
-          <div className="flex items-center">
+          <h1 className="text-slate-900">Price book</h1>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              onClick={() => setShowAddItemForm(prev => !prev)}
+            >
+              Add item
+            </button>
             <button
               type="button"
               className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
@@ -272,12 +288,18 @@ export function PriceBookPage() {
           </div>
         </div>
 
+        {showAddItemForm && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-white p-3">
+            <p className="text-sm text-slate-700">Add price book item</p>
+          </div>
+        )}
+
         {progressText && (
-          <p className="mb-3 text-sm text-slate-600">{progressText}</p>
+          <p data-testid="csv-import-progress" className="mb-3 text-sm text-slate-600">{progressText}</p>
         )}
 
         {invalidRows.length > 0 && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3">
+          <div data-testid="csv-import-errors" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3">
             <p className="mb-2 text-sm text-red-700">Some rows could not be imported:</p>
             <ul className="list-disc pl-5 text-sm text-red-700">
               {invalidRows.map(row => (
