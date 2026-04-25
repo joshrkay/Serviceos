@@ -27,6 +27,7 @@ interface InvalidRow {
 }
 
 const EXPECTED_COLUMNS = ['name', 'description', 'unit_price', 'unit', 'category'] as const;
+const MAX_IMPORT_ROWS = 500;
 
 function parseCsvRecords(csvText: string): string[] {
   const records: string[] = [];
@@ -103,6 +104,7 @@ export function PriceBookPage() {
   const [invalidRows, setInvalidRows] = useState<InvalidRow[]>([]);
   const [progressText, setProgressText] = useState<string>('');
   const [isImporting, setIsImporting] = useState(false);
+  const [showAddItemForm, setShowAddItemForm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const sortedItems = useMemo(
@@ -159,6 +161,13 @@ export function PriceBookPage() {
       const missingColumns = EXPECTED_COLUMNS.filter(column => headerIndex[column] === undefined);
       if (missingColumns.length > 0) {
         setInvalidRows([{ rowNumber: 1, reason: `CSV is missing required columns: ${missingColumns.join(', ')}.` }]);
+        return;
+      }
+
+      const dataRows = lines.length - 1;
+      if (dataRows > MAX_IMPORT_ROWS) {
+        setInvalidRows([{ rowNumber: 0, reason: `CSV has ${dataRows} rows. Maximum allowed is 500 rows per import.` }]);
+        setProgressText('');
         return;
       }
 
@@ -255,6 +264,7 @@ export function PriceBookPage() {
             <button
               type="button"
               className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              onClick={() => setShowAddItemForm(prev => !prev)}
             >
               Add item
             </button>
@@ -278,8 +288,14 @@ export function PriceBookPage() {
           </div>
         </div>
 
+        {showAddItemForm && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-white p-3">
+            <p className="text-sm text-slate-700">Add price book item</p>
+          </div>
+        )}
+
         {progressText && (
-          <p className="mb-3 text-sm text-slate-600">{progressText}</p>
+          <p data-testid="csv-import-progress" className="mb-3 text-sm text-slate-600">{progressText}</p>
         )}
 
         {invalidRows.length > 0 && (
