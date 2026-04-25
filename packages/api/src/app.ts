@@ -119,6 +119,7 @@ import {
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
+import { createJobFilesRouter } from './routes/job-files';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
