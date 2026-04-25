@@ -3,10 +3,11 @@ import { useNavigate } from 'react-router';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
-  MapPin, Check, Store, RefreshCw, TrendingUp, Mail,
+  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star,
 } from 'lucide-react';
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
+import { apiFetch } from '../../utils/api-fetch';
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -17,6 +18,32 @@ export function SettingsPage() {
   const [qbConnected, setQbConnected] = useState(false);
   const [suppliersOpen, setSuppliersOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
+  const [googleReviewUrl, setGoogleReviewUrl] = useState('');
+  const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
+  const [savingReviews, setSavingReviews]     = useState(false);
+  const [reviewsSaved, setReviewsSaved]       = useState(false);
+  const [reviewsError, setReviewsError]       = useState('');
+
+  async function saveReviewUrls() {
+    setSavingReviews(true);
+    setReviewsError('');
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ googleReviewUrl, yelpReviewUrl }),
+      });
+      if (!res.ok) {
+        setReviewsError('Could not save. Please try again.');
+        return;
+      }
+      setReviewsSaved(true);
+      setTimeout(() => setReviewsSaved(false), 2000);
+    } catch {
+      setReviewsError('Network error. Please try again.');
+    } finally {
+      setSavingReviews(false);
+    }
+  }
 
   const intakeUrl = 'fieldly.app/intake/ortega-hvac';
 
@@ -33,6 +60,7 @@ export function SettingsPage() {
         { icon: Building2, label: 'Business profile',    description: 'Name, logo, address, phone',                      action: () => {} },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español, timezone',                     action: () => {} },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => {} },
+        { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
       ],
     },
     {
@@ -48,6 +76,12 @@ export function SettingsPage() {
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => {} },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => {} },
+      ],
+    },
+    {
+      title: 'Customer experience',
+      items: [
+        { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
       ],
     },
     {
@@ -249,6 +283,72 @@ export function SettingsPage() {
               </button>
             </div>
           ))}
+        </div>
+
+        {/* Reviews section */}
+        <div className="mb-4">
+          <p className="text-xs text-slate-400 mb-2 px-1">REVIEWS</p>
+          <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="flex size-7 items-center justify-center rounded-lg bg-amber-100">
+                <Star size={14} className="text-amber-600" />
+              </span>
+              <div>
+                <p className="text-sm text-slate-800">Public review links</p>
+                <p className="text-xs text-slate-400 mt-0.5">Shown to happy customers after they leave feedback</p>
+              </div>
+            </div>
+
+            <label htmlFor="google-review-url" className="block mt-3">
+              <span className="text-sm text-slate-700">Google Review URL</span>
+              <input
+                id="google-review-url"
+                type="url"
+                value={googleReviewUrl}
+                onChange={e => setGoogleReviewUrl(e.target.value)}
+                placeholder="https://g.page/r/..."
+                className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+              />
+              <span className="block text-xs text-slate-400 mt-1">
+                Customers with a 4+ rating will see a button linking here.
+              </span>
+            </label>
+
+            <label htmlFor="yelp-review-url" className="block mt-4">
+              <span className="text-sm text-slate-700">Yelp Review URL</span>
+              <input
+                id="yelp-review-url"
+                type="url"
+                value={yelpReviewUrl}
+                onChange={e => setYelpReviewUrl(e.target.value)}
+                placeholder="https://www.yelp.com/biz/..."
+                className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+              />
+              <span className="block text-xs text-slate-400 mt-1">
+                Customers with a 4+ rating will see a button linking here.
+              </span>
+            </label>
+
+            {reviewsError && (
+              <p className="mt-3 text-sm text-red-600">{reviewsError}</p>
+            )}
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              {reviewsSaved && (
+                <span className="flex items-center gap-1 text-xs text-green-700 bg-green-100 rounded-full px-2 py-0.5">
+                  <Check size={11} /> Saved
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={saveReviewUrls}
+                disabled={savingReviews}
+                className="rounded-xl bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-700 active:scale-[0.98] transition disabled:opacity-50"
+              >
+                {savingReviews ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Settings sections */}
