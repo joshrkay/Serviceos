@@ -32,6 +32,7 @@ import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
+import { createJobFilesRouter } from './routes/job-files';
 import { createDispatchRoutes } from './dispatch/routes';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
@@ -92,7 +93,9 @@ import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
 import { InMemoryFileRepository } from './files/file-service';
+import { InMemoryJobFileRepository } from './files/job-file-repository';
 import { PgFileRepository } from './files/pg-file';
+import { PgJobFileRepository } from './files/pg-job-file';
 import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
 import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
@@ -259,6 +262,7 @@ export function createApp() {
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
@@ -460,6 +464,15 @@ export function createApp() {
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use(
+    '/api/jobs',
+    createJobFilesRouter({
+      jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
