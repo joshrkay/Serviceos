@@ -32,6 +32,7 @@ import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
+import { createJobFilesRouter } from './routes/job-files';
 import { createDispatchRoutes } from './dispatch/routes';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
@@ -466,7 +467,12 @@ export function createApp() {
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
   app.use(
     '/api/jobs',
-    createJobFilesRouter({ repo: jobFileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
+    createJobFilesRouter({
+      jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
   );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
