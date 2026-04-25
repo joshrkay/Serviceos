@@ -16,7 +16,7 @@ interface CatalogImportRow {
   rowNumber: number;
   name: string;
   description: string;
-  unit_price: number;
+  unitPriceCents: number;
   unit: string;
   category: string;
 }
