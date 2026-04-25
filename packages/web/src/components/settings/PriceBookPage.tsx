@@ -12,11 +12,11 @@ interface PriceBookItem {
   category?: string;
 }
 
-interface CatalogImportRow {
+interface CatalogImportPayload {
   rowNumber: number;
   name: string;
   description: string;
-  unitPriceCents: number;
+  unit_price: number;
   unit: string;
   category: string;
 }
@@ -171,7 +171,7 @@ export function PriceBookPage() {
         return;
       }
 
-      const validRows: CatalogImportRow[] = [];
+      const validRows: CatalogImportPayload[] = [];
       const rowErrors: InvalidRow[] = [];
 
       for (let i = 1; i < lines.length; i += 1) {
