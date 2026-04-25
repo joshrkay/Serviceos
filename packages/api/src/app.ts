@@ -30,6 +30,7 @@ import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
+import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createDispatchRoutes } from './dispatch/routes';
 
@@ -91,7 +92,11 @@ import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
 import { InMemoryFileRepository } from './files/file-service';
+import { InMemoryJobFileRepository } from './files/job-file-repository';
 import { PgFileRepository } from './files/pg-file';
+import { PgJobFileRepository } from './files/pg-job-file';
+import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
+import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
@@ -113,6 +118,7 @@ import {
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
+import { createJobFilesRouter } from './routes/job-files';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -256,6 +262,8 @@ export function createApp() {
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
+  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -456,6 +464,10 @@ export function createApp() {
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use(
+    '/api/jobs',
+    createJobFilesRouter({ repo: jobFileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
+  );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
@@ -471,6 +483,7 @@ export function createApp() {
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
   app.use('/api/technician-location', createTechnicianLocationRouter(technicianLocationPingRepo));
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
