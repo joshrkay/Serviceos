@@ -14,6 +14,7 @@ const isCI = !!process.env.CI;
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
+const includeQaMatrix = process.env.QA_MATRIX === '1';
 
 export default defineConfig({
   testDir: './e2e',
@@ -44,18 +45,21 @@ export default defineConfig({
       testIgnore: ['**/qa-matrix/**'],
       use: { ...devices['Desktop Chrome'] },
     },
-    {
-      // 4-agent swarm QA matrix (Estimates, Invoices, Assistant).
-      // Run with: npm run e2e:qa-matrix
-      // Requires: E2E_BASE_URL, E2E_API_URL, Clerk tokens for two tenants,
-      // Stripe test keys on the API, and E2E_DB_URL_READONLY for Agent C.
-      // See qa/README.md.
-      name: 'qa-matrix',
-      testDir: './e2e/qa-matrix',
-      testIgnore: [],
-      testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
-      use: { ...devices['Desktop Chrome'] },
-    },
+    ...(includeQaMatrix
+      ? [
+          {
+            // 4-agent swarm QA matrix (Estimates, Invoices, Assistant).
+            // Opt-in via QA_MATRIX=1 (set by `npm run e2e:qa-matrix`) so the
+            // default e2e run skips it — its specs need env vars and a real
+            // backend that aren't wired into PR CI.
+            name: 'qa-matrix',
+            testDir: './e2e/qa-matrix',
+            testIgnore: [],
+            testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
+            use: { ...devices['Desktop Chrome'] },
+          },
+        ]
+      : []),
   ],
 
   globalTeardown: process.env.QA_MATRIX === '1'
