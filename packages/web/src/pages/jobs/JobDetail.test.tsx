@@ -7,6 +7,12 @@ vi.mock('../../hooks/useDetailQuery', () => ({
   useDetailQuery: vi.fn(),
 }));
 
+vi.mock('../../components/jobs/PhotoBucket', () => ({
+  PhotoBucket: ({ category }: { category: string }) => (
+    <div data-testid={`photo-bucket-${category}`}>photo-bucket-{category}</div>
+  ),
+}));
+
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 describe('JobDetail', () => {
@@ -29,5 +35,22 @@ describe('JobDetail', () => {
     });
     render(<JobDetail jobId="1" />);
     expect(screen.getByText('Loading...')).toBeInTheDocument();
+  });
+
+  describe('site media section', () => {
+    it('renders Site Media heading', () => {
+      render(<JobDetail jobId="1" />);
+      expect(screen.getByText('Site Media')).toBeInTheDocument();
+    });
+
+    it('renders photo-bucket-before', () => {
+      render(<JobDetail jobId="1" />);
+      expect(screen.getByTestId('photo-bucket-before')).toBeInTheDocument();
+    });
+
+    it('renders photo-bucket-after', () => {
+      render(<JobDetail jobId="1" />);
+      expect(screen.getByTestId('photo-bucket-after')).toBeInTheDocument();
+    });
   });
 });
