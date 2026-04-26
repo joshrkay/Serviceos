@@ -290,7 +290,22 @@ export function PriceBookPage() {
 
         {showAddItemForm && (
           <div className="mb-4 rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-sm text-slate-700">Add price book item</p>
+            <p className="mb-3 text-sm text-slate-700">Add price book item</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Item name</span>
+                <input type="text" className="rounded border border-slate-300 px-2 py-1 text-sm" />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Unit price</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+            </div>
           </div>
         )}
 
