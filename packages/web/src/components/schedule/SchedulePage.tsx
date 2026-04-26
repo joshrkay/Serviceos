@@ -152,10 +152,14 @@ export function SchedulePage() {
   const activeData = error ? fallbackJobs : data;
   const isFallbackMode = Boolean(error);
 
-  // Client-side tech filter
+  // Apply personal-view scope, then client-side tech filter
+  const scopedData = viewMode === 'personal'
+    ? activeData.filter(j => j.technician?.id === myTechnicianId || j.assignedTechnicianId === myTechnicianId)
+    : activeData;
+
   const dayJobs = techFilter === 'All'
-    ? activeData
-    : activeData.filter(j => {
+    ? scopedData
+    : scopedData.filter(j => {
         const techName = j.technician
           ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
           : null;
