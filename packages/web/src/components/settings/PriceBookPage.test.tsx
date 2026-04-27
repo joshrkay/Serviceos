@@ -36,6 +36,7 @@ describe('PriceBookPage', () => {
     const input = screen.getByTestId('csv-file-input');
     expect(input).toHaveAttribute('type', 'file');
     expect(input).toHaveAttribute('accept', '.csv');
+    expect(useListQuery).toHaveBeenCalledWith('/api/catalog/items', { pageSize: 200 });
   });
 
 
@@ -161,5 +162,58 @@ describe('PriceBookPage', () => {
       );
     });
     expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('filters categories even when API data uses lowercase category values', () => {
+    vi.mocked(useListQuery).mockReturnValue({
+      data: [
+        { id: '1', name: 'Technician hour', unitPriceCents: 15000, unit: 'hour', category: 'labor' },
+        { id: '2', name: 'Air filter', unitPriceCents: 2000, unit: 'each', category: 'Parts' },
+      ],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+      isLoading: false,
+      error: null,
+      refetch: mockRefetch,
+      setPage: vi.fn(),
+      setSearch: vi.fn(),
+      setFilters: vi.fn(),
+    });
+
+    render(<PriceBookPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Labor' }));
+    expect(screen.getByText('Technician hour')).toBeInTheDocument();
+    expect(screen.queryByText('Air filter')).not.toBeInTheDocument();
+  });
+
+  it('submits create payload with unitPriceCents', async () => {
+    render(<PriceBookPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add item' }));
+    fireEvent.change(screen.getByLabelText('Item name'), { target: { value: 'Capacitor' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Run capacitor' } });
+    fireEvent.change(screen.getByLabelText('Unit price'), { target: { value: '12.34' } });
+    fireEvent.change(screen.getByLabelText('Unit'), { target: { value: 'each' } });
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'Parts' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create item' }));
+
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            name: 'Capacitor',
+            description: 'Run capacitor',
+            unitPriceCents: 1234,
+            unit: 'each',
+            category: 'Parts',
+          }),
+        })
+      )
+    );
   });
 });
