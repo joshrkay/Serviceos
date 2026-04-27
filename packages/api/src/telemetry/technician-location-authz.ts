@@ -35,7 +35,7 @@ export class PgTechnicianLocationAuthorizer extends PgBaseRepository implements 
          LIMIT 1`,
         [auth.tenantId, technicianId]
       );
-      return found.rowCount > 0;
+      return (found.rowCount ?? 0) > 0;
     });
   }
 }
