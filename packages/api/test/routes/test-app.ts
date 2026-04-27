@@ -11,11 +11,14 @@ import { createCustomerRouter } from '../../src/routes/customers';
 import { createEstimateRouter } from '../../src/routes/estimates';
 import { createInvoiceRouter } from '../../src/routes/invoices';
 import { createAppointmentRouter } from '../../src/routes/appointments';
+import { createProposalsRouter } from '../../src/routes/proposals';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryPaymentRepository } from '../../src/invoices/payment';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
@@ -47,7 +50,9 @@ export interface TestApp {
   customerRepo: InMemoryCustomerRepository;
   estimateRepo: InMemoryEstimateRepository;
   invoiceRepo: InMemoryInvoiceRepository;
+  paymentRepo: InMemoryPaymentRepository;
   appointmentRepo: InMemoryAppointmentRepository;
+  proposalRepo: InMemoryProposalRepository;
   settingsRepo: InMemorySettingsRepository;
   auditRepo: InMemoryAuditRepository;
 }
@@ -72,7 +77,9 @@ export async function buildTestApp(): Promise<TestApp> {
   const customerRepo = new InMemoryCustomerRepository();
   const estimateRepo = new InMemoryEstimateRepository();
   const invoiceRepo = new InMemoryInvoiceRepository();
+  const paymentRepo = new InMemoryPaymentRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
+  const proposalRepo = new InMemoryProposalRepository();
   const settingsRepo = new InMemorySettingsRepository();
   const auditRepo = new InMemoryAuditRepository();
 
@@ -88,8 +95,9 @@ export async function buildTestApp(): Promise<TestApp> {
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
-  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, appointmentRepo, settingsRepo, auditRepo };
+  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, appointmentRepo, proposalRepo, settingsRepo, auditRepo };
 }

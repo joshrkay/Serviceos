@@ -7,6 +7,13 @@ import { InMemoryTechnicianLocationPingRepository } from '../../src/telemetry/te
 
 describe('POST /api/technician-location', () => {
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  // Pings older than 24h are rejected by createTechnicianLocationPing's
+  // stale-window check (DEFAULT_MAX_STALE_MS). Earlier versions of
+  // this test used hardcoded 2026-04 ISO strings that rotted past the
+  // window as wall-clock time advanced. Relative-to-now dates keep
+  // the test deterministic against the stale-window guard.
+  const RECENT_PING_ISO = new Date(Date.now() - 60_000).toISOString();
+  const OLDER_PING_ISO = new Date(Date.now() - 120_000).toISOString();
   let app: express.Express;
   let repo: InMemoryTechnicianLocationPingRepository;
   let firstPingIso: string;

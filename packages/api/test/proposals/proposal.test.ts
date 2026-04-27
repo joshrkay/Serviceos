@@ -364,6 +364,35 @@ describe('decideInitialStatus — D3 trust-tier decision', () => {
       })
     ).toBe('draft');
   });
+
+  // missingFields override — partial payloads can never auto-execute.
+  // The forcing function: even a maximally-trusted autonomous agent
+  // at 0.95 confidence on a capture-class proposal stays in 'draft'
+  // whenever the task handler reports a gap. Review UI blocks
+  // Approve until the operator fills the listed fields.
+  it('missingFields non-empty forces draft even with autonomous + capture + 0.95', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        missingFields: ['email'],
+      })
+    ).toBe('draft');
+  });
+
+  it('missingFields empty array behaves as no-missingFields (preserves auto-approve path)', () => {
+    // An empty array should NOT be treated as "gaps exist" — it's
+    // semantically "we checked, nothing missing".
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        missingFields: [],
+      })
+    ).toBe('approved');
+  });
 });
 
 describe('createProposal — D3 trust-tier integration', () => {
@@ -416,5 +445,38 @@ describe('createProposal — D3 trust-tier integration', () => {
       createdBy: 'agent-invoice',
     });
     expect(proposal.status).toBe('draft');
+  });
+
+  it('missingFields land in sourceContext and force draft even on autonomous + 0.95', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      payload: { name: 'Acme' },
+      summary: 'Create customer Acme',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      createdBy: 'agent-capture',
+      missingFields: ['email', 'phone'],
+    });
+    expect(proposal.status).toBe('draft');
+    // missingFields ride on sourceContext so we don't need a new DB
+    // column — the typed accessor `missingFieldsFor(proposal)` reads
+    // them back.
+    expect(proposal.sourceContext).toBeDefined();
+    expect(proposal.sourceContext?.missingFields).toEqual(['email', 'phone']);
+  });
+
+  it('missingFields merge into existing sourceContext without clobbering other keys', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'reschedule_appointment',
+      payload: { appointmentReference: 'the Miller job' },
+      summary: 'Reschedule',
+      sourceContext: { conversationId: 'conv-42' },
+      createdBy: 'user-1',
+      missingFields: ['newScheduledStart'],
+    });
+    expect(proposal.sourceContext?.conversationId).toBe('conv-42');
+    expect(proposal.sourceContext?.missingFields).toEqual(['newScheduledStart']);
   });
 });

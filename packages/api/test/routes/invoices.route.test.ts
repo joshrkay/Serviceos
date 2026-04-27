@@ -91,14 +91,62 @@ describe('POST /api/invoices', () => {
     expect(r2.body.invoiceNumber).toBe('INV-0002');
   });
 
-  it('returns an error when lineItems is empty', async () => {
+  it('returns 400 with field errors when lineItems is empty', async () => {
     const res = await request(app).post('/api/invoices').send({
       jobId: 'job-1',
       invoiceNumber: 'PLACEHOLDER',
       lineItems: [],
     });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.body).toHaveProperty('error');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fields).toHaveProperty('lineItems');
+  });
+
+  it('returns 400 when required fields are missing', async () => {
+    const res = await request(app).post('/api/invoices').send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fields).toHaveProperty('jobId');
+  });
+});
+
+describe('PATCH /api/invoices/:id', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('updates a draft invoice and recalculates totals', async () => {
+    const created = await createInvoice(app);
+    const res = await request(app)
+      .patch(`/api/invoices/${created.body.id}`)
+      .send({
+        lineItems: [
+          { id: 'li-1', description: 'Updated', quantity: 1, unitPriceCents: 25000, totalCents: 25000, category: 'labor', sortOrder: 0, taxable: false },
+        ],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.totals.totalCents).toBe(25000);
+    expect(res.body.amountDueCents).toBe(25000);
+  });
+
+  it('returns 400 when editing an invoice that has been issued', async () => {
+    const created = await createInvoice(app);
+    await request(app).post(`/api/invoices/${created.body.id}/issue`).send({});
+
+    const res = await request(app)
+      .patch(`/api/invoices/${created.body.id}`)
+      .send({ customerMessage: 'too late' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 404 for unknown id', async () => {
+    const res = await request(app)
+      .patch('/api/invoices/nope')
+      .send({ customerMessage: 'x' });
+    expect(res.status).toBe(404);
   });
 });
 
@@ -121,6 +169,110 @@ describe('GET /api/invoices/:id', () => {
     const res = await request(app).get('/api/invoices/does-not-exist');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
+describe('GET /api/invoices', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns an empty array when no invoices exist', async () => {
+    const res = await request(app).get('/api/invoices');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('returns all invoices for the tenant', async () => {
+    await createInvoice(app);
+    await createInvoice(app);
+    const res = await request(app).get('/api/invoices');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0]).toHaveProperty('invoiceNumber');
+  });
+
+  it('filters by jobId when the query parameter is provided', async () => {
+    await createInvoice(app, { jobId: 'job-1' });
+    await createInvoice(app, { jobId: 'job-2' });
+    const res = await request(app).get('/api/invoices?jobId=job-2');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].jobId).toBe('job-2');
+  });
+});
+
+describe('POST /api/invoices/:id/payment', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function createOpenInvoice(overrides: Record<string, unknown> = {}) {
+    const created = await createInvoice(app, overrides);
+    await request(app)
+      .post(`/api/invoices/${created.body.id}/issue`)
+      .send({ paymentTermDays: 30 });
+    return created.body.id as string;
+  }
+
+  it('records a full payment and transitions the invoice to paid', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 15000, method: 'cash' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.payment.amountCents).toBe(15000);
+    expect(res.body.payment.method).toBe('cash');
+    expect(res.body.invoice.status).toBe('paid');
+    expect(res.body.invoice.amountPaidCents).toBe(15000);
+    expect(res.body.invoice.amountDueCents).toBe(0);
+  });
+
+  it('records a partial payment and transitions to partially_paid', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 5000, method: 'credit_card' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.invoice.status).toBe('partially_paid');
+    expect(res.body.invoice.amountPaidCents).toBe(5000);
+    expect(res.body.invoice.amountDueCents).toBe(10000);
+  });
+
+  it('returns 400 for non-positive payment amounts', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 0, method: 'cash' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 for payments that exceed the amount due', async () => {
+    const invoiceId = await createOpenInvoice();
+    const res = await request(app)
+      .post(`/api/invoices/${invoiceId}/payment`)
+      .send({ amountCents: 99999, method: 'cash' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 when the invoice is still a draft', async () => {
+    const created = await createInvoice(app);
+    const res = await request(app)
+      .post(`/api/invoices/${created.body.id}/payment`)
+      .send({ amountCents: 1000, method: 'cash' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 });
 
@@ -190,15 +342,14 @@ describe('POST /api/invoices/:id/transition', () => {
     expect(res.body.status).toBe('void');
   });
 
-  it('returns an error for invalid transition', async () => {
+  it('returns 400 for an invalid transition', async () => {
     const created = await createInvoice(app);
     expect(created.status).toBe(201);
-    // draft → paid is not a valid transition.
-    // The lifecycle throws a plain Error so the server returns 5xx.
     const res = await request(app)
       .post(`/api/invoices/${created.body.id}/transition`)
       .send({ status: 'paid' });
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
   it('returns 400 when status is missing', async () => {

@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { InvoiceDetail } from './InvoiceDetail';
 
 vi.mock('../../hooks/useDetailQuery', () => ({
@@ -95,5 +95,86 @@ describe('InvoiceDetail', () => {
     });
     render(<InvoiceDetail invoiceId="1" />);
     expect(screen.getByText('Not found')).toBeInTheDocument();
+  });
+
+  describe('P5-011A — manual payment recording UI', () => {
+    const originalFetch = global.fetch;
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    it('hides the payment form by default', () => {
+      render(<InvoiceDetail invoiceId="1" />);
+      expect(screen.queryByTestId('payment-record-form')).toBeNull();
+    });
+
+    it('opens the payment form when Record Payment is clicked', () => {
+      render(<InvoiceDetail invoiceId="1" />);
+      fireEvent.click(screen.getByText('Record Payment'));
+      expect(screen.getByTestId('payment-record-form')).toBeInTheDocument();
+      expect(screen.getByTestId('amount-due-display')).toHaveTextContent('$116.00');
+    });
+
+    it('closes the form when Cancel is clicked', () => {
+      render(<InvoiceDetail invoiceId="1" />);
+      fireEvent.click(screen.getByText('Record Payment'));
+      fireEvent.click(screen.getByTestId('cancel-button'));
+      expect(screen.queryByTestId('payment-record-form')).toBeNull();
+    });
+
+    it('POSTs to /api/payments and refetches on submit', async () => {
+      const refetch = vi.fn();
+      vi.mocked(useDetailQuery).mockReturnValue({
+        data: {
+          id: 'inv-1', invoiceNumber: 'INV-001', status: 'sent', jobId: 'j1',
+          subtotalCents: 20000, discountCents: 0, taxCents: 0, totalCents: 20000,
+          amountPaidCents: 0, amountDueCents: 20000,
+          createdAt: '2026-01-15T00:00:00Z', lineItems: [], payments: [],
+        },
+        isLoading: false, error: null, refetch,
+      });
+
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ id: 'pay-1' }), { status: 201 })
+      );
+      global.fetch = fetchMock;
+
+      render(<InvoiceDetail invoiceId="inv-1" />);
+      fireEvent.click(screen.getByText('Record Payment'));
+      fireEvent.click(screen.getByTestId('submit-button'));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('/api/payments');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body);
+      expect(body.invoiceId).toBe('inv-1');
+      expect(body.amountCents).toBe(20000);
+      expect(body.method).toBe('cash');
+
+      await waitFor(() => {
+        expect(refetch).toHaveBeenCalled();
+      });
+    });
+
+    it('surfaces a submit error when the API rejects', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response('balance mismatch', { status: 400 })
+      );
+      global.fetch = fetchMock;
+
+      render(<InvoiceDetail invoiceId="1" />);
+      fireEvent.click(screen.getByText('Record Payment'));
+      fireEvent.click(screen.getByTestId('submit-button'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('payment-submit-error')).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('payment-submit-error').textContent).toContain('400');
+    });
   });
 });

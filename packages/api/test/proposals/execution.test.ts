@@ -203,4 +203,81 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
       expect(result.success).toBe(true);
     });
   });
+
+  // IdempotencyGuard wired into ProposalExecutor. When the same
+  // idempotencyKey has already produced an executed proposal,
+  // re-executing must NOT call the handler a second time.
+  //
+  // The repo-level unique constraint blocks duplicate proposals with
+  // the same key from coexisting in tenant scope (good — first line
+  // of defense). The guard covers the cross-row case where a previous
+  // proposal with the same key has already been executed, e.g., an
+  // admin re-uploads a command with the same external idempotency
+  // key. In that path the second proposal must short-circuit rather
+  // than re-mutate.
+  describe('idempotency short-circuit', () => {
+    it('short-circuits when a prior executed proposal shares the idempotencyKey', async () => {
+      const { IdempotencyGuard } = await import('../../src/proposals/execution/idempotency');
+      const repo = new InMemoryProposalRepository();
+      const handlers = createExecutionHandlerRegistry();
+      const guard = new IdempotencyGuard(repo);
+      const executor = new ProposalExecutor(handlers, repo, guard);
+
+      // First proposal executes cleanly under idem-key-42.
+      const first = makeApprovedProposal({ idempotencyKey: 'idem-key-42' });
+      await repo.create(first);
+      const firstRun = await executor.execute(first, context);
+      expect(firstRun.result.success).toBe(true);
+      const priorEntityId = firstRun.result.resultEntityId;
+      expect(priorEntityId).toBeDefined();
+
+      // Admin re-submits a fresh proposal row with the same external
+      // idempotency key but a different proposal id (e.g., replaying
+      // a command-log replay). The repo allows creation only because
+      // the key uniqueness check matches against live rows — the
+      // first proposal has already been transitioned to 'executed',
+      // so the dedup path is the guard's job.
+      //
+      // Since InMemoryProposalRepository blocks on (tenant, key)
+      // regardless of status, we exercise the guard directly. In Pg
+      // the uniqueness is similarly (tenant, key), so the same
+      // concrete path requires a follow-up: the guard is still
+      // valuable when keys are per-run (voice recording id) rather
+      // than per-command.
+      const result = await guard.checkAndExecute(first, async () => ({
+        success: true,
+        resultEntityId: 'should-not-be-called',
+      }));
+      expect(result.alreadyExecuted).toBe(true);
+      expect(result.result.resultEntityId).toBe(priorEntityId);
+    });
+
+    it('runs the executeFn when no prior executed proposal matches the key', async () => {
+      const { IdempotencyGuard } = await import('../../src/proposals/execution/idempotency');
+      const repo = new InMemoryProposalRepository();
+      const guard = new IdempotencyGuard(repo);
+
+      const proposal = makeApprovedProposal({ idempotencyKey: 'fresh-key' });
+      const outcome = await guard.checkAndExecute(proposal, async () => ({
+        success: true,
+        resultEntityId: 'entity-new',
+      }));
+      expect(outcome.alreadyExecuted).toBe(false);
+      expect(outcome.result.resultEntityId).toBe('entity-new');
+    });
+
+    it('is a passthrough when the proposal has no idempotencyKey', async () => {
+      const { IdempotencyGuard } = await import('../../src/proposals/execution/idempotency');
+      const repo = new InMemoryProposalRepository();
+      const guard = new IdempotencyGuard(repo);
+
+      const proposal = makeApprovedProposal(); // no idempotencyKey
+      const outcome = await guard.checkAndExecute(proposal, async () => ({
+        success: true,
+        resultEntityId: 'entity-x',
+      }));
+      expect(outcome.alreadyExecuted).toBe(false);
+      expect(outcome.result.resultEntityId).toBe('entity-x');
+    });
+  });
 });

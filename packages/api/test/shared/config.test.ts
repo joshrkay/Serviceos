@@ -70,4 +70,53 @@ describe('P0-006 — Secrets/config framework', () => {
     const resolver = new EnvironmentSecretResolver();
     await expect(resolver.resolve('NONEXISTENT_SECRET')).rejects.toThrow('Secret not found');
   });
+
+  it('AC#1 — production load fails when CLERK_SECRET_KEY is missing', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'prod',
+        DATABASE_URL: 'postgres://u:p@h/d',
+        CLERK_WEBHOOK_SECRET: 'whsec_x',
+        AI_PROVIDER_API_KEY: 'ak_x',
+        CORS_ORIGIN: 'https://app.example.com',
+      })
+    ).toThrow(/CLERK_SECRET_KEY/);
+  });
+
+  it('AC#1 — production load fails when CORS_ORIGIN is missing', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'prod',
+        DATABASE_URL: 'postgres://u:p@h/d',
+        CLERK_SECRET_KEY: 'sk_x',
+        CLERK_WEBHOOK_SECRET: 'whsec_x',
+        AI_PROVIDER_API_KEY: 'ak_x',
+      })
+    ).toThrow(/CORS_ORIGIN/);
+  });
+
+  it('AC#1 — production load fails when DB credentials are missing', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'prod',
+        CLERK_SECRET_KEY: 'sk_x',
+        CLERK_WEBHOOK_SECRET: 'whsec_x',
+        AI_PROVIDER_API_KEY: 'ak_x',
+        CORS_ORIGIN: 'https://app.example.com',
+      })
+    ).toThrow(/DB_NAME|DB_USER|DB_PASSWORD/);
+  });
+
+  it('AC#1 — production load succeeds when all required secrets present', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'prod',
+        DATABASE_URL: 'postgres://u:p@h/d',
+        CLERK_SECRET_KEY: 'sk_x',
+        CLERK_WEBHOOK_SECRET: 'whsec_x',
+        AI_PROVIDER_API_KEY: 'ak_x',
+        CORS_ORIGIN: 'https://app.example.com',
+      })
+    ).not.toThrow();
+  });
 });

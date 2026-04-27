@@ -3,14 +3,23 @@ import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
-import { createLLMGateway } from '../ai/gateway';
-import { loadConfig } from '../shared/config';
+import { LLMGateway } from '../ai/gateway/gateway';
+import { ProposalRepository } from '../proposals/proposal';
+import { classifyIntent } from '../ai/orchestration/intent-classifier';
+import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
 
 const assistantMessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant']),
   content: z.string().min(1),
 });
 
+/**
+ * UI proposal shape consumed by AssistantPage + AIProposalCard. Narrower
+ * than the server-side Proposal — the card only renders a title, summary,
+ * optional edit fields, and a coarse confidence band. 'Customer' was
+ * added alongside AST-01b so create_customer proposals have a home in
+ * the UI type switch.
+ */
 const assistantProposalSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -19,7 +28,7 @@ const assistantProposalSchema = z.object({
   reasoning: z.array(z.string()).optional(),
   editFields: z.array(z.object({ label: z.string(), key: z.string(), value: z.string() })).optional(),
   confidence: z.enum(['High', 'Medium']),
-  type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate']),
+  type: z.enum(['Invoice', 'Estimate', 'Schedule', 'Follow-up', 'Alert', 'Duplicate', 'Customer']),
   status: z.enum(['Pending', 'Approved', 'Rejected']),
   relatedId: z.string().optional(),
   impact: z.string().optional(),
@@ -85,15 +94,122 @@ Return JSON only. No markdown. Match this schema exactly:
 Set "proposal" to null when no proposal is needed.
 `;
 
-async function generateAssistantReply(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>, tenantId: string) {
+export interface AssistantRouterDeps {
+  gateway: LLMGateway;
+  proposalRepo: ProposalRepository;
+}
+
+type AssistantProposal = z.infer<typeof assistantProposalSchema>;
+
+/**
+ * Map the server-side create_customer Proposal to the UI card shape.
+ * Reads `name` / `email` / `phone` out of the payload (the router
+ * translates classifier `displayName` → contract `name` in AST-01).
+ */
+function customerProposalToUI(
+  proposalId: string,
+  payload: Record<string, unknown>,
+  sourceMessage: string,
+  confidenceScore: number
+): AssistantProposal {
+  const name = typeof payload.name === 'string' && payload.name.length > 0 ? payload.name : undefined;
+  const email = typeof payload.email === 'string' ? payload.email : undefined;
+  const phone = typeof payload.phone === 'string' ? payload.phone : undefined;
+
+  const title = name ? `New customer: ${name}` : 'New customer (needs details)';
+  const summary = [
+    name ? `Name: ${name}` : 'Name not provided',
+    email ? `Email: ${email}` : undefined,
+    phone ? `Phone: ${phone}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  return {
+    id: proposalId,
+    title,
+    summary: summary || 'Review and approve to add this customer.',
+    explanation: `From your message: "${sourceMessage}"`,
+    editFields: [
+      { label: 'Name', key: 'name', value: name ?? '' },
+      { label: 'Email', key: 'email', value: email ?? '' },
+      { label: 'Phone', key: 'phone', value: phone ?? '' },
+    ],
+    confidence: confidenceScore >= 0.85 ? 'High' : 'Medium',
+    type: 'Customer',
+    status: 'Pending',
+  };
+}
+
+async function generateAssistantReply(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  tenantId: string,
+  userId: string,
+  deps: AssistantRouterDeps
+) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-  const taskType = inferTaskType(lastUser?.content ?? '');
+  const lastUserText = lastUser?.content ?? '';
+
+  // ── Intent path: AST-01b ──────────────────────────────────────────
+  // Run the same classifier the voice pipeline uses. If the message is
+  // a recognized action (today: create_customer), build a real proposal
+  // and return it instead of a free-text LLM reply. Other intents fall
+  // through to the LLM — separate stories wire them into the chat.
+  if (lastUserText.trim().length > 0) {
+    try {
+      const classification = await classifyIntent(lastUserText, { tenantId }, deps.gateway);
+
+      if (classification.intentType === 'create_customer') {
+        const handler = new CreateCustomerTaskHandler();
+        const entities = classification.extractedEntities;
+        // Same translation the voice-action-router does: classifier
+        // surfaces `displayName`, the create_customer contract wants
+        // `name`. Keeping the mapping here means the task handler stays
+        // a dumb passthrough.
+        const customerPayload: Record<string, unknown> = {};
+        if (entities?.displayName) customerPayload.name = entities.displayName;
+        if (entities?.email) customerPayload.email = entities.email;
+        if (entities?.phone) customerPayload.phone = entities.phone;
+
+        const { proposal } = await handler.handle({
+          tenantId,
+          userId,
+          message: lastUserText,
+          existingEntities: customerPayload,
+        });
+        await deps.proposalRepo.create(proposal);
+
+        const uiProposal = customerProposalToUI(
+          proposal.id,
+          proposal.payload,
+          lastUserText,
+          classification.confidence
+        );
+
+        return {
+          taskType: 'assistant.create_customer',
+          model: 'intent-classifier',
+          usage: { input: 0, output: 0, total: 0 },
+          message: {
+            role: 'assistant' as const,
+            content: uiProposal.title + '. Review and approve to add them to your CRM.',
+            reasoning: classification.reasoning,
+            proposal: uiProposal,
+          },
+        };
+      }
+    } catch {
+      // Classifier failure should never break the chat — drop into the
+      // generic LLM path so the operator still gets a response.
+    }
+  }
+
+  // ── Fallback path: generic LLM text reply ────────────────────────
+  const taskType = inferTaskType(lastUserText);
   const systemPrompt = getSystemPrompt(taskType);
 
   try {
-    const config = loadConfig();
-    const gateway = createLLMGateway(config);
-    const response = await gateway.complete({
+    const response = await deps.gateway.complete({
       taskType,
       responseFormat: 'json',
       messages: [
@@ -123,7 +239,7 @@ async function generateAssistantReply(messages: Array<{ role: 'system' | 'user' 
       usage: { input: 0, output: 0, total: 0 },
       message: {
         role: 'assistant' as const,
-        content: 'I can help with invoices, scheduling, follow-ups, and estimates. Tell me what you want to do next.',
+        content: 'I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.',
         reasoning: 'AI provider unavailable, returned fallback response.',
       },
     };
@@ -135,7 +251,7 @@ function writeSse(res: Response, event: string, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-export function createAssistantRouter(): Router {
+export function createAssistantRouter(deps: AssistantRouterDeps): Router {
   const router = Router();
 
   router.post(
@@ -146,7 +262,12 @@ export function createAssistantRouter(): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = assistantChatRequestSchema.parse(req.body);
-        const result = await generateAssistantReply(parsed.messages, req.auth!.tenantId);
+        const result = await generateAssistantReply(
+          parsed.messages,
+          req.auth!.tenantId,
+          req.auth!.userId,
+          deps
+        );
 
         if (parsed.stream) {
           res.setHeader('Content-Type', 'text/event-stream');

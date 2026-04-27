@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -95,7 +96,7 @@ export async function createInvoice(
   auditRepo?: AuditRepository
 ): Promise<Invoice> {
   const errors = validateInvoiceInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,
@@ -137,6 +138,61 @@ export async function createInvoice(
   return created;
 }
 
+export async function listInvoices(
+  tenantId: string,
+  repository: InvoiceRepository
+): Promise<Invoice[]> {
+  return repository.findByTenant(tenantId);
+}
+
+/**
+ * Insert-first, then allocate — a failed createInvoice never increments
+ * the tenant's invoice counter, so there are no gaps in the user-visible
+ * sequence.
+ *
+ * Flow:
+ *   1. createInvoice with a placeholder number (passes validation but is
+ *      replaced before the row is ever read by any caller)
+ *   2. getNextInvoiceNumber — only runs when step 1 succeeded
+ *   3. invoiceRepo.update rewrites the placeholder with the real number
+ *
+ * Residual risk: a crash between step 2 and step 3 leaves the counter
+ * incremented while the row still shows the placeholder. That's a much
+ * smaller exposure than the previous ordering, where any validation or
+ * constraint failure in createInvoice burned a sequence number. A proper
+ * pg transaction (SELECT FOR UPDATE settings + INSERT invoice) is the
+ * long-term fix and lands alongside PgSettingsRepository when that ships.
+ */
+export async function createInvoiceWithNextNumber(
+  input: Omit<CreateInvoiceInput, 'invoiceNumber'>,
+  invoiceRepo: InvoiceRepository,
+  settingsRepo: SettingsRepository,
+  auditRepo?: AuditRepository
+): Promise<Invoice> {
+  const placeholderNumber = `PENDING-${uuidv4()}`;
+
+  const invoice = await createInvoice(
+    { ...input, invoiceNumber: placeholderNumber },
+    invoiceRepo,
+    auditRepo
+  );
+
+  const invoiceNumber = await getNextInvoiceNumber(input.tenantId, settingsRepo);
+  const updated = await invoiceRepo.update(input.tenantId, invoice.id, {
+    invoiceNumber,
+  });
+  if (!updated) {
+    // Hard failure: the counter is now allocated but the placeholder row
+    // can't be promoted to its real number. Returning a synthetic object
+    // would desync the app state from persistence — callers must see this
+    // as an error so it can be retried or alerted on.
+    throw new Error(
+      `Allocated invoice number ${invoiceNumber} but failed to update row ${invoice.id}`
+    );
+  }
+  return updated;
+}
+
 export async function getInvoice(
   tenantId: string,
   id: string,
@@ -153,6 +209,10 @@ export async function updateInvoice(
 ): Promise<Invoice | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
+
+  if (existing.status !== 'draft') {
+    throw new ValidationError(`Cannot edit invoice in '${existing.status}' status`);
+  }
 
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
