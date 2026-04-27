@@ -175,6 +175,7 @@ describe('P6-006 — Day-scoped dispatch board query', () => {
       latenessState: appointment.id === appt.id ? 'late_prompt_required' : 'on_track',
       expectedDurationMinutes: 60,
       elapsedOnSiteMinutes: 70,
+      elapsedActiveServiceMinutes: 70,
       promptRequired: true,
       promptSuppressedByCooldown: false,
     });

@@ -25,6 +25,7 @@ describe('dispatch lateness intelligence', () => {
 
     expect(result.progressState).toBe('in_transit');
     expect(result.elapsedOnSiteMinutes).toBe(0);
+    expect(result.elapsedActiveServiceMinutes).toBe(0);
     expect(result.latenessState).toBe('on_track');
   });
 
@@ -71,6 +72,7 @@ describe('dispatch lateness intelligence', () => {
 
     expect(atRisk.progressState).toBe('at_site');
     expect(atRisk.latenessState).toBe('at_risk');
+    expect(atRisk.elapsedActiveServiceMinutes).toBe(45);
 
     const promptRequired = computeDispatchLateness({
       scheduledStart: new Date('2026-03-14T13:00:00.000Z'),
@@ -87,6 +89,30 @@ describe('dispatch lateness intelligence', () => {
 
     expect(promptRequired.latenessState).toBe('late_prompt_required');
     expect(promptRequired.promptRequired).toBe(true);
+  });
+
+  it('uses arrival window start as the service-clock anchor for lateness thresholds', () => {
+    const result = computeDispatchLateness({
+      scheduledStart: new Date('2026-03-14T13:00:00.000Z'),
+      scheduledEnd: new Date('2026-03-14T14:00:00.000Z'),
+      arrivalWindowStart: new Date('2026-03-14T13:30:00.000Z'),
+      technicianId: 'tech-1',
+      serviceLocation,
+      now: new Date('2026-03-14T14:20:00.000Z'),
+      expectedDurationBaselineMinutes: 45,
+      pings: [
+        { occurredAt: new Date('2026-03-14T13:05:00.000Z'), latitude: 40.7128, longitude: -74.006 },
+        { occurredAt: new Date('2026-03-14T13:10:00.000Z'), latitude: 40.7128, longitude: -74.006 },
+        { occurredAt: new Date('2026-03-14T14:19:00.000Z'), latitude: 40.7128, longitude: -74.006 },
+      ],
+    }, {
+      preThresholdRatio: 0.8,
+      latenessGraceMinutes: 5,
+    });
+
+    expect(result.elapsedOnSiteMinutes).toBe(75);
+    expect(result.elapsedActiveServiceMinutes).toBe(50);
+    expect(result.latenessState).toBe('late_prompt_required');
   });
 
   it('moves to late_confirmed when technician supplies a delay bucket', () => {

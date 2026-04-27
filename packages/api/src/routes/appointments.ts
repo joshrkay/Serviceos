@@ -17,12 +17,27 @@ import {
   JobTimelineRepository,
   JOB_TIMELINE_EVENT_TYPES,
 } from '../jobs/job-lifecycle';
+export interface DelayNotificationEnqueuer {
+  enqueueDelayNotice(input: {
+    tenantId: string;
+    currentAppointmentId: string;
+    delayVersion: number;
+    delayMinutes: number;
+    technicianName?: string;
+    etaWindow?: { start: Date; end: Date; timezone?: string };
+  }): Promise<string | null>;
+}
+
+interface AppointmentRouterOptions {
+  delayNotificationCoordinator?: DelayNotificationEnqueuer;
+}
 
 export function createAppointmentRouter(
   appointmentRepo: AppointmentRepository,
   ownership: TenantOwnership,
   jobRepo: JobRepository,
-  timelineRepo: JobTimelineRepository
+  timelineRepo: JobTimelineRepository,
+  options?: AppointmentRouterOptions
 ): Router {
   const router = Router();
 
@@ -181,6 +196,30 @@ export function createAppointmentRouter(
           metadata
         );
 
+        let delayNoticeIdempotencyKey: string | null = null;
+        if (parsed.isRunningBehind && parsed.delayMinutes) {
+          const history = await timelineRepo.findByJob(req.auth!.tenantId, appointment.jobId);
+          const delayVersion = history.filter(
+            (entry) =>
+              entry.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED &&
+              entry.metadata?.isRunningBehind === true
+          ).length;
+          try {
+            delayNoticeIdempotencyKey = await options?.delayNotificationCoordinator?.enqueueDelayNotice({
+              tenantId: req.auth!.tenantId,
+              currentAppointmentId: appointment.id,
+              delayVersion,
+              delayMinutes: parsed.delayMinutes,
+            }) ?? null;
+          } catch (notificationError) {
+            // eslint-disable-next-line no-console
+            console.warn('Failed to enqueue delay notification', {
+              appointmentId: appointment.id,
+              error: notificationError instanceof Error ? notificationError.message : String(notificationError),
+            });
+          }
+        }
+
         res.status(201).json({
           appointmentId: appointment.id,
           jobId: appointment.jobId,
@@ -189,6 +228,7 @@ export function createAppointmentRouter(
           reasonCode: parsed.reasonCode,
           inferredTriggerState,
           timelineEntry,
+          delayNoticeIdempotencyKey,
         });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
