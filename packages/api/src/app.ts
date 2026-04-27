@@ -64,6 +64,10 @@ import {
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
+import {
+  InMemoryTechnicianLocationAuthorizer,
+  PgTechnicianLocationAuthorizer,
+} from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
@@ -264,6 +268,9 @@ export function createApp() {
   const technicianLocationPingRepo = pool
     ? new PgTechnicianLocationPingRepository(pool)
     : new InMemoryTechnicianLocationPingRepository();
+  const technicianLocationAuthorizer = pool
+    ? new PgTechnicianLocationAuthorizer(pool)
+    : new InMemoryTechnicianLocationAuthorizer();
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
@@ -514,7 +521,14 @@ export function createApp() {
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
-  app.use('/api/technician-location', createTechnicianLocationRouter(technicianLocationPingRepo));
+  app.use(
+    '/api/technician-location',
+    createTechnicianLocationRouter({
+      repository: technicianLocationPingRepo,
+      canSubmitForTechnician: (auth, technicianId) =>
+        technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
+    })
+  );
   app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
   app.use(
     '/api/files',
