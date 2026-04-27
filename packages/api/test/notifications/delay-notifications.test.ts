@@ -88,6 +88,12 @@ describe('delay notification flow', () => {
       delayVersion: 2,
       delayMinutes: 20,
       technicianName: 'Taylor',
+      triggerContext: {
+        thresholdMinutes: 65,
+        confidenceScore: 0.82,
+        pingSampleCount: 6,
+        reason: 'threshold_breached',
+      },
     });
 
     expect(key).toBe(`${nextAppt.id}:2`);
@@ -99,6 +105,12 @@ describe('delay notification flow', () => {
 
     const state = await stateRepo.findByKey(`${nextAppt.id}:2`);
     expect(state?.status).toBe('queued');
+    expect(state?.triggerContext).toMatchObject({
+      thresholdMinutes: 65,
+      confidenceScore: 0.82,
+      pingSampleCount: 6,
+      reason: 'threshold_breached',
+    });
   });
 
   it('falls back to in_app when sms is preferred but consent is missing', async () => {

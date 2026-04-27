@@ -221,8 +221,7 @@ export function PriceBookPage() {
         const category = (tokens[headerIndex.category] ?? '').trim();
 
         const normalizedUnitPrice = normalizePrice(unitPriceRaw);
-        const unitPrice = Number(normalizedUnitPrice);
-        const unitPriceCents = Number.isFinite(unitPrice) ? Math.round(unitPrice * 100) : NaN;
+        const unitPriceCents = Math.round(parseFloat(normalizedUnitPrice) * 100);
 
         if (!name) {
           rowErrors.push({ rowNumber, reason: 'name is required.' });
@@ -234,7 +233,7 @@ export function PriceBookPage() {
           continue;
         }
 
-        if (!Number.isFinite(unitPrice) || unitPriceCents < 0) {
+        if (!Number.isFinite(unitPriceCents) || !Number.isInteger(unitPriceCents) || unitPriceCents < 0) {
           rowErrors.push({ rowNumber, reason: 'unit_price must be a non-negative number.' });
           continue;
         }
