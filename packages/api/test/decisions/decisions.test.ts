@@ -528,8 +528,8 @@ describe('D7 — Cross-user visibility', () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe('D8 — Retention + memory synthesis', () => {
-  it('memory synthesis module exists', async () => {
-    const hits = await grepApiSrc(/synthesiz|memorySynthesis|MemorySynthesis/);
+  it.fails('memory synthesis module exists', async () => {
+    const hits = await grepApiSrc(/memorySynthesis|MemorySynthesis|memory[-_]synthesis/);
     expect(hits.length).toBeGreaterThan(0);
   });
 

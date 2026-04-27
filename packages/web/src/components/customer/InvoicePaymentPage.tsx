@@ -6,25 +6,51 @@ import {
 import { useParams } from 'react-router';
 import { invoices, customers, calcInvoiceTotal } from '../../data/mock-data';
 
+type PaymentMethod = 'card' | 'ach';
+
+interface PayRequest {
+  method: PaymentMethod;
+  invoiceId: string;
+  amount: number;
+}
+
+async function submitPayment(request: PayRequest): Promise<void> {
+  const res = await fetch('/api/payments/public/collect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+
+  if (!res.ok) {
+    let message = `Payment request failed (${res.status})`;
+    try {
+      const body = await res.json() as { message?: string; error?: string };
+      message = body.message || body.error || message;
+    } catch {
+      // Keep default message when response body is not JSON.
+    }
+    throw new Error(message);
+  }
+}
+
 // ─── Card input form ──────────────────────────────────────────────────────
-function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
+function CardForm({
+  onPay, total, isSubmitting,
+}: { onPay: () => Promise<void>; total: number; isSubmitting: boolean }) {
   const [card,   setCard]   = useState('');
   const [expiry, setExpiry] = useState('');
   const [cvc,    setCvc]    = useState('');
   const [name,   setName]   = useState('');
   const [zip,    setZip]    = useState('');
-  const [paying, setPaying] = useState(false);
-
   function fmt(val: string) { return val.replace(/\D/g,'').replace(/(.{4})/g,'$1 ').trim().slice(0, 19); }
   function fmtExp(val: string) { const d = val.replace(/\D/g,''); return d.length > 2 ? `${d.slice(0,2)}/${d.slice(2,4)}` : d; }
 
   const canPay = card.replace(/\s/g,'').length >= 15 && expiry.length === 5 && cvc.length >= 3 && name.trim() && zip.length === 5;
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canPay) return;
-    setPaying(true);
-    setTimeout(() => { setPaying(false); onPay(); }, 1600);
+    if (!canPay || isSubmitting) return;
+    await onPay();
   }
 
   return (
@@ -39,7 +65,8 @@ function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
             placeholder="1234 5678 9012 3456"
             inputMode="numeric"
             maxLength={19}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors pr-14"
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors pr-14 disabled:bg-slate-50 disabled:text-slate-400"
+            disabled={isSubmitting}
           />
           <div className="absolute right-3 top-1/2 -translate-y-1/2 flex gap-1">
             {['V','M','A'].map(b => (
@@ -58,7 +85,8 @@ function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
             placeholder="MM/YY"
             inputMode="numeric"
             maxLength={5}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+            disabled={isSubmitting}
           />
         </div>
         <div>
@@ -69,7 +97,8 @@ function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
             placeholder="123"
             inputMode="numeric"
             maxLength={4}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+            disabled={isSubmitting}
           />
         </div>
       </div>
@@ -80,7 +109,8 @@ function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
           value={name}
           onChange={e => setName(e.target.value)}
           placeholder="Full name"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
+          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+          disabled={isSubmitting}
         />
       </div>
 
@@ -92,20 +122,21 @@ function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
           placeholder="78701"
           inputMode="numeric"
           maxLength={5}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
-        />
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+            disabled={isSubmitting}
+          />
       </div>
 
       <button
         type="submit"
-        disabled={!canPay || paying}
+        disabled={!canPay || isSubmitting}
         className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all mt-1 ${
           !canPay   ? 'bg-slate-100 text-slate-400 cursor-not-allowed' :
-          paying    ? 'bg-green-500 text-white' :
+          isSubmitting    ? 'bg-green-500 text-white' :
                       'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
         }`}
       >
-        {paying
+        {isSubmitting
           ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Processing…</>
           : <><Lock size={14} /> Pay ${total.toLocaleString()} securely</>
         }
@@ -115,19 +146,18 @@ function CardForm({ onPay, total }: { onPay: () => void; total: number }) {
 }
 
 // ─── ACH form ─────────────────────────────────────────────────────────────
-function ACHForm({ onPay, total }: { onPay: () => void; total: number }) {
+function ACHForm({
+  onPay, total, isSubmitting,
+}: { onPay: () => Promise<void>; total: number; isSubmitting: boolean }) {
   const [routing, setRouting] = useState('');
   const [account, setAccount] = useState('');
   const [name,    setName]    = useState('');
-  const [paying,  setPaying]  = useState(false);
-
   const canPay = routing.length === 9 && account.length >= 8 && name.trim();
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canPay) return;
-    setPaying(true);
-    setTimeout(() => { setPaying(false); onPay(); }, 1600);
+    if (!canPay || isSubmitting) return;
+    await onPay();
   }
 
   return (
@@ -144,7 +174,8 @@ function ACHForm({ onPay, total }: { onPay: () => void; total: number }) {
           value={name}
           onChange={e => setName(e.target.value)}
           placeholder="Full name on account"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
+          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+          disabled={isSubmitting}
         />
       </div>
       <div>
@@ -155,7 +186,8 @@ function ACHForm({ onPay, total }: { onPay: () => void; total: number }) {
           placeholder="021000021"
           inputMode="numeric"
           maxLength={9}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
+          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+          disabled={isSubmitting}
         />
       </div>
       <div>
@@ -165,19 +197,20 @@ function ACHForm({ onPay, total }: { onPay: () => void; total: number }) {
           onChange={e => setAccount(e.target.value.replace(/\D/g,'').slice(0, 17))}
           placeholder="•••••••••••"
           inputMode="numeric"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors"
+          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
+          disabled={isSubmitting}
         />
       </div>
       <button
         type="submit"
-        disabled={!canPay || paying}
+        disabled={!canPay || isSubmitting}
         className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all mt-1 ${
           !canPay ? 'bg-slate-100 text-slate-400 cursor-not-allowed' :
-          paying  ? 'bg-green-500 text-white' :
+          isSubmitting  ? 'bg-green-500 text-white' :
                     'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
         }`}
       >
-        {paying
+        {isSubmitting
           ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Processing…</>
           : <><Building2 size={14} /> Submit bank transfer — ${total.toLocaleString()}</>
         }
@@ -230,8 +263,10 @@ function PaidScreen({ customer, invoiceNumber, total, method }: {
 // ─── Main page ────────────────────────────────────────────────────────────
 export function InvoicePaymentPage() {
   const { id }                      = useParams<{ id: string }>();
-  const [method,  setMethod]        = useState<'card' | 'ach'>('card');
+  const [method,  setMethod]        = useState<PaymentMethod>('card');
   const [paid,    setPaid]          = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [showAll, setShowAll]       = useState(false);
 
   const inv = invoices.find(i =>
@@ -242,6 +277,24 @@ export function InvoicePaymentPage() {
   const total    = calcInvoiceTotal(inv);
   const isOverdue = inv.status === 'Overdue';
   const visItems  = showAll ? inv.lineItems : inv.lineItems.slice(0, 3);
+
+  async function handlePay(selectedMethod: PaymentMethod) {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      await submitPayment({
+        method: selectedMethod,
+        invoiceId: inv.id,
+        amount: total,
+      });
+      setPaid(true);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Payment failed. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
 
   if (paid) return <PaidScreen customer={inv.customer} invoiceNumber={inv.invoiceNumber} total={total} method={method} />;
 
@@ -354,17 +407,19 @@ export function InvoicePaymentPage() {
           <div className="flex p-3 gap-2">
             <button
               onClick={() => setMethod('card')}
+              disabled={isSubmitting}
               className={`flex-1 flex items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
                 method === 'card' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              }`}
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               <CreditCard size={15} /> Card
             </button>
             <button
               onClick={() => setMethod('ach')}
+              disabled={isSubmitting}
               className={`flex-1 flex items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
                 method === 'ach' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              }`}
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               <Building2 size={15} /> Bank / ACH
               {method === 'ach' && <span className="text-xs text-green-300 ml-1">lower fee</span>}
@@ -372,9 +427,14 @@ export function InvoicePaymentPage() {
           </div>
 
           <div className="px-5 pb-5">
+            {submitError && (
+              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                {submitError}
+              </div>
+            )}
             {method === 'card'
-              ? <CardForm onPay={() => setPaid(true)} total={total} />
-              : <ACHForm  onPay={() => setPaid(true)} total={total} />
+              ? <CardForm onPay={() => handlePay('card')} total={total} isSubmitting={isSubmitting} />
+              : <ACHForm onPay={() => handlePay('ach')} total={total} isSubmitting={isSubmitting} />
             }
           </div>
         </div>
