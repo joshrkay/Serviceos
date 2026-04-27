@@ -1,6 +1,10 @@
 import React from 'react';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import {
+  PaymentRecordForm,
+  PaymentFormData,
+} from '../../components/payments/PaymentRecordForm';
 
 interface LineItem {
   id: string;
@@ -75,6 +79,36 @@ interface InvoiceDetailProps {
 
 export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
   const { data, isLoading, error, refetch } = useDetailQuery<Invoice>('/api/invoices', invoiceId);
+  const [showPaymentForm, setShowPaymentForm] = React.useState(false);
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
+
+  const submitPayment = React.useCallback(
+    async (form: PaymentFormData) => {
+      setSubmitError(null);
+      try {
+        const res = await fetch('/api/payments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            invoiceId: form.invoiceId,
+            amountCents: form.amountCents,
+            method: form.method,
+            note: form.note || undefined,
+            receivedDate: form.receivedDate,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`Payment request failed (${res.status}): ${body}`);
+        }
+        setShowPaymentForm(false);
+        refetch();
+      } catch (err) {
+        setSubmitError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refetch]
+  );
 
   if (!data) {
     return <DetailPage title="Invoice" sections={[]} isLoading={isLoading} error={error} onBack={onBack} onRetry={refetch} />;
@@ -100,7 +134,11 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
       onRetry={refetch}
       actions={[
         { label: 'Edit', onClick: () => {}, variant: 'primary' },
-        { label: 'Record Payment', onClick: () => {}, variant: 'secondary' },
+        {
+          label: 'Record Payment',
+          onClick: () => setShowPaymentForm(true),
+          variant: 'secondary',
+        },
       ]}
       sections={[
         {
@@ -185,6 +223,31 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
             </table>
           ),
         },
+        ...(showPaymentForm
+          ? [
+              {
+                title: 'Record a Payment',
+                content: (
+                  <>
+                    {submitError && (
+                      <div className="error" data-testid="payment-submit-error">
+                        {submitError}
+                      </div>
+                    )}
+                    <PaymentRecordForm
+                      invoiceId={data.id}
+                      amountDueCents={data.amountDueCents}
+                      onSubmit={submitPayment}
+                      onCancel={() => {
+                        setSubmitError(null);
+                        setShowPaymentForm(false);
+                      }}
+                    />
+                  </>
+                ),
+              },
+            ]
+          : []),
       ]}
     />
   );

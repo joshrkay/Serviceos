@@ -28,8 +28,11 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
+import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
+import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
+import { createJobFilesRouter } from './routes/job-files';
 import { createDispatchRoutes } from './dispatch/routes';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
@@ -50,6 +53,16 @@ import { InMemoryEstimateTemplateRepository } from './templates/estimate-templat
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository } from './voice/voice-service';
+import { createTranscriptionProvider } from './voice/transcription-providers';
+import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
+import {
+  InMemoryFeatureFlagStore,
+  InMemoryFeatureFlagRepository,
+  hydrateStoreFromRepository,
+  FeatureFlagRepository,
+} from './flags/feature-flags';
+import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
+import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { InMemoryApprovalRepository } from './estimates/approval';
@@ -80,7 +93,11 @@ import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
 import { InMemoryFileRepository } from './files/file-service';
+import { InMemoryJobFileRepository } from './files/job-file-repository';
 import { PgFileRepository } from './files/pg-file';
+import { PgJobFileRepository } from './files/pg-job-file';
+import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
+import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
@@ -95,6 +112,12 @@ import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
+import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import {
+  createDiffAnalysisWorker,
+  InMemoryDiffAnalysisRepository,
+} from './ai/diff-analysis';
+import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
 
 // Auth middleware
@@ -239,6 +262,8 @@ export function createApp() {
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
+  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -249,44 +274,7 @@ export function createApp() {
     : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
-  // Transcription provider — use OpenAI Whisper API when API key is configured,
-  // otherwise fall back to a no-op provider for dev.
-  const transcriptionProvider = process.env.AI_PROVIDER_API_KEY
-    ? {
-        async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-          // Fetch the audio binary from the URL, then upload to Whisper
-          const audioResponse = await fetch(audioUrl);
-          if (!audioResponse.ok) {
-            throw new Error(`Failed to fetch audio from ${audioUrl}: ${audioResponse.status}`);
-          }
-          const audioBlob = await audioResponse.blob();
-          const fd = new FormData();
-          fd.append('file', audioBlob, 'audio.webm');
-          fd.append('model', 'whisper-1');
-          const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${process.env.AI_PROVIDER_API_KEY}` },
-            body: fd,
-          });
-          if (!res.ok) {
-            const errBody = await res.text();
-            throw new Error(`Whisper API error ${res.status}: ${errBody}`);
-          }
-          const data = (await res.json()) as { text?: string };
-          return {
-            transcript: data.text || '',
-            metadata: { provider: 'openai-whisper', processedAt: new Date().toISOString() },
-          };
-        },
-      }
-    : {
-        async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-          return {
-            transcript: `[Dev mode] Transcription not available. Audio: ${audioUrl}`,
-            metadata: { provider: 'dev-fallback', processedAt: new Date().toISOString() },
-          };
-        },
-      };
+  const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
@@ -341,6 +329,21 @@ export function createApp() {
     transcriptionWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // ── Diff-analysis worker (P0-018): compares two revision snapshots and
+  // persists a structured field-level delta. The worker, repo, and
+  // revision store are all in-memory today — PgDocumentRevisionRepository
+  // lands when estimate/invoice revisions graduate from dev fixtures.
+  const documentRevisionRepo = new InMemoryDocumentRevisionRepository();
+  const diffAnalysisRepo = new InMemoryDiffAnalysisRepository();
+  const diffAnalysisWorker = createDiffAnalysisWorker(
+    documentRevisionRepo,
+    diffAnalysisRepo
+  );
+  workerRegistry.set(
+    diffAnalysisWorker.type,
+    diffAnalysisWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   // ── Auto-delivery worker: sweeps approved proposals past the 5-second
   // undo window and hands them to the executor. Closes the operational
   // question from the D9 undo-window slice: "who kicks execution after
@@ -362,11 +365,23 @@ export function createApp() {
       );
     }
   }
+  // Voice intents (add_note, send_invoice, record_payment) execute
+  // against real domain repositories. Note + payment use the same
+  // in-memory or Pg repos already wired above; invoice delivery is
+  // currently a Noop (logs the dispatch shape, never sends bytes)
+  // until an outbound comms provider is integrated as a follow-up.
+  const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
+  const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
     estimateRepo,
+    settingsRepo,
+    noteRepo,
+    paymentRepo,
+    invoiceDeliveryProvider,
+    analyticsRepo: dispatchAnalyticsRepo,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
   const executionWorkerLogger = createLogger({
@@ -417,6 +432,13 @@ export function createApp() {
       const processed = await processMessage(message, handler, workerLogger);
       if (processed) {
         await queue.delete(message.id);
+      } else if (message.attempts >= message.maxAttempts) {
+        await queue.moveToDeadLetter(message, 'max attempts exceeded');
+        workerLogger.error('Message moved to DLQ', {
+          messageId: message.id,
+          type: message.type,
+          attempts: message.attempts,
+        });
       }
     } catch (err) {
       workerLogger.error('Queue poll failed', {
@@ -442,10 +464,19 @@ export function createApp() {
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use(
+    '/api/jobs',
+    createJobFilesRouter({
+      jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
@@ -457,11 +488,24 @@ export function createApp() {
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
   app.use('/api/technician-location', createTechnicianLocationRouter(technicianLocationPingRepo));
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  const featureFlagRepo: FeatureFlagRepository = pool
+    ? new PgFeatureFlagRepository(pool)
+    : new InMemoryFeatureFlagRepository();
+  const featureFlagStore = new InMemoryFeatureFlagStore();
+  // Hydration is fire-and-forget on boot — the store starts empty and is
+  // refilled from the repo asynchronously. isFeatureEnabled returns false
+  // for missing flags, so the worst case during the hydration window is
+  // that a flag reads as disabled for a few ms.
+  void hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

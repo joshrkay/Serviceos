@@ -9,6 +9,19 @@ export const proposalFilterSchema = z.object({
 
 export type ProposalFilter = z.infer<typeof proposalFilterSchema>;
 
+export const rejectProposalBodySchema = z.object({
+  reason: z.string().min(1, 'reason is required'),
+  details: z.string().optional(),
+});
+
+export type RejectProposalBody = z.infer<typeof rejectProposalBodySchema>;
+
+export const editProposalBodySchema = z.object({
+  edits: z.record(z.unknown()),
+});
+
+export type EditProposalBody = z.infer<typeof editProposalBodySchema>;
+
 export const proposalResponseSchema = z.object({
   id: z.string().uuid(),
   tenantId: z.string().uuid(),

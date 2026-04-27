@@ -103,6 +103,13 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         setClauses.push(`status = $${paramIndex++}`);
         values.push(updates.status);
       }
+      if (updates.invoiceNumber !== undefined) {
+        // Needed for the createInvoiceWithNextNumber flow: insert the row with
+        // a PENDING-<uuid> placeholder first, then rewrite to the real
+        // sequence number after getNextInvoiceNumber allocates it.
+        setClauses.push(`invoice_number = $${paramIndex++}`);
+        values.push(updates.invoiceNumber);
+      }
       if (updates.amountPaidCents !== undefined) {
         setClauses.push(`amount_paid_cents = $${paramIndex++}`);
         values.push(updates.amountPaidCents);

@@ -10,6 +10,7 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   draft_estimate: 0,
   draft_invoice: 1,
   update_invoice: 1,
+  issue_invoice: 1,
   update_estimate: 1,
   create_appointment: 2,
   create_job: 3,
@@ -18,6 +19,16 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   reassign_appointment: 1,
   reschedule_appointment: 1,
   cancel_appointment: 1,
+  // Clarification cards surface ahead of everything else — they are
+  // prompts for the operator, not queued work; stale clarifications
+  // are useless, so we want them top of feed while fresh.
+  voice_clarification: 0,
+  // Money-moving / comms proposals surface high — they require
+  // screen-tap and usually have same-day relevance.
+  record_payment: 1,
+  send_invoice: 1,
+  // Notes are low priority — they never gate other work.
+  add_note: 5,
   onboarding_tenant_settings: 6,
   onboarding_service_category: 7,
   onboarding_estimate_template: 8,

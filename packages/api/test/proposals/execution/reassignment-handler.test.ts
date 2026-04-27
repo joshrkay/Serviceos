@@ -3,6 +3,7 @@ import { ReassignAppointmentExecutionHandler } from '../../../src/proposals/exec
 import { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { InMemoryAssignmentRepository, assignTechnician } from '../../../src/appointments/assignment';
+import { InMemoryDispatchAnalyticsRepository } from '../../../src/dispatch/analytics';
 
 describe('P6-012 — Execution for reassignment proposals', () => {
   let handler: ReassignAppointmentExecutionHandler;
@@ -146,5 +147,87 @@ describe('P6-012 — Execution for reassignment proposals', () => {
 
     const assignments = await assignmentRepo.findByAppointment(tenantId, appt.id);
     expect(assignments).toHaveLength(1);
+  });
+
+  describe('P6-022B — dispatch analytics capture on reassignment', () => {
+    it('records a "reassigned" DispatchMetric when the analytics repo is wired', async () => {
+      const analyticsRepo = new InMemoryDispatchAnalyticsRepository();
+      const handlerWithAnalytics = new ReassignAppointmentExecutionHandler(
+        appointmentRepo,
+        assignmentRepo,
+        analyticsRepo
+      );
+
+      const appt = await createAppointment(
+        {
+          tenantId,
+          jobId: 'job-1',
+          scheduledStart: new Date('2026-03-14T09:00:00Z'),
+          scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+          timezone: 'America/New_York',
+          createdBy: 'user-1',
+        },
+        appointmentRepo
+      );
+      await assignTechnician(
+        {
+          tenantId,
+          appointmentId: appt.id,
+          technicianId: techA,
+          technicianRole: 'technician',
+          isPrimary: true,
+          assignedBy: 'user-1',
+        },
+        assignmentRepo
+      );
+
+      const proposal = makeProposal({
+        appointmentId: appt.id,
+        toTechnicianId: techB,
+      });
+
+      const result = await handlerWithAnalytics.execute(proposal, context);
+      expect(result.success).toBe(true);
+
+      const metrics = await analyticsRepo.getMetricsByType(tenantId, 'reassigned');
+      expect(metrics).toHaveLength(1);
+      expect(metrics[0].appointmentId).toBe(appt.id);
+      expect(metrics[0].technicianId).toBe(techB);
+      expect(metrics[0].metadata?.proposalId).toBe(proposal.id);
+    });
+
+    it('does not record a metric when the analytics repo is not supplied', async () => {
+      const appt = await createAppointment(
+        {
+          tenantId,
+          jobId: 'job-2',
+          scheduledStart: new Date('2026-03-14T09:00:00Z'),
+          scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+          timezone: 'America/New_York',
+          createdBy: 'user-1',
+        },
+        appointmentRepo
+      );
+      await assignTechnician(
+        {
+          tenantId,
+          appointmentId: appt.id,
+          technicianId: techA,
+          technicianRole: 'technician',
+          isPrimary: true,
+          assignedBy: 'user-1',
+        },
+        assignmentRepo
+      );
+
+      const proposal = makeProposal({
+        appointmentId: appt.id,
+        toTechnicianId: techB,
+      });
+
+      // handler here has no analyticsRepo — smoke-test it still works.
+      const result = await handler.execute(proposal, context);
+      expect(result.success).toBe(true);
+    });
   });
 });

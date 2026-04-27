@@ -2,14 +2,25 @@ import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { CreateInvoiceExecutionHandler } from './invoice-execution-handler';
 import { UpdateInvoiceExecutionHandler } from './update-invoice-handler';
+import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
+import {
+  AddNoteExecutionHandler,
+  SendInvoiceExecutionHandler,
+  RecordPaymentExecutionHandler,
+  InvoiceDeliveryProvider,
+} from './voice-extended-handlers';
+import { NoteRepository } from '../../notes/note';
+import { PaymentRepository } from '../../invoices/payment';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { EstimateRepository } from '../../estimates/estimate';
+import { SettingsRepository } from '../../settings/settings';
+import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 
@@ -184,7 +195,12 @@ export function createExecutionHandlerRegistry(deps?: {
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
+  settingsRepo?: SettingsRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
+  noteRepo?: NoteRepository;
+  paymentRepo?: PaymentRepository;
+  invoiceDeliveryProvider?: InvoiceDeliveryProvider;
+  analyticsRepo?: DispatchAnalyticsRepository;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
@@ -192,10 +208,17 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateJobExecutionHandler(),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new DraftEstimateExecutionHandler(),
-    new CreateInvoiceExecutionHandler(),
-    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo),
-    new CancelAppointmentExecutionHandler(deps?.appointmentRepo),
+    new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
+    new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo),
+    // Stage-2 voice handlers wired against real repositories. Each
+    // handler degrades to a synthetic-id passthrough when its dep is
+    // absent (used by in-memory tests that don't exercise the
+    // mutation path). Production wires the real deps in app.ts.
+    new AddNoteExecutionHandler(deps?.noteRepo),
+    new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
+    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered
@@ -203,6 +226,7 @@ export function createExecutionHandlerRegistry(deps?: {
   // touch these don't have to provide the dep.
   if (deps?.invoiceRepo) {
     handlers.push(new UpdateInvoiceExecutionHandler(deps.invoiceRepo));
+    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(deps.estimateRepo));
