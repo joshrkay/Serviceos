@@ -16,11 +16,17 @@ describe('POST /api/technician-location', () => {
   const OLDER_PING_ISO = new Date(Date.now() - 120_000).toISOString();
   let app: express.Express;
   let repo: InMemoryTechnicianLocationPingRepository;
+  let firstPingIso: string;
+  let secondPingIso: string;
 
   beforeEach(() => {
     app = express();
     app.use(express.json());
     repo = new InMemoryTechnicianLocationPingRepository();
+
+    const now = Date.now();
+    firstPingIso = new Date(now - 2 * 60 * 1000).toISOString();
+    secondPingIso = new Date(now - 1 * 60 * 1000).toISOString();
 
     app.use((req: Request, _res: Response, next: NextFunction) => {
       (req as AuthenticatedRequest).auth = {
@@ -42,13 +48,13 @@ describe('POST /api/technician-location', () => {
         {
           lat: 37.7,
           lng: -122.4,
-          recordedAt: OLDER_PING_ISO,
+          recordedAt: firstPingIso,
           source: 'gps',
         },
         {
           lat: 37.8,
           lng: -122.5,
-          recordedAt: RECENT_PING_ISO,
+          recordedAt: secondPingIso,
           source: 'gps',
         },
       ],
@@ -59,12 +65,8 @@ describe('POST /api/technician-location', () => {
 
     const rows = await repo.listByTechnician(tenantId, 'tech-1');
     expect(rows).toHaveLength(2);
-    // Repository sorts reverse-chronologically — the more-recent ping
-    // comes first. Assertion is on the relative order, not the
-    // absolute timestamp, so the test stays deterministic as the
-    // wall clock advances.
-    expect(rows[0].recordedAt.toISOString()).toBe(RECENT_PING_ISO);
-    expect(rows[1].recordedAt.toISOString()).toBe(OLDER_PING_ISO);
+    expect(rows[0].recordedAt.toISOString()).toBe(secondPingIso);
+    expect(rows[1].recordedAt.toISOString()).toBe(firstPingIso);
   });
 
   it('rejects technician submissions for a different technicianId', async () => {
@@ -74,7 +76,7 @@ describe('POST /api/technician-location', () => {
         {
           lat: 37.7,
           lng: -122.4,
-          recordedAt: RECENT_PING_ISO,
+          recordedAt: firstPingIso,
           source: 'gps',
         },
       ],
@@ -91,7 +93,7 @@ describe('POST /api/technician-location', () => {
         {
           lat: 100,
           lng: -122.4,
-          recordedAt: RECENT_PING_ISO,
+          recordedAt: firstPingIso,
           source: 'gps',
         },
       ],
@@ -107,7 +109,7 @@ describe('POST /api/technician-location', () => {
         {
           lat: 37.7,
           lng: -122.4,
-          recordedAt: RECENT_PING_ISO,
+          recordedAt: firstPingIso,
           source: 'gps',
         },
       ],
