@@ -109,4 +109,18 @@ describe('useListQuery', () => {
     expect(result.current.data).toEqual([{ id: '1' }, { id: '2' }]);
     expect(result.current.total).toBe(2);
   });
+
+  it('does not fetch when disabled', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: '1' }], total: 1 }),
+    } as Response);
+
+    const { result } = renderHook(() => useListQuery('/api/items', { enabled: false }));
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(result.current.data).toEqual([]);
+    expect(result.current.total).toBe(0);
+  });
 });
