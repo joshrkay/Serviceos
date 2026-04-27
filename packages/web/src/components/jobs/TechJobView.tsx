@@ -534,6 +534,7 @@ const SVC_BG:   Record<ServiceType, string> = {
   Painting: 'bg-violet-900/40',
 };
 const DELAY_OPTIONS = [10, 15, 20, 60] as const;
+type DelayOption = (typeof DELAY_OPTIONS)[number];
 
 export function TechJobView({ id }: { id: string }) {
   const navigate = useNavigate();
@@ -555,7 +556,7 @@ export function TechJobView({ id }: { id: string }) {
   const [notes,   setNotes]   = useState<FieldNote[]>([]);
   const [cameraOpen, setCam] = useState(false);
   const [isRunningBehind, setIsRunningBehind] = useState<boolean | null>(null);
-  const [delayMinutes, setDelayMinutes] = useState<(typeof DELAY_OPTIONS)[number] | null>(null);
+  const [delayMinutes, setDelayMinutes] = useState<DelayOption | null>(null);
 
   if (!job) return (
     <div className="flex h-full items-center justify-center">
@@ -779,7 +780,7 @@ export function TechJobView({ id }: { id: string }) {
                         onClick={() => {
                           const behind = label === 'Yes';
                           setIsRunningBehind(behind);
-                          if (!behind) setDelayMinutes(null);
+                          if (!behind) setDelayMinutes(() => null);
                         }}
                         className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                           selected
