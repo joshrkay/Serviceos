@@ -80,7 +80,7 @@ describe('PriceBookPage', () => {
         body: JSON.stringify({
           name: 'Filter',
           description: '1-inch, pleated',
-          unit_price: 12.5,
+          unitPriceCents: 1250,
           unit: 'ea',
           category: 'HVAC',
         }),
@@ -94,7 +94,7 @@ describe('PriceBookPage', () => {
         body: JSON.stringify({
           name: 'Capacitor',
           description: 'Run capacitor',
-          unit_price: 35,
+          unitPriceCents: 3500,
           unit: 'ea',
           category: 'Electrical',
         }),
