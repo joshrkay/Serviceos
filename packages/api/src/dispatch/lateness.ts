@@ -43,6 +43,7 @@ export interface DispatchLatenessResult {
   latenessState: AppointmentLatenessState;
   expectedDurationMinutes: number;
   elapsedOnSiteMinutes: number;
+  elapsedActiveServiceMinutes: number;
   promptRequired: boolean;
   promptSuppressedByCooldown: boolean;
   selectedDelayBucket?: DelayBucketMinutes;
@@ -165,6 +166,14 @@ function resolveProgressState(
   return 'in_transit';
 }
 
+function resolveServiceClockStart(input: DispatchLatenessInput): Date {
+  if (input.arrivalWindowStart) {
+    return input.arrivalWindowStart;
+  }
+
+  return input.scheduledStart;
+}
+
 export function computeDispatchLateness(
   input: DispatchLatenessInput,
   tenantConfig?: Partial<DispatchLatenessConfig>,
@@ -195,6 +204,13 @@ export function computeDispatchLateness(
   const elapsedOnSiteMinutes = onsiteStreak
     ? toMinutes((progressState === 'at_site' ? now : onsiteStreak.end).getTime() - onsiteStreak.start.getTime())
     : 0;
+  const serviceClockStart = resolveServiceClockStart(input);
+  const activeOnSiteStart = onsiteStreak && onsiteStreak.start > serviceClockStart
+    ? onsiteStreak.start
+    : serviceClockStart;
+  const elapsedActiveServiceMinutes = onsiteStreak
+    ? toMinutes((progressState === 'at_site' ? now : onsiteStreak.end).getTime() - activeOnSiteStart.getTime())
+    : 0;
 
   const preThresholdMinutes = expectedDurationMinutes * config.preThresholdRatio;
   const promptThresholdMinutes = expectedDurationMinutes + config.latenessGraceMinutes;
@@ -205,7 +221,7 @@ export function computeDispatchLateness(
 
   if (input.selectedDelayBucket !== undefined) {
     latenessState = 'late_confirmed';
-  } else if (elapsedOnSiteMinutes >= promptThresholdMinutes) {
+  } else if (elapsedActiveServiceMinutes >= promptThresholdMinutes) {
     const cooldownActive = input.lastPromptAt
       ? toMinutes(now.getTime() - input.lastPromptAt.getTime()) < config.promptCooldownMinutes
       : false;
@@ -217,7 +233,7 @@ export function computeDispatchLateness(
       latenessState = 'late_prompt_required';
       promptRequired = true;
     }
-  } else if (elapsedOnSiteMinutes >= preThresholdMinutes) {
+  } else if (elapsedActiveServiceMinutes >= preThresholdMinutes) {
     latenessState = 'at_risk';
   }
 
@@ -226,6 +242,7 @@ export function computeDispatchLateness(
     latenessState,
     expectedDurationMinutes,
     elapsedOnSiteMinutes,
+    elapsedActiveServiceMinutes,
     promptRequired,
     promptSuppressedByCooldown,
     selectedDelayBucket: input.selectedDelayBucket,
