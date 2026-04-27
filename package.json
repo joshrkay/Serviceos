@@ -20,7 +20,11 @@
     "e2e:smoke": "playwright test e2e/smoke.spec.ts",
     "e2e:ui": "playwright test --ui",
     "e2e:report": "playwright show-report",
-    "e2e:qa-matrix": "QA_MATRIX=1 playwright test --project=qa-matrix"
+    "qa:smoke-tools": "node qa-runner/src/orchestrator.mjs smoke",
+    "qa:run": "node qa-runner/src/orchestrator.mjs run",
+    "qa:report": "node qa-runner/src/orchestrator.mjs summary",
+    "qa:doctor": "node qa-runner/src/orchestrator.mjs doctor",
+    "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
