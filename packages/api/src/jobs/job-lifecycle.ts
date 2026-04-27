@@ -27,7 +27,7 @@ export const JOB_TIMELINE_EVENT_TYPES = {
   DELAY_ACKNOWLEDGED: 'delay_acknowledged',
 } as const;
 
-export interface DelayAcknowledgmentMetadata {
+export interface DelayAcknowledgmentMetadata extends Record<string, unknown> {
   appointmentId: string;
   isRunningBehind: boolean;
   delayMinutes?: 10 | 15 | 20 | 60;
@@ -138,8 +138,12 @@ export async function addDelayAcknowledgmentTimelineEntry(
   timelineRepo: JobTimelineRepository,
   metadata: DelayAcknowledgmentMetadata
 ): Promise<JobTimelineEntry> {
+  if (metadata.isRunningBehind && metadata.delayMinutes === undefined) {
+    throw new ValidationError('delayMinutes is required when isRunningBehind is true');
+  }
+
   const description = metadata.isRunningBehind
-    ? `Delay acknowledged (${metadata.delayMinutes ?? 'unspecified'}m)`
+    ? `Delay acknowledged (${metadata.delayMinutes}m)`
     : 'Delay cleared';
 
   return addTimelineEntry(
