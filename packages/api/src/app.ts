@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import cron from 'node-cron';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
 import { createHealthRouter, HealthCheck } from './health/health';
@@ -139,6 +140,8 @@ import {
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
+
+void cron;
 
 export function createApp() {
   const app = express();
