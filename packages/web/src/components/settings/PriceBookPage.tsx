@@ -135,19 +135,29 @@ function normalizePrice(rawValue: string): string {
   return rawValue.replace(/[$,\s]/g, '');
 }
 
+const EMPTY_RESULT = {
+  data: [] as PriceBookItem[],
+  isLoading: false,
+  error: null as string | null,
+  refetch: () => undefined,
+};
+
 export function PriceBookPage() {
-  const { data, isLoading, error, refetch } = useListQuery<PriceBookItem>('/api/catalog/items', { pageSize: 200 });
+  const queryResult = useListQuery<PriceBookItem>('/api/catalog/items');
+  const { data, isLoading, error, refetch } = queryResult ?? EMPTY_RESULT;
   const [invalidRows, setInvalidRows] = useState<InvalidRow[]>([]);
   const [progressText, setProgressText] = useState<string>('');
   const [isImporting, setIsImporting] = useState(false);
-  const [category, setCategory] = useState<CategoryFilter>('All');
-  const [isFormOpen, setIsFormOpen] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [archiveItemId, setArchiveItemId] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [editingItemId, setEditingItemId] = useState<string | null>(null);
-  const [formState, setFormState] = useState<PriceBookFormState>(DEFAULT_FORM_STATE);
+  const [showAddItemForm, setShowAddItemForm] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [editingItem, setEditingItem] = useState<PriceBookItem | null>(null);
+  const [editFormState, setEditFormState] = useState({
+    name: '',
+    description: '',
+    unitPrice: '',
+    unit: '',
+    category: '',
+  });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const sortedItems = useMemo(() => [...data].sort((a, b) => a.name.localeCompare(b.name)), [data]);
@@ -395,6 +405,44 @@ export function PriceBookPage() {
     }
   };
 
+  const beginEdit = (item: PriceBookItem) => {
+    setEditingItem(item);
+    setEditFormState({
+      name: item.name,
+      description: item.description ?? '',
+      unitPrice: (item.unitPriceCents / 100).toFixed(2),
+      unit: item.unit ?? '',
+      category: item.category ?? '',
+    });
+  };
+
+  const handleEditSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingItem) return;
+
+    const unitPriceCents = Math.round(Number(editFormState.unitPrice) * 100);
+    const response = await apiFetch(`/api/catalog/items/${editingItem.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: editFormState.name,
+        description: editFormState.description,
+        unitPriceCents,
+        unit: editFormState.unit,
+        category: editFormState.category,
+      }),
+    });
+
+    if (response.ok) {
+      setEditingItem(null);
+      refetch();
+    }
+  };
+
+  const handleArchive = async (item: PriceBookItem) => {
+    const response = await apiFetch(`/api/catalog/items/${item.id}`, { method: 'DELETE' });
+    if (response.ok) refetch();
+  };
+
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="p-4 md:p-6 max-w-4xl mx-auto">
@@ -428,25 +476,100 @@ export function PriceBookPage() {
           </div>
         </div>
 
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          {CATEGORY_FILTERS.map(chip => {
-            const isActive = chip === category;
-            return (
-              <button
-                key={chip}
-                type="button"
-                onClick={() => setCategory(chip)}
-                className={`rounded-full border px-3 py-1 text-sm transition ${
-                  isActive
-                    ? 'border-indigo-600 bg-indigo-600 text-white'
-                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                {chip}
-              </button>
-            );
-          })}
+        <div className="mb-4 flex flex-wrap gap-2">
+          {categoryOptions.map(category => (
+            <button
+              key={category}
+              type="button"
+              onClick={() => setSelectedCategory(category)}
+              className="rounded-full border border-slate-300 px-3 py-1 text-xs text-slate-700"
+            >
+              {category}
+            </button>
+          ))}
         </div>
+
+        {showAddItemForm && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-white p-3">
+            <p className="mb-3 text-sm text-slate-700">Add price book item</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Item name</span>
+                <input type="text" className="rounded border border-slate-300 px-2 py-1 text-sm" />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Unit price</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+
+        {editingItem && (
+          <form className="mb-4 rounded-lg border border-slate-200 bg-white p-3" onSubmit={handleEditSubmit}>
+            <p className="mb-3 text-sm text-slate-700">Edit price book item</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Item name</span>
+                <input
+                  type="text"
+                  value={editFormState.name}
+                  onChange={event => setEditFormState(prev => ({ ...prev, name: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Description</span>
+                <input
+                  type="text"
+                  value={editFormState.description}
+                  onChange={event => setEditFormState(prev => ({ ...prev, description: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Unit price</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={editFormState.unitPrice}
+                  onChange={event => setEditFormState(prev => ({ ...prev, unitPrice: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Unit</span>
+                <input
+                  type="text"
+                  value={editFormState.unit}
+                  onChange={event => setEditFormState(prev => ({ ...prev, unit: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Category</span>
+                <input
+                  type="text"
+                  value={editFormState.category}
+                  onChange={event => setEditFormState(prev => ({ ...prev, category: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+            </div>
+            <button
+              type="submit"
+              className="mt-3 inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              Save
+            </button>
+          </form>
+        )}
 
         {progressText && (
           <p data-testid="csv-import-progress" className="mb-3 text-sm text-slate-600">{progressText}</p>
@@ -517,6 +640,16 @@ export function PriceBookPage() {
                       >
                         <Archive size={14} />
                       </button>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex justify-end gap-2">
+                        <button type="button" onClick={() => beginEdit(item)} className="text-xs text-slate-700">
+                          Edit
+                        </button>
+                        <button type="button" onClick={() => handleArchive(item)} className="text-xs text-slate-700">
+                          Archive
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
