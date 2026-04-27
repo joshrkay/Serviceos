@@ -44,9 +44,9 @@ export function JobDetail({ jobId, onBack }: JobDetailProps) {
         {
           title: 'Site Media',
           content: (
-            <div>
-              <PhotoBucket category="before" />
-              <PhotoBucket category="after" />
+            <div className="space-y-6">
+              <PhotoBucket jobId={jobId} category="before" />
+              <PhotoBucket jobId={jobId} category="after" />
             </div>
           ),
         },
