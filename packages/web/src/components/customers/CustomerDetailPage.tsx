@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useParams, useNavigate } from 'react-router';
+import { Link, useParams, useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, Mail, MessageSquare, Plus, MapPin,
   ChevronDown, ChevronUp, Eye, EyeOff, Briefcase, FileText,
@@ -11,6 +11,14 @@ import {
   ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
+import { useListQuery } from '../../hooks/useListQuery';
+
+interface ApiContract {
+  id: string;
+  title: string;
+  cadence?: string;
+  status?: string;
+}
 
 // ─── constants ───────────────────────────────────────────────────────────────
 const SVC_CHIP: Record<ServiceType, string> = {
@@ -284,6 +292,54 @@ function InvoiceStatusBar({ status, dueDate, paidDate, sentDate }: {
   return null;
 }
 
+function MaintenanceContractsSidebar({ customerId, contracts }: {
+  customerId: string;
+  contracts: ApiContract[];
+}) {
+  const [open, setOpen] = useState(true);
+  const activeContracts = contracts.filter(contract => (contract.status ?? '').toLowerCase() === 'active');
+
+  if (contracts.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+      <button
+        onClick={() => setOpen(value => !value)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 transition-colors"
+      >
+        <p className="text-sm text-slate-900">Maintenance Contracts</p>
+        {open ? <ChevronUp size={15} className="text-slate-400" /> : <ChevronDown size={15} className="text-slate-400" />}
+      </button>
+      {open ? (
+        <div className="border-t border-slate-100 px-4 py-3">
+          {activeContracts.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {activeContracts.map(contract => (
+                <Link
+                  key={contract.id}
+                  to={`/contracts/${contract.id}`}
+                  className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs text-blue-700 hover:bg-blue-100 transition-colors"
+                >
+                  {contract.title}
+                  {contract.cadence ? <span className="text-blue-500">· {contract.cadence}</span> : null}
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500">No active maintenance contracts.</p>
+          )}
+          <Link
+            to={`/contracts?customerId=${customerId}`}
+            className="inline-block mt-3 text-xs text-blue-600 hover:underline"
+          >
+            View all
+          </Link>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 type Tab = 'overview' | 'locations' | 'history';
 type HistoryFilter = 'all' | 'invoices' | 'jobs' | 'estimates';
@@ -293,6 +349,7 @@ export function CustomerDetailPage() {
   const navigate = useNavigate();
 
   const found = customers.find(c => c.id === id);
+  const { data: maintenanceContracts } = useListQuery<ApiContract>(`/api/customers/${id}/maintenance-contracts`);
   const [tab,              setTab]           = useState<Tab>('history');
   const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
@@ -459,6 +516,7 @@ export function CustomerDetailPage() {
           {/* ── Overview ── */}
           {tab === 'overview' && (
             <div className="flex flex-col gap-4">
+              {id ? <MaintenanceContractsSidebar customerId={id} contracts={maintenanceContracts} /> : null}
 
               {/* contact + location */}
               <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden">
