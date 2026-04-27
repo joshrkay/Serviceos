@@ -3,6 +3,7 @@ import React from 'react';
 export type PhotoCategory = 'before' | 'after';
 
 interface PhotoBucketProps {
+  jobId: string;
   category: PhotoCategory;
 }
 
