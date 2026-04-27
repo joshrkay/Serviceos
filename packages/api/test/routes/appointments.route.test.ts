@@ -5,7 +5,7 @@
  * the scheduling fields the UI expects.
  */
 import request from 'supertest';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { buildTestApp } from './test-app';
 import type { Express } from 'express';
 import express, { Request, Response, NextFunction } from 'express';
@@ -17,6 +17,7 @@ import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
+import { DelayNotificationEnqueuer } from '../../src/routes/appointments';
 
 function tomorrowIso(hoursFromNowStart: number, hoursFromNowEnd: number) {
   const start = new Date(Date.now() + hoursFromNowStart * 60 * 60 * 1000);
@@ -69,7 +70,7 @@ describe('POST /api/appointments', () => {
 });
 
 describe('POST /api/appointments/:id/delay-ack', () => {
-  function buildDelayAckApp(): Express {
+  function buildDelayAckApp(options?: { delayNotificationCoordinator?: DelayNotificationEnqueuer }): Express {
     const app = express();
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -90,7 +91,7 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     const auditRepo = new InMemoryAuditRepository();
     const ownership = permissiveTenantOwnership();
     app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
-    app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
+    app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, options));
     return app;
   }
 
@@ -192,5 +193,31 @@ describe('POST /api/appointments/:id/delay-ack', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('FORBIDDEN');
+  });
+
+  it('enqueues delay notification for running-behind acknowledgement', async () => {
+    const enqueueDelayNotice = vi.fn().mockResolvedValue('next-appt:1');
+    const app = buildDelayAckApp({
+      delayNotificationCoordinator: { enqueueDelayNotice },
+    });
+    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/delay-ack`)
+      .set('x-test-role', 'dispatcher')
+      .set('x-test-user-id', 'dispatcher-1')
+      .send({
+        appointmentId,
+        isRunningBehind: true,
+        delayMinutes: 20,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.delayNoticeIdempotencyKey).toBe('next-appt:1');
+    expect(enqueueDelayNotice).toHaveBeenCalledTimes(1);
+    expect(enqueueDelayNotice.mock.calls[0][0]).toMatchObject({
+      delayVersion: 1,
+      delayMinutes: 20,
+    });
   });
 });
