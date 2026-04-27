@@ -776,7 +776,11 @@ export function TechJobView({ id }: { id: string }) {
                     return (
                       <button
                         key={label}
-                        onClick={() => setIsRunningBehind(label === 'Yes')}
+                        onClick={() => {
+                          const behind = label === 'Yes';
+                          setIsRunningBehind(behind);
+                          if (!behind) setDelayMinutes(null);
+                        }}
                         className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                           selected
                             ? 'bg-slate-900 text-white border-slate-900'
