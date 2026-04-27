@@ -119,6 +119,13 @@ import {
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
+import {
+  createDelayNotificationWorker,
+  DelayNotificationCoordinator,
+  InMemoryDelayNoticeStateRepository,
+  NextCustomerSelector,
+  NoopDelayNotificationService,
+} from './notifications/delay-notifications';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -384,6 +391,21 @@ export function createApp() {
     analyticsRepo: dispatchAnalyticsRepo,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  const delayNoticeStateRepo = new InMemoryDelayNoticeStateRepository();
+  const delayNotificationCoordinator = new DelayNotificationCoordinator(
+    queue,
+    new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+    delayNoticeStateRepo,
+  );
+  const delayNotificationWorker = createDelayNotificationWorker({
+    service: new NoopDelayNotificationService(),
+    stateRepo: delayNoticeStateRepo,
+    analyticsRepo: dispatchAnalyticsRepo,
+  });
+  workerRegistry.set(
+    delayNotificationWorker.type,
+    delayNotificationWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -473,7 +495,12 @@ export function createApp() {
       auditRepo,
     })
   );
-  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
+  app.use(
+    '/api/appointments',
+    createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
+      delayNotificationCoordinator,
+    })
+  );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
