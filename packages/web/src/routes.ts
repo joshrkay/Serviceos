@@ -53,6 +53,7 @@ export const router = createBrowserRouter([
       { path: 'schedule',       Component: SchedulePage    },
       { path: 'customers',      Component: CustomersPage   },
       { path: 'customers/:id',  Component: CustomerDetailPage },
+      { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'leads',          Component: LeadsPage       },
       { path: 'estimates',      Component: EstimatesPage   },
       { path: 'invoices',       Component: InvoicesPage    },
