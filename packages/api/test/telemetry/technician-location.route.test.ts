@@ -86,6 +86,46 @@ describe('POST /api/technician-location', () => {
     expect(res.body.error).toBe('FORBIDDEN');
   });
 
+
+  it('rejects dispatcher submissions when authz check disallows target technician', async () => {
+    app = express();
+    app.use(express.json());
+    repo = new InMemoryTechnicianLocationPingRepository();
+
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'dispatcher-1',
+        sessionId: 'session-1',
+        tenantId,
+        role: 'dispatcher',
+      };
+      next();
+    });
+
+    app.use(
+      '/api/technician-location',
+      createTechnicianLocationRouter({
+        repository: repo,
+        canSubmitForTechnician: async () => false,
+      })
+    );
+
+    const res = await request(app).post('/api/technician-location').send({
+      technicianId: 'tech-1',
+      pings: [
+        {
+          lat: 37.7,
+          lng: -122.4,
+          recordedAt: RECENT_PING_ISO,
+          source: 'gps',
+        },
+      ],
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+  });
+
   it('rejects invalid ping payloads', async () => {
     const res = await request(app).post('/api/technician-location').send({
       technicianId: 'tech-1',

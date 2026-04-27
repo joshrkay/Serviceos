@@ -88,6 +88,12 @@ describe('delay notification flow', () => {
       delayVersion: 2,
       delayMinutes: 20,
       technicianName: 'Taylor',
+      triggerContext: {
+        thresholdMinutes: 65,
+        confidenceScore: 0.82,
+        pingSampleCount: 6,
+        reason: 'threshold_breached',
+      },
     });
 
     expect(key).toBe(`${nextAppt.id}:2`);
@@ -99,6 +105,12 @@ describe('delay notification flow', () => {
 
     const state = await stateRepo.findByKey(`${nextAppt.id}:2`);
     expect(state?.status).toBe('queued');
+    expect(state?.triggerContext).toMatchObject({
+      thresholdMinutes: 65,
+      confidenceScore: 0.82,
+      pingSampleCount: 6,
+      reason: 'threshold_breached',
+    });
   });
 
   it('falls back to in_app when sms is preferred but consent is missing', async () => {
@@ -214,5 +226,55 @@ describe('delay notification flow', () => {
     expect(selectDelayTemplate(variants, 20)).toContain('20 minutes');
     expect(selectDelayTemplate(variants, 60)).toContain('60 minutes');
     expect(variants.m60).toContain('Updated ETA window');
+  });
+
+  it('does not enqueue duplicate jobs for same appointment delay version', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const queue = new InMemoryQueue();
+    const stateRepo = new InMemoryDelayNoticeStateRepository();
+
+    const currentCustomer = await createCustomer({ tenantId, firstName: 'Current', lastName: 'Customer', createdBy: 'dispatcher' }, customerRepo);
+    const nextCustomer = await createCustomer({
+      tenantId,
+      firstName: 'Alex',
+      lastName: 'Smith',
+      primaryPhone: '+15555550123',
+      preferredChannel: 'sms',
+      smsConsent: true,
+      createdBy: 'dispatcher',
+    }, customerRepo);
+    const currentJob = await createJob({ tenantId, customerId: currentCustomer.id, locationId: 'loc-1', summary: 'Current call', createdBy: 'dispatcher' }, jobRepo);
+    const nextJob = await createJob({ tenantId, customerId: nextCustomer.id, locationId: 'loc-2', summary: 'Next call', createdBy: 'dispatcher' }, jobRepo);
+    const currentAppt = await createAppointment({ tenantId, jobId: currentJob.id, scheduledStart: new Date('2026-04-20T13:00:00Z'), scheduledEnd: new Date('2026-04-20T14:00:00Z'), timezone: 'UTC', createdBy: 'dispatcher' }, appointmentRepo);
+    const nextAppt = await createAppointment({ tenantId, jobId: nextJob.id, scheduledStart: new Date('2026-04-20T15:00:00Z'), scheduledEnd: new Date('2026-04-20T16:00:00Z'), timezone: 'UTC', createdBy: 'dispatcher' }, appointmentRepo);
+    await assignTechnician({ tenantId, appointmentId: currentAppt.id, technicianId: techId, technicianRole: 'technician', assignedBy: 'dispatcher' }, assignmentRepo);
+    await assignTechnician({ tenantId, appointmentId: nextAppt.id, technicianId: techId, technicianRole: 'technician', assignedBy: 'dispatcher' }, assignmentRepo);
+
+    const coordinator = new DelayNotificationCoordinator(
+      queue,
+      new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+      stateRepo,
+    );
+
+    await coordinator.enqueueDelayNotice({
+      tenantId,
+      currentAppointmentId: currentAppt.id,
+      delayVersion: 3,
+      delayMinutes: 20,
+    });
+    await coordinator.enqueueDelayNotice({
+      tenantId,
+      currentAppointmentId: currentAppt.id,
+      delayVersion: 3,
+      delayMinutes: 20,
+    });
+
+    const first = await queue.receive();
+    const second = await queue.receive();
+    expect(first?.idempotencyKey).toBe(`${nextAppt.id}:3`);
+    expect(second).toBeNull();
   });
 });
