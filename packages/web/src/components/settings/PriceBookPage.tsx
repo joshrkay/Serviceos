@@ -16,7 +16,7 @@ interface CatalogImportPayload {
   rowNumber: number;
   name: string;
   description: string;
-  unit_price: number;
+  unitPriceCents: number;
   unit: string;
   category: string;
 }
@@ -191,8 +191,7 @@ export function PriceBookPage() {
         const category = (tokens[headerIndex.category] ?? '').trim();
 
         const normalizedUnitPrice = normalizePrice(unitPriceRaw);
-        const unitPrice = Number(normalizedUnitPrice);
-        const unitPriceCents = Number.isFinite(unitPrice) ? Math.round(unitPrice * 100) : NaN;
+        const unitPriceCents = Math.round(parseFloat(normalizedUnitPrice) * 100);
 
         if (!name) {
           rowErrors.push({ rowNumber, reason: 'name is required.' });
@@ -204,12 +203,12 @@ export function PriceBookPage() {
           continue;
         }
 
-        if (!Number.isFinite(unitPrice) || unitPriceCents < 0) {
+        if (!Number.isFinite(unitPriceCents) || !Number.isInteger(unitPriceCents) || unitPriceCents < 0) {
           rowErrors.push({ rowNumber, reason: 'unit_price must be a non-negative number.' });
           continue;
         }
 
-        validRows.push({ rowNumber, name, description, unit_price: unitPrice, unit, category });
+        validRows.push({ rowNumber, name, description, unitPriceCents, unit, category });
       }
 
       setInvalidRows(rowErrors);
