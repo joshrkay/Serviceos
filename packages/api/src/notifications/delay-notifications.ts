@@ -49,6 +49,7 @@ export interface DelayNoticeDeliveryState {
   maxAttempts: number;
   lastError?: string;
   providerMessageId?: string;
+  triggerContext?: Record<string, unknown>;
   updatedAt: Date;
 }
 
@@ -220,6 +221,12 @@ export interface EnqueueDelayNoticeInput {
   delayMinutes: number;
   technicianName?: string;
   etaWindow?: { start: Date; end: Date; timezone?: string };
+  triggerContext?: {
+    thresholdMinutes?: number;
+    confidenceScore?: number;
+    pingSampleCount?: number;
+    reason?: string;
+  };
 }
 
 export interface InternalAlertSink {
@@ -283,6 +290,7 @@ export class DelayNotificationCoordinator {
       channel: target.channel,
       attempts: 0,
       maxAttempts: this.queue.getConfig().maxRetries,
+      triggerContext: input.triggerContext,
       updatedAt: new Date(),
     });
 
