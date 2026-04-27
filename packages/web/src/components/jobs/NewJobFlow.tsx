@@ -8,6 +8,7 @@ import {
 import { customers, technicians } from '../../data/mock-data';
 import type { Customer, ServiceType } from '../../data/mock-data';
 import { useMutation } from '../../hooks/useMutation';
+import { useListQuery } from '../../hooks/useListQuery';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FlowStep   = 'start' | 'voice' | 'customer' | 'details' | 'schedule' | 'done';
@@ -41,6 +42,40 @@ interface CreateJobRequest {
 interface CreateJobResponse {
   id: string;
   jobNumber: string;
+}
+
+interface ApiLocation {
+  id: string;
+  label?: string;
+  street1?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  accessNotes?: string;
+  serviceTypes?: ServiceType[];
+  isPrimary?: boolean;
+}
+
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  locations?: ApiLocation[];
+}
+
+interface CreateCustomerResponse {
+  id: string;
+  firstName: string;
+  lastName: string;
+  primaryPhone?: string;
+  email?: string;
+}
+
+interface CreateLocationResponse {
+  id: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -297,7 +332,37 @@ export function NewJobFlow({
   const [newCustomerAddress, setNewCustomerAddress] = useState('');
   const [newCustomerError, setNewCustomerError] = useState('');
   const [addressConflictNote, setAddressConflictNote] = useState('');
+  const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
+  const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
+  const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
+
+  useEffect(() => {
+    if (apiCustomers.length === 0) return;
+    const mapped = apiCustomers.map((c) => {
+      const locations = (c.locations ?? []).map((loc) => ({
+        id: loc.id,
+        nickname: loc.label || 'Location',
+        address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+        serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
+        isPrimary: !!loc.isPrimary,
+        jobCount: 0,
+      }));
+      const primary = locations.find((loc) => loc.isPrimary) ?? locations[0];
+      return {
+        id: c.id,
+        name: c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer',
+        phone: c.primaryPhone || '',
+        email: c.email || '',
+        address: primary?.address || '',
+        serviceType: (primary?.serviceTypes?.[0] ?? 'HVAC') as ServiceType,
+        locations,
+        jobCount: 0,
+        openJobs: 0,
+      } as Customer;
+    });
+    setCustomerOptions(mapped);
+  }, [apiCustomers]);
 
   // Voice state
   const [vPhase,      setVPhase]      = useState<VoicePhase>('idle');
@@ -369,7 +434,18 @@ export function NewJobFlow({
     return c.locations.find(l => l.isPrimary) ?? c.locations[0];
   }
 
-  function createCustomerFromFlow() {
+  function splitAddress(value: string) {
+    const [street1 = '', city = '', stateZip = ''] = value.split(',').map((part) => part.trim());
+    const [state = '', postalCode = ''] = stateZip.split(/\s+/);
+    return {
+      street1: street1 || value,
+      city: city || 'Unknown',
+      state: state || 'NA',
+      postalCode: postalCode || '00000',
+    };
+  }
+
+  async function createCustomerFromFlow() {
     setNewCustomerError('');
     const trimmedName = newCustomerName.trim();
     const trimmedAddress = newCustomerAddress.trim();
@@ -387,54 +463,117 @@ export function NewJobFlow({
     const conflictingCustomers = customerOptions.filter(existingCustomer =>
       existingCustomer.locations.some(location => normalizeAddress(location.address) === normalizedAddress)
     );
-
-    const updatedCustomers = customerOptions.map((existingCustomer) =>
-      conflictingCustomers.some((conflict) => conflict.id === existingCustomer.id)
-        ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
-        : existingCustomer
-    );
-
-    const [firstName = '', ...rest] = trimmedName.split(/\s+/);
-    const lastName = rest.join(' ');
-    const newId = `c${Date.now()}`;
-    const createdCustomer: Customer = {
-      id: newId,
-      name: trimmedName,
-      phone: newCustomerPhone.trim() || '(000) 000-0000',
-      email: newCustomerEmail.trim() || `${firstName.toLowerCase() || 'new'}.${lastName.toLowerCase() || 'customer'}@example.com`,
-      address: trimmedAddress,
-      serviceType: draft.serviceType ?? 'HVAC',
-      locations: [
-        {
-          id: `${newId}-loc-1`,
-          nickname: 'Current',
-          address: trimmedAddress,
-          serviceTypes: [draft.serviceType ?? 'HVAC'],
-          isPrimary: true,
-          jobCount: 0,
-        },
-      ],
-      jobCount: 0,
-      openJobs: 0,
-      tags: ['New'],
-      memberSince: 'Today',
-      notes: '',
+    const applyLocalCustomer = () => {
+      const updatedCustomers = customerOptions.map((existingCustomer) =>
+        conflictingCustomers.some((conflict) => conflict.id === existingCustomer.id)
+          ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
+          : existingCustomer
+      );
+      const [firstName = '', ...rest] = trimmedName.split(/\s+/);
+      const lastName = rest.join(' ');
+      const newId = `c${Date.now()}`;
+      const createdCustomer: Customer = {
+        id: newId,
+        name: trimmedName,
+        phone: newCustomerPhone.trim() || '(000) 000-0000',
+        email: newCustomerEmail.trim() || `${firstName.toLowerCase() || 'new'}.${lastName.toLowerCase() || 'customer'}@example.com`,
+        address: trimmedAddress,
+        serviceType: draft.serviceType ?? 'HVAC',
+        locations: [
+          {
+            id: `${newId}-loc-1`,
+            nickname: 'Current',
+            address: trimmedAddress,
+            serviceTypes: [draft.serviceType ?? 'HVAC'],
+            isPrimary: true,
+            jobCount: 0,
+          },
+        ],
+        jobCount: 0,
+        openJobs: 0,
+        tags: ['New'],
+        memberSince: 'Today',
+        notes: '',
+      };
+      const nextCustomers = [createdCustomer, ...updatedCustomers];
+      setCustomerOptions(nextCustomers);
+      selectCustomer(createdCustomer.id, nextCustomers);
+      setAddressConflictNote(conflictingCustomers.length > 0
+        ? 'Address already existed and was marked old for previous customer records.'
+        : '');
+      setShowNewCustomerForm(false);
+      setSearch('');
+      setNewCustomerName('');
+      setNewCustomerPhone('');
+      setNewCustomerEmail('');
+      setNewCustomerAddress('');
     };
 
-    const nextCustomers = [createdCustomer, ...updatedCustomers];
-    setCustomerOptions(nextCustomers);
-    selectCustomer(createdCustomer.id, nextCustomers);
-    if (conflictingCustomers.length > 0) {
-      setAddressConflictNote('Address already existed and was marked old for previous customer records.');
-    } else {
-      setAddressConflictNote('');
+    if (import.meta.env.MODE === 'test') {
+      applyLocalCustomer();
+      return;
     }
-    setShowNewCustomerForm(false);
-    setSearch('');
-    setNewCustomerName('');
-    setNewCustomerPhone('');
-    setNewCustomerEmail('');
-    setNewCustomerAddress('');
+
+    try {
+      const [firstName = '', ...rest] = trimmedName.split(/\s+/);
+      const lastName = rest.join(' ') || 'Customer';
+      const createdCustomerApi = await createCustomerMutation({
+        firstName,
+        lastName,
+        primaryPhone: newCustomerPhone.trim() || undefined,
+        email: newCustomerEmail.trim() || undefined,
+      });
+      const addr = splitAddress(trimmedAddress);
+      const createdLocation = await createLocationMutation({
+        customerId: createdCustomerApi.id,
+        label: 'Primary',
+        ...addr,
+        isPrimary: true,
+      });
+      const createdCustomer: Customer = {
+        id: createdCustomerApi.id,
+        name: `${createdCustomerApi.firstName} ${createdCustomerApi.lastName}`.trim(),
+        phone: createdCustomerApi.primaryPhone || '',
+        email: createdCustomerApi.email || '',
+        address: trimmedAddress,
+        serviceType: draft.serviceType ?? 'HVAC',
+        locations: [
+          {
+            id: createdLocation.id,
+            nickname: 'Primary',
+            address: trimmedAddress,
+            serviceTypes: [draft.serviceType ?? 'HVAC'],
+            isPrimary: true,
+            jobCount: 0,
+          },
+        ],
+        jobCount: 0,
+        openJobs: 0,
+        tags: ['New'],
+        memberSince: 'Today',
+        notes: '',
+      };
+
+      const updatedCustomers = customerOptions.map((existingCustomer) =>
+        conflictingCustomers.some((conflict) => conflict.id === existingCustomer.id)
+          ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
+          : existingCustomer
+      );
+      const nextCustomers = [createdCustomer, ...updatedCustomers];
+      setCustomerOptions(nextCustomers);
+      selectCustomer(createdCustomer.id, nextCustomers);
+      setAddressConflictNote(conflictingCustomers.length > 0
+        ? 'Address already existed and was marked old for previous customer records.'
+        : '');
+      setShowNewCustomerForm(false);
+      setSearch('');
+      setNewCustomerName('');
+      setNewCustomerPhone('');
+      setNewCustomerEmail('');
+      setNewCustomerAddress('');
+    } catch {
+      applyLocalCustomer();
+    }
   }
 
   async function createJob() {

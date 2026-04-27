@@ -157,4 +157,50 @@ describe('P3-013 — Mobile-friendly technician interactions', () => {
       'Customer reports AC not cooling.'
     );
   });
+
+  describe('P3-013 — responsive touch target constraints', () => {
+    it('job-item buttons meet the 44px minimum touch target', () => {
+      render(
+        <MobileTechView
+          assignedJobs={jobs}
+          onSelectJob={vi.fn()}
+          onUploadRecording={vi.fn()}
+        />
+      );
+      const items = screen.getAllByTestId('mobile-job-item');
+      for (const item of items) {
+        // Inline style contract — kept out of CSS so removing the rule
+        // can't silently shrink the touch target.
+        expect((item as HTMLElement).style.minHeight).toBe('44px');
+        expect((item as HTMLElement).style.minWidth).toBe('44px');
+      }
+    });
+
+    it('selected job is flagged via data-selected for responsive CSS hooks', () => {
+      render(
+        <MobileTechView
+          assignedJobs={jobs}
+          selectedJobId="job-2"
+          onSelectJob={vi.fn()}
+          onUploadRecording={vi.fn()}
+        />
+      );
+      const items = screen.getAllByTestId('mobile-job-item');
+      const selected = items.find((el) => el.getAttribute('data-selected') === 'true');
+      expect(selected).toBeTruthy();
+      expect(selected!.textContent).toContain('Plumbing Fix');
+    });
+
+    it('exposes the root container for responsive CSS (.mobile-tech-view)', () => {
+      render(
+        <MobileTechView
+          assignedJobs={jobs}
+          onSelectJob={vi.fn()}
+          onUploadRecording={vi.fn()}
+        />
+      );
+      const root = screen.getByTestId('mobile-tech-view');
+      expect(root.classList.contains('mobile-tech-view')).toBe(true);
+    });
+  });
 });

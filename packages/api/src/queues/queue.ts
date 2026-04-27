@@ -16,10 +16,22 @@ export interface QueueConfig {
   visibilityTimeout: number;
 }
 
+export interface DeadLetterEntry {
+  messageId: string;
+  type: string;
+  payload: unknown;
+  attempts: number;
+  idempotencyKey: string;
+  error: string;
+  failedAt: string;
+}
+
 export interface Queue {
   send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   receive<T>(): Promise<QueueMessage<T> | null>;
   delete(messageId: string): Promise<void>;
+  moveToDeadLetter(message: QueueMessage, error: string): Promise<void>;
+  listDeadLetter(): Promise<DeadLetterEntry[]>;
   getConfig(): QueueConfig;
 }
 
@@ -37,6 +49,7 @@ export function createQueueConfig(env: string): QueueConfig {
  */
 export class InMemoryQueue implements Queue {
   private messages: QueueMessage[] = [];
+  private dlq: DeadLetterEntry[] = [];
   private config: QueueConfig;
   private receiving = false;
 
@@ -79,12 +92,32 @@ export class InMemoryQueue implements Queue {
     // Message already removed on receive in-memory
   }
 
+  async moveToDeadLetter(message: QueueMessage, error: string): Promise<void> {
+    this.dlq.push({
+      messageId: message.id,
+      type: message.type,
+      payload: message.payload,
+      attempts: message.attempts,
+      idempotencyKey: message.idempotencyKey,
+      error,
+      failedAt: new Date().toISOString(),
+    });
+  }
+
+  async listDeadLetter(): Promise<DeadLetterEntry[]> {
+    return [...this.dlq];
+  }
+
   getConfig(): QueueConfig {
     return this.config;
   }
 
   size(): number {
     return this.messages.length;
+  }
+
+  dlqSize(): number {
+    return this.dlq.length;
   }
 }
 

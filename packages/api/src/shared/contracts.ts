@@ -152,7 +152,6 @@ export const createJobSchema = z.object({
 
 export const createEstimateSchema = z.object({
   jobId: z.string().min(1),
-  estimateNumber: z.string().min(1),
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
@@ -164,7 +163,6 @@ export const createEstimateSchema = z.object({
 export const createInvoiceSchema = z.object({
   jobId: z.string().min(1),
   estimateId: z.string().optional(),
-  invoiceNumber: z.string().min(1),
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().nonnegative().optional(),
   taxRateBps: z.number().int().min(0).max(10000).optional(),
@@ -189,12 +187,38 @@ export const createAppointmentSchema = z.object({
   notes: z.string().optional(),
 });
 
+export const delayMinutesSchema = z.union([
+  z.literal(10),
+  z.literal(15),
+  z.literal(20),
+  z.literal(60),
+]);
+
+export const delayAcknowledgmentSchema = z.object({
+  appointmentId: z.string().min(1),
+  isRunningBehind: z.boolean(),
+  delayMinutes: delayMinutesSchema.optional(),
+  reasonCode: z.string().min(1).optional(),
+});
+
+export type DelayAcknowledgment = z.infer<typeof delayAcknowledgmentSchema>;
+
 export const createNoteSchema = z.object({
   entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
   entityId: z.string().min(1),
   content: z.string().min(1),
   isPinned: z.boolean().optional(),
 });
+
+export const createCatalogItemSchema = z.object({
+  name: z.string().trim().min(1),
+  description: z.string().trim().optional(),
+  category: z.enum(['Labor', 'Parts', 'Materials']),
+  unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
+  unitPriceCents: z.number().int().nonnegative(),
+});
+
+export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),

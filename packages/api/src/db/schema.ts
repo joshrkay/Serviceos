@@ -923,6 +923,56 @@ export const MIGRATIONS = {
     ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
       CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
   `,
+
+  '040_create_technician_location_pings': `
+    CREATE TABLE IF NOT EXISTS technician_location_pings (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id TEXT NOT NULL,
+      appointment_id UUID REFERENCES appointments(id),
+      lat DOUBLE PRECISION NOT NULL CHECK (lat >= -90 AND lat <= 90),
+      lng DOUBLE PRECISION NOT NULL CHECK (lng >= -180 AND lng <= 180),
+      accuracy_meters DOUBLE PRECISION CHECK (accuracy_meters IS NULL OR accuracy_meters >= 0),
+      speed_mps DOUBLE PRECISION CHECK (speed_mps IS NULL OR speed_mps >= 0),
+      heading DOUBLE PRECISION CHECK (heading IS NULL OR (heading >= 0 AND heading < 360)),
+      recorded_at TIMESTAMPTZ NOT NULL,
+      source TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tlp_tenant_technician_recorded_desc
+      ON technician_location_pings(tenant_id, technician_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tlp_tenant_appointment_recorded_desc
+      ON technician_location_pings(tenant_id, appointment_id, recorded_at DESC);
+    ALTER TABLE technician_location_pings ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_location_pings FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_location_pings ON technician_location_pings;
+    CREATE POLICY tenant_isolation_technician_location_pings ON technician_location_pings
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '041_create_catalog_items': `
+    CREATE TABLE IF NOT EXISTS catalog_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL CHECK (category IN ('Labor', 'Parts', 'Materials')),
+      unit TEXT NOT NULL CHECK (unit IN ('each', 'hour', 'sq ft', 'per lb', 'per gal')),
+      unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+      product_service_type TEXT NOT NULL CHECK (product_service_type IN ('product', 'service')),
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_tenant ON catalog_items(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_tenant_category ON catalog_items(tenant_id, category);
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_active ON catalog_items(tenant_id) WHERE archived_at IS NULL;
+    ALTER TABLE catalog_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE catalog_items FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_catalog_items ON catalog_items;
+    CREATE POLICY tenant_isolation_catalog_items ON catalog_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

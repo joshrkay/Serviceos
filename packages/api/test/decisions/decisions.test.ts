@@ -193,17 +193,27 @@ describe('D2 — Voice debrief primary capture', () => {
   });
 
   it('real STT provider is wired (not a hardcoded stub)', async () => {
-    const appTs = await fs.readFile(path.resolve(API_SRC, 'app.ts'), 'utf8');
+    const providersTs = await fs.readFile(
+      path.resolve(API_SRC, 'voice/transcription-providers.ts'),
+      'utf8'
+    );
     // The prod path must call a real STT endpoint. We test by asserting the
-    // Whisper API URL appears in app.ts. If the prod path is removed, this
-    // fails and forces a conscious decision.
-    expect(appTs).toMatch(/api\.openai\.com\/v1\/audio\/transcriptions/);
+    // Whisper API URL appears in the provider module. If the prod path is
+    // removed, this fails and forces a conscious decision.
+    expect(providersTs).toMatch(/api\.openai\.com\/v1\/audio\/transcriptions/);
+    // And the factory must still be invoked from app.ts.
+    const appTs = await fs.readFile(path.resolve(API_SRC, 'app.ts'), 'utf8');
+    expect(appTs).toMatch(/createTranscriptionProvider/);
   });
 
   it('dev fallback is clearly marked and not used when AI_PROVIDER_API_KEY is set', async () => {
+    const providersTs = await fs.readFile(
+      path.resolve(API_SRC, 'voice/transcription-providers.ts'),
+      'utf8'
+    );
+    expect(providersTs).toMatch(/\[Dev mode\]/);
     const appTs = await fs.readFile(path.resolve(API_SRC, 'app.ts'), 'utf8');
     expect(appTs).toMatch(/AI_PROVIDER_API_KEY/);
-    expect(appTs).toMatch(/\[Dev mode\]/);
   });
 
   it.todo(

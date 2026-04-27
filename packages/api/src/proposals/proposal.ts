@@ -14,7 +14,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -25,9 +25,14 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'update_estimate',
   'draft_invoice',
   'update_invoice',
+  'issue_invoice',
   'reassign_appointment',
   'reschedule_appointment',
   'cancel_appointment',
+  'voice_clarification',
+  'add_note',
+  'send_invoice',
+  'record_payment',
   'onboarding_tenant_settings',
   'onboarding_service_category',
   'onboarding_estimate_template',
@@ -109,6 +114,29 @@ export interface CreateProposalInput {
    * `decideInitialStatus` below.
    */
   sourceTrustTier?: TrustTier;
+  /**
+   * Required fields the task handler could not fill from the input.
+   * When non-empty, the proposal is forced to 'draft' regardless of
+   * trust tier / confidence — the review UI prompts the operator to
+   * fill each gap before approval is allowed. Stored on the persisted
+   * proposal under `sourceContext.missingFields` so existing tables
+   * don't need a schema migration; helper `missingFieldsFor` reads it
+   * back with the correct type.
+   */
+  missingFields?: string[];
+}
+
+/**
+ * Extract the list of missing required fields from a proposal. These
+ * are stored under `sourceContext.missingFields` (see CreateProposalInput)
+ * so no DB migration is required; this helper is the typed accessor.
+ */
+export function missingFieldsFor(proposal: Proposal): string[] {
+  const ctx = proposal.sourceContext;
+  if (!ctx) return [];
+  const mf = (ctx as Record<string, unknown>).missingFields;
+  if (!Array.isArray(mf)) return [];
+  return mf.filter((s): s is string => typeof s === 'string');
 }
 
 // ─── Decision 3: action class + trust tier ───────────────────────────────
@@ -150,14 +178,39 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'update_invoice':
     case 'reassign_appointment':
     case 'reschedule_appointment':
+    case 'add_note':
     case 'onboarding_tenant_settings':
     case 'onboarding_service_category':
     case 'onboarding_estimate_template':
     case 'onboarding_team_member':
     case 'onboarding_schedule':
       return 'capture';
+    case 'issue_invoice':
+      return 'money';
+    // voice_clarification is not a mutation — it is a user-visible
+    // prompt emitted when the classifier can't confidently route a
+    // transcript. It never auto-approves and has no execution handler;
+    // it closes when the operator dismisses it or speaks again. It is
+    // bucketed as 'capture' so the D3 rules leave it in 'draft' (no
+    // sourceTrustTier is passed when it is created, so the capture
+    // bucket is effectively a formality).
+    case 'voice_clarification':
+      return 'capture';
+    // Cancellation is irreversible and must never auto-approve — the
+    // operator always screen-taps. Per CLAUDE.md "Never auto-execute".
     case 'cancel_appointment':
       return 'irreversible';
+    // Outbound communications: even with autonomous trust, we do not
+    // let the system send a customer-facing message without an
+    // explicit approval. A mis-sent invoice is a real reputation
+    // cost.
+    case 'send_invoice':
+      return 'comms';
+    // Money: per D3, money-class proposals never auto-approve
+    // regardless of confidence / trust tier. The MCP money_server
+    // provides a second gate at the tool layer.
+    case 'record_payment':
+      return 'money';
   }
 }
 
@@ -180,7 +233,13 @@ export function decideInitialStatus(input: {
   proposalType: ProposalType;
   sourceTrustTier?: TrustTier;
   confidenceScore?: number;
+  missingFields?: string[];
 }): ProposalStatus {
+  // Missing required fields always land in 'draft' — a partial payload
+  // can't be auto-approved even by an autonomous agent with high
+  // confidence. The operator must fill the gaps at review time.
+  if (input.missingFields && input.missingFields.length > 0) return 'draft';
+
   if (!input.sourceTrustTier) return 'draft';
 
   const cls = actionClassForProposalType(input.proposalType);
@@ -272,6 +331,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
     proposalType: input.proposalType,
     sourceTrustTier: input.sourceTrustTier,
     confidenceScore: input.confidenceScore,
+    missingFields: input.missingFields,
   });
   // D9 undo window: auto-approved proposals stamp `approvedAt` at
   // creation so the 5-second undo window starts ticking immediately.
@@ -279,6 +339,12 @@ export function createProposal(input: CreateProposalInput): Proposal {
   // whole point of the window is to give the operator a chance to
   // reverse a machine-approved action.
   const approvedAt = status === 'approved' ? now : undefined;
+  // missingFields rides in sourceContext so we avoid a DB schema
+  // change. `missingFieldsFor(proposal)` is the typed reader.
+  const sourceContext =
+    input.missingFields && input.missingFields.length > 0
+      ? { ...(input.sourceContext ?? {}), missingFields: input.missingFields }
+      : input.sourceContext;
   return {
     id: uuidv4(),
     tenantId: input.tenantId,
@@ -289,7 +355,7 @@ export function createProposal(input: CreateProposalInput): Proposal {
     explanation: input.explanation,
     confidenceScore: input.confidenceScore,
     confidenceFactors: input.confidenceFactors,
-    sourceContext: input.sourceContext,
+    sourceContext,
     aiRunId: input.aiRunId,
     promptVersionId: input.promptVersionId,
     targetEntityType: input.targetEntityType,

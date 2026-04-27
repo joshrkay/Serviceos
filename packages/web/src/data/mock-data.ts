@@ -2,7 +2,7 @@ export type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
 export type JobStatus = 'New' | 'Scheduled' | 'Unscheduled' | 'Dispatched' | 'En Route' | 'On Site' | 'Active' | 'In Progress' | 'Waiting for Parts' | 'Day 2' | 'Completed' | 'Canceled' | 'No Show' | 'Pending';
 export type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
 export type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue';
-export type ProposalType = 'Invoice' | 'Estimate' | 'Schedule' | 'Follow-up' | 'Alert' | 'Duplicate';
+export type ProposalType = 'Invoice' | 'Estimate' | 'Schedule' | 'Follow-up' | 'Alert' | 'Duplicate' | 'Customer' | 'Clarification' | 'Note' | 'Payment' | 'Send';
 export type ProposalConfidence = 'High' | 'Medium';
 export type LeadStatus = 'New' | 'Contacted' | 'Estimate Sent' | 'Won' | 'Lost';
 export type LeadSource = 'Web Form' | 'Referral' | 'Google' | 'Yelp' | 'Facebook' | 'Nextdoor' | 'Phone';
@@ -127,6 +127,26 @@ export interface AIProposal {
   status: 'Pending' | 'Approved' | 'Rejected';
   relatedId?: string;
   impact?: string;
+  /**
+   * When the backend emits a voice_clarification proposal (transcript
+   * the classifier couldn't route), `suggestedIntents` lists the
+   * guessed intent(s) the card can render as "Did you mean…?" chips.
+   * Undefined for every other proposal type.
+   */
+  suggestedIntents?: string[];
+  /**
+   * Fields the task handler couldn't fill from the transcript.
+   * Drives the slot-fill prompt on the Pending card: Approve is
+   * blocked until the operator fills each missing field.
+   */
+  missingFields?: string[];
+  /**
+   * Per-action-class flag — when true, this proposal can be approved
+   * by voice ("say approve or cancel"). When false (money / comms /
+   * irreversible), the UI shows a "tap to confirm" badge and
+   * suppresses any voice-approval listener.
+   */
+  voiceApprovable?: boolean;
 }
 
 export interface Message {

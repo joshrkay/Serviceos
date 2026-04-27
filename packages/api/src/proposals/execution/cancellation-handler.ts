@@ -2,12 +2,17 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
+import {
+  DispatchAnalyticsRepository,
+  captureDispatchEvent,
+} from '../../dispatch/analytics';
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
 
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
+    private readonly analyticsRepo?: DispatchAnalyticsRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -54,6 +59,13 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
 
       if (!updated) {
         return { success: false, error: 'Failed to cancel appointment' };
+      }
+
+      if (this.analyticsRepo) {
+        await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'canceled', {
+          appointmentId,
+          metadata: { proposalId: proposal.id, reason },
+        });
       }
 
       return { success: true, resultEntityId: appointmentId };

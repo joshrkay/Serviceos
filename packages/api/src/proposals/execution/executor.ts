@@ -1,19 +1,33 @@
 import { Proposal, ProposalRepository } from '../proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
+import { IdempotencyGuard } from './idempotency';
 import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 
 export class ProposalExecutor {
+  /**
+   * Optional idempotency guard. When supplied, proposals with an
+   * `idempotencyKey` are checked against prior executed proposals
+   * before the handler runs — if a previous success is found, the
+   * executor short-circuits with that same `resultEntityId` instead
+   * of double-creating entities. Protects against queue redelivery
+   * and operator re-approval after a network blip.
+   */
+  private readonly idempotency?: IdempotencyGuard;
+
   constructor(
     private readonly handlers: Map<ProposalType, ExecutionHandler>,
-    private readonly proposalRepo: ProposalRepository
-  ) {}
+    private readonly proposalRepo: ProposalRepository,
+    idempotency?: IdempotencyGuard
+  ) {
+    this.idempotency = idempotency;
+  }
 
   async execute(
     proposal: Proposal,
     context: ExecutionContext
-  ): Promise<{ proposal: Proposal; result: ExecutionResult }> {
+  ): Promise<{ proposal: Proposal; result: ExecutionResult; alreadyExecuted?: boolean }> {
     if (proposal.status !== 'approved') {
       throw new AppError(
         'INVALID_STATUS',
@@ -48,7 +62,21 @@ export class ProposalExecutor {
       );
     }
 
-    const result = await handler.execute(proposal, context);
+    // Idempotency gate: route through the guard when present. When
+    // `idempotencyKey` is absent the guard is a passthrough and runs
+    // the handler directly, preserving behavior for callers that
+    // haven't adopted idempotency keys yet.
+    let result: ExecutionResult;
+    let alreadyExecuted = false;
+    if (this.idempotency) {
+      const outcome = await this.idempotency.checkAndExecute(proposal, () =>
+        handler.execute(proposal, context)
+      );
+      result = outcome.result;
+      alreadyExecuted = outcome.alreadyExecuted;
+    } else {
+      result = await handler.execute(proposal, context);
+    }
 
     let updatedProposal: Proposal;
     if (result.success) {
@@ -60,17 +88,58 @@ export class ProposalExecutor {
       updatedProposal = transitionProposal(proposal, 'execution_failed', context.executedBy);
     }
 
-    await this.proposalRepo.updateStatus(
-      updatedProposal.tenantId,
-      updatedProposal.id,
-      updatedProposal.status,
-      {
-        resultEntityId: updatedProposal.resultEntityId,
-        executedAt: updatedProposal.executedAt,
-        executedBy: updatedProposal.executedBy,
-      }
-    );
+    // Write the status transition. Normally this runs for every
+    // execution. When the idempotency guard short-circuits
+    // (`alreadyExecuted`) we usually want to leave the DB row alone
+    // because it is already in 'executed' state from the prior
+    // successful run — re-writing would stomp on executedAt/executedBy.
+    //
+    // HOWEVER: there's a subtle race. If a prior run succeeded at the
+    // handler but CRASHED before it could write the status update,
+    // the DB row is stuck at 'approved' while the idempotency guard
+    // — which looks up by key AND status='executed' — won't find a
+    // match. That means a retry would see the side effect as "not
+    // done" and try to re-execute, double-firing the mutation.
+    //
+    // The current `alreadyExecuted` branch here is reached only when
+    // the guard DID find an executed match, so the DB is consistent
+    // and we can skip the write. The crash-in-the-middle path needs
+    // a different fix at the guard layer (follow-up — requires
+    // transactional wrapping of handler+status). For now we
+    // reconcile as best we can: on the `alreadyExecuted` branch, if
+    // the caller's view of the proposal is still 'approved' (e.g.,
+    // because it was re-fetched after the crash), force the status
+    // to 'executed' with the idempotency result so the row becomes
+    // consistent the first time a retry runs cleanly.
+    if (!alreadyExecuted) {
+      await this.proposalRepo.updateStatus(
+        updatedProposal.tenantId,
+        updatedProposal.id,
+        updatedProposal.status,
+        {
+          resultEntityId: updatedProposal.resultEntityId,
+          executedAt: updatedProposal.executedAt,
+          executedBy: updatedProposal.executedBy,
+        }
+      );
+    } else if (proposal.status === 'approved') {
+      // Defensive reconciliation: the idempotency guard matched on a
+      // prior 'executed' proposal under the same key, but THIS row is
+      // still 'approved' — likely the same proposal being retried
+      // after a prior crash. Transition it now using the resolved
+      // resultEntityId so the audit trail is coherent.
+      await this.proposalRepo.updateStatus(
+        proposal.tenantId,
+        proposal.id,
+        'executed',
+        {
+          resultEntityId: result.resultEntityId,
+          executedAt: new Date(),
+          executedBy: context.executedBy,
+        }
+      );
+    }
 
-    return { proposal: updatedProposal, result };
+    return { proposal: updatedProposal, result, alreadyExecuted };
   }
 }

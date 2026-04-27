@@ -58,6 +58,7 @@ interface AddCustomerSheetProps {
 function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers, onCreate }: AddCustomerSheetProps) {
   const navigate = useNavigate();
   const { mutate: createCustomer } = useMutation<Record<string, unknown>, ApiCustomer>('POST', '/api/customers');
+  const { mutate: createLocation } = useMutation<Record<string, unknown>, { id: string }>('POST', '/api/locations');
 
   const [step, setStep] = useState<SheetStep>('contact');
   const [form, setForm] = useState({
@@ -90,6 +91,17 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
 
   const canGoToLocation = form.name.trim().length > 0;
   const canSave = form.locAddress.trim().length > 0 && form.locServiceTypes.length > 0;
+
+  function splitAddress(value: string) {
+    const [street1 = '', city = '', stateZip = ''] = value.split(',').map((part) => part.trim());
+    const [state = '', postalCode = ''] = stateZip.split(/\s+/);
+    return {
+      street1: street1 || value,
+      city: city || 'Unknown',
+      state: state || 'NA',
+      postalCode: postalCode || '00000',
+    };
+  }
 
   const stepDots: SheetStep[] = ['contact', 'location'];
   const stepIdx = stepDots.indexOf(step);
@@ -296,11 +308,19 @@ function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers,
               <button
                 onClick={async () => {
                   const nameParts = form.name.trim().split(' ');
-                  await createCustomer({
-                    firstName: nameParts[0],
-                    lastName: nameParts.slice(1).join(' ') || undefined,
+                  const createdCustomer = await createCustomer({
+                    firstName: nameParts[0] || 'New',
+                    lastName: nameParts.slice(1).join(' ') || 'Customer',
                     primaryPhone: form.phone || undefined,
                     email: form.email || undefined,
+                  });
+                  const address = splitAddress(form.locAddress);
+                  await createLocation({
+                    customerId: createdCustomer.id,
+                    label: form.locNickname || 'Primary',
+                    ...address,
+                    accessNotes: form.locNotes || undefined,
+                    isPrimary: true,
                   });
                   onCreate();
                   setStep('done');

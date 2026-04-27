@@ -14,9 +14,11 @@ const isCI = !!process.env.CI;
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
+const includeQaMatrix = process.env.QA_MATRIX === '1';
 
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: ['**/qa-matrix/**'],
   fullyParallel: false,
   forbidOnly: isCI,
   retries: isCI ? 2 : 1,
@@ -39,9 +41,30 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testDir: './e2e',
+      testIgnore: ['**/qa-matrix/**'],
       use: { ...devices['Desktop Chrome'] },
     },
+    ...(includeQaMatrix
+      ? [
+          {
+            // 4-agent swarm QA matrix (Estimates, Invoices, Assistant).
+            // Opt-in via QA_MATRIX=1 (set by `npm run e2e:qa-matrix`) so the
+            // default e2e run skips it — its specs need env vars and a real
+            // backend that aren't wired into PR CI.
+            name: 'qa-matrix',
+            testDir: './e2e/qa-matrix',
+            testIgnore: [],
+            testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
+            use: { ...devices['Desktop Chrome'] },
+          },
+        ]
+      : []),
   ],
+
+  globalTeardown: process.env.QA_MATRIX === '1'
+    ? './e2e/qa-matrix/helpers/report-builder.ts'
+    : undefined,
 
   webServer: skipWebServer
     ? undefined

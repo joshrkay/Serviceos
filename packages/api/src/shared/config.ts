@@ -115,9 +115,17 @@ export class EnvironmentSecretResolver implements SecretResolver {
   }
 }
 
-// Secrets are managed as Railway environment variables in all environments.
-// Use the Railway dashboard to set and rotate secrets — no external secrets
-// manager required.
+// P0-006 — Secrets backend decision.
+//
+// The PRD suggested AWS Secrets Manager, but the project deploys on Railway,
+// which natively encrypts environment variables at rest and supports rotation
+// via the Railway dashboard. Swapping to AWS SM would add a second control
+// plane without reducing risk, so EnvironmentSecretResolver is the canonical
+// resolver in every environment.
+//
+// loadConfig() enforces that all required production secrets are set before
+// the app boots (AC#1), and the logger redacts any secret-keyed values before
+// emitting structured JSON (AC#2 — see logging/redact.ts).
 export function createSecretResolver(_env: string): SecretResolver {
   return new EnvironmentSecretResolver();
 }

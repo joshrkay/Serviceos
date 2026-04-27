@@ -176,3 +176,82 @@
     line-height: 1.5;
   }
 }
+
+/* P3-013 — Mobile technician view responsive layout. Narrow viewports get a
+   single-column stack with full-width touch targets; wider viewports (e.g.
+   tablet landscape) render the job list and detail side-by-side. */
+.mobile-tech-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background: var(--background, #f8fafc);
+}
+
+.mobile-tech-view .mobile-nav {
+  position: sticky;
+  top: 0;
+  background: var(--surface, #ffffff);
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  z-index: 1;
+}
+
+.mobile-tech-view .mobile-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.mobile-tech-view .mobile-job-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border, #e2e8f0);
+  background: var(--surface, #ffffff);
+  touch-action: manipulation;
+}
+
+.mobile-tech-view .mobile-job-item[data-selected='true'] {
+  border-color: var(--accent, #6366f1);
+  background: var(--accent-soft, #eef2ff);
+}
+
+.mobile-tech-view .mobile-job-detail {
+  padding: 1rem;
+}
+
+.mobile-tech-view .mobile-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+@media (min-width: 768px) {
+  .mobile-tech-view {
+    flex-direction: row;
+  }
+  .mobile-tech-view .mobile-nav {
+    position: static;
+    width: 100%;
+  }
+  .mobile-tech-view .mobile-job-list {
+    flex: 0 0 320px;
+    border-right: 1px solid var(--border, #e2e8f0);
+    min-height: 100dvh;
+  }
+  .mobile-tech-view .mobile-job-detail {
+    flex: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-tech-view .mobile-job-item {
+    transition: none;
+  }
+}

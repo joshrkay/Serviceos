@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { createAppointmentSchema } from '../shared/contracts';
+import { createAppointmentSchema, delayAcknowledgmentSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
@@ -11,10 +11,18 @@ import {
   listByJob,
   AppointmentRepository,
 } from '../appointments/appointment';
+import { JobRepository } from '../jobs/job';
+import {
+  addTimelineEntry,
+  JobTimelineRepository,
+  JOB_TIMELINE_EVENT_TYPES,
+} from '../jobs/job-lifecycle';
 
 export function createAppointmentRouter(
   appointmentRepo: AppointmentRepository,
-  ownership: TenantOwnership
+  ownership: TenantOwnership,
+  jobRepo: JobRepository,
+  timelineRepo: JobTimelineRepository
 ): Router {
   const router = Router();
 
@@ -108,6 +116,80 @@ export function createAppointmentRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
+    '/:id/delay-ack',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = delayAcknowledgmentSchema.parse(req.body);
+        if (parsed.appointmentId !== req.params.id) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'appointmentId must match route id' });
+          return;
+        }
+
+        const appointment = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
+        if (!appointment) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+          return;
+        }
+
+        const role = req.auth!.role;
+        const actorId = req.auth!.userId;
+        if (role !== 'dispatcher' && role !== 'technician') {
+          res.status(403).json({ error: 'FORBIDDEN', message: 'Only assigned technician/dispatcher can acknowledge delay' });
+          return;
+        }
+
+        if (role === 'technician') {
+          const job = await jobRepo.findById(req.auth!.tenantId, appointment.jobId);
+          if (!job || job.assignedTechnicianId !== actorId) {
+            res.status(403).json({ error: 'FORBIDDEN', message: 'Only the assigned technician can acknowledge delay' });
+            return;
+          }
+        }
+
+        const inferredTriggerState = parsed.isRunningBehind ? 'running_behind' : 'on_time';
+        const metadata: Record<string, unknown> = {
+          appointmentId: parsed.appointmentId,
+          isRunningBehind: parsed.isRunningBehind,
+          delayMinutes: parsed.delayMinutes,
+          reasonCode: parsed.reasonCode,
+          actorId,
+          actorRole: role,
+          timestamp: new Date().toISOString(),
+          inferredTriggerState,
+        };
+
+        const timelineEntry = await addTimelineEntry(
+          req.auth!.tenantId,
+          appointment.jobId,
+          JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED,
+          parsed.isRunningBehind
+            ? `Delay acknowledged (${parsed.delayMinutes ?? 'unspecified'}m)`
+            : 'Delay cleared',
+          actorId,
+          role,
+          timelineRepo,
+          metadata
+        );
+
+        res.status(201).json({
+          appointmentId: appointment.id,
+          jobId: appointment.jobId,
+          isRunningBehind: parsed.isRunningBehind,
+          delayMinutes: parsed.delayMinutes,
+          reasonCode: parsed.reasonCode,
+          inferredTriggerState,
+          timelineEntry,
+        });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

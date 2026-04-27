@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Job, JobStatus, JobRepository } from './job';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { NotFoundError } from '../shared/errors';
+import { NotFoundError, ValidationError } from '../shared/errors';
 
 export interface JobTimelineEntry {
   id: string;
@@ -21,6 +21,11 @@ export interface JobTimelineRepository {
   create(entry: JobTimelineEntry): Promise<JobTimelineEntry>;
   findByJob(tenantId: string, jobId: string): Promise<JobTimelineEntry[]>;
 }
+
+export const JOB_TIMELINE_EVENT_TYPES = {
+  STATUS_CHANGE: 'status_change',
+  DELAY_ACKNOWLEDGED: 'delay_acknowledged',
+} as const;
 
 export const JOB_STATUS_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
   new: ['scheduled', 'canceled'],
@@ -48,7 +53,7 @@ export async function transitionJobStatus(
   if (!job) throw new NotFoundError('Job', jobId);
 
   if (!isValidTransition(job.status, newStatus)) {
-    throw new Error(`Invalid transition from ${job.status} to ${newStatus}`);
+    throw new ValidationError(`Invalid transition from ${job.status} to ${newStatus}`);
   }
 
   const oldStatus = job.status;
@@ -61,7 +66,7 @@ export async function transitionJobStatus(
     id: uuidv4(),
     tenantId,
     jobId,
-    eventType: 'status_change',
+    eventType: JOB_TIMELINE_EVENT_TYPES.STATUS_CHANGE,
     fromStatus: oldStatus,
     toStatus: newStatus,
     description: `Status changed from ${oldStatus} to ${newStatus}`,
