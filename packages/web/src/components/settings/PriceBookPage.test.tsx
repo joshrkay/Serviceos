@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PriceBookPage } from './PriceBookPage';
 
@@ -11,11 +11,38 @@ import { apiFetch } from '../../utils/api-fetch';
 
 const mockRefetch = vi.fn();
 
+const mockItems = [
+  {
+    id: 'item-1',
+    name: 'Air Filter',
+    description: 'MERV 8 return filter',
+    unitPriceCents: 1250,
+    unit: 'ea',
+    category: 'HVAC',
+  },
+  {
+    id: 'item-2',
+    name: 'Capacitor',
+    description: 'Run capacitor',
+    unitPriceCents: 3500,
+    unit: 'ea',
+    category: 'Electrical',
+  },
+  {
+    id: 'item-3',
+    name: 'Labor - Diagnostic',
+    description: 'On-site diagnosis',
+    unitPriceCents: 9500,
+    unit: 'hr',
+    category: 'Labor',
+  },
+];
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(useListQuery).mockReturnValue({
-    data: [],
-    total: 0,
+    data: mockItems,
+    total: mockItems.length,
     page: 1,
     pageSize: 25,
     isLoading: false,
@@ -29,6 +56,18 @@ beforeEach(() => {
 });
 
 describe('PriceBookPage', () => {
+  it('renders list item names and formatted prices from API results', () => {
+    render(<PriceBookPage />);
+
+    expect(screen.getByText('Air Filter')).toBeInTheDocument();
+    expect(screen.getByText('Capacitor')).toBeInTheDocument();
+    expect(screen.getByText('Labor - Diagnostic')).toBeInTheDocument();
+
+    expect(screen.getByText('$12.50')).toBeInTheDocument();
+    expect(screen.getByText('$35.00')).toBeInTheDocument();
+    expect(screen.getByText('$95.00')).toBeInTheDocument();
+  });
+
   it('renders import button and hidden csv input', () => {
     render(<PriceBookPage />);
 
@@ -37,7 +76,6 @@ describe('PriceBookPage', () => {
     expect(input).toHaveAttribute('type', 'file');
     expect(input).toHaveAttribute('accept', '.csv');
   });
-
 
   it('opens add-item form when clicking Add item', () => {
     render(<PriceBookPage />);
@@ -49,6 +87,78 @@ describe('PriceBookPage', () => {
     expect(screen.getByLabelText('Unit price')).toBeInTheDocument();
   });
 
+  it('filters rows locally for each category chip option', () => {
+    render(<PriceBookPage />);
+
+    const filterExpectations: Record<string, string[]> = {
+      All: ['Air Filter', 'Capacitor', 'Labor - Diagnostic'],
+      HVAC: ['Air Filter'],
+      Electrical: ['Capacitor'],
+      Labor: ['Labor - Diagnostic'],
+    };
+
+    Object.entries(filterExpectations).forEach(([chip, expectedNames]) => {
+      fireEvent.click(screen.getByRole('button', { name: chip }));
+      const table = screen.getByRole('table');
+
+      expectedNames.forEach(name => {
+        expect(within(table).getByText(name)).toBeInTheDocument();
+      });
+
+      const unexpectedNames = mockItems.map(item => item.name).filter(name => !expectedNames.includes(name));
+      unexpectedNames.forEach(name => {
+        expect(within(table).queryByText(name)).not.toBeInTheDocument();
+      });
+    });
+  });
+
+  it('submits edited item values and calls PUT with expected endpoint and payload', async () => {
+    render(<PriceBookPage />);
+
+    const row = screen.getByRole('row', { name: /air filter/i });
+    fireEvent.click(within(row).getByRole('button', { name: /edit/i }));
+
+    fireEvent.change(screen.getByLabelText('Item name'), { target: { value: 'Air Filter Premium' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'MERV 11 return filter' } });
+    fireEvent.change(screen.getByLabelText('Unit price'), { target: { value: '18.99' } });
+    fireEvent.change(screen.getByLabelText('Unit'), { target: { value: 'ea' } });
+    fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'HVAC' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items/item-1',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({
+            name: 'Air Filter Premium',
+            description: 'MERV 11 return filter',
+            unitPriceCents: 1899,
+            unit: 'ea',
+            category: 'HVAC',
+          }),
+        })
+      );
+    });
+  });
+
+  it('archives an item and refetches list data', async () => {
+    render(<PriceBookPage />);
+
+    const row = screen.getByRole('row', { name: /capacitor/i });
+    fireEvent.click(within(row).getByRole('button', { name: /archive/i }));
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalledWith(
+        '/api/catalog/items/item-2',
+        expect.objectContaining({ method: 'DELETE' })
+      );
+    });
+
+    expect(mockRefetch).toHaveBeenCalled();
+  });
+
   it('handles missing list query result without crashing', () => {
     vi.mocked(useListQuery).mockReturnValueOnce(undefined as any);
 
@@ -57,7 +167,7 @@ describe('PriceBookPage', () => {
     expect(screen.getByText('Price book')).toBeInTheDocument();
   });
 
-  it('posts each valid row sequentially and shows progress text', async () => {
+  it('posts each valid row sequentially with unitPriceCents payload and shows progress text', async () => {
     render(<PriceBookPage />);
 
     const csv = [
@@ -80,7 +190,7 @@ describe('PriceBookPage', () => {
         body: JSON.stringify({
           name: 'Filter',
           description: '1-inch, pleated',
-          unit_price: 12.5,
+          unitPriceCents: 1250,
           unit: 'ea',
           category: 'HVAC',
         }),
@@ -94,7 +204,7 @@ describe('PriceBookPage', () => {
         body: JSON.stringify({
           name: 'Capacitor',
           description: 'Run capacitor',
-          unit_price: 35,
+          unitPriceCents: 3500,
           unit: 'ea',
           category: 'Electrical',
         }),
