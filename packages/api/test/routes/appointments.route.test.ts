@@ -193,4 +193,57 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('FORBIDDEN');
   });
+
+  it('rejects running-behind acknowledgement without fixed delay value', async () => {
+    const app = buildDelayAckApp();
+    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/delay-ack`)
+      .set('x-test-role', 'dispatcher')
+      .set('x-test-user-id', 'dispatcher-1')
+      .send({
+        appointmentId,
+        isRunningBehind: true,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects delayMinutes when not running behind', async () => {
+    const app = buildDelayAckApp();
+    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/delay-ack`)
+      .set('x-test-role', 'dispatcher')
+      .set('x-test-user-id', 'dispatcher-1')
+      .send({
+        appointmentId,
+        isRunningBehind: false,
+        delayMinutes: 15,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects body appointmentId mismatch with route id', async () => {
+    const app = buildDelayAckApp();
+    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/delay-ack`)
+      .set('x-test-role', 'dispatcher')
+      .set('x-test-user-id', 'dispatcher-1')
+      .send({
+        appointmentId: 'different-id',
+        isRunningBehind: true,
+        delayMinutes: 10,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
 });

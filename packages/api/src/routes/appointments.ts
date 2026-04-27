@@ -13,9 +13,9 @@ import {
 } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
 import {
-  addTimelineEntry,
+  addDelayAcknowledgmentTimelineEntry,
   JobTimelineRepository,
-  JOB_TIMELINE_EVENT_TYPES,
+  DelayAcknowledgmentMetadata,
 } from '../jobs/job-lifecycle';
 
 export function createAppointmentRouter(
@@ -157,7 +157,7 @@ export function createAppointmentRouter(
         }
 
         const inferredTriggerState = parsed.isRunningBehind ? 'running_behind' : 'on_time';
-        const metadata: Record<string, unknown> = {
+        const metadata: DelayAcknowledgmentMetadata = {
           appointmentId: parsed.appointmentId,
           isRunningBehind: parsed.isRunningBehind,
           delayMinutes: parsed.delayMinutes,
@@ -168,13 +168,9 @@ export function createAppointmentRouter(
           inferredTriggerState,
         };
 
-        const timelineEntry = await addTimelineEntry(
+        const timelineEntry = await addDelayAcknowledgmentTimelineEntry(
           req.auth!.tenantId,
           appointment.jobId,
-          JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED,
-          parsed.isRunningBehind
-            ? `Delay acknowledged (${parsed.delayMinutes ?? 'unspecified'}m)`
-            : 'Delay cleared',
           actorId,
           role,
           timelineRepo,
