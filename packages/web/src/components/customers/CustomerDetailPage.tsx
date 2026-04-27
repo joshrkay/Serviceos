@@ -349,7 +349,11 @@ export function CustomerDetailPage() {
   const navigate = useNavigate();
 
   const found = customers.find(c => c.id === id);
-  const { data: maintenanceContracts } = useListQuery<ApiContract>(`/api/customers/${id}/maintenance-contracts`);
+  const customerId = id ?? '';
+  const { data: maintenanceContracts } = useListQuery<ApiContract>(
+    customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
+    { enabled: Boolean(customerId) && Boolean(found) },
+  );
   const [tab,              setTab]           = useState<Tab>('history');
   const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
@@ -516,7 +520,7 @@ export function CustomerDetailPage() {
           {/* ── Overview ── */}
           {tab === 'overview' && (
             <div className="flex flex-col gap-4">
-              {id ? <MaintenanceContractsSidebar customerId={id} contracts={maintenanceContracts} /> : null}
+              {customerId ? <MaintenanceContractsSidebar customerId={customerId} contracts={maintenanceContracts} /> : null}
 
               {/* contact + location */}
               <div className="rounded-2xl bg-white border border-slate-200 overflow-hidden">

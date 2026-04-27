@@ -57,5 +57,9 @@ describe('ContractDetailPage', () => {
 
     expect(screen.getByText('Quarterly HVAC Tune-Up')).toBeInTheDocument();
     expect(vi.mocked(useDetailQuery)).toHaveBeenCalledWith('/api/maintenance-contracts', 'mc-1');
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs', {
+      filters: { contractId: 'mc-1' },
+      enabled: true,
+    });
   });
 });

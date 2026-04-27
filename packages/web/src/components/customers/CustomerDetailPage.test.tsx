@@ -38,5 +38,9 @@ describe('CustomerDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Overview' }));
     expect(screen.getByText('Maintenance Contracts')).toBeInTheDocument();
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/customers/c1/maintenance-contracts',
+      { enabled: true },
+    );
   });
 });

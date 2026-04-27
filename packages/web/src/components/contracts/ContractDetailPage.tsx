@@ -34,22 +34,30 @@ function formatDate(value?: string): string {
 export function ContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const contractId = id ?? null;
+  const canLoad = Boolean(contractId);
 
   const {
     data: contract,
     isLoading,
     error,
     refetch: refetchContract,
-  } = useDetailQuery<ApiContract>('/api/maintenance-contracts', id ?? null);
+  } = useDetailQuery<ApiContract>('/api/maintenance-contracts', contractId);
 
   const {
     data: jobs,
     isLoading: jobsLoading,
     error: jobsError,
-  } = useListQuery<ApiJob>('/api/jobs', { filters: id ? { contractId: id } : {} });
+  } = useListQuery<ApiJob>('/api/jobs', {
+    filters: contractId ? { contractId } : {},
+    enabled: canLoad,
+  });
 
   const { mutate: updateStatus, isLoading: isUpdating, error: updateError } =
-    useMutation<{ status: 'paused' | 'canceled' }, ApiContract>('PATCH', `/api/maintenance-contracts/${id}/status`);
+    useMutation<{ status: 'paused' | 'canceled' }, ApiContract>(
+      'PATCH',
+      contractId ? `/api/maintenance-contracts/${contractId}/status` : '/api/maintenance-contracts/unknown/status',
+    );
 
   const statusClass = useMemo(() => {
     switch ((contract?.status ?? '').toLowerCase()) {
@@ -61,12 +69,16 @@ export function ContractDetailPage() {
   }, [contract?.status]);
 
   async function handleStatusChange(status: 'paused' | 'canceled') {
-    if (!id) return;
-    await updateStatus({ status });
-    refetchContract();
+    if (!contractId) return;
+    try {
+      await updateStatus({ status });
+      refetchContract();
+    } catch {
+      // handled by useMutation error state
+    }
   }
 
-  if (!id) return <div className="p-6 text-sm text-slate-500">Missing contract id.</div>;
+  if (!contractId) return <div className="p-6 text-sm text-slate-500">Missing contract id.</div>;
   if (isLoading) return <div className="p-6 text-sm text-slate-500">Loading contract…</div>;
   if (error) return <div className="p-6 text-sm text-red-600">Failed to load contract.</div>;
   if (!contract) return <div className="p-6 text-sm text-slate-500">Contract not found.</div>;
@@ -100,14 +112,14 @@ export function ContractDetailPage() {
         <div className="flex flex-wrap gap-2 pt-2">
           <button
             onClick={() => handleStatusChange('paused')}
-            disabled={isUpdating}
+            disabled={isUpdating || (contract.status ?? '').toLowerCase() === 'paused'}
             className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700 disabled:opacity-50"
           >
             <PauseCircle size={15} /> Pause
           </button>
           <button
             onClick={() => handleStatusChange('canceled')}
-            disabled={isUpdating}
+            disabled={isUpdating || (contract.status ?? '').toLowerCase() === 'canceled'}
             className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 disabled:opacity-50"
           >
             <XCircle size={15} /> Cancel
