@@ -238,9 +238,9 @@ npm test -- --grep "P0-025"
 
 **Dependencies:** P0-006
 
-**Allowed files:** `packages/api/src/app.ts, packages/api/src/shared/env.ts`
+**Allowed files:** `packages/api/src/shared/config.ts, packages/api/test/shared/config.test.ts, packages/api/package.json`
 
-**Build prompt:** Create a Zod schema for all required environment variables and validate at startup before initializing any services. Required vars: `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `CORS_ORIGIN` (must not be `true` in production), `NODE_ENV`. Optional with safe defaults: `PORT`, `LOG_LEVEL`. Remove the hardcoded `'dev-secret-key'` fallback at `app.ts:97` — throw a clear error if `CLERK_SECRET_KEY` is missing. In development mode (`NODE_ENV=development`), allow relaxed defaults. In production, fail fast on any missing required var.
+**Build prompt:** Create a Zod schema for all required environment variables and validate at startup before initializing any services. Required vars: `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `CORS_ORIGIN` (must not be `true` in production), `NODE_ENV`. Optional with safe defaults: `PORT`, `LOG_LEVEL`. The hardcoded `'dev-secret-key'` fallback at `app.ts:97` was already removed (verified 0 hits in `packages/api/src/`); this story focuses on the Zod schema layer in `shared/config.ts`. Extend the existing `validateProductionConfig` function with a `validateEnvSchema(env)` companion that returns a parsed, typed `Env` object. In development mode (`NODE_ENV=development`), allow relaxed defaults. In production, fail fast on any missing required var.
 
 **Review prompt:** Verify the `'dev-secret-key'` fallback is completely removed. Verify CORS_ORIGIN cannot be `true` in production. Verify all env vars listed in deployment docs are validated. Verify the error messages are clear and actionable (tell the operator exactly which var is missing).
 
