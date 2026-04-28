@@ -973,6 +973,46 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_catalog_items ON catalog_items
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+
+  '042_create_feedback_requests': `
+    CREATE TABLE IF NOT EXISTS feedback_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      token TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'submitted', 'expired')),
+      expires_at TIMESTAMPTZ NOT NULL,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_requests_tenant ON feedback_requests(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_requests_job ON feedback_requests(tenant_id, job_id);
+    ALTER TABLE feedback_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE feedback_requests FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_feedback_requests ON feedback_requests;
+    CREATE POLICY tenant_isolation_feedback_requests ON feedback_requests
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '043_create_feedback_responses': `
+    CREATE TABLE IF NOT EXISTS feedback_responses (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      request_id UUID NOT NULL REFERENCES feedback_requests(id) ON DELETE CASCADE,
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment TEXT,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_responses_request ON feedback_responses(request_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_responses_tenant_submitted ON feedback_responses(tenant_id, submitted_at DESC);
+    ALTER TABLE feedback_responses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE feedback_responses FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_feedback_responses ON feedback_responses;
+    CREATE POLICY tenant_isolation_feedback_responses ON feedback_responses
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
