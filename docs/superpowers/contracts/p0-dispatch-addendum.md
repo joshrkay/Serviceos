@@ -379,7 +379,7 @@ cd /home/user/Serviceos && \
 ## P0-034 — Feature-flag admin authority — platform-admin gate
 
 **Wave:** 1B (parallel — independent of P0-019..P0-023)
-**Migration number reserved:** `044_*`
+**Migration number reserved:** `046_*`
 **Forbidden files:**
 - `packages/api/src/app.ts` (Wave 1C only)
 - `packages/api/src/auth/clerk.ts` (P0-033 owns)
