@@ -461,16 +461,16 @@ export function PriceBookPage() {
           })}
         </div>
 
-        {editingItem && (
-          <form className="mb-4 rounded-lg border border-slate-200 bg-white p-3" onSubmit={handleEditSubmit}>
+        {editingItemId && (
+          <form className="mb-4 rounded-lg border border-slate-200 bg-white p-3" onSubmit={handleSaveItem}>
             <p className="mb-3 text-sm text-slate-700">Edit price book item</p>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm text-slate-700">
                 <span>Item name</span>
                 <input
                   type="text"
-                  value={editFormState.name}
-                  onChange={event => setEditFormState(prev => ({ ...prev, name: event.target.value }))}
+                  value={formState.name}
+                  onChange={event => setFormState(prev => ({ ...prev, name: event.target.value }))}
                   className="rounded border border-slate-300 px-2 py-1 text-sm"
                 />
               </label>
@@ -478,8 +478,8 @@ export function PriceBookPage() {
                 <span>Description</span>
                 <input
                   type="text"
-                  value={editFormState.description}
-                  onChange={event => setEditFormState(prev => ({ ...prev, description: event.target.value }))}
+                  value={formState.description}
+                  onChange={event => setFormState(prev => ({ ...prev, description: event.target.value }))}
                   className="rounded border border-slate-300 px-2 py-1 text-sm"
                 />
               </label>
@@ -489,8 +489,8 @@ export function PriceBookPage() {
                   type="number"
                   step="0.01"
                   min="0"
-                  value={editFormState.unitPrice}
-                  onChange={event => setEditFormState(prev => ({ ...prev, unitPrice: event.target.value }))}
+                  value={formState.unitPrice}
+                  onChange={event => setFormState(prev => ({ ...prev, unitPrice: event.target.value }))}
                   className="rounded border border-slate-300 px-2 py-1 text-sm"
                 />
               </label>
@@ -498,8 +498,8 @@ export function PriceBookPage() {
                 <span>Unit</span>
                 <input
                   type="text"
-                  value={editFormState.unit}
-                  onChange={event => setEditFormState(prev => ({ ...prev, unit: event.target.value }))}
+                  value={formState.unit}
+                  onChange={event => setFormState(prev => ({ ...prev, unit: event.target.value }))}
                   className="rounded border border-slate-300 px-2 py-1 text-sm"
                 />
               </label>
@@ -507,8 +507,8 @@ export function PriceBookPage() {
                 <span>Category</span>
                 <input
                   type="text"
-                  value={editFormState.category}
-                  onChange={event => setEditFormState(prev => ({ ...prev, category: event.target.value }))}
+                  value={formState.category}
+                  onChange={event => setFormState(prev => ({ ...prev, category: event.target.value }))}
                   className="rounded border border-slate-300 px-2 py-1 text-sm"
                 />
               </label>
