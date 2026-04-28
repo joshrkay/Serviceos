@@ -228,8 +228,8 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-026|validateProductionConfig" && \
-  ! grep -n "'dev-secret-key'" packages/api/src/**/*.ts
+  npm test --workspace=packages/api -- --run -t "P0-026|validateProductionConfig|validateEnvSchema" && \
+  ! grep -rn "'dev-secret-key'" packages/api/src/
 ```
 
 ---
