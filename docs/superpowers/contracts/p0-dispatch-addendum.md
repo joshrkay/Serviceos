@@ -12,11 +12,12 @@ For every story below, the agent prompt should include:
 | Wave | Stories | Run-mode | Blocks |
 |---|---|---|---|
 | 1A | P0-019, P0-020, P0-021, P0-022, P0-027, P0-028 | parallel (6 agents, isolated worktrees) | Wave 1C |
-| 1B | P0-026, P0-029, P0-032 | parallel (3 agents) | none |
+| 1B | P0-026, P0-029, P0-032, P0-034 | parallel (4 agents) | none |
 | 1C | P0-023 | single agent, after 1A merges | P0-024 |
 | 1D | P0-024, P0-025, P0-030, P0-031 | parallel (4 agents) after 1C merges | sprint complete |
+| 1E | P0-033 | single agent, after P0-026 merges (security hardening) | release gate |
 
-Sprint 1 originally appeared sequential. With the wave plan and the contract freeze, **11 stories collapse to 4 wall-clock waves**.
+Sprint 1 originally appeared sequential. With the wave plan and the contract freeze, **13 stories collapse to 5 wall-clock waves** (1A, 1B/1E, 1C, 1D).
 
 ---
 
@@ -350,6 +351,51 @@ cd /home/user/Serviceos && \
   npm run typecheck && \
   npm test --workspace=packages/web -- --run --grep "P0-032|ErrorBoundary|Toaster"
 ```
+
+---
+
+## P0-033 — Clerk session verification — RS256 + JWKS
+
+**Wave:** 1E (new — security hardening, post-Sprint-1)
+**Migration number reserved:** none
+**Forbidden files:**
+- everything outside `packages/api/src/auth/` and `packages/api/src/shared/env.ts`
+- `packages/api/src/app.ts` (no app-wiring changes — `verifyClerkSession` keeps the same export)
+- `packages/shared/**`
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run --grep "P0-033|verifyClerkSession"
+```
+
+**Pre-flight:** P0-026 must be merged (env validation gates the new `CLERK_DEV_HMAC_TOKENS` flag).
+
+**Risk note:** This story changes the auth-verification primitive used by every authenticated request. Any regression locks every user out. Review heavy — require a second human reviewer. Stage rollout: deploy with `CLERK_DEV_HMAC_TOKENS=true` so existing dev tokens still work; verify production token verification works against a real Clerk session; then flip the flag off.
+
+---
+
+## P0-034 — Feature-flag admin authority — platform-admin gate
+
+**Wave:** 1B (parallel — independent of P0-019..P0-023)
+**Migration number reserved:** `046_*`
+**Forbidden files:**
+- `packages/api/src/app.ts` (Wave 1C only)
+- `packages/api/src/auth/clerk.ts` (P0-033 owns)
+- `packages/shared/**`
+- any route file other than `routes/feature-flags.ts`
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run --grep "P0-034|requirePlatformAdmin|feature-flags"
+```
+
+**Pre-flight:** none.
+
+**Risk note:** Switching the gate from `requireRole('owner')` to `requirePlatformAdmin` will lock out anyone currently using the admin endpoints until at least one platform-admin row is seeded. The dispatch script must seed at least one `platform_admins` entry (via the new CLI) **before** the new check goes live in any environment. Order: (1) deploy migration + middleware; (2) seed; (3) flip routes.
 
 ---
 
