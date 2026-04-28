@@ -84,9 +84,9 @@ fi
 MIG_NUM=$(awk -v id="$STORY_ID" '
   /^## / { in_block = ($0 ~ "^## " id " ") }
   in_block && /\*\*Migration number reserved:\*\*/ {
-    match($0, /`[0-9]{3}_/)
+    match($0, /[0-9]{3}_/)
     if (RSTART > 0) {
-      num = substr($0, RSTART+1, 3)
+      num = substr($0, RSTART, 3)
       print num
     }
     exit
