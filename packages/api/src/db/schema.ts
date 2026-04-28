@@ -1013,6 +1013,21 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_feedback_responses ON feedback_responses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P0-034 — platform-admin authority. Cross-tenant table by design:
+  // platform admins are global authorities (e.g. for the feature-flag
+  // registry) and are NOT scoped to any tenant. RLS is intentionally NOT
+  // enabled here — every read must go through `withClient()` (no tenant
+  // GUC) and every check against this table is a security gate.
+  '046_create_platform_admins': `
+    CREATE TABLE IF NOT EXISTS platform_admins (
+      user_id UUID PRIMARY KEY,
+      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      granted_by UUID NOT NULL,
+      notes TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_admins_user_id ON platform_admins(user_id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
