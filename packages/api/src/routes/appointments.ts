@@ -16,7 +16,6 @@ import {
   addDelayAcknowledgmentTimelineEntry,
   JobTimelineRepository,
   DelayAcknowledgmentMetadata,
-  JOB_TIMELINE_EVENT_TYPES,
 } from '../jobs/job-lifecycle';
 export interface DelayNotificationEnqueuer {
   enqueueDelayNotice(input: {
