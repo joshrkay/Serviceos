@@ -13,9 +13,7 @@ codebase for this story, we found:
 - `packages/api/src/queues/pg-queue.ts` already exists, with `FOR UPDATE SKIP
   LOCKED` semantics and visibility-timeout-style reservation. It implements the
   same `Queue` interface as `InMemoryQueue`, so callers do not need to change.
-- The current `app.ts` wires `InMemoryQueue` unconditionally, ignoring
-  `PgQueue` even when a Postgres pool is available. This is the actual launch
-  blocker — not the absence of SQS.
+- `app.ts:262` already wires the selection: `queue = pool ? new PgQueue(pool) : new InMemoryQueue()`. (The original ADR draft asserted the wiring was missing — it isn't. The launch-readiness gap was the absence of a recorded decision, not unwired code.)
 - No production traffic is hitting SQS today; no caller depends on
   SQS-specific semantics (FIFO ordering, message attributes, cross-region
   replication, etc.).
@@ -36,7 +34,10 @@ development without Postgres.
 Defer the `SqsQueue` implementation until at least one of these triggers
 fires:
 
-1. Sustained queue depth >10 000 messages OR p95 enqueue latency >50 ms.
+1. Sustained queue depth >10 000 messages, p95 enqueue latency >50 ms, OR
+   p95 receive latency >100 ms (PgQueue receive can degrade as table size
+   grows even when writes stay fast — index health on `_queue_messages` is
+   the canary).
 2. Need for cross-region durability or fan-out semantics.
 3. Need for fully managed retry / DLQ semantics that PgQueue cannot match
    (e.g. exponential backoff with jitter at the broker level, or
@@ -81,12 +82,8 @@ fires:
 
 ## Implementation
 
-1. **P0-023 (Wave 1C) wires the selection.** That story will swap `app.ts` to
-   wire `pool ? new PgQueue(pool) : new InMemoryQueue()`. **No code in this
-   story.**
-2. **Add follow-up story P0-035: `pg_queue_cleanup` worker.** Schedules a
-   daily job that deletes processed/failed messages older than 7 days, to
-   prevent table bloat. This is a small worker, not a schema change.
+1. **Selection already wired in `app.ts:262`** — `queue = pool ? new PgQueue(pool) : new InMemoryQueue()`. The original ADR draft assumed P0-023 would do this; in fact it shipped earlier. No further code change needed for the selection.
+2. **Add follow-up story P0-035: `pg_queue_dlq_cleanup` worker.** Schedules a daily job that deletes rows from `_queue_dlq` older than 7 days. Successful messages are already deleted from `_queue_messages` on completion (see `pg-queue.ts:128`); only the DLQ grows unbounded if left alone. This is a small worker, not a schema change.
 3. **`InMemoryQueue` stays in the codebase.** It remains the test-suite
    default and the local-dev fallback when no `DATABASE_URL` is set. No
    deprecation.
