@@ -210,6 +210,7 @@ export function PriceBookPage() {
   };
 
   const handleArchive = async (itemId: string) => {
+    if (archiveItemId) return;
     setActionError(null);
     setArchiveItemId(itemId);
     try {
