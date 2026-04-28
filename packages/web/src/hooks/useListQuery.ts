@@ -4,6 +4,7 @@ import { apiFetch } from '../utils/api-fetch';
 export interface ListQueryOptions {
   search?: string;
   filters?: Record<string, string>;
+  enabled?: boolean;
   page?: number;
   pageSize?: number;
   sortBy?: string;
@@ -33,10 +34,15 @@ export function useListQuery<T>(
   const [pageSize] = useState(initialOptions.pageSize ?? 25);
   const [search, setSearch] = useState(initialOptions.search ?? '');
   const [filters, setFilters] = useState(initialOptions.filters ?? {});
+  const [enabled] = useState(initialOptions.enabled ?? true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refetch = useCallback(async () => {
+    if (!enabled) {
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     setError(null);
     try {
@@ -56,7 +62,7 @@ export function useListQuery<T>(
     } finally {
       setIsLoading(false);
     }
-  }, [endpoint, page, pageSize, search, filters]);
+  }, [enabled, endpoint, page, pageSize, search, filters]);
 
   useEffect(() => {
     refetch();
