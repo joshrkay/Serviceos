@@ -28,10 +28,10 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 **Re-scoped scope:**
 1. Verify each existing `pg-*.ts` (Customer, Location, Job, JobTimeline, Appointment, Note) satisfies its interface contract from `repository-conventions.md`. If yes, no work needed for that entity — record the verification in the PR description.
 2. Add `PgAssignmentRepository` in `packages/api/src/appointments/pg-assignment.ts`.
-3. Add migration `042_create_assignments` to `db/schema.ts`.
+3. Add migration `048_create_assignments` to `db/schema.ts`.
 
 **Wave:** 1A
-**Migration number reserved:** `042_*`
+**Migration number reserved:** `048_*`
 **Forbidden files:**
 - `packages/api/src/app.ts` (Wave 1C only)
 - any `pg-*.ts` outside the entities listed above
@@ -41,8 +41,9 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 
 **Verification gate (single command):**
 ```bash
+cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-019|PgAssignment" && \
+  npm test --workspace=packages/api -- --run -t "P0-019|PgAssignment" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/appointments/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -57,10 +58,10 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 **Re-scoped scope:**
 1. Verify Pg impls for Estimate, EstimateApproval, EstimateEditDelta, Invoice, Payment satisfy contract.
 2. Add `PgWebhookEventRepository` (idempotency tracking by `event_id`) in `packages/api/src/webhooks/pg-webhook-event.ts`.
-3. Add migration `043_create_webhook_events` with `UNIQUE (event_id)` constraint.
+3. Add migration `049_create_webhook_events` with `UNIQUE (event_id)` constraint.
 
 **Wave:** 1A
-**Migration number reserved:** `043_*`
+**Migration number reserved:** `049_*`
 **Forbidden files:**
 - `packages/api/src/app.ts`
 - any `pg-*.ts` outside the entities listed above
@@ -71,7 +72,7 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-020|PgWebhookEvent" && \
+  npm test --workspace=packages/api -- --run -t "P0-020|PgWebhookEvent" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/webhooks/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -228,8 +229,8 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-026|validateProductionConfig" && \
-  ! grep -n "'dev-secret-key'" packages/api/src/**/*.ts
+  npm test --workspace=packages/api -- --run -t "P0-026|validateProductionConfig|validateEnvSchema" && \
+  ! grep -rn "'dev-secret-key'" packages/api/src/
 ```
 
 ---
