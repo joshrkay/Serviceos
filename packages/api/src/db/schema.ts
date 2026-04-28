@@ -1047,6 +1047,74 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_assignments ON appointment_assignments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P0-021 — Postgres-backed AI artifacts: document_revisions + diff_analyses.
+  //
+  // Both tables are append-only (the audit trail invariant). The Pg
+  // repositories implement create + read methods only; diff_analyses additionally
+  // exposes updateStatus to advance the worker state machine
+  // (pending -> processing -> completed/failed).
+  //
+  // Column-type rationale (driven by InMemory entity types):
+  //   * document_revisions.id is generated via uuidv4() in createRevision()
+  //     so we use UUID with gen_random_uuid() default.
+  //   * document_revisions.actor_id is TEXT (not UUID) — Clerk user ids are
+  //     TEXT throughout this codebase (see users.clerk_user_id, tenants.owner_id,
+  //     audit_events.actor_id).
+  //   * document_revisions.document_id is TEXT — the InMemory entity treats
+  //     documentId as an opaque string and several callers may pass non-UUID
+  //     ids (estimates / invoices / proposals across surfaces).
+  //   * diff_analyses.id is TEXT (not UUID) because diffAnalysisIdFor() builds
+  //     a deterministic key like `diff:<tenantId>:<docType>:<docId>:<from>:<to>`
+  //     so re-enqueueing the same revision pair is end-to-end idempotent.
+  //   * diff_analyses.diff is JSONB storing the DiffEntry[] array.
+  '044_create_ai_artifacts': `
+    CREATE TABLE IF NOT EXISTS document_revisions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      document_type TEXT NOT NULL CHECK (document_type IN ('estimate', 'invoice', 'proposal')),
+      document_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      snapshot JSONB NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'ai_generated', 'ai_revised')),
+      actor_id TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      ai_run_id UUID,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, document_type, document_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_tenant_doc
+      ON document_revisions(tenant_id, document_type, document_id);
+    ALTER TABLE document_revisions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE document_revisions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_document_revisions ON document_revisions;
+    CREATE POLICY tenant_isolation_document_revisions ON document_revisions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS diff_analyses (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      document_type TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      from_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      to_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      diff JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_tenant_doc
+      ON diff_analyses(tenant_id, document_type, document_id);
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_revisions
+      ON diff_analyses(tenant_id, from_revision_id, to_revision_id);
+    ALTER TABLE diff_analyses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE diff_analyses FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_diff_analyses ON diff_analyses;
+    CREATE POLICY tenant_isolation_diff_analyses ON diff_analyses
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
