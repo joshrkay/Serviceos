@@ -1014,34 +1014,38 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // P0-034 — platform-admin authority. Cross-tenant table by design:
-  // platform admins are global authorities (e.g. for the feature-flag
-  // registry) and are NOT scoped to any tenant. RLS is intentionally NOT
-  // enabled here — every read must go through `withClient()` (no tenant
-  // GUC) and every check against this table is a security gate.
-  '046_create_platform_admins': `
-    CREATE TABLE IF NOT EXISTS platform_admins (
-      user_id UUID PRIMARY KEY,
-      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      granted_by UUID NOT NULL,
-      notes TEXT
+  // P0-019 — Postgres-backed AssignmentRepository.
+  //
+  // The `appointment_assignments` table itself was created by migration
+  // `019_create_appointment_assignments` (with RLS, tenant_isolation policy,
+  // and single-column indexes on appointment_id and technician_id).
+  //
+  // This migration is idempotent and:
+  //   * Re-asserts RLS + tenant_isolation policy (defense-in-depth — safe no-op
+  //     when the policy already matches).
+  //   * Adds composite indexes `(tenant_id, appointment_id)` and
+  //     `(tenant_id, technician_id)` to support the access patterns used by
+  //     `PgAssignmentRepository.findByAppointment` / `findByTechnician`,
+  //     which always filter by tenant_id first as defense-in-depth.
+  '048_create_assignments': `
+    CREATE TABLE IF NOT EXISTS appointment_assignments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL REFERENCES appointments(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      is_primary BOOLEAN NOT NULL DEFAULT true,
+      assigned_by TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_admins_user_id ON platform_admins(user_id);
-  `,
-
-  // P0-034 follow-up. Migration 046 used UUID for user_id / granted_by, but
-  // every other auth principal in the schema is TEXT (tenants.owner_id,
-  // users.clerk_user_id, audit_events.actor_id) because Clerk session
-  // identifiers like "user_2abc..." are not valid UUIDs. With UUID columns
-  // the production gate would throw a Postgres cast error on real Clerk
-  // ids — turning every admin request into a 503. Convert in place and
-  // drop the redundant unique index (PRIMARY KEY already implies one).
-  '047_fix_platform_admins_id_types': `
-    DROP INDEX IF EXISTS idx_platform_admins_user_id;
-    ALTER TABLE platform_admins
-      ALTER COLUMN user_id TYPE TEXT USING user_id::TEXT;
-    ALTER TABLE platform_admins
-      ALTER COLUMN granted_by TYPE TEXT USING granted_by::TEXT;
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_appointment
+      ON appointment_assignments(tenant_id, appointment_id);
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_technician
+      ON appointment_assignments(tenant_id, technician_id);
+    ALTER TABLE appointment_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_assignments FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_assignments ON appointment_assignments;
+    CREATE POLICY tenant_isolation_assignments ON appointment_assignments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 
