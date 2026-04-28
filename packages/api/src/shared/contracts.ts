@@ -199,6 +199,22 @@ export const delayAcknowledgmentSchema = z.object({
   isRunningBehind: z.boolean(),
   delayMinutes: delayMinutesSchema.optional(),
   reasonCode: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (value.isRunningBehind && value.delayMinutes === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['delayMinutes'],
+      message: 'delayMinutes is required when isRunningBehind is true',
+    });
+  }
+
+  if (!value.isRunningBehind && value.delayMinutes !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['delayMinutes'],
+      message: 'delayMinutes is not allowed when isRunningBehind is false',
+    });
+  }
 });
 
 export type DelayAcknowledgment = z.infer<typeof delayAcknowledgmentSchema>;
