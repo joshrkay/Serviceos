@@ -460,7 +460,7 @@ npm test --workspace=packages/api -- --run --grep "P0-033|verifyClerkSession"
 
 **Dependencies:** None
 
-**Allowed files:** `packages/api/src/routes/feature-flags.ts, packages/api/src/auth/rbac.ts, packages/api/src/auth/platform-admin.ts, packages/api/src/auth/platform-admin.test.ts, packages/api/src/db/schema.ts`
+**Allowed files:** `packages/api/src/routes/feature-flags.ts, packages/api/src/routes/feature-flags.test.ts, packages/api/src/auth/rbac.ts, packages/api/src/auth/platform-admin.ts, packages/api/src/auth/platform-admin.test.ts, packages/api/src/db/schema.ts, packages/api/scripts/grant-platform-admin.ts`
 
 **Build prompt:** The feature-flag admin endpoints in `routes/feature-flags.ts:39,55,75,100` gate on `requireRole('owner')`, which is a per-tenant role — meaning **any tenant owner can mutate global feature flags**, escalating their authority beyond their tenant. Implement a true platform-admin authorization layer: (1) Add `platform_admins` table (migration 044): `(user_id UUID PRIMARY KEY, granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), granted_by UUID NOT NULL, notes TEXT)` — NOT tenant-scoped, no RLS. (2) Add `requirePlatformAdmin` middleware in `auth/platform-admin.ts` that checks the authenticated user against the `platform_admins` table. Return 403 if not present. (3) Replace `requireRole('owner')` with `requirePlatformAdmin` in all four feature-flag admin routes. (4) Add a CLI seed script (`packages/api/scripts/grant-platform-admin.ts`) that takes a Clerk user id and inserts into the table — for bootstrap. (5) Audit every grant/revoke via the existing audit module with `actor_type='platform'`. Per-tenant feature flag READS may still be done by tenant owners — only WRITES to the global registry require platform-admin.
 
