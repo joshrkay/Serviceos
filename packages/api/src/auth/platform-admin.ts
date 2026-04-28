@@ -62,13 +62,21 @@ export class InMemoryPlatformAdminChecker implements PlatformAdminChecker {
  * Postgres-backed checker. Uses `withClient()` (no tenant GUC) because
  * `platform_admins` is intentionally cross-tenant. Cached for `ttlMs`
  * (default 60s) to avoid hitting the DB on every admin request.
+ *
+ * The cache is bounded (`maxEntries`, default 10_000) to prevent
+ * unbounded growth from a flood of unique (likely-unauthorized) user
+ * ids. Eviction is FIFO via Map insertion order — when the cap is
+ * reached, the oldest entry is dropped before the new one is inserted.
  */
+const PLATFORM_ADMIN_CACHE_MAX_ENTRIES = 10_000;
+
 export class PgPlatformAdminChecker implements PlatformAdminChecker {
   private cache: Map<string, { value: boolean; expiresAt: number }> = new Map();
 
   constructor(
     private readonly pool: Pool,
-    private readonly ttlMs: number = 60_000
+    private readonly ttlMs: number = 60_000,
+    private readonly maxEntries: number = PLATFORM_ADMIN_CACHE_MAX_ENTRIES
   ) {}
 
   async isPlatformAdmin(userId: string): Promise<boolean> {
@@ -78,6 +86,11 @@ export class PgPlatformAdminChecker implements PlatformAdminChecker {
     const cached = this.cache.get(userId);
     if (cached && cached.expiresAt > now) {
       return cached.value;
+    }
+    if (cached) {
+      // Stale — drop so re-insertion below counts as a fresh entry for
+      // FIFO eviction order.
+      this.cache.delete(userId);
     }
 
     // platform_admins is intentionally cross-tenant — must NOT set the
@@ -94,6 +107,10 @@ export class PgPlatformAdminChecker implements PlatformAdminChecker {
       client.release();
     }
 
+    if (this.cache.size >= this.maxEntries) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) this.cache.delete(oldestKey);
+    }
     this.cache.set(userId, { value, expiresAt: now + this.ttlMs });
     return value;
   }
@@ -134,11 +151,14 @@ export function requirePlatformAdmin(checker: PlatformAdminChecker): RequestHand
       next();
     } catch (err) {
       // Fail closed on DB errors. We do not want a transient DB outage to
-      // accidentally grant access; we want it to deny.
-      const message = err instanceof Error ? err.message : 'platform-admin check failed';
+      // accidentally grant access; we want it to deny. The internal
+      // exception is intentionally NOT echoed in the response body —
+      // err.message can leak connection strings or schema names. Log
+      // server-side for ops, return a generic body to the client.
+      console.error('[platform-admin] check failed:', err);
       res.status(503).json({
         error: 'platform_admin_check_failed',
-        message,
+        message: 'platform-admin check failed',
       });
     }
   };
@@ -169,8 +189,13 @@ export interface GrantResult {
 
 /**
  * Idempotent grant. Inserts into `platform_admins`; on conflict, the
- * existing row is left untouched. Emits an audit event regardless,
- * with metadata.actor_type='platform' so review tooling can filter.
+ * existing row is left untouched. Emits an audit event with
+ * metadata.actor_type='platform' so review tooling can filter.
+ *
+ * When `auditRepo` is provided, the INSERT and the audit write run in
+ * a single transaction — if the audit fails (FK violation, transient
+ * error), the grant is rolled back so we never end up with a granted
+ * platform admin who is invisible to the audit log.
  */
 export async function grantPlatformAdmin(
   pool: Pool,
@@ -182,7 +207,11 @@ export async function grantPlatformAdmin(
   const client = await pool.connect();
   let inserted = false;
   let grantedAt = input.grantedAt ?? new Date();
+  const useTransaction = Boolean(input.auditRepo);
+
   try {
+    if (useTransaction) await client.query('BEGIN');
+
     const result = await client.query<{ user_id: string; granted_at: Date }>(
       `INSERT INTO platform_admins (user_id, granted_by, notes, granted_at)
        VALUES ($1, $2, $3, COALESCE($4, NOW()))
@@ -194,26 +223,37 @@ export async function grantPlatformAdmin(
       inserted = true;
       grantedAt = result.rows[0].granted_at;
     }
+
+    if (input.auditRepo) {
+      const event = createAuditEvent({
+        tenantId: input.auditTenantId,
+        actorId: input.grantedBy,
+        actorRole: 'platform',
+        eventType: 'platform_admin.granted',
+        entityType: 'platform_admin',
+        entityId: input.userId,
+        metadata: {
+          actor_type: 'platform',
+          granted_to: input.userId,
+          notes: input.notes ?? null,
+          idempotent_no_op: !inserted,
+        },
+      });
+      await input.auditRepo.create(event);
+    }
+
+    if (useTransaction) await client.query('COMMIT');
+  } catch (err) {
+    if (useTransaction) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // best-effort; primary error is the one we want to surface
+      }
+    }
+    throw err;
   } finally {
     client.release();
-  }
-
-  if (input.auditRepo) {
-    const event = createAuditEvent({
-      tenantId: input.auditTenantId,
-      actorId: input.grantedBy,
-      actorRole: 'platform',
-      eventType: 'platform_admin.granted',
-      entityType: 'platform_admin',
-      entityId: input.userId,
-      metadata: {
-        actor_type: 'platform',
-        granted_to: input.userId,
-        notes: input.notes ?? null,
-        idempotent_no_op: !inserted,
-      },
-    });
-    await input.auditRepo.create(event);
   }
 
   return { userId: input.userId, inserted, grantedAt };
@@ -240,31 +280,46 @@ export async function revokePlatformAdmin(
 
   const client = await pool.connect();
   let removed = false;
+  const useTransaction = Boolean(input.auditRepo);
+
   try {
+    if (useTransaction) await client.query('BEGIN');
+
     const result = await client.query(
       `DELETE FROM platform_admins WHERE user_id = $1 RETURNING user_id`,
       [input.userId]
     );
     removed = result.rowCount !== null && result.rowCount > 0;
+
+    if (input.auditRepo) {
+      const event = createAuditEvent({
+        tenantId: input.auditTenantId,
+        actorId: input.revokedBy,
+        actorRole: 'platform',
+        eventType: 'platform_admin.revoked',
+        entityType: 'platform_admin',
+        entityId: input.userId,
+        metadata: {
+          actor_type: 'platform',
+          revoked_from: input.userId,
+          was_present: removed,
+        },
+      });
+      await input.auditRepo.create(event);
+    }
+
+    if (useTransaction) await client.query('COMMIT');
+  } catch (err) {
+    if (useTransaction) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // best-effort
+      }
+    }
+    throw err;
   } finally {
     client.release();
-  }
-
-  if (input.auditRepo) {
-    const event = createAuditEvent({
-      tenantId: input.auditTenantId,
-      actorId: input.revokedBy,
-      actorRole: 'platform',
-      eventType: 'platform_admin.revoked',
-      entityType: 'platform_admin',
-      entityId: input.userId,
-      metadata: {
-        actor_type: 'platform',
-        revoked_from: input.userId,
-        was_present: removed,
-      },
-    });
-    await input.auditRepo.create(event);
   }
 
   return { userId: input.userId, removed };

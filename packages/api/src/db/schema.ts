@@ -1028,6 +1028,21 @@ export const MIGRATIONS = {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_admins_user_id ON platform_admins(user_id);
   `,
+
+  // P0-034 follow-up. Migration 046 used UUID for user_id / granted_by, but
+  // every other auth principal in the schema is TEXT (tenants.owner_id,
+  // users.clerk_user_id, audit_events.actor_id) because Clerk session
+  // identifiers like "user_2abc..." are not valid UUIDs. With UUID columns
+  // the production gate would throw a Postgres cast error on real Clerk
+  // ids — turning every admin request into a 503. Convert in place and
+  // drop the redundant unique index (PRIMARY KEY already implies one).
+  '047_fix_platform_admins_id_types': `
+    DROP INDEX IF EXISTS idx_platform_admins_user_id;
+    ALTER TABLE platform_admins
+      ALTER COLUMN user_id TYPE TEXT USING user_id::TEXT;
+    ALTER TABLE platform_admins
+      ALTER COLUMN granted_by TYPE TEXT USING granted_by::TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
