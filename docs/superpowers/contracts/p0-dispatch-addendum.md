@@ -76,7 +76,7 @@ cd /home/user/Serviceos && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/webhooks/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
-**Pre-flight:** none. (P0-019 in story body listed as dependency; in practice the two stories are independent — both touch different files. Coordinator may launch in parallel.)
+**Pre-flight:** none. (Story body lists a dep on the core-entities story; in practice the two stories are independent — both touch different files. Coordinator may launch in parallel.)
 
 ---
 
@@ -104,7 +104,7 @@ These store immutable AI artifacts (revisions of generated content + their diff 
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-021|PgDocumentRevision|PgDiffAnalysis" && \
+  npm test --workspace=packages/api -- --run -t "P0-021|PgDocumentRevision|PgDiffAnalysis" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/ai/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -132,7 +132,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-022|PgDispatchAnalytics|PgDelayNoticeState" && \
+  npm test --workspace=packages/api -- --run -t "P0-022|PgDispatchAnalytics|PgDelayNoticeState" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/(dispatch|notifications)/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -253,7 +253,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-027|Whisper"
+  npm test --workspace=packages/api -- --run -t "P0-027|Whisper"
 ```
 
 ---
