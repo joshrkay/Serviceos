@@ -92,6 +92,37 @@ describe('P0-034 — requirePlatformAdmin middleware', () => {
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('platform_admin_check_failed');
   });
+
+  it('503 message is generic — never echoes the underlying error string', async () => {
+    // Suppress the expected console.error so the test output stays clean.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sensitive =
+      'connection refused to postgres://admin:supersecret@10.0.0.5:5432/serviceos';
+    const checker = {
+      isPlatformAdmin: vi.fn(async () => {
+        throw new Error(sensitive);
+      }),
+    };
+    const app = express();
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'user-1',
+        sessionId: 's',
+        tenantId: 'tenant-1',
+        role: 'owner',
+      };
+      next();
+    });
+    app.get('/protected', requirePlatformAdmin(checker), (_req, res) =>
+      res.json({ ok: true })
+    );
+    const res = await request(app).get('/protected');
+    expect(res.status).toBe(503);
+    expect(res.body.message).toBe('platform-admin check failed');
+    expect(JSON.stringify(res.body)).not.toContain('supersecret');
+    expect(JSON.stringify(res.body)).not.toContain('postgres://');
+    errSpy.mockRestore();
+  });
 });
 
 // Lightweight Pool stub with just enough surface for our usage.
@@ -175,6 +206,31 @@ describe('P0-034 — PgPlatformAdminChecker (caching)', () => {
     const checker = new PgPlatformAdminChecker(pool as any);
     expect(await checker.isPlatformAdmin('')).toBe(false);
     expect(client.query).not.toHaveBeenCalled();
+  });
+
+  it('cache is bounded — oldest entry evicted when maxEntries reached', async () => {
+    // Cap = 2. Insert 3 distinct users → 3 misses, cache now holds the
+    // last 2 ({u2, u3}). Re-querying u1 (the evicted one) must miss the
+    // cache and trigger a 4th DB call. Re-querying u3 (still cached)
+    // must NOT trigger another DB call.
+    const { pool, client } = makePoolStub({
+      selectRows: [[], [], [], []],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const checker = new PgPlatformAdminChecker(pool as any, 60_000, 2);
+
+    await checker.isPlatformAdmin('u1');
+    await checker.isPlatformAdmin('u2');
+    await checker.isPlatformAdmin('u3');
+    expect(client.query).toHaveBeenCalledTimes(3);
+
+    // u3 still cached — no new query.
+    await checker.isPlatformAdmin('u3');
+    expect(client.query).toHaveBeenCalledTimes(3);
+
+    // u1 was evicted when u3 arrived — must re-query.
+    await checker.isPlatformAdmin('u1');
+    expect(client.query).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -268,5 +324,60 @@ describe('P0-034 — grantPlatformAdmin / revokePlatformAdmin (idempotent + audi
         auditTenantId: 't',
       })
     ).rejects.toThrow(/grantedBy is required/);
+  });
+
+  it('grant rolls back the INSERT when the audit write fails', async () => {
+    // Inspect all SQL the helper issues against the client. We expect
+    // BEGIN -> INSERT -> ROLLBACK once the auditRepo throws, with no
+    // COMMIT in between. The original audit error must propagate.
+    const insertedAt = new Date('2026-04-28T12:00:00Z');
+    const { pool, client } = makePoolStub({
+      insertRows: [[{ user_id: 'new-admin', granted_at: insertedAt }]],
+    });
+    const failingAudit = {
+      create: vi.fn(async () => {
+        throw new Error('audit repo down');
+      }),
+      // Other AuditRepository methods aren't called by the helper.
+    };
+
+    await expect(
+      grantPlatformAdmin(pool as never, {
+        userId: 'new-admin',
+        grantedBy: 'granter-1',
+        auditTenantId: '00000000-0000-0000-0000-000000000001',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        auditRepo: failingAudit as any,
+      })
+    ).rejects.toThrow(/audit repo down/);
+
+    const sql = client.query.mock.calls.map((c) => String(c[0]).trim().toUpperCase());
+    expect(sql).toContain('BEGIN');
+    expect(sql).toContain('ROLLBACK');
+    expect(sql).not.toContain('COMMIT');
+  });
+
+  it('revoke rolls back the DELETE when the audit write fails', async () => {
+    const { pool, client } = makePoolStub({ deleteRowCounts: [1] });
+    const failingAudit = {
+      create: vi.fn(async () => {
+        throw new Error('audit repo down');
+      }),
+    };
+
+    await expect(
+      revokePlatformAdmin(pool as never, {
+        userId: 'old-admin',
+        revokedBy: 'granter-1',
+        auditTenantId: '00000000-0000-0000-0000-000000000001',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        auditRepo: failingAudit as any,
+      })
+    ).rejects.toThrow(/audit repo down/);
+
+    const sql = client.query.mock.calls.map((c) => String(c[0]).trim().toUpperCase());
+    expect(sql).toContain('BEGIN');
+    expect(sql).toContain('ROLLBACK');
+    expect(sql).not.toContain('COMMIT');
   });
 });
