@@ -40,5 +40,6 @@ describe('TechJobView delay acknowledgement prompt', () => {
     expect(chip15).toBeDisabled();
     expect(chip20).toBeDisabled();
     expect(chip60).toBeDisabled();
+    expect(chip20).not.toHaveClass('bg-indigo-600');
   });
 });

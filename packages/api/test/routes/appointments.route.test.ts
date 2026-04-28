@@ -197,11 +197,8 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     expect(res.body.error).toBe('FORBIDDEN');
   });
 
-  it('enqueues delay notification for running-behind acknowledgement', async () => {
-    const enqueueDelayNotice = vi.fn().mockResolvedValue('next-appt:1');
-    const app = buildDelayAckApp({
-      delayNotificationCoordinator: { enqueueDelayNotice },
-    });
+  it('rejects running-behind acknowledgement without fixed delay value', async () => {
+    const app = buildDelayAckApp();
     const appointmentId = await seedScheduledAppointment(app, 'tech-1');
 
     const res = await request(app)
@@ -211,15 +208,45 @@ describe('POST /api/appointments/:id/delay-ack', () => {
       .send({
         appointmentId,
         isRunningBehind: true,
-        delayMinutes: 20,
       });
 
-    expect(res.status).toBe(201);
-    expect(res.body.delayNoticeIdempotencyKey).toBe('next-appt:1');
-    expect(enqueueDelayNotice).toHaveBeenCalledTimes(1);
-    expect(enqueueDelayNotice.mock.calls[0][0]).toMatchObject({
-      delayVersion: 1,
-      delayMinutes: 20,
-    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects delayMinutes when not running behind', async () => {
+    const app = buildDelayAckApp();
+    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/delay-ack`)
+      .set('x-test-role', 'dispatcher')
+      .set('x-test-user-id', 'dispatcher-1')
+      .send({
+        appointmentId,
+        isRunningBehind: false,
+        delayMinutes: 15,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects body appointmentId mismatch with route id', async () => {
+    const app = buildDelayAckApp();
+    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
+
+    const res = await request(app)
+      .post(`/api/appointments/${appointmentId}/delay-ack`)
+      .set('x-test-role', 'dispatcher')
+      .set('x-test-user-id', 'dispatcher-1')
+      .send({
+        appointmentId: 'different-id',
+        isRunningBehind: true,
+        delayMinutes: 10,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 });
