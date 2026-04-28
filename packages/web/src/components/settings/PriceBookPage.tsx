@@ -408,44 +408,6 @@ export function PriceBookPage() {
     }
   };
 
-  const beginEdit = (item: PriceBookItem) => {
-    setEditingItem(item);
-    setEditFormState({
-      name: item.name,
-      description: item.description ?? '',
-      unitPrice: (item.unitPriceCents / 100).toFixed(2),
-      unit: item.unit ?? '',
-      category: item.category ?? '',
-    });
-  };
-
-  const handleEditSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!editingItem) return;
-
-    const unitPriceCents = Math.round(Number(editFormState.unitPrice) * 100);
-    const response = await apiFetch(`/api/catalog/items/${editingItem.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        name: editFormState.name,
-        description: editFormState.description,
-        unitPriceCents,
-        unit: editFormState.unit,
-        category: editFormState.category,
-      }),
-    });
-
-    if (response.ok) {
-      setEditingItem(null);
-      refetch();
-    }
-  };
-
-  const handleArchive = async (item: PriceBookItem) => {
-    const response = await apiFetch(`/api/catalog/items/${item.id}`, { method: 'DELETE' });
-    if (response.ok) refetch();
-  };
-
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="p-4 md:p-6 max-w-4xl mx-auto">
@@ -630,15 +592,27 @@ export function PriceBookPage() {
                         <Archive size={14} />
                       </button>
                     </td>
-                    <td className="px-3 py-2">
-                      <div className="flex justify-end gap-2">
-                        <button type="button" onClick={() => beginEdit(item)} className="text-xs text-slate-700">
-                          Edit
-                        </button>
-                        <button type="button" onClick={() => handleArchive(item)} className="text-xs text-slate-700">
-                          Archive
-                        </button>
-                      </div>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="inline-flex text-slate-500 hover:text-indigo-600"
+                        aria-label={`Edit ${item.name}`}
+                        onClick={() => openEditForm(item)}
+                        disabled={archiveItemId === item.id || isSaving}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="inline-flex text-slate-500 hover:text-red-600"
+                        aria-label={`Archive ${item.name}`}
+                        onClick={() => handleArchive(item.id)}
+                        disabled={archiveItemId === item.id}
+                      >
+                        <Archive size={14} />
+                      </button>
                     </td>
                   </tr>
                 ))}
