@@ -110,9 +110,17 @@ describe('MaintenanceContractsPage', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/contracts/mc-1');
   });
 
-  it('shows loading and error states', () => {
+  it('shows loading state', () => {
     vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, data: [], isLoading: true });
     renderPage();
     expect(screen.getByText('Loading contracts…')).toBeInTheDocument();
+  });
+
+  it('shows error state and retries', () => {
+    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, data: [], error: 'HTTP 500' });
+    renderPage();
+    expect(screen.getByText('Failed to load contracts')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(defaultListResult.refetch).toHaveBeenCalled();
   });
 });

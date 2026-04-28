@@ -77,10 +77,10 @@ export function MaintenanceContractsPage() {
                 ? contract.customer.displayName || [contract.customer.firstName, contract.customer.lastName].filter(Boolean).join(' ') || 'Customer'
                 : 'Customer';
               return (
-                <Link
+                <button
                   key={contract.id}
-                  to={`/contracts/${contract.id}`}
-                  className="block w-full rounded-xl border border-slate-200 bg-white px-4 py-3.5 text-left hover:border-slate-300 hover:shadow-sm transition-all"
+                  onClick={() => navigate(`/contracts/${contract.id}`)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3.5 text-left hover:border-slate-300 hover:shadow-sm transition-all"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
@@ -93,7 +93,7 @@ export function MaintenanceContractsPage() {
                     <span>{contract.cadence || 'No cadence'} • {contract.serviceWindow || 'No service window'}</span>
                     <span className="inline-flex items-center gap-1 text-slate-400">View <ChevronRight size={14} /></span>
                   </div>
-                </Link>
+                </button>
               );
             })}
             {normalized.length === 0 && (
