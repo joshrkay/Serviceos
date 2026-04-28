@@ -1047,6 +1047,60 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_assignments ON appointment_assignments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P0-022 — Postgres-backed DispatchAnalyticsRepository and DelayNoticeStateRepository.
+  //
+  // `dispatch_analytics` is an append-only event log (one row per dispatch event)
+  // matching the InMemory `DispatchMetric` shape: per-event, not aggregated buckets.
+  // Reads filter by tenant + optional date range or by event type.
+  //
+  // `delay_notice_state` keys on the idempotency key (UUID-shaped string composed
+  // as `<appointmentId>:<delayVersion>`). It is an upsert table — every state
+  // transition (queued/retrying/sent/failed/fallback_in_app) overwrites the row
+  // for the same key. PRIMARY KEY is `idempotency_key` so `findByKey` is a
+  // direct lookup; we additionally keep `tenant_id` indexed for RLS / audits.
+  '045_create_operational_metrics': `
+    CREATE TABLE IF NOT EXISTS dispatch_analytics (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      event_type TEXT NOT NULL,
+      appointment_id UUID,
+      technician_id UUID,
+      metadata JSONB,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded
+      ON dispatch_analytics(tenant_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_event_type
+      ON dispatch_analytics(tenant_id, event_type, recorded_at DESC);
+    ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
+    CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS delay_notice_state (
+      idempotency_key TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL,
+      delay_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL,
+      last_error TEXT,
+      provider_message_id TEXT,
+      trigger_context JSONB,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant_appointment
+      ON delay_notice_state(tenant_id, appointment_id);
+    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
