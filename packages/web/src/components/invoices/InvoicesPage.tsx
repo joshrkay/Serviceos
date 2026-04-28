@@ -316,14 +316,18 @@ function InvoiceLineItems({ items, editable, onChange }: {
 }
 
 // ─── Send Payment Sheet ────────────────────────────────────────────────────
-function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
+function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
   inv: InvCompat; total: number; paymentLink: string;
   onClose: () => void; onSent: () => void;
+  /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
+  apiId?: string;
 }) {
   const customer = customers.find(c => c.id === inv.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
+  const [recipient, setRecipient] = useState<string>(customer?.phone ?? '');
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const firstName = customer?.name.split(' ')[0] ?? 'there';
 
@@ -332,9 +336,39 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
 
   const [msg, setMsg] = useState(smsMsg);
 
-  function handleSend() {
+  type SendBody = {
+    channel: 'sms' | 'email';
+    recipientPhone?: string;
+    recipientEmail?: string;
+    customMessage?: string;
+  };
+  type SendResp = { viewUrl: string; viewToken: string };
+  const { mutate: sendInvoice } = useMutation<SendBody, SendResp>(
+    'POST',
+    apiId ? `/api/invoices/${apiId}/send` : '/api/invoices/_/send'
+  );
+
+  async function handleSend() {
     setSending(true);
-    setTimeout(() => { setSending(false); setSent(true); setTimeout(() => { onSent(); onClose(); }, 1200); }, 1500);
+    setSendError(null);
+    try {
+      if (apiId) {
+        await sendInvoice({
+          channel,
+          recipientPhone: channel === 'sms' ? recipient : undefined,
+          recipientEmail: channel === 'email' ? recipient : undefined,
+          customMessage: msg,
+        });
+      } else {
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+      setSending(false);
+      setSent(true);
+      setTimeout(() => { onSent(); onClose(); }, 1200);
+    } catch (err) {
+      setSending(false);
+      setSendError(err instanceof Error ? err.message : 'Send failed');
+    }
   }
 
   const isOverdue = inv.status === 'Overdue';
@@ -383,7 +417,11 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
               {(['sms', 'email'] as const).map(c => (
                 <button
                   key={c}
-                  onClick={() => { setChannel(c); setMsg(c === 'sms' ? smsMsg : emailMsg); }}
+                  onClick={() => {
+                    setChannel(c);
+                    setMsg(c === 'sms' ? smsMsg : emailMsg);
+                    setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
+                  }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
                     channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
                   }`}
@@ -398,7 +436,8 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
           <div>
             <p className="text-xs text-slate-500 mb-1.5">{channel === 'sms' ? 'Phone number' : 'Email address'}</p>
             <input
-              defaultValue={channel === 'sms' ? customer?.phone : customer?.email}
+              value={recipient}
+              onChange={(e) => setRecipient(e.target.value)}
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
             />
           </div>
@@ -425,6 +464,10 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
             <p className="text-xs text-slate-400 flex items-center gap-1.5">
               <Clock size={11} /> Payment due {inv.dueDate}
             </p>
+          )}
+
+          {sendError && (
+            <p className="text-xs text-red-600 -mt-2">Send failed: {sendError}</p>
           )}
 
           {/* Send button */}
@@ -713,6 +756,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           inv={invCompat}
           total={total}
           paymentLink={paymentLink}
+          apiId={inv?.id}
           onClose={() => setSendOpen(false)}
           onSent={() => {}}
         />

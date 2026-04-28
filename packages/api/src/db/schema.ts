@@ -1013,6 +1013,44 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_feedback_responses ON feedback_responses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '044_add_view_tokens_to_estimates_and_invoices': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_token TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_dispatch_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_estimates_view_token ON estimates(view_token) WHERE view_token IS NOT NULL;
+
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_token TEXT;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS last_dispatch_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_view_token ON invoices(view_token) WHERE view_token IS NOT NULL;
+  `,
+
+  '045_create_message_dispatches': `
+    CREATE TABLE IF NOT EXISTS message_dispatches (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('estimate', 'invoice')),
+      entity_id UUID NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('sms', 'email')),
+      recipient TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'failed', 'bounced')),
+      error_message TEXT,
+      idempotency_key TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      delivered_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_entity ON message_dispatches(tenant_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_dispatches_provider_msg ON message_dispatches(provider, provider_message_id) WHERE provider_message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatches_idempotency ON message_dispatches(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE message_dispatches ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE message_dispatches FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_message_dispatches ON message_dispatches;
+    CREATE POLICY tenant_isolation_message_dispatches ON message_dispatches
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -130,6 +130,18 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         setClauses.push(`updated_at = $${paramIndex++}`);
         values.push(updates.updatedAt);
       }
+      if (updates.viewToken !== undefined) {
+        setClauses.push(`view_token = $${paramIndex++}`);
+        values.push(updates.viewToken);
+      }
+      if (updates.sentAt !== undefined) {
+        setClauses.push(`sent_at = $${paramIndex++}`);
+        values.push(updates.sentAt);
+      }
+      if (updates.lastDispatchId !== undefined) {
+        setClauses.push(`last_dispatch_id = $${paramIndex++}`);
+        values.push(updates.lastDispatchId);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -238,6 +250,9 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       validUntil: row.valid_until ? new Date(row.valid_until) : undefined,
       customerMessage: row.customer_message ?? undefined,
       internalNotes: row.internal_notes ?? undefined,
+      viewToken: row.view_token ?? undefined,
+      sentAt: row.sent_at ? new Date(row.sent_at) : undefined,
+      lastDispatchId: row.last_dispatch_id ?? undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

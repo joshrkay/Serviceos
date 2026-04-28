@@ -20,6 +20,12 @@ export interface Invoice {
   issuedAt?: Date;
   dueDate?: Date;
   customerMessage?: string;
+  /** Random URL-safe token for unauthenticated customer payment-page links. */
+  viewToken?: string;
+  /** Timestamp of the most recent send. */
+  sentAt?: Date;
+  /** ID of the most recent message_dispatches row. */
+  lastDispatchId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

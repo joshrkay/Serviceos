@@ -16,6 +16,12 @@ export interface Estimate {
   validUntil?: Date;
   customerMessage?: string;
   internalNotes?: string;
+  /** Random URL-safe token for unauthenticated customer view links. Set on first send. */
+  viewToken?: string;
+  /** Timestamp of the most recent send. */
+  sentAt?: Date;
+  /** ID of the most recent message_dispatches row. */
+  lastDispatchId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

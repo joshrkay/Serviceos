@@ -148,6 +148,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         setClauses.push(`updated_at = $${paramIndex++}`);
         values.push(updates.updatedAt);
       }
+      if (updates.viewToken !== undefined) {
+        setClauses.push(`view_token = $${paramIndex++}`);
+        values.push(updates.viewToken);
+      }
+      if (updates.sentAt !== undefined) {
+        setClauses.push(`sent_at = $${paramIndex++}`);
+        values.push(updates.sentAt);
+      }
+      if (updates.lastDispatchId !== undefined) {
+        setClauses.push(`last_dispatch_id = $${paramIndex++}`);
+        values.push(updates.lastDispatchId);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -259,6 +271,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       issuedAt: row.issued_at ? new Date(row.issued_at) : undefined,
       dueDate: row.due_date ? new Date(row.due_date) : undefined,
       customerMessage: row.customer_message ?? undefined,
+      viewToken: row.view_token ?? undefined,
+      sentAt: row.sent_at ? new Date(row.sent_at) : undefined,
+      lastDispatchId: row.last_dispatch_id ?? undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

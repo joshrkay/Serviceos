@@ -116,6 +116,17 @@ import {
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import {
+  MessageDeliveryProvider,
+  InMemoryDeliveryProvider,
+} from './notifications/delivery-provider';
+import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { SendService } from './notifications/send-service';
+import {
+  InMemoryDispatchRepository,
+  PgDispatchRepository,
+} from './notifications/dispatch-repository';
+import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -293,6 +304,48 @@ export function createApp() {
         })
       : new NoopFeedbackDispatcher();
 
+  // Customer-facing message delivery for estimates and invoices.
+  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
+  // the env vars, falls back to InMemoryDeliveryProvider so the app
+  // boots in dev without delivery credentials. Send routes return
+  // 503 when sendService is undefined.
+  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
+  const messageDelivery: MessageDeliveryProvider | null =
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_AUTH_TOKEN &&
+    process.env.TWILIO_FROM_NUMBER &&
+    process.env.SENDGRID_API_KEY &&
+    process.env.SENDGRID_FROM_EMAIL
+      ? new TwilioDeliveryProvider({
+          sms: {
+            accountSid: process.env.TWILIO_ACCOUNT_SID,
+            authToken: process.env.TWILIO_AUTH_TOKEN,
+            fromNumber: process.env.TWILIO_FROM_NUMBER,
+          },
+          email: {
+            apiKey: process.env.SENDGRID_API_KEY,
+            fromEmail: process.env.SENDGRID_FROM_EMAIL,
+            fromName: process.env.SENDGRID_FROM_NAME,
+            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+          },
+        })
+      : process.env.NODE_ENV === 'production'
+        ? null
+        : new InMemoryDeliveryProvider();
+  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const sendService = messageDelivery
+    ? new SendService({
+        delivery: messageDelivery,
+        estimateRepo,
+        invoiceRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dispatchRepo,
+        publicBaseUrl,
+      })
+    : undefined;
+
   const workerLogger = createLogger({
     service: 'transcription-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -377,10 +430,13 @@ export function createApp() {
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above; invoice delivery is
-  // currently a Noop (logs the dispatch shape, never sends bytes)
-  // until an outbound comms provider is integrated as a follow-up.
-  const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
+  // in-memory or Pg repos already wired above. Invoice delivery
+  // routes through the unified SendService when delivery credentials
+  // are configured; otherwise falls back to the Noop so the proposal
+  // executor stays exercised in dev/test without sending bytes.
+  const invoiceDeliveryProvider = sendService
+    ? new SendServiceInvoiceDeliveryProvider(sendService)
+    : new NoopInvoiceDeliveryProvider();
   const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
@@ -548,8 +604,8 @@ export function createApp() {
     })
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
