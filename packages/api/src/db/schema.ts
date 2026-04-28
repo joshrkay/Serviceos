@@ -1013,6 +1013,40 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_feedback_responses ON feedback_responses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P0-019 — Postgres-backed AssignmentRepository.
+  //
+  // The `appointment_assignments` table itself was created by migration
+  // `019_create_appointment_assignments` (with RLS, tenant_isolation policy,
+  // and single-column indexes on appointment_id and technician_id).
+  //
+  // This migration is idempotent and:
+  //   * Re-asserts RLS + tenant_isolation policy (defense-in-depth — safe no-op
+  //     when the policy already matches).
+  //   * Adds composite indexes `(tenant_id, appointment_id)` and
+  //     `(tenant_id, technician_id)` to support the access patterns used by
+  //     `PgAssignmentRepository.findByAppointment` / `findByTechnician`,
+  //     which always filter by tenant_id first as defense-in-depth.
+  '048_create_assignments': `
+    CREATE TABLE IF NOT EXISTS appointment_assignments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL REFERENCES appointments(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      is_primary BOOLEAN NOT NULL DEFAULT true,
+      assigned_by TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_appointment
+      ON appointment_assignments(tenant_id, appointment_id);
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_technician
+      ON appointment_assignments(tenant_id, technician_id);
+    ALTER TABLE appointment_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_assignments FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_assignments ON appointment_assignments;
+    CREATE POLICY tenant_isolation_assignments ON appointment_assignments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
