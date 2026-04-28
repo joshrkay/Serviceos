@@ -40,7 +40,6 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 
 **Verification gate (single command):**
 ```bash
-cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
   npm test --workspace=packages/api -- --run --grep "P0-019|PgAssignment" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/appointments/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
