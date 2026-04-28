@@ -13,21 +13,24 @@ export class NoopFeedbackDispatcher implements FeedbackDispatcher {
   }
 }
 
-export interface TwilioFeedbackDispatcherOptions {
+export interface SmsProviderDispatcherOptions {
   accountSid: string;
   authToken: string;
   fromNumber: string;
+  apiBaseUrl?: string;
 }
 
-export class TwilioFeedbackDispatcher implements FeedbackDispatcher {
+export class SmsProviderFeedbackDispatcher implements FeedbackDispatcher {
   private readonly accountSid: string;
   private readonly authToken: string;
   private readonly fromNumber: string;
+  private readonly apiBaseUrl: string;
 
-  constructor(options: TwilioFeedbackDispatcherOptions) {
+  constructor(options: SmsProviderDispatcherOptions) {
     this.accountSid = options.accountSid;
     this.authToken = options.authToken;
     this.fromNumber = options.fromNumber;
+    this.apiBaseUrl = options.apiBaseUrl ?? 'https://api.TWILIO.com/2010-04-01';
   }
 
   async send(input: FeedbackDispatchInput): Promise<void> {
@@ -39,7 +42,7 @@ export class TwilioFeedbackDispatcher implements FeedbackDispatcher {
 
     const auth = Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64');
     const response = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/Messages.json`,
+      `${this.apiBaseUrl}/Accounts/${this.accountSid}/Messages.json`,
       {
         method: 'POST',
         headers: {
@@ -52,7 +55,7 @@ export class TwilioFeedbackDispatcher implements FeedbackDispatcher {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Twilio SMS send failed (${response.status}): ${text}`);
+      throw new Error(`SMS provider send failed (${response.status}): ${text}`);
     }
   }
 }

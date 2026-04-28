@@ -115,7 +115,7 @@ import {
 } from './feedback/feedback-response';
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
-import { NoopFeedbackDispatcher, TwilioFeedbackDispatcher } from './feedback/dispatcher';
+import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -286,7 +286,7 @@ export function createApp() {
 
   const feedbackDispatcher =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
-      ? new TwilioFeedbackDispatcher({
+      ? new SmsProviderFeedbackDispatcher({
           accountSid: process.env.TWILIO_ACCOUNT_SID,
           authToken: process.env.TWILIO_AUTH_TOKEN,
           fromNumber: process.env.TWILIO_FROM_NUMBER,
