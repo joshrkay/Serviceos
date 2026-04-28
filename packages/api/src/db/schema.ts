@@ -1048,57 +1048,71 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // P0-022 — Postgres-backed DispatchAnalyticsRepository and DelayNoticeStateRepository.
+  // P0-021 — Postgres-backed AI artifacts: document_revisions + diff_analyses.
   //
-  // `dispatch_analytics` is an append-only event log (one row per dispatch event)
-  // matching the InMemory `DispatchMetric` shape: per-event, not aggregated buckets.
-  // Reads filter by tenant + optional date range or by event type.
+  // Both tables are append-only (the audit trail invariant). The Pg
+  // repositories implement create + read methods only; diff_analyses additionally
+  // exposes updateStatus to advance the worker state machine
+  // (pending -> processing -> completed/failed).
   //
-  // `delay_notice_state` keys on the idempotency key (UUID-shaped string composed
-  // as `<appointmentId>:<delayVersion>`). It is an upsert table — every state
-  // transition (queued/retrying/sent/failed/fallback_in_app) overwrites the row
-  // for the same key. PRIMARY KEY is `idempotency_key` so `findByKey` is a
-  // direct lookup; we additionally keep `tenant_id` indexed for RLS / audits.
-  '045_create_operational_metrics': `
-    CREATE TABLE IF NOT EXISTS dispatch_analytics (
-      id UUID PRIMARY KEY,
+  // Column-type rationale (driven by InMemory entity types):
+  //   * document_revisions.id is generated via uuidv4() in createRevision()
+  //     so we use UUID with gen_random_uuid() default.
+  //   * document_revisions.actor_id is TEXT (not UUID) — Clerk user ids are
+  //     TEXT throughout this codebase (see users.clerk_user_id, tenants.owner_id,
+  //     audit_events.actor_id).
+  //   * document_revisions.document_id is TEXT — the InMemory entity treats
+  //     documentId as an opaque string and several callers may pass non-UUID
+  //     ids (estimates / invoices / proposals across surfaces).
+  //   * diff_analyses.id is TEXT (not UUID) because diffAnalysisIdFor() builds
+  //     a deterministic key like `diff:<tenantId>:<docType>:<docId>:<from>:<to>`
+  //     so re-enqueueing the same revision pair is end-to-end idempotent.
+  //   * diff_analyses.diff is JSONB storing the DiffEntry[] array.
+  '044_create_ai_artifacts': `
+    CREATE TABLE IF NOT EXISTS document_revisions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      event_type TEXT NOT NULL,
-      appointment_id UUID,
-      technician_id UUID,
+      document_type TEXT NOT NULL CHECK (document_type IN ('estimate', 'invoice', 'proposal')),
+      document_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      snapshot JSONB NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'ai_generated', 'ai_revised')),
+      actor_id TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      ai_run_id UUID,
       metadata JSONB,
-      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, document_type, document_id, version)
     );
-    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded
-      ON dispatch_analytics(tenant_id, recorded_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_event_type
-      ON dispatch_analytics(tenant_id, event_type, recorded_at DESC);
-    ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
-    CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_tenant_doc
+      ON document_revisions(tenant_id, document_type, document_id);
+    ALTER TABLE document_revisions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE document_revisions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_document_revisions ON document_revisions;
+    CREATE POLICY tenant_isolation_document_revisions ON document_revisions
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
 
-    CREATE TABLE IF NOT EXISTS delay_notice_state (
-      idempotency_key TEXT PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS diff_analyses (
+      id TEXT PRIMARY KEY,
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      appointment_id UUID NOT NULL,
-      delay_version INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      channel TEXT NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      max_attempts INTEGER NOT NULL,
-      last_error TEXT,
-      provider_message_id TEXT,
-      trigger_context JSONB,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      document_type TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      from_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      to_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      diff JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant_appointment
-      ON delay_notice_state(tenant_id, appointment_id);
-    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
-    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_tenant_doc
+      ON diff_analyses(tenant_id, document_type, document_id);
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_revisions
+      ON diff_analyses(tenant_id, from_revision_id, to_revision_id);
+    ALTER TABLE diff_analyses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE diff_analyses FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_diff_analyses ON diff_analyses;
+    CREATE POLICY tenant_isolation_diff_analyses ON diff_analyses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
