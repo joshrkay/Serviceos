@@ -1047,6 +1047,34 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_assignments ON appointment_assignments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P0-020 — Pg-backed webhook idempotency repository.
+  //
+  // The `webhook_events` table itself was created by migration
+  // `012_create_webhook_events`. It is intentionally CROSS-TENANT (no
+  // tenant_id column, no RLS) because Clerk's `user.created` webhook fires
+  // BEFORE the tenant exists — the bootstrap handler in
+  // `webhooks/routes.ts` reads it to create the tenant. The same applies
+  // to platform-level Stripe webhook routing where we look up the tenant
+  // from the Stripe customer mapping after dedup. Idempotency therefore
+  // lives at the (source, idempotency_key) level — equivalent to the
+  // (provider, event_id) pair from the P0-020 spec.
+  //
+  // This migration is idempotent and:
+  //   * Re-asserts the (source, idempotency_key) UNIQUE constraint that
+  //     PgWebhookEventRepository.recordReceipt relies on for ON CONFLICT
+  //     DO NOTHING — without it duplicate Stripe / Clerk webhooks could
+  //     double-charge.
+  //   * Adds an index on (status, created_at) to support the
+  //     `findUnprocessed` access pattern used by retry workers, which
+  //     scans rows where status = 'received' ordered by arrival time.
+  '049_create_webhook_events': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_idempotency
+      ON webhook_events(source, idempotency_key);
+    CREATE INDEX IF NOT EXISTS idx_webhook_unprocessed
+      ON webhook_events(status, created_at)
+      WHERE status = 'received';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
