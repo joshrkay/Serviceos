@@ -77,6 +77,7 @@ Each Wave 1A story owns one migration file. Reservations:
 | P0-020 | 043_* | Financial (Webhook idempotency) |
 | P0-021 | 044_* | AI/conversation (DocumentRevisions, DiffAnalysis) |
 | P0-022 | 045_* | Operational (DispatchAnalytics, DelayNoticeState) |
+| P0-034 | 046_* | Platform admin (`platform_admins` table) |
 
 **Rule:** the wave coordinator picks the next available number from `packages/api/src/db/schema.ts` immediately before dispatching, and writes it into each story's "Allowed files" line. Numbers are not reserved in this doc indefinitely — refresh before each wave.
 

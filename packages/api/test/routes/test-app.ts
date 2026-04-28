@@ -24,6 +24,8 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository, TenantSettings } from '../../src/settings/settings';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
+import { InMemoryQueue } from '../../src/queues/queue';
+import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
 
 export const TEST_TENANT_ID = 'tenant-test-1';
 export const TEST_USER_ID = 'user-test-1';
@@ -92,7 +94,7 @@ export async function buildTestApp(): Promise<TestApp> {
   // packages/api/test/decisions/tenant-isolation.test.ts.
   const ownership = permissiveTenantOwnership();
 
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));

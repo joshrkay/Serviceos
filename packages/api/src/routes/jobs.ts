@@ -10,14 +10,21 @@ import {
   JobTimelineRepository,
 } from '../jobs/job-lifecycle';
 import { AuditRepository } from '../audit/audit';
+import { Queue } from '../queues/queue';
+import { FeedbackDispatcher } from '../feedback/dispatcher';
 
 export function createJobRouter(
   jobRepo: JobRepository,
   timelineRepo: JobTimelineRepository,
   auditRepo: AuditRepository,
-  ownership: TenantOwnership
+  ownership: TenantOwnership,
+  queue: Queue,
+  feedbackDispatcher: FeedbackDispatcher,
 ): Router {
   const router = Router();
+  // Dispatcher is intentionally passed through router wiring so this API
+  // surface aligns with app-level dependency injection for feedback_send.
+  void feedbackDispatcher;
 
   router.post(
     '/',
@@ -27,8 +34,6 @@ export function createJobRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createJobSchema.parse(req.body);
-        // Cross-entity tenant guard: both customerId and locationId
-        // must belong to the requesting tenant.
         await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
         await ownership.requireExists(req.auth!.tenantId, 'location', parsed.locationId);
         const result = await createJob(
@@ -139,6 +144,15 @@ export function createJobRouter(
           timelineRepo,
           auditRepo
         );
+
+        if (status === 'completed') {
+          await queue.send(
+            'feedback_send',
+            { tenantId: req.auth!.tenantId, jobId: req.params.id },
+            `${req.auth!.tenantId}:${req.params.id}:feedback_send`
+          );
+        }
+
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

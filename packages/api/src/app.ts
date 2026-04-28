@@ -35,6 +35,8 @@ import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createDispatchRoutes } from './dispatch/routes';
+import { createPublicFeedbackRouter } from './routes/public-feedback';
+import { createFeedbackResponsesRouter } from './routes/feedback';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -106,6 +108,16 @@ import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
+import {
+  InMemoryFeedbackRequestRepository,
+} from './feedback/feedback-request';
+import {
+  InMemoryFeedbackResponseRepository,
+} from './feedback/feedback-response';
+import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
+import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
+import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
@@ -224,33 +236,6 @@ export function createApp() {
     app.use('/storage-dev', createDevStorageRouter());
   }
 
-  // Auth middleware for API routes
-  const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
-  app.use('/api', verifyClerkSession(clerkSecret));
-
-  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
-  // Accepts Clerk tokens without RS256/JWKS verification and
-  // auto-bootstraps a tenant per Clerk user. Exists because
-  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
-  // algorithm) — tracked as a production bug. No-op in non-dev.
-  if (isDevAuthBypassEnabled()) {
-    const devTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
-    app.use('/api', devAuthBypass({ tenantRepo: devTenantRepo }));
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
-      'Never enable this outside local dev.'
-    );
-  }
-
-  // Fail-closed: every /api/* request must carry a valid Clerk session.
-  // Individual routes still apply requireAuth/requireTenant/requirePermission
-  // as defense in depth, but this line makes it architecturally impossible
-  // for a new route to be silently public just because the author forgot
-  // to opt into the per-route gate. The decisions test suite guards this
-  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
-  app.use('/api', requireAuth);
-
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
@@ -281,6 +266,8 @@ export function createApp() {
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
+  const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
+  const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -299,6 +286,15 @@ export function createApp() {
   const llmGateway = config.AI_PROVIDER_API_KEY
     ? createLLMGateway(config)
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
+
+  const feedbackDispatcher =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
+      ? new SmsProviderFeedbackDispatcher({
+          accountSid: process.env.TWILIO_ACCOUNT_SID,
+          authToken: process.env.TWILIO_AUTH_TOKEN,
+          fromNumber: process.env.TWILIO_FROM_NUMBER,
+        })
+      : new NoopFeedbackDispatcher();
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -447,6 +443,19 @@ export function createApp() {
     voiceActionRouterWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  const feedbackSendWorker = createFeedbackSendWorker({
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    feedbackRequestRepo,
+    dispatcher: feedbackDispatcher,
+    publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+  });
+  workerRegistry.set(
+    feedbackSendWorker.type,
+    feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
@@ -492,10 +501,40 @@ export function createApp() {
     appointmentRepo,
   });
 
+  // Public feedback routes are mounted before /api auth middleware.
+  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+
+  // Auth middleware for API routes
+  const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
+  app.use('/api', verifyClerkSession(clerkSecret));
+
+  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
+  // Accepts Clerk tokens without RS256/JWKS verification and
+  // auto-bootstraps a tenant per Clerk user. Exists because
+  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
+  // algorithm) — tracked as a production bug. No-op in non-dev.
+  if (isDevAuthBypassEnabled()) {
+    const devTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
+    app.use('/api', devAuthBypass({ tenantRepo: devTenantRepo }));
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
+      'Never enable this outside local dev.'
+    );
+  }
+
+  // Fail-closed: every /api/* request must carry a valid Clerk session.
+  // Individual routes still apply requireAuth/requireTenant/requirePermission
+  // as defense in depth, but this line makes it architecturally impossible
+  // for a new route to be silently public just because the author forgot
+  // to opt into the per-route gate. The decisions test suite guards this
+  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
+  app.use('/api', requireAuth);
+
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
   app.use(
     '/api/jobs',
     createJobFilesRouter({
@@ -516,6 +555,7 @@ export function createApp() {
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
+  app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));

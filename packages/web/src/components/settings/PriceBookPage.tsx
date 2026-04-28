@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import { Upload } from 'lucide-react';
+import { Archive, Pencil, Upload, X } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -28,6 +28,42 @@ interface InvalidRow {
 
 const EXPECTED_COLUMNS = ['name', 'description', 'unit_price', 'unit', 'category'] as const;
 const MAX_IMPORT_ROWS = 500;
+const CATEGORY_FILTERS = ['All', 'Labor', 'Parts', 'Materials'] as const;
+const CATEGORY_OPTIONS = ['Labor', 'Parts', 'Materials'] as const;
+const UNIT_OPTIONS = ['each', 'hour', 'sq ft', 'per lb', 'per gal'] as const;
+
+type CategoryFilter = typeof CATEGORY_FILTERS[number];
+type ItemCategory = typeof CATEGORY_OPTIONS[number];
+type ItemUnit = typeof UNIT_OPTIONS[number];
+
+interface PriceBookFormState {
+  name: string;
+  description: string;
+  unitPrice: string;
+  unit: ItemUnit;
+  category: ItemCategory;
+}
+
+const DEFAULT_FORM_STATE: PriceBookFormState = {
+  name: '',
+  description: '',
+  unitPrice: '',
+  unit: 'each',
+  category: 'Labor',
+};
+
+function normalizeCategory(value?: string): CategoryFilter {
+  const normalized = (value ?? '').trim().toLowerCase();
+  if (normalized === 'labor') return 'Labor';
+  if (normalized === 'parts') return 'Parts';
+  if (normalized === 'materials') return 'Materials';
+  return 'All';
+}
+
+function formatPriceFromCents(value: number | undefined): string {
+  if (!Number.isFinite(value)) return '$0.00';
+  return `$${((value ?? 0) / 100).toFixed(2)}`;
+}
 
 function parseCsvRecords(csvText: string): string[] {
   const records: string[] = [];
@@ -107,40 +143,135 @@ const EMPTY_RESULT = {
 };
 
 export function PriceBookPage() {
-  const queryResult = useListQuery<PriceBookItem>('/api/catalog/items');
-  const { data, isLoading, error, refetch } = queryResult ?? EMPTY_RESULT;
+  const listQuery = useListQuery<PriceBookItem>('/api/catalog/items', { pageSize: 200 });
+  const {
+    data = [],
+    isLoading = false,
+    error = null,
+    refetch = () => undefined,
+  } = listQuery ?? {};
   const [invalidRows, setInvalidRows] = useState<InvalidRow[]>([]);
   const [progressText, setProgressText] = useState<string>('');
   const [isImporting, setIsImporting] = useState(false);
-  const [showAddItemForm, setShowAddItemForm] = useState(false);
-  const [selectedCategory, setSelectedCategory] = useState('All');
-  const [editingItem, setEditingItem] = useState<PriceBookItem | null>(null);
-  const [editFormState, setEditFormState] = useState({
-    name: '',
-    description: '',
-    unitPrice: '',
-    unit: '',
-    category: '',
-  });
+  const [category, setCategory] = useState<CategoryFilter>('All');
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [archiveItemId, setArchiveItemId] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [formState, setFormState] = useState<PriceBookFormState>(DEFAULT_FORM_STATE);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const sortedItems = useMemo(
-    () => [...data].sort((a, b) => a.name.localeCompare(b.name)),
-    [data]
+  const sortedItems = useMemo(() => [...data].sort((a, b) => a.name.localeCompare(b.name)), [data]);
+  const filteredItems = useMemo(
+    () =>
+      category === 'All'
+        ? sortedItems
+        : sortedItems.filter(item => normalizeCategory(item.category) === category),
+    [category, sortedItems]
   );
 
-  const categoryOptions = useMemo(() => {
-    const options = sortedItems
-      .map(item => item.category?.trim())
-      .filter((category): category is string => Boolean(category));
+  const openCreateForm = () => {
+    setEditingItemId(null);
+    setFormState(DEFAULT_FORM_STATE);
+    setFormError(null);
+    setActionError(null);
+    setIsFormOpen(true);
+  };
 
-    return ['All', ...Array.from(new Set(options))];
-  }, [sortedItems]);
+  const openEditForm = (item: PriceBookItem) => {
+    setEditingItemId(item.id);
+    setFormState({
+      name: item.name ?? '',
+      description: item.description ?? '',
+      unitPrice: ((item.unitPriceCents ?? 0) / 100).toFixed(2),
+      unit: UNIT_OPTIONS.includes((item.unit ?? '') as ItemUnit) ? (item.unit as ItemUnit) : 'each',
+      category: CATEGORY_OPTIONS.includes(normalizeCategory(item.category) as ItemCategory)
+        ? (normalizeCategory(item.category) as ItemCategory)
+        : 'Labor',
+    });
+    setFormError(null);
+    setActionError(null);
+    setIsFormOpen(true);
+  };
 
-  const visibleItems = useMemo(() => {
-    if (selectedCategory === 'All') return sortedItems;
-    return sortedItems.filter(item => (item.category ?? '') === selectedCategory);
-  }, [selectedCategory, sortedItems]);
+  const closeForm = () => {
+    setIsFormOpen(false);
+    setFormError(null);
+    setIsSaving(false);
+  };
+
+  const updateFormField = <K extends keyof PriceBookFormState>(
+    field: K,
+    value: PriceBookFormState[K]
+  ) => {
+    setFormState(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleArchive = async (itemId: string) => {
+    setActionError(null);
+    setArchiveItemId(itemId);
+    try {
+      const response = await apiFetch(`/api/catalog/items/${itemId}`, { method: 'DELETE' });
+      if (!response.ok) {
+        setActionError(`Archive failed (HTTP ${response.status}).`);
+        return;
+      }
+      refetch();
+    } catch (archiveError) {
+      setActionError(archiveError instanceof Error ? archiveError.message : 'Archive failed.');
+    } finally {
+      setArchiveItemId(null);
+    }
+  };
+
+  const handleSaveItem = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError(null);
+    setActionError(null);
+
+    const unitPriceValue = Number(formState.unitPrice.replace(/[$,\s]/g, ''));
+    const unitPriceCents = Number.isFinite(unitPriceValue) ? Math.round(unitPriceValue * 100) : NaN;
+    if (!formState.name.trim()) {
+      setFormError('Name is required.');
+      return;
+    }
+    if (!Number.isFinite(unitPriceValue) || unitPriceCents < 0) {
+      setFormError('Unit price must be a non-negative number.');
+      return;
+    }
+
+    setIsSaving(true);
+    const payload = {
+      name: formState.name.trim(),
+      description: formState.description.trim(),
+      unitPriceCents,
+      unit: formState.unit,
+      category: formState.category,
+    };
+
+    try {
+      const endpoint = editingItemId ? `/api/catalog/items/${editingItemId}` : '/api/catalog/items';
+      const method = editingItemId ? 'PUT' : 'POST';
+      const response = await apiFetch(endpoint, {
+        method,
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        setFormError(`${editingItemId ? 'Update' : 'Create'} failed (HTTP ${response.status}).`);
+        return;
+      }
+
+      closeForm();
+      refetch();
+    } catch (saveError) {
+      setFormError(saveError instanceof Error ? saveError.message : 'Unable to save item.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const handleCsvImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -284,44 +415,6 @@ export function PriceBookPage() {
     }
   };
 
-  const beginEdit = (item: PriceBookItem) => {
-    setEditingItem(item);
-    setEditFormState({
-      name: item.name,
-      description: item.description ?? '',
-      unitPrice: (item.unitPriceCents / 100).toFixed(2),
-      unit: item.unit ?? '',
-      category: item.category ?? '',
-    });
-  };
-
-  const handleEditSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!editingItem) return;
-
-    const unitPriceCents = Math.round(Number(editFormState.unitPrice) * 100);
-    const response = await apiFetch(`/api/catalog/items/${editingItem.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        name: editFormState.name,
-        description: editFormState.description,
-        unitPriceCents,
-        unit: editFormState.unit,
-        category: editFormState.category,
-      }),
-    });
-
-    if (response.ok) {
-      setEditingItem(null);
-      refetch();
-    }
-  };
-
-  const handleArchive = async (item: PriceBookItem) => {
-    const response = await apiFetch(`/api/catalog/items/${item.id}`, { method: 'DELETE' });
-    if (response.ok) refetch();
-  };
-
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
       <div className="p-4 md:p-6 max-w-4xl mx-auto">
@@ -331,7 +424,7 @@ export function PriceBookPage() {
             <button
               type="button"
               className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-              onClick={() => setShowAddItemForm(prev => !prev)}
+              onClick={openCreateForm}
             >
               Add item
             </button>
@@ -355,100 +448,25 @@ export function PriceBookPage() {
           </div>
         </div>
 
-        <div className="mb-4 flex flex-wrap gap-2">
-          {categoryOptions.map(category => (
-            <button
-              key={category}
-              type="button"
-              onClick={() => setSelectedCategory(category)}
-              className="rounded-full border border-slate-300 px-3 py-1 text-xs text-slate-700"
-            >
-              {category}
-            </button>
-          ))}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          {CATEGORY_FILTERS.map(chip => {
+            const isActive = chip === category;
+            return (
+              <button
+                key={chip}
+                type="button"
+                onClick={() => setCategory(chip)}
+                className={`rounded-full border px-3 py-1 text-sm transition ${
+                  isActive
+                    ? 'border-indigo-600 bg-indigo-600 text-white'
+                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                {chip}
+              </button>
+            );
+          })}
         </div>
-
-        {showAddItemForm && (
-          <div className="mb-4 rounded-lg border border-slate-200 bg-white p-3">
-            <p className="mb-3 text-sm text-slate-700">Add price book item</p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Item name</span>
-                <input type="text" className="rounded border border-slate-300 px-2 py-1 text-sm" />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Unit price</span>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  className="rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-            </div>
-          </div>
-        )}
-
-        {editingItem && (
-          <form className="mb-4 rounded-lg border border-slate-200 bg-white p-3" onSubmit={handleEditSubmit}>
-            <p className="mb-3 text-sm text-slate-700">Edit price book item</p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Item name</span>
-                <input
-                  type="text"
-                  value={editFormState.name}
-                  onChange={event => setEditFormState(prev => ({ ...prev, name: event.target.value }))}
-                  className="rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Description</span>
-                <input
-                  type="text"
-                  value={editFormState.description}
-                  onChange={event => setEditFormState(prev => ({ ...prev, description: event.target.value }))}
-                  className="rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Unit price</span>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={editFormState.unitPrice}
-                  onChange={event => setEditFormState(prev => ({ ...prev, unitPrice: event.target.value }))}
-                  className="rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Unit</span>
-                <input
-                  type="text"
-                  value={editFormState.unit}
-                  onChange={event => setEditFormState(prev => ({ ...prev, unit: event.target.value }))}
-                  className="rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-sm text-slate-700">
-                <span>Category</span>
-                <input
-                  type="text"
-                  value={editFormState.category}
-                  onChange={event => setEditFormState(prev => ({ ...prev, category: event.target.value }))}
-                  className="rounded border border-slate-300 px-2 py-1 text-sm"
-                />
-              </label>
-            </div>
-            <button
-              type="submit"
-              className="mt-3 inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-            >
-              Save
-            </button>
-          </form>
-        )}
 
         {progressText && (
           <p data-testid="csv-import-progress" className="mb-3 text-sm text-slate-600">{progressText}</p>
@@ -468,6 +486,7 @@ export function PriceBookPage() {
         )}
 
         {error && <p className="mb-3 text-sm text-red-600">Failed to load price book: {error}</p>}
+        {actionError && <p className="mb-3 text-sm text-red-600">{actionError}</p>}
 
         {isLoading ? (
           <p className="text-sm text-slate-500">Loading...</p>
@@ -477,40 +496,168 @@ export function PriceBookPage() {
               <thead className="bg-slate-50 text-slate-500">
                 <tr>
                   <th className="px-3 py-2">Name</th>
-                  <th className="px-3 py-2">Description</th>
-                  <th className="px-3 py-2">Unit</th>
                   <th className="px-3 py-2">Category</th>
+                  <th className="px-3 py-2">Unit</th>
                   <th className="px-3 py-2 text-right">Unit price</th>
-                  <th className="px-3 py-2 text-right">Actions</th>
+                  <th className="w-10 px-3 py-2 text-right">Edit</th>
+                  <th className="w-10 px-3 py-2 text-right">Archive</th>
                 </tr>
               </thead>
               <tbody>
-                {visibleItems.map(item => (
+                {filteredItems.map(item => (
                   <tr key={item.id} className="border-t border-slate-100">
                     <td className="px-3 py-2 text-slate-800">{item.name}</td>
-                    <td className="px-3 py-2 text-slate-600">{item.description || '—'}</td>
-                    <td className="px-3 py-2 text-slate-600">{item.unit || '—'}</td>
-                    <td className="px-3 py-2 text-slate-600">{item.category || '—'}</td>
-                    <td className="px-3 py-2 text-right text-slate-800">
-                      ${(item.unitPriceCents / 100).toFixed(2)}
-                    </td>
                     <td className="px-3 py-2">
-                      <div className="flex justify-end gap-2">
-                        <button type="button" onClick={() => beginEdit(item)} className="text-xs text-slate-700">
-                          Edit
-                        </button>
-                        <button type="button" onClick={() => handleArchive(item)} className="text-xs text-slate-700">
-                          Archive
-                        </button>
-                      </div>
+                      <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+                        {item.category || '—'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">{item.unit || '—'}</td>
+                    <td className="px-3 py-2 text-right text-slate-800">
+                      {formatPriceFromCents(item.unitPriceCents)}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="inline-flex text-slate-500 hover:text-indigo-600"
+                        aria-label={`Edit ${item.name}`}
+                        onClick={() => openEditForm(item)}
+                        disabled={archiveItemId === item.id || isSaving}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="inline-flex text-slate-500 hover:text-red-600"
+                        aria-label={`Archive ${item.name}`}
+                        onClick={() => handleArchive(item.id)}
+                        disabled={archiveItemId === item.id}
+                      >
+                        <Archive size={14} />
+                      </button>
                     </td>
                   </tr>
                 ))}
+                {filteredItems.length === 0 && (
+                  <tr className="border-t border-slate-100">
+                    <td className="px-3 py-6 text-center text-slate-500" colSpan={6}>
+                      No price book items found for this category.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {isFormOpen && (
+        <div className="fixed inset-0 z-50 bg-black/30" onClick={closeForm}>
+          <aside
+            className="absolute right-0 top-0 h-full w-full max-w-md overflow-y-auto bg-white p-5 shadow-xl"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-slate-900">
+                {editingItemId ? 'Edit price book item' : 'Add price book item'}
+              </h2>
+              <button
+                type="button"
+                onClick={closeForm}
+                className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close form"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form className="space-y-4" onSubmit={handleSaveItem}>
+              <label className="block text-sm text-slate-700">
+                <span className="mb-1 block">Item name</span>
+                <input
+                  type="text"
+                  value={formState.name}
+                  onChange={event => updateFormField('name', event.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block text-sm text-slate-700">
+                <span className="mb-1 block">Description</span>
+                <textarea
+                  value={formState.description}
+                  onChange={event => updateFormField('description', event.target.value)}
+                  rows={3}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block text-sm text-slate-700">
+                <span className="mb-1 block">Unit price</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={formState.unitPrice}
+                  onChange={event => updateFormField('unitPrice', event.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block text-sm text-slate-700">
+                <span className="mb-1 block">Unit</span>
+                <select
+                  value={formState.unit}
+                  onChange={event => updateFormField('unit', event.target.value as ItemUnit)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  {UNIT_OPTIONS.map(option => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block text-sm text-slate-700">
+                <span className="mb-1 block">Category</span>
+                <select
+                  value={formState.category}
+                  onChange={event => updateFormField('category', event.target.value as ItemCategory)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                >
+                  {CATEGORY_OPTIONS.map(option => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {formError && <p className="text-sm text-red-600">{formError}</p>}
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={closeForm}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSaving}
+                  className="rounded-lg bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isSaving ? 'Saving...' : editingItemId ? 'Save changes' : 'Create item'}
+                </button>
+              </div>
+            </form>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
