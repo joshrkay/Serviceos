@@ -17,6 +17,8 @@ import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
+import { InMemoryQueue } from '../../src/queues/queue';
+import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
 import { DelayNotificationEnqueuer } from '../../src/routes/appointments';
 
 function tomorrowIso(hoursFromNowStart: number, hoursFromNowEnd: number) {
@@ -90,7 +92,7 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     const timelineRepo = new InMemoryJobTimelineRepository();
     const auditRepo = new InMemoryAuditRepository();
     const ownership = permissiveTenantOwnership();
-    app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
+    app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
     app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, options));
     return app;
   }
