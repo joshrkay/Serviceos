@@ -108,4 +108,4 @@ P0-023's job is to extend the same ternary to the 6 remaining InMemory-only repo
 
 Every Wave 1A story includes a migration. Migration filenames are sequenced (`0001_*.sql`, `0002_*.sql`, …). Two agents writing the same number = merge conflict.
 
-**Rule:** Each story declares its migration number range in its "Allowed files" line. Numbers are reserved by the wave coordinator before agents launch. See `multi-agent-runbook.md` for the reservation table.
+**Rule:** Each story declares its migration number range in its "Allowed files" line. Numbers are reserved by the wave coordinator before agents launch. See freeze-list.md for the reservation table.
