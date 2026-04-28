@@ -23,6 +23,7 @@ import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
+import { ContractDetailPage } from './components/contracts/ContractDetailPage';
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
@@ -51,6 +52,7 @@ export const router = createBrowserRouter([
       { path: 'schedule',       Component: SchedulePage    },
       { path: 'customers',      Component: CustomersPage   },
       { path: 'customers/:id',  Component: CustomerDetailPage },
+      { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'leads',          Component: LeadsPage       },
       { path: 'estimates',      Component: EstimatesPage   },
       { path: 'invoices',       Component: InvoicesPage    },
