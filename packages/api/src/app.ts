@@ -47,6 +47,8 @@ import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
 import { InMemoryPaymentRepository } from './invoices/payment';
+import { InMemoryPaymentReadinessRepository } from './invoices/payment-readiness';
+import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
@@ -380,6 +382,18 @@ export function createApp() {
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  // P5-017: Resolve the payment-link provider via the factory so the mock
+  // is hard-blocked in production. The factory throws at boot if
+  // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
+  // and emits a loud dev-mode warning when the mock is used.
+  const paymentReadinessRepo = new InMemoryPaymentReadinessRepository();
+  const paymentLinkProvider = createPaymentLinkProvider(process.env, {
+    readinessRepo: paymentReadinessRepo,
+  });
+  // Reference the variable so TS doesn't drop it; the provider will be
+  // wired into routes/workers in a follow-up. The factory call itself is
+  // load-bearing — it asserts the production guard at boot time.
+  void paymentLinkProvider;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
