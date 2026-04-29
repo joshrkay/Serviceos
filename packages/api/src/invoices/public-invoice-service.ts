@@ -125,12 +125,34 @@ export class PublicInvoiceService {
       throw new Error(`Stripe API error (${res.status}): ${body}`);
     }
 
-    const data = (await res.json()) as { id: string; url: string };
-    await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
-      stripePaymentLinkId: data.id,
-      stripePaymentLinkUrl: data.url,
-      updatedAt: new Date(),
-    });
+    const data = (await res.json()) as { id?: string; url?: string };
+    if (!data.id || !data.url) {
+      throw new Error('Stripe API returned incomplete payment link (missing id or url)');
+    }
+
+    try {
+      await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
+        stripePaymentLinkId: data.id,
+        stripePaymentLinkUrl: data.url,
+        updatedAt: new Date(),
+      });
+    } catch (dbErr) {
+      // The Stripe link was created but we can't persist the URL. Deactivate
+      // it (best-effort) so it isn't an orphaned charge vector, then re-throw.
+      // The link ID is included in the error message so it can be recovered
+      // manually if deactivation also fails.
+      await fetch(`https://api.stripe.com/v1/payment_links/${data.id}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.deps.stripeConfig!.apiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ active: 'false' }),
+      }).catch(() => undefined); // deactivation is best-effort; don't mask the original error
+
+      const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+      throw new Error(`Failed to persist Stripe payment link ${data.id}: ${msg}`);
+    }
 
     return { url: data.url };
   }
