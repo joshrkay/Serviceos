@@ -109,40 +109,37 @@ export function withTenantTransaction(pool: Pool) {
     // Wire commit/rollback to the response lifecycle. `finish` fires
     // after the last byte of the response is flushed; `close` fires
     // when the underlying connection is torn down. They can fire in
-    // either order on different runtimes — the released flag makes
-    // sure we COMMIT-or-ROLLBACK exactly once.
-    let finished = false;
-    res.once('finish', () => {
-      finished = true;
-      void (async () => {
-        try {
-          await client.query('COMMIT');
-        } catch {
-          // If commit fails, attempt rollback so the connection is
-          // returned to the pool in a clean state.
+    // either order on different runtimes (and `close` MAY fire even
+    // when finish has already happened). Both flow through a single
+    // `cleanup()` that's idempotent — the `cleanedUp` flag prevents
+    // a COMMIT-after-ROLLBACK race that would otherwise execute a
+    // query on a client that's already back in the pool.
+    let cleanedUp = false;
+    const cleanup = async (commit: boolean) => {
+      if (cleanedUp || released) return;
+      cleanedUp = true;
+      try {
+        await client.query(commit ? 'COMMIT' : 'ROLLBACK');
+      } catch {
+        // If commit fails, fall back to rollback so the connection is
+        // returned to the pool in a clean state. Swallow rollback
+        // errors — there is nothing actionable from this layer.
+        if (commit) {
           try {
             await client.query('ROLLBACK');
           } catch {
             /* ignore */
           }
-        } finally {
-          releaseOnce();
         }
-      })();
+      } finally {
+        releaseOnce();
+      }
+    };
+    res.once('finish', () => {
+      void cleanup(true);
     });
     res.once('close', () => {
-      // If the response already finished cleanly, the finish handler
-      // owns commit + release. Skip.
-      if (finished) return;
-      void (async () => {
-        try {
-          await client.query('ROLLBACK');
-        } catch {
-          /* ignore */
-        } finally {
-          releaseOnce();
-        }
-      })();
+      void cleanup(false);
     });
 
     // Run the rest of the request inside the AsyncLocalStorage scope so
