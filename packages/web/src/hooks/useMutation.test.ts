@@ -264,4 +264,85 @@ describe('P0-030 useMutation — Authorization Bearer header', () => {
     expect(clerkState.getToken).not.toHaveBeenCalled();
     expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBeNull();
   });
+
+  it('Gemini: Authorization header survives when callers pass a Headers instance', async () => {
+    // Direct apiClient call with init.headers as a Headers instance
+    // (the bug: spread {} on a Headers instance dropped all entries
+    // and the Authorization injection then ran on an empty headers
+    // object). Now the merge goes through `new Headers(...)` so all
+    // three input shapes round-trip cleanly.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    } as Response);
+
+    const { useApiClient } = await import('../lib/apiClient');
+    const { result } = renderHook(() => useApiClient());
+    const headersInstance = new Headers({ 'X-Custom': 'preserved' });
+    await act(async () => {
+      await result.current('/api/items', {
+        method: 'POST',
+        body: JSON.stringify({ name: 'x' }),
+        headers: headersInstance,
+      });
+    });
+
+    const init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    const sent = init.headers as Record<string, string>;
+    // Headers ctor normalizes keys to lowercase on iteration; assert
+    // case-insensitively.
+    const customKey = Object.keys(sent).find((k) => k.toLowerCase() === 'x-custom');
+    expect(customKey, 'caller-provided X-Custom must round-trip').toBeDefined();
+    expect(sent[customKey!]).toBe('preserved');
+    expect(sent['Authorization']).toBe('Bearer tok-default');
+  });
+
+  it('Gemini: Content-Type=application/json is set ONLY for string bodies', async () => {
+    // For FormData / URLSearchParams / Blob / ArrayBuffer, fetch()
+    // sets the right Content-Type itself (multipart boundary etc).
+    // Forcing application/json there used to corrupt the request.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    } as Response);
+
+    const { useApiClient } = await import('../lib/apiClient');
+    const { result } = renderHook(() => useApiClient());
+
+    // String body -> Content-Type set
+    await act(async () => {
+      await result.current('/api/items', {
+        method: 'POST',
+        body: JSON.stringify({ a: 1 }),
+      });
+    });
+    let init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    let sent = init.headers as Record<string, string>;
+    expect(sent['Content-Type']).toBe('application/json');
+
+    // FormData body -> Content-Type NOT set (let fetch infer)
+    fetchSpy.mockClear();
+    const fd = new FormData();
+    fd.append('file', new Blob([new Uint8Array([1, 2, 3])]), 'foo.bin');
+    await act(async () => {
+      await result.current('/api/upload', { method: 'POST', body: fd });
+    });
+    init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    sent = init.headers as Record<string, string>;
+    expect(sent['Content-Type']).toBeUndefined();
+
+    // URLSearchParams body -> Content-Type NOT set
+    fetchSpy.mockClear();
+    await act(async () => {
+      await result.current('/api/form', {
+        method: 'POST',
+        body: new URLSearchParams({ k: 'v' }),
+      });
+    });
+    init = fetchSpy.mock.calls[0]![1] as RequestInit;
+    sent = init.headers as Record<string, string>;
+    expect(sent['Content-Type']).toBeUndefined();
+  });
 });

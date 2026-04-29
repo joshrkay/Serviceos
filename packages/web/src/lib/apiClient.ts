@@ -87,14 +87,30 @@ export function useApiClient(): ApiFetch {
 
   return useCallback<ApiFetch>(
     async (path: string, init: RequestInit = {}): Promise<Response> => {
-      // Build a plain Record<string,string> so callers using
-      // `expect.objectContaining({ 'Content-Type': ... })` continue to work.
-      const headers: Record<string, string> = {
-        ...(init.headers as Record<string, string> | undefined),
-      };
+      // Build a plain Record<string,string>. RequestInit['headers']
+      // can be a plain object, a Headers instance, or a string[][].
+      // The naive spread approach silently dropped Headers / array
+      // forms (Gemini PR #208 review). Handle each shape; keep the
+      // plain-object case preserving caller's key casing so that
+      // injecting `'Content-Type'` below doesn't collide with a
+      // caller-supplied `'content-type'`.
+      const headers: Record<string, string> = {};
+      if (init.headers instanceof Headers) {
+        init.headers.forEach((value, key) => {
+          headers[key] = value;
+        });
+      } else if (Array.isArray(init.headers)) {
+        for (const [key, value] of init.headers) headers[key] = value;
+      } else if (init.headers) {
+        Object.assign(headers, init.headers);
+      }
 
-      // Set a default Content-Type for JSON payloads (callers can override).
-      if (init.body && !(init.body instanceof FormData) && !headers['Content-Type']) {
+      // Set a default Content-Type only for STRING bodies. fetch()
+      // already infers the right Content-Type for FormData,
+      // URLSearchParams, Blob, and ArrayBuffer; setting
+      // application/json on those would corrupt the request
+      // (Gemini PR #208 review).
+      if (typeof init.body === 'string' && !headers['Content-Type']) {
         headers['Content-Type'] = 'application/json';
       }
 
