@@ -1215,9 +1215,12 @@ export const MIGRATIONS = {
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
       event_type TEXT NOT NULL,
-      appointment_id UUID,
+      -- ON DELETE SET NULL: keep the analytics row when the parent
+      -- appointment is removed (this is an audit log; we want history
+      -- to survive deletion) but null out the dangling reference.
+      appointment_id UUID REFERENCES appointments(id) ON DELETE SET NULL,
       technician_id TEXT,
-      metadata JSONB,
+      metadata JSONB DEFAULT '{}'::jsonb,
       recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded
@@ -1231,9 +1234,19 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
 
     CREATE TABLE IF NOT EXISTS delay_notice_state (
+      -- idempotency_key alone is the primary key, NOT (tenant_id, idempotency_key).
+      -- The locked InMemory interface exposes findByKey(idempotencyKey)
+      -- without a tenant arg — it expects at most one row per key
+      -- globally. Keys are constructed from tenant-scoped appointment
+      -- ids, so cross-tenant collisions are not realistic. A composite
+      -- PK without a separate UNIQUE INDEX on the key alone would
+      -- allow collisions and cause findByKey to silently return the
+      -- wrong tenant's row (rows[0]).
       idempotency_key TEXT PRIMARY KEY,
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      appointment_id UUID NOT NULL,
+      -- ON DELETE CASCADE: notification state has no value once the
+      -- parent appointment is gone. Cleanup happens automatically.
+      appointment_id UUID NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
       delay_version INTEGER NOT NULL,
       status TEXT NOT NULL,
       channel TEXT NOT NULL,
@@ -1241,7 +1254,7 @@ export const MIGRATIONS = {
       max_attempts INTEGER NOT NULL DEFAULT 3,
       last_error TEXT,
       provider_message_id TEXT,
-      trigger_context JSONB,
+      trigger_context JSONB DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant_appt
