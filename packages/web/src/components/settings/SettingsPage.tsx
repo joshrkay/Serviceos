@@ -206,7 +206,7 @@ export function SettingsPage() {
           <div className="flex-1 min-w-0">
             <p className="text-white">Ortega HVAC &amp; Services</p>
             <p className="text-xs text-slate-400 mt-0.5">HVAC · Plumbing · Painting · Austin, TX</p>
-            <p className="text-xs text-slate-400 mt-0.5">Owner: Mike Ortega</p>
+            <p className="text-xs text-slate-400 mt-0.5">Owner</p>
           </div>
           <button className="text-xs text-slate-400 hover:text-white transition-colors shrink-0">Edit</button>
         </div>
