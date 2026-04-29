@@ -380,4 +380,91 @@ describe('SlotConflictChecker (P0-035)', () => {
 
     expect(result).toEqual({ ok: true });
   });
+
+  it('canceled appointment in the same window does NOT trigger technician_busy (PR #201 status-filter follow-up)', async () => {
+    // A canceled appointment shouldn't block a new booking — it doesn't
+    // actually occupy the slot. Same setup as the technician_busy case
+    // but with status='canceled'; expect ok: true.
+    const canceled = makeAppointment({
+      id: 'appt-canceled',
+      jobId: 'job-1',
+      status: 'canceled',
+      scheduledStart: new Date('2026-04-21T10:30:00Z'),
+      scheduledEnd: new Date('2026-04-21T11:30:00Z'),
+    });
+    const { appointmentRepo, assignmentRepo, jobRepo } = buildStubs({
+      appointments: [canceled],
+      assignmentsByAppt: new Map([
+        ['appt-canceled', [makeAssignment({ appointmentId: 'appt-canceled', technicianId })]],
+      ]),
+      jobsById: new Map([['job-1', makeJob({ id: 'job-1', customerId })]]),
+    });
+    const checker = new DefaultSlotConflictChecker({ appointmentRepo, assignmentRepo, jobRepo });
+
+    const result = await checker.check({
+      tenantId,
+      windowStart: new Date('2026-04-21T11:00:00Z'),
+      windowEnd: new Date('2026-04-21T12:00:00Z'),
+      technicianId,
+      customerId,
+    });
+
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('completed appointment does NOT trigger conflict', async () => {
+    const completed = makeAppointment({
+      id: 'appt-completed',
+      jobId: 'job-1',
+      status: 'completed',
+      scheduledStart: new Date('2026-04-21T10:30:00Z'),
+      scheduledEnd: new Date('2026-04-21T11:30:00Z'),
+    });
+    const { appointmentRepo, assignmentRepo, jobRepo } = buildStubs({
+      appointments: [completed],
+      assignmentsByAppt: new Map([
+        ['appt-completed', [makeAssignment({ appointmentId: 'appt-completed', technicianId })]],
+      ]),
+      jobsById: new Map([['job-1', makeJob({ id: 'job-1', customerId })]]),
+    });
+    const checker = new DefaultSlotConflictChecker({ appointmentRepo, assignmentRepo, jobRepo });
+
+    const result = await checker.check({
+      tenantId,
+      windowStart: new Date('2026-04-21T11:00:00Z'),
+      windowEnd: new Date('2026-04-21T12:00:00Z'),
+      technicianId,
+      customerId,
+    });
+
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('no_show appointment does NOT trigger conflict', async () => {
+    const noShow = makeAppointment({
+      id: 'appt-noshow',
+      jobId: 'job-1',
+      status: 'no_show',
+      scheduledStart: new Date('2026-04-21T10:30:00Z'),
+      scheduledEnd: new Date('2026-04-21T11:30:00Z'),
+    });
+    const { appointmentRepo, assignmentRepo, jobRepo } = buildStubs({
+      appointments: [noShow],
+      assignmentsByAppt: new Map([
+        ['appt-noshow', [makeAssignment({ appointmentId: 'appt-noshow', technicianId })]],
+      ]),
+      jobsById: new Map([['job-1', makeJob({ id: 'job-1', customerId })]]),
+    });
+    const checker = new DefaultSlotConflictChecker({ appointmentRepo, assignmentRepo, jobRepo });
+
+    const result = await checker.check({
+      tenantId,
+      windowStart: new Date('2026-04-21T11:00:00Z'),
+      windowEnd: new Date('2026-04-21T12:00:00Z'),
+      technicianId,
+      customerId,
+    });
+
+    expect(result).toEqual({ ok: true });
+  });
 });

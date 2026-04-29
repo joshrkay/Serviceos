@@ -1,6 +1,22 @@
-import { Appointment, AppointmentRepository } from '../../appointments/appointment';
+import {
+  Appointment,
+  AppointmentRepository,
+  AppointmentStatus,
+} from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
 import { JobRepository } from '../../jobs/job';
+
+/**
+ * Statuses that mean the appointment actually occupies the slot.
+ * `canceled`, `completed`, `no_show` are excluded so they don't block
+ * legitimate new bookings into the same window (PR #201 review,
+ * Codex P1 — exclude non-active appointments from overlap candidates).
+ */
+const ACTIVE_APPOINTMENT_STATUSES: ReadonlySet<AppointmentStatus> = new Set([
+  'scheduled',
+  'confirmed',
+  'in_progress',
+]);
 
 /**
  * SlotConflictChecker — pre-draft availability check for AI-drafted
@@ -111,12 +127,19 @@ export class DefaultSlotConflictChecker implements SlotConflictChecker {
     }
 
     // Filter to true overlaps (the repo returns "starts within range",
-    // not strict overlap — we still apply the strict-overlap predicate).
-    const overlapping = candidates.filter((a) =>
-      overlaps(
-        { start: a.scheduledStart, end: a.scheduledEnd },
-        { start: windowStart, end: windowEnd }
-      )
+    // not strict overlap — we still apply the strict-overlap predicate)
+    // AND active statuses only. Canceled, completed, and no-show
+    // appointments don't actually occupy the slot — counting them as
+    // conflicts would block valid scheduling into windows that contain
+    // only historical or canceled work (a real functional regression
+    // caught in PR #201 review).
+    const overlapping = candidates.filter(
+      (a) =>
+        ACTIVE_APPOINTMENT_STATUSES.has(a.status) &&
+        overlaps(
+          { start: a.scheduledStart, end: a.scheduledEnd },
+          { start: windowStart, end: windowEnd }
+        )
     );
 
     if (overlapping.length === 0) return { ok: true };
