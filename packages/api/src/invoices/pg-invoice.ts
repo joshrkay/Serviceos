@@ -172,6 +172,14 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         setClauses.push(`view_count = $${paramIndex++}`);
         values.push(updates.viewCount);
       }
+      if (updates.stripePaymentLinkId !== undefined) {
+        setClauses.push(`stripe_payment_link_id = $${paramIndex++}`);
+        values.push(updates.stripePaymentLinkId);
+      }
+      if (updates.stripePaymentLinkUrl !== undefined) {
+        setClauses.push(`stripe_payment_link_url = $${paramIndex++}`);
+        values.push(updates.stripePaymentLinkUrl);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -191,6 +199,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
 
       return this.findByIdWithClient(client, tenantId, id);
     });
+  }
+
+  async findByViewToken(token: string): Promise<Invoice | null> {
+    const headerRow = await this.withClient(async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM invoices WHERE view_token = $1 LIMIT 1`,
+        [token],
+      );
+      return rows[0] ?? null;
+    });
+    if (!headerRow) return null;
+    return this.findById(headerRow.tenant_id, headerRow.id);
   }
 
   private async insertLineItems(
@@ -289,6 +309,8 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       lastDispatchId: row.last_dispatch_id ?? undefined,
       firstViewedAt: row.first_viewed_at ? new Date(row.first_viewed_at) : undefined,
       viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
+      stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
+      stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

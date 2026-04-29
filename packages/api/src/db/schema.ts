@@ -1176,6 +1176,11 @@ export const MIGRATIONS = {
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
   `,
+
+  '050_invoice_stripe_payment_link': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

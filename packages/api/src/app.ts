@@ -129,6 +129,8 @@ import {
 import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
+import { PublicInvoiceService } from './invoices/public-invoice-service';
+import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -168,7 +170,12 @@ import { requireAuth } from './middleware/auth';
 export function createApp() {
   const app = express();
 
-  // Body parsing
+  // Stripe webhook needs the raw body for signature verification.
+  // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
+  // and the global json() middleware skips it (body-parser sets req._body = true).
+  app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+  // Body parsing for all other routes
   app.use(express.json());
 
   // Load validated config — must happen before CORS so validateProductionConfig()
@@ -233,9 +240,18 @@ export function createApp() {
   const webhookSettingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
+  // Constructed early so the Stripe webhook handler can record payments.
+  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   app.use(
     '/webhooks',
-    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+    createWebhookRouter(config, {
+      tenantRepo,
+      settingsRepo: webhookSettingsRepo,
+      invoiceRepo: webhookInvoiceRepo,
+      paymentRepo: webhookPaymentRepo,
+      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    })
   );
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
@@ -567,6 +583,19 @@ export function createApp() {
     settingsRepo,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
+
+  // Public unauthenticated invoice payment flow (token-authenticated).
+  // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
+  const publicInvoiceService = new PublicInvoiceService({
+    invoiceRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : undefined,
+  });
+  app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
