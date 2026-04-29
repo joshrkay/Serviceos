@@ -331,10 +331,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
 
   const firstName = customer?.name.split(' ')[0] ?? 'there';
 
-  const smsMsg  = `Hi ${firstName},\n\nYour invoice for ${inv.description} is ready.\n\nAmount due: $${total.toLocaleString()}\n\nPay securely online:\n${paymentLink}\n\nQuestions? Call (512) 555-0000.\nThanks! – Mike`;
-  const emailMsg = `Hi ${firstName},\n\nYour invoice ${inv.invoiceNumber} is ready for payment.\n\nDescription: ${inv.description}\nAmount due: $${total.toLocaleString()}${inv.dueDate ? `\nDue date: ${inv.dueDate}` : ''}\n\nPay by card or ACH:\n${paymentLink}\n\nThank you,\nMike\nFieldly Pro Services\n(512) 555-0000`;
-
-  const [msg, setMsg] = useState(smsMsg);
+  const [msg, setMsg] = useState('');
 
   type SendBody = {
     channel: 'sms' | 'email';
@@ -419,7 +416,6 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
                   key={c}
                   onClick={() => {
                     setChannel(c);
-                    setMsg(c === 'sms' ? smsMsg : emailMsg);
                     setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
                   }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
@@ -442,13 +438,14 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
             />
           </div>
 
-          {/* Message */}
+          {/* Personal note */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Message</p>
+            <p className="text-xs text-slate-500 mb-1.5">Personal note <span className="text-slate-400">(optional)</span></p>
             <textarea
               value={msg}
               onChange={e => setMsg(e.target.value)}
-              rows={channel === 'sms' ? 8 : 10}
+              rows={3}
+              placeholder="Add a personal note to your customer..."
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-blue-400 bg-white resize-none leading-relaxed"
             />
           </div>

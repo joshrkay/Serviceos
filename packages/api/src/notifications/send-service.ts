@@ -111,6 +111,16 @@ export class SendService {
       estimate.viewTokenExpiresAt ?? new Date(Date.now() + ESTIMATE_TOKEN_TTL_MS);
     const viewUrl = this.buildViewUrl('e', viewToken);
 
+    // Persist the token before sending — if delivery succeeds but the final DB
+    // update fails, the customer would hold a link with a non-existent token.
+    if (!estimate.viewToken) {
+      await this.deps.estimateRepo.update(input.tenantId, estimate.id, {
+        viewToken,
+        viewTokenExpiresAt,
+        updatedAt: new Date(),
+      });
+    }
+
     const channels = resolveChannels({
       channel: input.channel,
       customer,
@@ -225,6 +235,16 @@ export class SendService {
     const viewTokenExpiresAt =
       invoice.viewTokenExpiresAt ?? new Date(Date.now() + INVOICE_TOKEN_TTL_MS);
     const viewUrl = this.buildViewUrl('pay', viewToken);
+
+    // Persist the token before sending — if delivery succeeds but the final DB
+    // update fails, the customer would hold a link with a non-existent token.
+    if (!invoice.viewToken) {
+      await this.deps.invoiceRepo.update(input.tenantId, invoice.id, {
+        viewToken,
+        viewTokenExpiresAt,
+        updatedAt: new Date(),
+      });
+    }
 
     const channels = resolveChannels({
       channel: input.channel,

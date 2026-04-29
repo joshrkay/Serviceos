@@ -440,10 +440,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   const [sent,    setSent]    = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
 
-  const smsMsg = `Hi ${customer?.name.split(' ')[0] ?? 'there'},\n\nI've prepared an estimate for ${est.description}.\n\nTotal: $${total.toLocaleString()}\n\nReview and approve here:\nfieldly.app/e/${est.estimateNumber.toLowerCase().replace('-','')}\n\nQuestions? Call (512) 555-0000.\n– Mike from Fieldly Pro`;
-  const emailMsg = `Hi ${customer?.name.split(' ')[0] ?? 'there'},\n\nPlease find your estimate attached below.\n\nEstimate: ${est.estimateNumber}\nDescription: ${est.description}\nTotal: $${total.toLocaleString()}\n\nClick the button below to review and accept.\n\nThank you,\nMike\nFieldly Pro Services`;
-
-  const [msg, setMsg] = useState(smsMsg);
+  const [msg, setMsg] = useState('');
 
   type SendBody = {
     channel: 'sms' | 'email';
@@ -513,7 +510,6 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
                   key={c}
                   onClick={() => {
                     setChannel(c);
-                    setMsg(c === 'sms' ? smsMsg : emailMsg);
                     setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
                   }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
@@ -536,13 +532,14 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
             />
           </div>
 
-          {/* Message */}
+          {/* Personal note */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Message</p>
+            <p className="text-xs text-slate-500 mb-1.5">Personal note <span className="text-slate-400">(optional)</span></p>
             <textarea
               value={msg}
               onChange={e => setMsg(e.target.value)}
-              rows={channel === 'sms' ? 7 : 9}
+              rows={3}
+              placeholder="Add a personal note to your customer..."
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-blue-400 bg-white resize-none leading-relaxed"
             />
           </div>
