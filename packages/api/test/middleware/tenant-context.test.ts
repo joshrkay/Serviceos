@@ -245,6 +245,51 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(uniqueClients.size).toBe(1);
   });
 
+  it('Codex P1 fix: withTenantTransaction reuses the request-scoped client (no extra pool.connect)', async () => {
+    // Without this reuse, a write path under a 1-connection pool
+    // would deadlock — the middleware holds client A until
+    // response.finish, but the repo would call pool.connect() and
+    // wait for client B which can't be acquired until A releases.
+    const { pool, calls } = makeMockPool();
+
+    class TestWriteRepo extends PgBaseRepository {
+      async write(tenantId: string): Promise<void> {
+        await this.withTenantTransaction(tenantId, async (client) => {
+          await client.query(
+            "INSERT INTO test_table (tenant_id, name) VALUES (current_setting('app.current_tenant_id')::UUID, 'x')",
+          );
+        });
+      }
+    }
+
+    const repo = new TestWriteRepo(pool);
+
+    const app = buildApp(pool, async (req, res) => {
+      await repo.write(req.auth!.tenantId);
+      res.json({ ok: true });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(200);
+
+    // CRITICAL: only ONE pool.connect() for the entire request.
+    // If withTenantTransaction ignored AsyncLocalStorage we'd see
+    // two — and on a 1-connection pool the second would deadlock.
+    const connectCount = (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    expect(connectCount).toBe(1);
+
+    // And we must NOT have issued a second BEGIN inside the request
+    // (the middleware already opened the transaction).
+    const innerBegins = calls.filter(
+      (c) => /^\s*BEGIN/i.test(c.sql) && c !== calls.find((x) => /^\s*BEGIN/i.test(x.sql)),
+    );
+    expect(innerBegins).toHaveLength(0);
+  });
+
   it('tenant isolation — withTenant called with a different tenantId opens its own connection', async () => {
     const { pool, calls } = makeMockPool();
 
