@@ -20,6 +20,11 @@ const configSchema = z.object({
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
   CLERK_WEBHOOK_SECRET: z.string().optional(),
   CLERK_JWKS_URL: z.string().url().optional(),
+  // P0-033 — gate for the legacy HMAC-SHA256 dev path in `verifyClerkSession`.
+  // Only honoured when explicitly set to the literal string 'true'. Refused
+  // in production by `validateEnvSchema` so a misconfigured prod can't
+  // silently fall back to HMAC.
+  CLERK_DEV_HMAC_TOKENS: z.string().optional(),
   // Cloudflare R2 — S3-compatible object storage for file uploads
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ACCESS_KEY_ID: z.string().optional(),
@@ -126,6 +131,9 @@ const baseEnvShape = {
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().min(1).optional(),
   STRIPE_SECRET_KEY: z.string().min(1).optional(),
+  // P0-033 — legacy HMAC dev-token gate. Production refuses any value other
+  // than absent/'false' (enforced via the prod refinement on the schema).
+  CLERK_DEV_HMAC_TOKENS: z.string().optional(),
 } as const;
 
 const devEnvSchema = z.object({
@@ -140,24 +148,36 @@ const devEnvSchema = z.object({
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
 });
 
-const prodEnvSchema = z.object({
-  ...baseEnvShape,
-  DATABASE_URL: z
-    .string({ required_error: 'Required' })
-    .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' }),
-  CLERK_SECRET_KEY: z
-    .string({ required_error: 'Required' })
-    .min(1, { message: 'Required' }),
-  CLERK_PUBLISHABLE_KEY: z
-    .string({ required_error: 'Required' })
-    .min(1, { message: 'Required' }),
-  CORS_ORIGIN: z
-    .string({ required_error: 'Required' })
-    .min(1, { message: 'Required' })
-    .refine((v) => v !== 'true', {
-      message: "Cannot be 'true' in production. Set a specific origin.",
-    }),
-});
+const prodEnvSchema = z
+  .object({
+    ...baseEnvShape,
+    DATABASE_URL: z
+      .string({ required_error: 'Required' })
+      .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' }),
+    CLERK_SECRET_KEY: z
+      .string({ required_error: 'Required' })
+      .min(1, { message: 'Required' }),
+    CLERK_PUBLISHABLE_KEY: z
+      .string({ required_error: 'Required' })
+      .min(1, { message: 'Required' }),
+    CORS_ORIGIN: z
+      .string({ required_error: 'Required' })
+      .min(1, { message: 'Required' })
+      .refine((v) => v !== 'true', {
+        message: "Cannot be 'true' in production. Set a specific origin.",
+      }),
+    // P0-033 — must NOT be 'true' in production. Other values (absent,
+    // 'false', '0', anything else) are accepted as "off". The runtime gate
+    // in `verifyClerkSession` is also production-disabled as defense in
+    // depth, but failing fast at startup gives operators a clear signal.
+    CLERK_DEV_HMAC_TOKENS: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'true', {
+        message:
+          "CLERK_DEV_HMAC_TOKENS=true is forbidden in production. Unset or set to 'false' before starting.",
+      }),
+  });
 
 export type Env = z.infer<typeof devEnvSchema> & Partial<z.infer<typeof prodEnvSchema>>;
 
