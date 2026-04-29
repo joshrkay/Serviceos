@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createEstimateSchema } from '../shared/contracts';
@@ -14,7 +15,7 @@ import {
 } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
 import { getNextEstimateNumber, SettingsRepository } from '../settings/settings';
-import { SendService, SendChannel } from '../notifications/send-service';
+import { SendService } from '../notifications/send-service';
 
 export function createEstimateRouter(
   estimateRepo: EstimateRepository,
@@ -165,21 +166,20 @@ export function createEstimateRouter(
             });
           return;
         }
-        const channel: SendChannel = req.body?.channel ?? 'sms';
-        if (channel !== 'sms' && channel !== 'email' && channel !== 'both') {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: 'channel must be sms, email, or both',
-          });
+        const parsed = z.object({
+          channel: z.enum(['sms', 'email', 'both']).default('sms'),
+          recipientPhone: z.string().optional(),
+          recipientEmail: z.string().optional(),
+          customMessage: z.string().optional(),
+        }).safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });
           return;
         }
         const result = await sendService.sendEstimate({
           tenantId: req.auth!.tenantId,
           estimateId: req.params.id,
-          channel,
-          recipientPhone: req.body?.recipientPhone,
-          recipientEmail: req.body?.recipientEmail,
-          customMessage: req.body?.customMessage,
+          ...parsed.data,
         });
         res.status(202).json(result);
       } catch (err) {

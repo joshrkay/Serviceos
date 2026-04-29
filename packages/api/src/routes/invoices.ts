@@ -17,7 +17,7 @@ import {
 import { AuditRepository } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
-import { SendService, SendChannel } from '../notifications/send-service';
+import { SendService } from '../notifications/send-service';
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -233,21 +233,20 @@ export function createInvoiceRouter(
             });
           return;
         }
-        const channel: SendChannel = req.body?.channel ?? 'sms';
-        if (channel !== 'sms' && channel !== 'email' && channel !== 'both') {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: 'channel must be sms, email, or both',
-          });
+        const parsed = z.object({
+          channel: z.enum(['sms', 'email', 'both']).default('sms'),
+          recipientPhone: z.string().optional(),
+          recipientEmail: z.string().optional(),
+          customMessage: z.string().optional(),
+        }).safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });
           return;
         }
         const result = await sendService.sendInvoice({
           tenantId: req.auth!.tenantId,
           invoiceId: req.params.id,
-          channel,
-          recipientPhone: req.body?.recipientPhone,
-          recipientEmail: req.body?.recipientEmail,
-          customMessage: req.body?.customMessage,
+          ...parsed.data,
         });
         res.status(202).json(result);
       } catch (err) {
