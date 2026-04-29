@@ -146,6 +146,7 @@ import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
 import { InMemoryProposalRepository } from './proposals/proposal';
@@ -646,9 +647,21 @@ export function createApp() {
   // transcription worker's onTranscribed hook, classifies intent,
   // and persists a proposal via proposalRepo. Registered now that
   // proposalRepo is available.
+  //
+  // P0-035 wiring (PR #202 follow-up): pass a SlotConflictChecker so
+  // create_appointment proposals run a pre-draft availability check
+  // and emit a voice_clarification proposal on conflict instead of a
+  // create_appointment that the dispatcher will reject. Without this
+  // construction, the checker shipped in PR #201 is dead code.
+  const slotConflictChecker = new DefaultSlotConflictChecker({
+    appointmentRepo,
+    assignmentRepo,
+    jobRepo,
+  });
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    slotConflictChecker,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
