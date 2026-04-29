@@ -1181,6 +1181,89 @@ export const MIGRATIONS = {
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
   `,
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // POST-#194-MERGE RECOVERY (round 2). PR #195's recovery migrations were
+  // dropped a SECOND time during the schema.ts conflict resolution when
+  // PR #194 merged on top of PR #195. Restore the four tables/ALTERs that
+  // backing code in main now references at runtime. (The 049 webhook
+  // partial index is intentionally skipped — performance only, and the
+  // UNIQUE constraint from migration 012 already provides correctness.)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // platform_admins: cross-tenant authority table for the feature-flag
+  // admin gate (P0-034). Without it, requirePlatformAdmin returns 503
+  // on every admin request. Columns are TEXT (not UUID) because Clerk
+  // session ids are TEXT — matches users.clerk_user_id, tenants.owner_id,
+  // audit_events.actor_id. RLS is intentionally NOT enabled — this is a
+  // global authority table, never tenant-scoped.
+  '051_create_platform_admins': `
+    CREATE TABLE IF NOT EXISTS platform_admins (
+      user_id TEXT PRIMARY KEY,
+      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      granted_by TEXT NOT NULL,
+      notes TEXT
+    );
+  `,
+
+  // P0-022 operational metrics. Two tables consumed by code already in
+  // main: pg-analytics.ts and pg-delay-notice-state.ts. Without these
+  // CREATE TABLEs, every dispatch metric write or delay-notice upsert
+  // throws "relation does not exist".
+  '052_create_operational_metrics': `
+    CREATE TABLE IF NOT EXISTS dispatch_analytics (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      event_type TEXT NOT NULL,
+      appointment_id UUID,
+      technician_id TEXT,
+      metadata JSONB,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded
+      ON dispatch_analytics(tenant_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_event_type
+      ON dispatch_analytics(tenant_id, event_type, recorded_at DESC);
+    ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
+    CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS delay_notice_state (
+      idempotency_key TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL,
+      delay_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      last_error TEXT,
+      provider_message_id TEXT,
+      trigger_context JSONB,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant_appt
+      ON delay_notice_state(tenant_id, appointment_id);
+    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // diff_analyses.id was originally UUID (from migration 011), but the
+  // P0-021 code in main writes deterministic TEXT keys via
+  // diffAnalysisIdFor(...) — e.g. "diff:tenant:doc:from:to". UUID columns
+  // throw "invalid input syntax for type uuid" on those keys, so every
+  // INSERT crashes today. Convert in place. Safe because the new repo
+  // has never written successfully (it's been throwing) and 011's
+  // gen_random_uuid() default was only used by InMemory paths.
+  '053_diff_analyses_id_to_text': `
+    ALTER TABLE diff_analyses ALTER COLUMN id DROP DEFAULT;
+    ALTER TABLE diff_analyses ALTER COLUMN id TYPE TEXT USING id::TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
