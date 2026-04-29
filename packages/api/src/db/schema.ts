@@ -1115,6 +1115,106 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_diff_analyses ON diff_analyses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // ---------------------------------------------------------------------------
+  // POST-MERGE RECOVERY MIGRATIONS (PR #193 dropped these during conflict
+  // resolution; runtime crashes if not restored).
+  //
+  // - 045: dispatch_analytics + delay_notice_state — referenced by
+  //        pg-analytics.ts and pg-delay-notice-state.ts; tables never created.
+  // - 046: platform_admins — referenced by auth/platform-admin.ts; without
+  //        the table, requirePlatformAdmin returns 503 on every admin request.
+  //        Columns are TEXT (not UUID) because Clerk session ids are TEXT
+  //        like "user_2abc..." (matches users.clerk_user_id, tenants.owner_id,
+  //        audit_events.actor_id). The original PR #177 used UUID and PR #179
+  //        was the UUID->TEXT fix; both were lost in merge — recover with
+  //        TEXT from the start.
+  // - 049: webhook_events partial index — performance only; UNIQUE constraint
+  //        already exists from migration 012, so dedup correctness is intact.
+  // - 050: diff_analyses.id type fix — migration 044 was a no-op duplicate
+  //        of 011 (CREATE TABLE IF NOT EXISTS skipped because 011 already ran).
+  //        The new diff-analysis repo writes deterministic TEXT keys
+  //        (e.g. "diff:tenant:doc:from:to") into a column still typed UUID
+  //        from migration 011. Convert the column in place.
+  // ---------------------------------------------------------------------------
+
+  '045_create_operational_metrics': `
+    CREATE TABLE IF NOT EXISTS dispatch_analytics (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      event_type TEXT NOT NULL,
+      appointment_id UUID,
+      technician_id TEXT,
+      metadata JSONB,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded
+      ON dispatch_analytics(tenant_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_event_type
+      ON dispatch_analytics(tenant_id, event_type, recorded_at DESC);
+    ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
+    CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS delay_notice_state (
+      idempotency_key TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL,
+      delay_version INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      last_error TEXT,
+      provider_message_id TEXT,
+      trigger_context JSONB,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant_appt
+      ON delay_notice_state(tenant_id, appointment_id);
+    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // platform_admins is intentionally cross-tenant — a row grants global
+  // authority (e.g. for the feature-flag registry). RLS is intentionally
+  // NOT enabled here. The PrimaryKey on user_id is the only uniqueness
+  // we need (no separate unique index — PRIMARY KEY already implies one).
+  '046_create_platform_admins': `
+    CREATE TABLE IF NOT EXISTS platform_admins (
+      user_id TEXT PRIMARY KEY,
+      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      granted_by TEXT NOT NULL,
+      notes TEXT
+    );
+  `,
+
+  '049_webhook_events_idempotency_indexes': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_idempotency_recovery
+      ON webhook_events(source, idempotency_key);
+    CREATE INDEX IF NOT EXISTS idx_webhook_unprocessed
+      ON webhook_events(status, created_at)
+      WHERE status = 'received';
+  `,
+
+  // diff_analyses.id was created as UUID by migration 011. The new
+  // pg-diff-analysis.ts writes deterministic non-UUID keys, e.g.
+  //   diffAnalysisIdFor(tenant, docType, docId, from, to)
+  //     => "diff:00000000-0000-0000-0000-000000000001:estimate:est-7:rev-1:rev-2"
+  // Casting an arbitrary string to UUID throws "invalid input syntax for
+  // type uuid", so every INSERT crashes today. Convert in place. Safe
+  // because the new repo has never successfully written to this table
+  // (it's been throwing) and migration 011's gen_random_uuid() default
+  // was only used by old InMemory test paths that don't write to Postgres.
+  '050_diff_analyses_id_to_text': `
+    ALTER TABLE diff_analyses ALTER COLUMN id DROP DEFAULT;
+    ALTER TABLE diff_analyses ALTER COLUMN id TYPE TEXT USING id::TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
