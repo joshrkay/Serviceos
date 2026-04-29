@@ -33,6 +33,15 @@ const requestSchema = z.object({
 export interface PublicPaymentsDeps {
   invoiceRepo: InvoiceRepository;
   stripeConfig: StripePaymentIntentConfig | null;
+  /**
+   * ISO 4217 currency code (lowercase per Stripe convention) used when
+   * creating PaymentIntents. Defaults to `'usd'`. Surfaced on the deps
+   * interface so a tenant- or env-driven default can be threaded in
+   * later without re-touching the route handler — see PR #203 review.
+   * Multi-currency support proper (per-invoice currency) is a separate
+   * follow-up that requires a `currency` column on `invoices`.
+   */
+  defaultCurrency?: string;
   /** Optional fetch override — used to mock Stripe in tests. */
   stripeFetch?: StripeFetch;
 }
@@ -98,7 +107,7 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
         deps.stripeConfig,
         {
           amount: invoice.amountDueCents,
-          currency: 'usd',
+          currency: deps.defaultCurrency ?? 'usd',
           invoiceId: invoice.id,
           tenantId: invoice.tenantId,
         },

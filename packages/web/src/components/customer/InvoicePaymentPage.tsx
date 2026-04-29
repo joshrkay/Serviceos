@@ -155,7 +155,19 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
 
 type PayStatus = 'idle' | 'processing' | 'succeeded' | 'failed';
 
-function PaymentForm({ amountCents }: { amountCents: number }) {
+function PaymentForm({
+  amountCents,
+  onSucceeded,
+}: {
+  amountCents: number;
+  /**
+   * Called after a successful inline confirmation (no redirect path).
+   * Implementations should re-render the success screen — typically by
+   * setting a `success=true` query param via react-router so we don't
+   * trigger a full-page reload (which would re-fetch the invoice).
+   */
+  onSucceeded: () => void;
+}) {
   const stripe = useStripe();
   const elements = useElements();
   const [status, setStatus] = useState<PayStatus>('idle');
@@ -178,10 +190,12 @@ function PaymentForm({ amountCents }: { amountCents: number }) {
       setErrorMessage(error.message ?? 'Payment failed. Please try a different card.');
       return;
     }
-    // On stay-on-page success (no redirect needed), reload so the public
-    // invoice GET can re-evaluate the paid state via webhook reconciliation.
+    // On stay-on-page success (no redirect needed), flip to the success
+    // screen via react-router. Avoids a full-page reload — the parent
+    // re-renders against the same invoice data, and webhook
+    // reconciliation flips `paid_at` server-side independently.
     setStatus('succeeded');
-    window.location.search = '?success=true';
+    onSucceeded();
   }
 
   const disabled = !stripe || !elements || status === 'processing';
@@ -230,7 +244,7 @@ function PaymentForm({ amountCents }: { amountCents: number }) {
 
 export function InvoicePaymentPage() {
   const { id: token } = useParams<{ id: string }>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [invoice, setInvoice] = useState<PublicInvoiceView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -459,7 +473,10 @@ export function InvoicePaymentPage() {
           </div>
         ) : (
           <Elements stripe={stripePromise} options={elementsOptions}>
-            <PaymentForm amountCents={inv.amountDueCents} />
+            <PaymentForm
+              amountCents={inv.amountDueCents}
+              onSucceeded={() => setSearchParams({ success: 'true' })}
+            />
           </Elements>
         )}
 

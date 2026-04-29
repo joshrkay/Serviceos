@@ -116,22 +116,9 @@ describe('P5-016 InvoicePaymentPage — Stripe Elements integration', () => {
     expect(screen.getByRole('button', { name: /pay.*securely/i })).toBeInTheDocument();
   });
 
-  it('success — confirmPayment resolving without an error sets ?success=true', async () => {
+  it('success — confirmPayment resolving without an error renders the paid screen via setSearchParams (no full reload)', async () => {
     mockFetch({});
     confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_1', status: 'succeeded' } });
-
-    // jsdom location: stub the search setter so we can observe it.
-    const setSearchSpy = vi.fn();
-    Object.defineProperty(window, 'location', {
-      configurable: true,
-      value: {
-        ...window.location,
-        origin: 'http://localhost',
-        pathname: '/pay/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        get search() { return ''; },
-        set search(v: string) { setSearchSpy(v); },
-      },
-    });
 
     renderPage();
     await waitFor(() => screen.getByRole('button', { name: /pay.*securely/i }));
@@ -140,8 +127,11 @@ describe('P5-016 InvoicePaymentPage — Stripe Elements integration', () => {
     await waitFor(() => {
       expect(confirmPaymentMock).toHaveBeenCalled();
     });
+    // After success, react-router's setSearchParams flips us to ?success=true
+    // and the same component re-renders the redirect-back paid screen
+    // (no `window.location.search =` write, so no full page reload).
     await waitFor(() => {
-      expect(setSearchSpy).toHaveBeenCalledWith('?success=true');
+      expect(screen.getByText(/payment received/i)).toBeInTheDocument();
     });
   });
 
