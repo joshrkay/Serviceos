@@ -40,7 +40,7 @@ P5-017 is the **only one with security implications**; it should ship first rega
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P5-017|MockPaymentLinkProvider" && \
+  npm test --workspace=packages/api -- --run -t "P5-017|MockPaymentLinkProvider" && \
   grep -nE "new MockPaymentLinkProvider\(\)" packages/api/src/app.ts | (! grep -v "NODE_ENV !== 'production'")
 ```
 
@@ -82,7 +82,7 @@ The final grep ensures any direct instantiation of the mock is guarded by an exp
 ```bash
 cd /home/user/Serviceos && \
   npm run typecheck && \
-  npm test --workspace=packages/web -- --run --grep "P5-016|InvoicePaymentPage" && \
+  npm test --workspace=packages/web -- --run -t "P5-016|InvoicePaymentPage" && \
   grep -nE "setTimeout" packages/web/src/components/customer/InvoicePaymentPage.tsx | (! grep .) && \
   grep -nE "@stripe/react-stripe-js" packages/web/src/components/customer/InvoicePaymentPage.tsx | grep .
 ```
@@ -113,8 +113,8 @@ cd /home/user/Serviceos && \
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
   npm run typecheck && \
-  npm test --workspace=packages/api -- --run --grep "P5-018|invoice-status" && \
-  npm test --workspace=packages/web -- --run --grep "P5-018|useInvoiceStatus"
+  npm test --workspace=packages/api -- --run -t "P5-018|invoice-status" && \
+  npm test --workspace=packages/web -- --run -t "P5-018|useInvoiceStatus"
 ```
 
 **Pre-flight:** P5-016 merged.
@@ -141,7 +141,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P5-019|invoice-notification|invoice-delivery"
+  npm test --workspace=packages/api -- --run -t "P5-019|invoice-notification|invoice-delivery"
 ```
 
 **Pre-flight:** none (uses existing notification infrastructure).
