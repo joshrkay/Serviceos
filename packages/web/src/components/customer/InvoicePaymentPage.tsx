@@ -42,7 +42,9 @@ function formatMoney(cents: number) {
 
 function formatDate(iso?: string) {
   if (!iso) return '';
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 async function fetchInvoice(token: string): Promise<PublicInvoiceView> {
@@ -85,7 +87,7 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
         <div>
           <h1 className="text-slate-900" style={{ fontSize: '1.6rem', lineHeight: 1.2 }}>Payment received!</h1>
           <p className="text-slate-500 mt-2 leading-relaxed text-sm">
-            Thank you, {customerName.split(' ')[0]}! Your payment of{' '}
+            Thank you, {(customerName || 'there').split(' ')[0] || 'there'}! Your payment of{' '}
             <strong>${formatMoney(totalCents)}</strong> for {invoiceNumber} has been processed.
           </p>
         </div>
@@ -148,6 +150,18 @@ export function InvoicePaymentPage() {
     setCheckoutError(null);
     try {
       const url = await createCheckout(token);
+      // Validate the URL is a legitimate Stripe-hosted checkout page before
+      // navigating — guards against a compromised API response injecting
+      // javascript: URIs or redirecting to arbitrary hosts.
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new Error('Invalid checkout URL returned by server');
+      }
+      if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.stripe.com')) {
+        throw new Error('Unexpected checkout URL returned by server');
+      }
       window.location.href = url;
     } catch (err) {
       setCheckoutError(err instanceof Error ? err.message : 'Could not start checkout. Please try again.');
@@ -177,13 +191,17 @@ export function InvoicePaymentPage() {
   const isOverdue = inv.dueDate ? new Date(inv.dueDate) < new Date() && !inv.isPaid : false;
   const visItems = showAll ? inv.lineItems : inv.lineItems.slice(0, 3);
 
-  // Show paid screen if already paid or Stripe redirected back with success.
-  if (inv.isPaid || paymentSucceeded) {
+  // Show paid screen when:
+  //   • invoice is fully settled (isPaid or amountDueCents === 0)
+  //   • Stripe redirected back with ?success=true (webhook may not have fired yet)
+  // amountDueCents === 0 guard prevents showing the pay form during the
+  // 1–5 second window between Stripe's redirect and webhook processing.
+  if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded) {
     return (
       <PaidScreen
         customerName={inv.customerName}
         invoiceNumber={inv.invoiceNumber}
-        totalCents={inv.amountDueCents > 0 ? inv.amountDueCents : inv.totalCents}
+        totalCents={inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents}
         businessPhone={inv.businessPhone}
       />
     );
@@ -235,7 +253,7 @@ export function InvoicePaymentPage() {
           <span className="text-xs text-slate-500">{inv.invoiceNumber}</span>
         </div>
         <h1 className="text-slate-900 mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
-          Hi, {inv.customerName.split(' ')[0]}!
+          Hi, {(inv.customerName || 'there').split(' ')[0] || 'there'}!
         </h1>
         {inv.dueDate && (
           <p className={`text-sm mb-5 ${isOverdue ? 'text-red-500' : 'text-slate-500'}`}>

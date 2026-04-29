@@ -204,13 +204,30 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   async findByViewToken(token: string): Promise<Invoice | null> {
     const headerRow = await this.withClient(async (client) => {
       const { rows } = await client.query(
-        `SELECT * FROM invoices WHERE view_token = $1 LIMIT 1`,
+        `SELECT * FROM invoices
+         WHERE view_token = $1
+           AND (view_token_expires_at IS NULL OR view_token_expires_at > NOW())
+         ORDER BY created_at DESC
+         LIMIT 1`,
         [token],
       );
       return rows[0] ?? null;
     });
     if (!headerRow) return null;
     return this.findById(headerRow.tenant_id, headerRow.id);
+  }
+
+  async incrementViewCount(tenantId: string, id: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE invoices
+         SET view_count = view_count + 1,
+             first_viewed_at = COALESCE(first_viewed_at, NOW()),
+             updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2`,
+        [id, tenantId],
+      );
+    });
   }
 
   private async insertLineItems(

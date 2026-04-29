@@ -202,6 +202,12 @@ export function createApp() {
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
   }));
+  // Public invoice/estimate pages are unauthenticated but token-gated.
+  // Limit aggressively to slow token brute-force and view-count inflation.
+  app.use('/public', rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: 30,                  // per IP
+  }));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.

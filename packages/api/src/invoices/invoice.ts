@@ -68,6 +68,12 @@ export interface InvoiceRepository {
   update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
+  /**
+   * Atomically increment view_count and set first_viewed_at if not yet set.
+   * Implementations that support it (Pg) should do this in a single UPDATE
+   * to avoid the read-modify-write race when concurrent requests arrive.
+   */
+  incrementViewCount?(tenantId: string, id: string): Promise<void>;
 }
 
 export const INVOICE_STATUS_TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
@@ -324,8 +330,23 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
 
   async findByViewToken(token: string): Promise<Invoice | null> {
     for (const inv of this.invoices.values()) {
-      if (inv.viewToken === token) return { ...inv, lineItems: [...inv.lineItems] };
+      if (inv.viewToken === token) {
+        if (inv.viewTokenExpiresAt && inv.viewTokenExpiresAt < new Date()) return null;
+        return { ...inv, lineItems: [...inv.lineItems] };
+      }
     }
     return null;
+  }
+
+  async incrementViewCount(tenantId: string, id: string): Promise<void> {
+    const inv = this.invoices.get(id);
+    if (!inv || inv.tenantId !== tenantId) return;
+    const now = new Date();
+    this.invoices.set(id, {
+      ...inv,
+      firstViewedAt: inv.firstViewedAt ?? now,
+      viewCount: (inv.viewCount ?? 0) + 1,
+      updatedAt: now,
+    });
   }
 }

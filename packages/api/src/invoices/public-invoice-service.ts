@@ -54,12 +54,19 @@ export class PublicInvoiceService {
 
   async recordView(token: string): Promise<{ recorded: boolean }> {
     const invoice = await this.lookupByToken(token);
-    const now = new Date();
-    await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
-      firstViewedAt: invoice.firstViewedAt ?? now,
-      viewCount: (invoice.viewCount ?? 0) + 1,
-      updatedAt: now,
-    });
+    // Use atomic increment when available (avoids lost-update race when two
+    // requests arrive simultaneously). Falls back to read-modify-write for
+    // the InMemory repo used in tests.
+    if (this.deps.invoiceRepo.incrementViewCount) {
+      await this.deps.invoiceRepo.incrementViewCount(invoice.tenantId, invoice.id);
+    } else {
+      const now = new Date();
+      await this.deps.invoiceRepo.update(invoice.tenantId, invoice.id, {
+        firstViewedAt: invoice.firstViewedAt ?? now,
+        viewCount: (invoice.viewCount ?? 0) + 1,
+        updatedAt: now,
+      });
+    }
     return { recorded: true };
   }
 
@@ -79,6 +86,10 @@ export class PublicInvoiceService {
       throw new ValidationError(
         `Invoice cannot be paid from status: ${invoice.status}`
       );
+    }
+
+    if (invoice.amountDueCents <= 0) {
+      throw new ValidationError('Invoice has no outstanding balance');
     }
 
     // Return existing link if already created.
@@ -125,7 +136,7 @@ export class PublicInvoiceService {
   }
 
   private async lookupByToken(token: string): Promise<Invoice> {
-    if (!token || token.length < 16) {
+    if (!token || token.length < 16 || token.length > 512) {
       throw new ValidationError('Invalid token');
     }
     if (!this.deps.invoiceRepo.findByViewToken) {
@@ -133,6 +144,9 @@ export class PublicInvoiceService {
     }
     const found = await this.deps.invoiceRepo.findByViewToken(token);
     if (!found) {
+      throw new NotFoundError('Invoice', 'token');
+    }
+    if (found.viewTokenExpiresAt && found.viewTokenExpiresAt < new Date()) {
       throw new NotFoundError('Invoice', 'token');
     }
     return found;
