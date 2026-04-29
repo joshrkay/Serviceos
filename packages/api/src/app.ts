@@ -122,6 +122,21 @@ import {
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import {
+  MessageDeliveryProvider,
+  InMemoryDeliveryProvider,
+} from './notifications/delivery-provider';
+import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { SendService } from './notifications/send-service';
+import {
+  InMemoryDispatchRepository,
+  PgDispatchRepository,
+} from './notifications/dispatch-repository';
+import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
+import { PublicEstimateService } from './estimates/public-estimate-service';
+import { createPublicEstimatesRouter } from './routes/public-estimates';
+import { PublicInvoiceService } from './invoices/public-invoice-service';
+import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -258,7 +273,12 @@ class InMemoryWebhookEventRepository {
 export function createApp() {
   const app = express();
 
-  // Body parsing
+  // Stripe webhook needs the raw body for signature verification.
+  // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
+  // and the global json() middleware skips it (body-parser sets req._body = true).
+  app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+  // Body parsing for all other routes
   app.use(express.json());
 
   // Load validated config — must happen before CORS so validateProductionConfig()
@@ -284,6 +304,12 @@ export function createApp() {
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+  }));
+  // Public invoice/estimate pages are unauthenticated but token-gated.
+  // Limit aggressively to slow token brute-force and view-count inflation.
+  app.use('/public', rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: 30,                  // per IP
   }));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
@@ -323,9 +349,18 @@ export function createApp() {
   const webhookSettingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
+  // Constructed early so the Stripe webhook handler can record payments.
+  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   app.use(
     '/webhooks',
-    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+    createWebhookRouter(config, {
+      tenantRepo,
+      settingsRepo: webhookSettingsRepo,
+      invoiceRepo: webhookInvoiceRepo,
+      paymentRepo: webhookPaymentRepo,
+      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    })
   );
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
@@ -404,6 +439,48 @@ export function createApp() {
           fromNumber: process.env.TWILIO_FROM_NUMBER,
         })
       : new NoopFeedbackDispatcher();
+
+  // Customer-facing message delivery for estimates and invoices.
+  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
+  // the env vars, falls back to InMemoryDeliveryProvider so the app
+  // boots in dev without delivery credentials. Send routes return
+  // 503 when sendService is undefined.
+  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
+  const messageDelivery: MessageDeliveryProvider | null =
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_AUTH_TOKEN &&
+    process.env.TWILIO_FROM_NUMBER &&
+    process.env.SENDGRID_API_KEY &&
+    process.env.SENDGRID_FROM_EMAIL
+      ? new TwilioDeliveryProvider({
+          sms: {
+            accountSid: process.env.TWILIO_ACCOUNT_SID,
+            authToken: process.env.TWILIO_AUTH_TOKEN,
+            fromNumber: process.env.TWILIO_FROM_NUMBER,
+          },
+          email: {
+            apiKey: process.env.SENDGRID_API_KEY,
+            fromEmail: process.env.SENDGRID_FROM_EMAIL,
+            fromName: process.env.SENDGRID_FROM_NAME,
+            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+          },
+        })
+      : process.env.NODE_ENV === 'production'
+        ? null
+        : new InMemoryDeliveryProvider();
+  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const sendService = messageDelivery
+    ? new SendService({
+        delivery: messageDelivery,
+        estimateRepo,
+        invoiceRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dispatchRepo,
+        publicBaseUrl,
+      })
+    : undefined;
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -493,10 +570,13 @@ export function createApp() {
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above; invoice delivery is
-  // currently a Noop (logs the dispatch shape, never sends bytes)
-  // until an outbound comms provider is integrated as a follow-up.
-  const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
+  // in-memory or Pg repos already wired above. Invoice delivery
+  // routes through the unified SendService when delivery credentials
+  // are configured; otherwise falls back to the Noop so the proposal
+  // executor stays exercised in dev/test without sending bytes.
+  const invoiceDeliveryProvider = sendService
+    ? new SendServiceInvoiceDeliveryProvider(sendService)
+    : new NoopInvoiceDeliveryProvider();
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
@@ -621,6 +701,28 @@ export function createApp() {
   // Public feedback routes are mounted before /api auth middleware.
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
 
+  // Public unauthenticated estimate approval flow (token-authenticated).
+  const publicEstimateService = new PublicEstimateService({
+    estimateRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+  });
+  app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
+
+  // Public unauthenticated invoice payment flow (token-authenticated).
+  // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
+  const publicInvoiceService = new PublicInvoiceService({
+    invoiceRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : undefined,
+  });
+  app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -668,8 +770,8 @@ export function createApp() {
     })
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
