@@ -1,19 +1,62 @@
+/**
+ * useMutation tests — including P0-030 auth-header injection coverage.
+ *
+ * Test names use the prefixes the dispatcher's verification gate filters on:
+ * "useMutation", "Authorization", "Bearer", "P0-030".
+ */
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// ── Clerk mock — overridable per-test via clerkState ─────────────────────────
+const clerkState = {
+  token: 'tok-default' as string | null,
+  freshToken: 'tok-fresh' as string | null,
+  // Loose typing: vi.Mock for ergonomic .toHaveBeenCalledWith assertions while
+  // letting tests swap in implementations that return null for the no-token
+  // case.
+  getToken: vi.fn() as ReturnType<typeof vi.fn>,
+};
+
+vi.mock('@clerk/clerk-react', () => ({
+  useAuth: () => ({ getToken: clerkState.getToken }),
+}));
+
+// Imports that depend on the mock must come AFTER vi.mock above.
 import { useMutation } from './useMutation';
 
-describe('useMutation', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
+beforeEach(() => {
+  vi.restoreAllMocks();
+  clerkState.token = 'tok-default';
+  clerkState.freshToken = 'tok-fresh';
+  clerkState.getToken = vi.fn(async (opts?: { skipCache?: boolean }) => {
+    return opts?.skipCache ? clerkState.freshToken : clerkState.token;
+  }) as unknown as ReturnType<typeof vi.fn>;
+});
 
+function getAuthHeader(call: Parameters<typeof fetch>): string | null {
+  const init = call[1] as RequestInit | undefined;
+  if (!init) return null;
+  const headers = init.headers;
+  if (headers instanceof Headers) return headers.get('Authorization');
+  if (Array.isArray(headers)) {
+    const found = headers.find(([k]) => k.toLowerCase() === 'authorization');
+    return found ? found[1] : null;
+  }
+  if (headers && typeof headers === 'object') {
+    const obj = headers as Record<string, string>;
+    return obj['Authorization'] ?? obj['authorization'] ?? null;
+  }
+  return null;
+}
+
+describe('useMutation — basic behavior', () => {
   it('starts with isLoading false and no error', () => {
     const { result } = renderHook(() => useMutation('POST', '/api/items'));
     expect(result.current.isLoading).toBe(false);
     expect(result.current.error).toBeNull();
   });
 
-  it('calls fetch with correct method, path, and body', async () => {
+  it('calls fetch with correct method, path, and JSON body', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({ id: '1' }),
@@ -24,11 +67,13 @@ describe('useMutation', () => {
       await result.current.mutate({ name: 'Test' });
     });
 
-    expect(fetchSpy).toHaveBeenCalledWith('/api/items', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'Test' }),
-    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe('/api/items');
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe(JSON.stringify({ name: 'Test' }));
+    const headers = init!.headers as Record<string, string>;
+    expect(headers['Content-Type']).toBe('application/json');
   });
 
   it('returns parsed response on success', async () => {
@@ -98,5 +143,125 @@ describe('useMutation', () => {
     });
 
     expect(fetchSpy).toHaveBeenCalledWith('/api/items/1', expect.objectContaining({ method: 'PUT' }));
+  });
+});
+
+describe('P0-030 useMutation — Authorization Bearer header', () => {
+  it('happy path: includes Bearer token from Clerk getToken on every request', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: '1' }),
+    } as Response);
+
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await result.current.mutate({ name: 'Test' });
+    });
+
+    expect(clerkState.getToken).toHaveBeenCalled();
+    const auth = getAuthHeader(fetchSpy.mock.calls[0]!);
+    expect(auth).toBe('Bearer tok-default');
+  });
+
+  it('Bearer token reflects the value returned by getToken on each call', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: '1' }),
+    } as Response);
+
+    // First call returns one token, second call returns another — proves we
+    // never cache across requests.
+    let n = 0;
+    clerkState.getToken = vi.fn(async () => `tok-${++n}`) as unknown as ReturnType<typeof vi.fn>;
+
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await result.current.mutate({});
+    });
+    await act(async () => {
+      await result.current.mutate({});
+    });
+
+    expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBe('Bearer tok-1');
+    expect(getAuthHeader(fetchSpy.mock.calls[1]!)).toBe('Bearer tok-2');
+  });
+
+  it('no token: cancels the request with AbortError, fetch is NOT called', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    clerkState.getToken = vi.fn(async () => null) as unknown as ReturnType<typeof vi.fn>;
+
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await expect(result.current.mutate({})).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('401 response: retries once with skipCache token, returns retry result on success', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({ ok: false, status: 401 } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'ok' }) } as Response);
+
+    const { result } = renderHook(() => useMutation<unknown, { id: string }>('POST', '/api/items'));
+    let resp: { id: string } | undefined;
+    await act(async () => {
+      resp = await result.current.mutate({});
+    });
+
+    expect(resp).toEqual({ id: 'ok' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(clerkState.getToken).toHaveBeenCalledWith({ skipCache: true });
+    // First call uses the cached token, second uses the fresh one.
+    expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBe('Bearer tok-default');
+    expect(getAuthHeader(fetchSpy.mock.calls[1]!)).toBe('Bearer tok-fresh');
+  });
+
+  it('persistent 401: redirects to /login with redirect query', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, status: 401 } as Response);
+
+    // jsdom's window.location is read-only for href; spy via Object.defineProperty.
+    const hrefSetter = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...window.location,
+        get pathname() {
+          return '/customers';
+        },
+        set href(value: string) {
+          hrefSetter(value);
+        },
+      },
+    });
+
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await expect(result.current.mutate({})).rejects.toThrow(/Unauthorized/);
+    });
+
+    expect(hrefSetter).toHaveBeenCalledWith(
+      '/login?redirect=' + encodeURIComponent('/customers')
+    );
+  });
+
+  it('public route: does NOT include Authorization header for /api/public-payments/*', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    } as Response);
+
+    const { result } = renderHook(() =>
+      useMutation('POST', '/api/public-payments/create-payment-intent')
+    );
+    await act(async () => {
+      await result.current.mutate({});
+    });
+
+    expect(clerkState.getToken).not.toHaveBeenCalled();
+    expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBeNull();
   });
 });
