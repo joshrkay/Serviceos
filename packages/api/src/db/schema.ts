@@ -1249,8 +1249,20 @@ export const MIGRATIONS = {
     ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
     ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
+    -- delay_notice_state.findByKey is a deliberate cross-tenant read
+    -- path (the locked InMemory interface gives the caller no tenantId
+    -- to pass — the idempotency key is globally unique by PRIMARY KEY).
+    -- Allow that read by tolerating a missing GUC: when
+    -- app.current_tenant_id is unset (withClient() path), the second
+    -- arg to current_setting returns NULL instead of erroring, the
+    -- IS NULL short-circuits to true, and the row is returned. All
+    -- write paths (upsert) go through withTenant() which sets the GUC,
+    -- so per-tenant isolation is still enforced on writes.
     CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+      USING (
+        current_setting('app.current_tenant_id', true) IS NULL
+        OR tenant_id = current_setting('app.current_tenant_id', true)::UUID
+      );
   `,
 
   // diff_analyses.id was originally UUID (from migration 011), but the
