@@ -17,6 +17,7 @@ import {
 import { AuditRepository } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { SendService } from '../notifications/send-service';
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -30,7 +31,8 @@ export function createInvoiceRouter(
   settingsRepo: SettingsRepository,
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
-  paymentRepo?: PaymentRepository
+  paymentRepo?: PaymentRepository,
+  sendService?: SendService
 ): Router {
   const router = Router();
 
@@ -208,6 +210,45 @@ export function createInvoiceRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
+    '/:id/send',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!sendService) {
+          res
+            .status(503)
+            .json({
+              error: 'NOT_CONFIGURED',
+              message: 'Message delivery is not configured for this environment',
+            });
+          return;
+        }
+        const parsed = z.object({
+          channel: z.enum(['sms', 'email', 'both']).default('sms'),
+          recipientPhone: z.string().optional(),
+          recipientEmail: z.string().optional(),
+          customMessage: z.string().optional(),
+        }).safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+          return;
+        }
+        const result = await sendService.sendInvoice({
+          tenantId: req.auth!.tenantId,
+          invoiceId: req.params.id,
+          ...parsed.data,
+        });
+        res.status(202).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

@@ -780,7 +780,7 @@ export function TechJobView({ id }: { id: string }) {
                         onClick={() => {
                           const behind = label === 'Yes';
                           setIsRunningBehind(behind);
-                          if (!behind) setDelayMinutes(() => null);
+                          if (!behind) setDelayMinutes(null);
                         }}
                         className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                           selected

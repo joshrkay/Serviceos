@@ -238,9 +238,9 @@ npm test -- --grep "P0-025"
 
 **Dependencies:** P0-006
 
-**Allowed files:** `packages/api/src/app.ts, packages/api/src/shared/env.ts`
+**Allowed files:** `packages/api/src/shared/config.ts, packages/api/test/shared/config.test.ts, packages/api/package.json`
 
-**Build prompt:** Create a Zod schema for all required environment variables and validate at startup before initializing any services. Required vars: `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `CORS_ORIGIN` (must not be `true` in production), `NODE_ENV`. Optional with safe defaults: `PORT`, `LOG_LEVEL`. Remove the hardcoded `'dev-secret-key'` fallback at `app.ts:97` — throw a clear error if `CLERK_SECRET_KEY` is missing. In development mode (`NODE_ENV=development`), allow relaxed defaults. In production, fail fast on any missing required var.
+**Build prompt:** Create a Zod schema for all required environment variables and validate at startup before initializing any services. Required vars: `DATABASE_URL`, `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, `CORS_ORIGIN` (must not be `true` in production), `NODE_ENV`. Optional with safe defaults: `PORT`, `LOG_LEVEL`. The hardcoded `'dev-secret-key'` fallback at `app.ts:97` was already removed (verified 0 hits in `packages/api/src/`); this story focuses on the Zod schema layer in `shared/config.ts`. Extend the existing `validateProductionConfig` function with a `validateEnvSchema(env)` companion that returns a parsed, typed `Env` object. In development mode (`NODE_ENV=development`), allow relaxed defaults. In production, fail fast on any missing required var.
 
 **Review prompt:** Verify the `'dev-secret-key'` fallback is completely removed. Verify CORS_ORIGIN cannot be `true` in production. Verify all env vars listed in deployment docs are validated. Verify the error messages are clear and actionable (tell the operator exactly which var is missing).
 
@@ -481,3 +481,32 @@ npm test --workspace=packages/api -- --run --grep "P0-034|requirePlatformAdmin|f
 - [ ] Grant emits audit row with `actor_type='platform'`
 - [ ] Revoke emits audit row
 - [ ] Migration applies cleanly + RLS NOT applied to `platform_admins` (intentionally cross-tenant)
+
+---
+
+### P0-035 — Slot-conflict pre-check for AI-drafted `create_appointment` proposals
+
+> **Size:** S | **Layer:** AI / Scheduling | **AI Build:** Medium | **Human Review:** Heavy
+
+**Dependencies:** P0-019 (PgAssignment landed in PR #184)
+
+**Allowed files:** `packages/api/src/ai/tasks/create-appointment-task.ts, packages/api/src/ai/tasks/slot-conflict-checker.ts, packages/api/src/ai/tasks/slot-conflict-checker.test.ts, packages/api/src/ai/tasks/create-appointment-task.test.ts`
+
+**Build prompt:** Today the AI task router for `create_appointment` proposals goes straight from intent → proposal without checking whether the slot is actually available. This produces conflicting proposals that waste dispatcher review time and erode trust in the AI. Add a `SlotConflictChecker` that: (1) Takes a proposed appointment window (start, end), the proposed technician id (or "unassigned"), and the customer id. (2) Queries the appointment + assignment repos for any existing appointment that overlaps the window for that technician. (3) Also checks the customer's existing appointments in the window (a customer can't be in two places at once). (4) Returns one of `{ ok: true }`, `{ ok: false, conflict: 'technician_busy', appointmentId, conflictWindow }`, or `{ ok: false, conflict: 'customer_busy', appointmentId, conflictWindow }`. Wire the checker into `create-appointment-task.ts` so that on a conflict, the task produces a `voice_clarification` proposal that asks the user to pick another time or another technician (with the conflicting appointment id surfaced for context), instead of a `create_appointment` proposal that the dispatcher will then have to reject.
+
+**Review prompt:** Verify the checker queries both the appointment table AND the assignment table (an appointment may have multiple assignments, only one of which matters for the proposed tech). Verify the conflict window comparison is exclusive at the boundaries (10:00–11:00 does NOT conflict with 11:00–12:00). Verify the checker bypasses RLS via the agent's tenant context (the AI task runs server-side under a tenant id). Verify the `voice_clarification` proposal payload includes the conflicting appointment id so the user / dispatcher can see what's blocking. Verify the existing happy-path tests still pass — non-conflicting proposals still flow through unchanged.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+npm test --workspace=packages/api -- --run -t "P0-035|SlotConflictChecker|create_appointment"
+```
+
+**Required tests:**
+- [ ] Happy path — non-conflicting slot produces a `create_appointment` proposal
+- [ ] Technician busy — overlapping appointment for same tech produces `voice_clarification`
+- [ ] Customer busy — overlapping appointment for same customer (different tech) produces `voice_clarification`
+- [ ] Boundary — 10:00–11:00 vs 11:00–12:00 — no conflict
+- [ ] Both busy — surfaces the technician conflict (more actionable for dispatcher)
+- [ ] Unassigned tech — only the customer-busy check applies; technician-busy is skipped
+- [ ] Repo error — surfaces a `voice_clarification` with a "could not verify availability — please confirm manually" message rather than crashing the task

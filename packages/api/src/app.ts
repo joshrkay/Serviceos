@@ -47,6 +47,8 @@ import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
 import { InMemoryPaymentRepository } from './invoices/payment';
+import { InMemoryPaymentReadinessRepository } from './invoices/payment-readiness';
+import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
@@ -106,6 +108,12 @@ import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
 import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
+import { PgWebhookEventRepository } from './webhooks/pg-webhook-event';
+import { PgAssignmentRepository } from './appointments/pg-assignment';
+import { PgDocumentRevisionRepository } from './ai/pg-document-revision';
+import { PgDiffAnalysisRepository } from './ai/pg-diff-analysis';
+import { PgDispatchAnalyticsRepository } from './dispatch/pg-analytics';
+import { PgDelayNoticeStateRepository } from './notifications/pg-delay-notice-state';
 import { PgQueue } from './queues/pg-queue';
 import {
   InMemoryFeedbackRequestRepository,
@@ -116,6 +124,22 @@ import {
 import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
 import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
 import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import {
+  MessageDeliveryProvider,
+  InMemoryDeliveryProvider,
+} from './notifications/delivery-provider';
+import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { SendService } from './notifications/send-service';
+import {
+  InMemoryDispatchRepository,
+  PgDispatchRepository,
+} from './notifications/dispatch-repository';
+import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
+import { PublicEstimateService } from './estimates/public-estimate-service';
+import { createPublicEstimatesRouter } from './routes/public-estimates';
+import { PublicInvoiceService } from './invoices/public-invoice-service';
+import { createPublicInvoicesRouter } from './routes/public-invoices';
+import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -152,10 +176,112 @@ import {
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
 
+/**
+ * In-memory dev fallback for the WebhookEvent idempotency repo.
+ *
+ * The Pg-backed variant (PgWebhookEventRepository, P0-020) sits on top of the
+ * `webhook_events` table. There is no shared interface declaration in the
+ * webhook-event source (only the Pg class), and per the P0-023 hard rules we
+ * cannot edit any pg-* source file. To keep the `pool ? Pg : InMemory`
+ * wiring pattern consistent across all six newly wired entities, a minimal
+ * Map-backed stub lives here. It mirrors PgWebhookEventRepository's public
+ * surface (recordReceipt / markProcessed / markFailed / findById /
+ * findUnprocessed) so dev runs without DATABASE_URL still type-check.
+ *
+ * Production and staging ALWAYS use the Pg variant — `createApp()` throws
+ * above if DATABASE_URL is missing in those environments. So this stub is a
+ * dev-only fallback by construction.
+ */
+class InMemoryWebhookEventRepository {
+  private events = new Map<string, {
+    id: string;
+    provider: string;
+    eventId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+    receivedAt: Date;
+    processedAt: Date | null;
+    processingError: string | null;
+  }>();
+
+  private key(provider: string, eventId: string): string {
+    return `${provider}:${eventId}`;
+  }
+
+  async recordReceipt(
+    provider: string,
+    eventId: string,
+    eventType: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ inserted: boolean; record: {
+    id: string;
+    provider: string;
+    eventId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+    receivedAt: Date;
+    processedAt: Date | null;
+    processingError: string | null;
+  } }> {
+    if (!provider) throw new Error('provider is required');
+    if (!eventId) throw new Error('eventId is required');
+    const k = this.key(provider, eventId);
+    const existing = this.events.get(k);
+    if (existing) {
+      return { inserted: false, record: { ...existing } };
+    }
+    const record = {
+      id: `${k}:${this.events.size + 1}`,
+      provider,
+      eventId,
+      eventType,
+      payload,
+      receivedAt: new Date(),
+      processedAt: null,
+      processingError: null,
+    };
+    this.events.set(k, record);
+    return { inserted: true, record: { ...record } };
+  }
+
+  async markProcessed(provider: string, eventId: string): Promise<void> {
+    const r = this.events.get(this.key(provider, eventId));
+    if (r) {
+      r.processedAt = new Date();
+      r.processingError = null;
+    }
+  }
+
+  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
+    const r = this.events.get(this.key(provider, eventId));
+    if (r) {
+      r.processingError = error;
+    }
+  }
+
+  async findById(provider: string, eventId: string) {
+    const r = this.events.get(this.key(provider, eventId));
+    return r ? { ...r } : null;
+  }
+
+  async findUnprocessed(limit = 100) {
+    return Array.from(this.events.values())
+      .filter((r) => r.processedAt === null && r.processingError === null)
+      .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+}
+
 export function createApp() {
   const app = express();
 
-  // Body parsing
+  // Stripe webhook needs the raw body for signature verification.
+  // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
+  // and the global json() middleware skips it (body-parser sets req._body = true).
+  app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+  // Body parsing for all other routes
   app.use(express.json());
 
   // Load validated config — must happen before CORS so validateProductionConfig()
@@ -181,6 +307,12 @@ export function createApp() {
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
+  }));
+  // Public invoice/estimate pages are unauthenticated but token-gated.
+  // Limit aggressively to slow token brute-force and view-count inflation.
+  app.use('/public', rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: 30,                  // per IP
   }));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
@@ -220,9 +352,18 @@ export function createApp() {
   const webhookSettingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
+  // Constructed early so the Stripe webhook handler can record payments.
+  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   app.use(
     '/webhooks',
-    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+    createWebhookRouter(config, {
+      tenantRepo,
+      settingsRepo: webhookSettingsRepo,
+      invoiceRepo: webhookInvoiceRepo,
+      paymentRepo: webhookPaymentRepo,
+      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    })
   );
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
@@ -238,10 +379,22 @@ export function createApp() {
   const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
-  const assignmentRepo     = new InMemoryAssignmentRepository();
+  const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  // P5-017: Resolve the payment-link provider via the factory so the mock
+  // is hard-blocked in production. The factory throws at boot if
+  // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
+  // and emits a loud dev-mode warning when the mock is used.
+  const paymentReadinessRepo = new InMemoryPaymentReadinessRepository();
+  const paymentLinkProvider = createPaymentLinkProvider(process.env, {
+    readinessRepo: paymentReadinessRepo,
+  });
+  // Reference the variable so TS doesn't drop it; the provider will be
+  // wired into routes/workers in a follow-up. The factory call itself is
+  // load-bearing — it asserts the production guard at boot time.
+  void paymentLinkProvider;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
@@ -265,6 +418,15 @@ export function createApp() {
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
+  // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
+  // is wired here so a future webhook handler can pull it from app-level
+  // wiring without re-instantiating. The webhooks/routes.ts router still
+  // uses its own InMemoryWebhookRepository for the legacy
+  // (provider/event/svix-id) shape — that one is unchanged.
+  const webhookEventRepo   = pool ? new PgWebhookEventRepository(pool)    : new InMemoryWebhookEventRepository();
+  // Reference the variable so TS doesn't drop it; downstream consumers will
+  // attach in a follow-up PR.
+  void webhookEventRepo;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -292,6 +454,48 @@ export function createApp() {
           fromNumber: process.env.TWILIO_FROM_NUMBER,
         })
       : new NoopFeedbackDispatcher();
+
+  // Customer-facing message delivery for estimates and invoices.
+  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
+  // the env vars, falls back to InMemoryDeliveryProvider so the app
+  // boots in dev without delivery credentials. Send routes return
+  // 503 when sendService is undefined.
+  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
+  const messageDelivery: MessageDeliveryProvider | null =
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_AUTH_TOKEN &&
+    process.env.TWILIO_FROM_NUMBER &&
+    process.env.SENDGRID_API_KEY &&
+    process.env.SENDGRID_FROM_EMAIL
+      ? new TwilioDeliveryProvider({
+          sms: {
+            accountSid: process.env.TWILIO_ACCOUNT_SID,
+            authToken: process.env.TWILIO_AUTH_TOKEN,
+            fromNumber: process.env.TWILIO_FROM_NUMBER,
+          },
+          email: {
+            apiKey: process.env.SENDGRID_API_KEY,
+            fromEmail: process.env.SENDGRID_FROM_EMAIL,
+            fromName: process.env.SENDGRID_FROM_NAME,
+            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+          },
+        })
+      : process.env.NODE_ENV === 'production'
+        ? null
+        : new InMemoryDeliveryProvider();
+  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const sendService = messageDelivery
+    ? new SendService({
+        delivery: messageDelivery,
+        estimateRepo,
+        invoiceRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dispatchRepo,
+        publicBaseUrl,
+      })
+    : undefined;
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -340,11 +544,15 @@ export function createApp() {
   );
 
   // ── Diff-analysis worker (P0-018): compares two revision snapshots and
-  // persists a structured field-level delta. The worker, repo, and
-  // revision store are all in-memory today — PgDocumentRevisionRepository
-  // lands when estimate/invoice revisions graduate from dev fixtures.
-  const documentRevisionRepo = new InMemoryDocumentRevisionRepository();
-  const diffAnalysisRepo = new InMemoryDiffAnalysisRepository();
+  // persists a structured field-level delta. P0-023 graduates the revision
+  // store and the analysis store onto Postgres when DATABASE_URL is set —
+  // dev still uses the in-memory variants so tests boot without a DB.
+  const documentRevisionRepo = pool
+    ? new PgDocumentRevisionRepository(pool)
+    : new InMemoryDocumentRevisionRepository();
+  const diffAnalysisRepo = pool
+    ? new PgDiffAnalysisRepository(pool)
+    : new InMemoryDiffAnalysisRepository();
   const diffAnalysisWorker = createDiffAnalysisWorker(
     documentRevisionRepo,
     diffAnalysisRepo
@@ -377,11 +585,16 @@ export function createApp() {
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above; invoice delivery is
-  // currently a Noop (logs the dispatch shape, never sends bytes)
-  // until an outbound comms provider is integrated as a follow-up.
-  const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
-  const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
+  // in-memory or Pg repos already wired above. Invoice delivery
+  // routes through the unified SendService when delivery credentials
+  // are configured; otherwise falls back to the Noop so the proposal
+  // executor stays exercised in dev/test without sending bytes.
+  const invoiceDeliveryProvider = sendService
+    ? new SendServiceInvoiceDeliveryProvider(sendService)
+    : new NoopInvoiceDeliveryProvider();
+  const dispatchAnalyticsRepo = pool
+    ? new PgDispatchAnalyticsRepository(pool)
+    : new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
@@ -394,7 +607,9 @@ export function createApp() {
     analyticsRepo: dispatchAnalyticsRepo,
   });
   const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
-  const delayNoticeStateRepo = new InMemoryDelayNoticeStateRepository();
+  const delayNoticeStateRepo = pool
+    ? new PgDelayNoticeStateRepository(pool)
+    : new InMemoryDelayNoticeStateRepository();
   const delayNotificationCoordinator = new DelayNotificationCoordinator(
     queue,
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
@@ -501,6 +716,43 @@ export function createApp() {
   // Public feedback routes are mounted before /api auth middleware.
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
 
+  // Public unauthenticated estimate approval flow (token-authenticated).
+  const publicEstimateService = new PublicEstimateService({
+    estimateRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+  });
+  app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
+
+  // Public unauthenticated invoice payment flow (token-authenticated).
+  // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
+  const publicInvoiceService = new PublicInvoiceService({
+    invoiceRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : undefined,
+  });
+  app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
+
+  // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
+  // Returns a `client_secret` so the customer's browser can confirm the
+  // payment directly with Stripe — card data never touches our server.
+  // Lives under /api/public-payments (not /public) so the frontend's
+  // existing /api/* base URL config picks it up.
+  app.use(
+    '/api/public-payments',
+    createPublicPaymentsRouter({
+      invoiceRepo,
+      stripeConfig: process.env.STRIPE_SECRET_KEY
+        ? { apiKey: process.env.STRIPE_SECRET_KEY }
+        : null,
+    }),
+  );
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -548,8 +800,8 @@ export function createApp() {
     })
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
@@ -593,6 +845,30 @@ export function createApp() {
     const { statusCode, body } = toErrorResponse(err);
     res.status(statusCode).json(body);
   });
+
+  // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so
+  // Railway's stop signal doesn't strand active connections. We use
+  // `process.once` so repeated `createApp()` calls inside the test runner
+  // don't stack handlers, and we exit only when the pool finishes draining
+  // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
+  // this handler only takes responsibility for the DB pool.
+  if (pool) {
+    const shutdown = async (signal: NodeJS.Signals) => {
+      try {
+        // eslint-disable-next-line no-console
+        console.log(`[app] ${signal} received — closing pg pool`);
+        await Promise.race([
+          pool.end(),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[app] pool.end() failed', err);
+      }
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+  }
 
   return app;
 }

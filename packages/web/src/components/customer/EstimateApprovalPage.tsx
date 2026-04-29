@@ -5,10 +5,44 @@ import {
   MapPin, FileText, Calendar, Clock, User,
 } from 'lucide-react';
 import { estimates, customers, calcEstimateTotal } from '../../data/mock-data';
+import { apiFetch } from '../../utils/api-fetch';
+
+interface PublicEstimateView {
+  id: string;
+  estimateNumber: string;
+  status: string;
+  customerName: string;
+  customerAddress?: string;
+  businessName: string;
+  businessPhone?: string;
+  businessEmail?: string;
+  lineItems: Array<{
+    description: string;
+    quantity: number;
+    unitPriceCents: number;
+    totalCents: number;
+  }>;
+  totalCents: number;
+  subtotalCents: number;
+  taxCents: number;
+  discountCents: number;
+  validUntil?: string;
+  customerMessage?: string;
+  isActionable: boolean;
+  acceptedAt?: string;
+  acceptedByName?: string;
+  rejectedAt?: string;
+  rejectedReason?: string;
+  isExpired: boolean;
+}
 
 // ─── Signature canvas ─────────────────────────────────────────────────────
-function SignatureCanvas({ onChange }: { onChange: (hasSig: boolean) => void }) {
-  const canvasRef  = useRef<HTMLCanvasElement>(null);
+function SignatureCanvas({ onChange, canvasRef: externalRef }: {
+  onChange: (hasSig: boolean) => void;
+  canvasRef?: React.MutableRefObject<HTMLCanvasElement | null>;
+}) {
+  const localRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = externalRef ?? (localRef as unknown as React.MutableRefObject<HTMLCanvasElement | null>);
   const drawing    = useRef(false);
   const [hasSig, setHasSig] = useState(false);
 
@@ -98,19 +132,51 @@ function SignatureCanvas({ onChange }: { onChange: (hasSig: boolean) => void }) 
 
 // ─── Approval sheet ───────────────────────────────────────────────────────
 function ApprovalSheet({
-  estimateNumber, customer, total, onClose, onConfirm,
+  estimateNumber, customer, total, token, onClose, onConfirm,
 }: {
   estimateNumber: string; customer: string; total: number;
-  onClose: () => void; onConfirm: () => void;
+  /** When set, submit calls the real /public/estimates/:token/approve endpoint. */
+  token?: string;
+  onClose: () => void; onConfirm: (view?: PublicEstimateView) => void;
 }) {
+  const sigRef = useRef<HTMLCanvasElement | null>(null);
   const [name,    setName]    = useState(customer);
   const [hasSig,  setHasSig]  = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState<string | null>(null);
 
-  function submit() {
+  async function submit() {
     if (!name.trim() || !hasSig) return;
     setLoading(true);
-    setTimeout(() => { setLoading(false); onConfirm(); }, 1400);
+    setError(null);
+    try {
+      let view: PublicEstimateView | undefined;
+      if (token) {
+        const signatureData = sigRef.current?.toDataURL('image/png');
+        const res = await apiFetch(`/public/estimates/${token}/approve`, {
+          method: 'POST',
+          body: JSON.stringify({
+            acceptedByName: name.trim(),
+            // Keep payload size sane — most signatures fit under ~50KB.
+            signatureData: signatureData && signatureData.length < 200_000
+              ? signatureData
+              : undefined,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({} as any));
+          throw new Error(body.message ?? `HTTP ${res.status}`);
+        }
+        view = await res.json() as PublicEstimateView;
+      } else {
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+      setLoading(false);
+      onConfirm(view);
+    } catch (err) {
+      setLoading(false);
+      setError(err instanceof Error ? err.message : 'Approval failed');
+    }
   }
 
   return (
@@ -157,8 +223,12 @@ function ApprovalSheet({
           {/* Signature */}
           <div className="mb-6">
             <label className="block text-xs text-slate-500 mb-1.5">Signature</label>
-            <SignatureCanvas onChange={setHasSig} />
+            <SignatureCanvas onChange={setHasSig} canvasRef={sigRef} />
           </div>
+
+          {error && (
+            <p className="text-xs text-red-600 mb-3 bg-red-50 rounded-lg px-3 py-2">{error}</p>
+          )}
 
           {/* Date */}
           <div className="flex items-center justify-between text-xs text-slate-400 mb-6">
@@ -381,20 +451,104 @@ export function EstimateApprovalPage() {
   const [accepted,     setAccept] = useState(false);
   const [showAllItems, setAll]    = useState(false);
 
-  const est = estimates.find(e =>
+  // Try the real public API first. Falls back to mock data for the demo
+  // /e/<estimate-number-slug> URLs that don't correspond to real tokens.
+  const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
+  const [apiLoading, setApiLoading] = useState(true);
+  const [apiNotFound, setApiNotFound] = useState(false);
+
+  useEffect(() => {
+    if (!id) {
+      setApiLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/public/estimates/${encodeURIComponent(id)}`);
+        if (cancelled) return;
+        if (res.status === 404) {
+          setApiNotFound(true);
+          setApiLoading(false);
+          return;
+        }
+        if (!res.ok) {
+          setApiLoading(false);
+          return;
+        }
+        const view = await res.json() as PublicEstimateView;
+        setApiView(view);
+        if (view.status === 'accepted') setAccept(true);
+        // Fire-and-forget view tracking.
+        apiFetch(`/public/estimates/${encodeURIComponent(id)}/view`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        }).catch(() => {});
+      } catch {
+        // Network error — fall back to mock data path silently.
+      } finally {
+        if (!cancelled) setApiLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [id]);
+
+  // Mock-data fallback (used when running against a fixture URL or when
+  // the public API isn't reachable in dev).
+  const mockEst = estimates.find(e =>
     e.id === id || e.estimateNumber.toLowerCase().replace('-', '') === id?.toLowerCase()
   ) ?? estimates[0];
+  const mockCustomer = customers.find(c => c.id === mockEst.customerId);
 
-  const customer = customers.find(c => c.id === est.customerId);
-  const total    = calcEstimateTotal(est);
-  const visItems = showAllItems ? est.lineItems : est.lineItems.slice(0, 3);
+  const usingApi = apiView !== null;
+  const estimateNumber  = apiView?.estimateNumber  ?? mockEst.estimateNumber;
+  const businessName    = apiView?.businessName    ?? 'Fieldly Pro Services';
+  const businessPhone   = apiView?.businessPhone   ?? '(512) 555-0000';
+  const customerName    = apiView?.customerName    ?? mockEst.customer;
+  const customerAddress = apiView?.customerAddress ?? mockCustomer?.address ?? '';
+  const description     = apiView?.customerMessage ?? mockEst.description;
+  const total           = apiView ? apiView.totalCents / 100 : calcEstimateTotal(mockEst);
+  const validUntilText  = apiView?.validUntil
+    ? apiView.validUntil.slice(0, 10)
+    : mockEst.validUntil;
+  const lineItems       = apiView
+    ? apiView.lineItems.map(li => ({
+        description: li.description,
+        qty: li.quantity,
+        rate: li.unitPriceCents / 100,
+      }))
+    : mockEst.lineItems;
+  const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
+  const isExpired       = apiView?.isExpired ?? false;
+  const isAlreadyDeclined = apiView?.status === 'rejected';
+
+  if (apiLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
+      </div>
+    );
+  }
+
+  if (apiNotFound && !usingApi) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
+        <div className="max-w-md text-center">
+          <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>Link not found</h1>
+          <p className="text-sm text-slate-500">
+            This estimate link is invalid or has been revoked. Please contact the business that sent it.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (accepted) return (
     <SuccessScreen
-      customer={est.customer}
-      estimateNumber={est.estimateNumber}
-      description={est.description}
-      address={customer?.address ?? ''}
+      customer={customerName}
+      estimateNumber={estimateNumber}
+      description={description}
+      address={customerAddress}
       total={total}
     />
   );
@@ -407,20 +561,19 @@ export function EstimateApprovalPage() {
           <div className="max-w-lg mx-auto flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
-                <span className="text-white" style={{ fontSize: 13 }}>F</span>
+                <span className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
               </div>
               <div>
-                <p className="text-sm text-slate-800">Fieldly Pro Services</p>
-                <p className="text-xs text-slate-400">Austin, TX</p>
+                <p className="text-sm text-slate-800">{businessName}</p>
+                {businessPhone && <p className="text-xs text-slate-400">{businessPhone}</p>}
               </div>
             </div>
             <div className="flex items-center gap-3">
-              <a href="tel:5125550000" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-                <Phone size={14} className="text-slate-600" />
-              </a>
-              <a href="mailto:info@fieldly.pro" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-                <Mail size={14} className="text-slate-600" />
-              </a>
+              {businessPhone && (
+                <a href={`tel:${businessPhone.replace(/\D/g, '')}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
+                  <Phone size={14} className="text-slate-600" />
+                </a>
+              )}
             </div>
           </div>
         </div>
@@ -429,25 +582,40 @@ export function EstimateApprovalPage() {
           {/* Estimate badge */}
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs text-slate-500 uppercase tracking-widest">Estimate</span>
-            <span className="text-xs text-slate-500">{est.estimateNumber}</span>
+            <span className="text-xs text-slate-500">{estimateNumber}</span>
           </div>
 
           {/* Customer */}
           <h1 className="text-slate-900 mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
-            Hi, {est.customer.split(' ')[0]}!
+            Hi, {customerName.split(' ')[0]}!
           </h1>
-          <p className="text-sm text-slate-500 mb-5">
-            {customer?.address}
-          </p>
+          {customerAddress && (
+            <p className="text-sm text-slate-500 mb-5">
+              {customerAddress}
+            </p>
+          )}
+
+          {isExpired && (
+            <div className="mb-5 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3">
+              <p className="text-sm text-amber-900">This estimate has expired.</p>
+              <p className="text-xs text-amber-700 mt-0.5">Please contact the business for an updated quote.</p>
+            </div>
+          )}
+          {isAlreadyDeclined && (
+            <div className="mb-5 rounded-xl bg-slate-100 border border-slate-200 px-4 py-3">
+              <p className="text-sm text-slate-800">You declined this estimate.</p>
+              {apiView?.rejectedReason && <p className="text-xs text-slate-500 mt-0.5">{apiView.rejectedReason}</p>}
+            </div>
+          )}
 
           {/* Service description */}
           <div className="bg-white rounded-2xl border border-slate-200 px-5 py-4 mb-4">
             <p className="text-xs text-slate-400 mb-1">Service</p>
-            <p className="text-sm text-slate-800">{est.description}</p>
-            {est.validUntil && (
+            <p className="text-sm text-slate-800">{description}</p>
+            {validUntilText && (
               <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
                 <span className="size-1.5 rounded-full bg-amber-400 inline-block" />
-                Valid until {est.validUntil}
+                Valid until {validUntilText}
               </p>
             )}
           </div>
@@ -470,12 +638,12 @@ export function EstimateApprovalPage() {
                 </div>
               ))}
             </div>
-            {est.lineItems.length > 3 && (
+            {lineItems.length > 3 && (
               <button
                 onClick={() => setAll(v => !v)}
                 className="flex items-center justify-center gap-1 w-full py-2.5 text-xs text-slate-400 hover:text-slate-600 border-t border-slate-100 transition-colors"
               >
-                {showAllItems ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {est.lineItems.length - 3} more items</>}
+                {showAllItems ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {lineItems.length - 3} more items</>}
               </button>
             )}
             <div className="flex items-center justify-between px-5 py-4 bg-slate-900 rounded-b-2xl">
@@ -486,35 +654,125 @@ export function EstimateApprovalPage() {
 
           {/* Notes */}
           <p className="text-xs text-slate-400 text-center px-4 mb-6 leading-relaxed">
-            This estimate is valid until {est.validUntil ?? 'Mar 24, 2026'}. Prices may change if site conditions differ from what was quoted. Contact us with any questions.
+            {validUntilText
+              ? `This estimate is valid until ${validUntilText}. `
+              : ''}
+            Prices may change if site conditions differ from what was quoted. Contact us with any questions.
           </p>
         </div>
 
         {/* Fixed CTA */}
-        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
-          <div className="max-w-lg mx-auto">
-            <button
-              onClick={() => setAppr(true)}
-              className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
-            >
-              <Check size={16} /> Accept this estimate
-            </button>
-            <p className="text-center text-xs text-slate-400 mt-2 pb-1">
-              No account needed · Fieldly Pro Services
-            </p>
+        {apiView?.isActionable !== false && !isExpired && !isAlreadyDeclined && (
+          <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
+            <div className="max-w-lg mx-auto">
+              <button
+                onClick={() => setAppr(true)}
+                className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
+              >
+                <Check size={16} /> Accept this estimate
+              </button>
+              {usingApi && id && (
+                <DeclineButton
+                  token={id}
+                  onDeclined={(view) => setApiView(view)}
+                />
+              )}
+              <p className="text-center text-xs text-slate-400 mt-2 pb-1">
+                No account needed · {businessName}
+              </p>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {showApproval && (
         <ApprovalSheet
-          estimateNumber={est.estimateNumber}
-          customer={est.customer}
+          estimateNumber={estimateNumber}
+          customer={customerName}
           total={total}
+          token={usingApi ? id : undefined}
           onClose={() => setAppr(false)}
-          onConfirm={() => { setAppr(false); setAccept(true); }}
+          onConfirm={(view) => {
+            if (view) setApiView(view);
+            setAppr(false);
+            setAccept(true);
+          }}
         />
       )}
     </>
+  );
+}
+
+// ─── Decline button ────────────────────────────────────────────────────────
+function DeclineButton({ token, onDeclined }: {
+  token: string;
+  onDeclined: (view: PublicEstimateView) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/public/estimates/${encodeURIComponent(token)}/decline`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason.trim() || undefined }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as any));
+        throw new Error(body.message ?? `HTTP ${res.status}`);
+      }
+      const view = await res.json() as PublicEstimateView;
+      onDeclined(view);
+      setConfirming(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Decline failed');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        onClick={() => setConfirming(true)}
+        className="block mx-auto mt-2 text-xs text-slate-500 hover:text-slate-700 underline underline-offset-2"
+      >
+        Decline this estimate
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-xl bg-slate-50 border border-slate-200 px-3 py-3">
+      <p className="text-xs text-slate-600 mb-2">Decline this estimate? You can include a brief reason (optional).</p>
+      <textarea
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        rows={2}
+        placeholder="e.g. Going with another quote"
+        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:outline-none focus:border-slate-400 bg-white resize-none"
+      />
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+      <div className="flex gap-2 mt-2">
+        <button
+          onClick={() => setConfirming(false)}
+          disabled={submitting}
+          className="flex-1 rounded-lg border border-slate-200 bg-white py-2 text-xs text-slate-700 hover:bg-slate-50"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={submit}
+          disabled={submitting}
+          className="flex-1 rounded-lg bg-slate-700 text-white py-2 text-xs hover:bg-slate-800 disabled:opacity-60"
+        >
+          {submitting ? 'Declining…' : 'Confirm decline'}
+        </button>
+      </div>
+    </div>
   );
 }
