@@ -577,7 +577,9 @@ export function createApp() {
   const invoiceDeliveryProvider = sendService
     ? new SendServiceInvoiceDeliveryProvider(sendService)
     : new NoopInvoiceDeliveryProvider();
-  const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
+  const dispatchAnalyticsRepo = pool
+    ? new PgDispatchAnalyticsRepository(pool)
+    : new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
