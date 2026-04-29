@@ -107,6 +107,8 @@ export class SendService {
 
     const businessName = await this.resolveBusinessName(input.tenantId);
     const viewToken = estimate.viewToken ?? generateViewToken();
+    const viewTokenExpiresAt =
+      estimate.viewTokenExpiresAt ?? new Date(Date.now() + ESTIMATE_TOKEN_TTL_MS);
     const viewUrl = this.buildViewUrl('e', viewToken);
 
     const channels = resolveChannels({
@@ -116,16 +118,23 @@ export class SendService {
       recipientEmail: input.recipientEmail,
     });
 
-    const sent: SendResult['channelsSent'] = [];
-    const errors: string[] = [];
-
-    for (const target of channels) {
-      try {
-        const dispatchId = await this.dispatchOne({
+    // Run all channels in parallel — halves p50 latency for channel: 'both'.
+    // Any individual channel failure is recorded as a failed dispatch row in
+    // the audit table without aborting the others (Promise.allSettled).
+    const sendStartedAt = Date.now();
+    const results = await Promise.allSettled(
+      channels.map((target) =>
+        this.dispatchOne({
           tenantId: input.tenantId,
           entityType: 'estimate',
           entityId: estimate.id,
           target,
+          idempotencyKey: this.buildIdempotencyKey(
+            'estimate',
+            estimate.id,
+            target.channel,
+            sendStartedAt
+          ),
           render: () =>
             target.channel === 'sms'
               ? this.renderEstimateSmsMessage(target.recipient, {
@@ -144,16 +153,24 @@ export class SendService {
                   viewUrl,
                   customMessage: input.customMessage,
                 }),
-        });
-        sent.push(dispatchId);
-      } catch (err) {
+        })
+      )
+    );
+
+    const sent: SendResult['channelsSent'] = [];
+    const errors: string[] = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        sent.push(r.value);
+      } else {
+        const target = channels[i];
         errors.push(
           `${target.channel} to ${target.recipient}: ${
-            err instanceof Error ? err.message : 'unknown error'
+            r.reason instanceof Error ? r.reason.message : 'unknown error'
           }`
         );
       }
-    }
+    });
 
     if (sent.length === 0) {
       throw new ValidationError(
@@ -164,6 +181,7 @@ export class SendService {
     const now = new Date();
     await this.deps.estimateRepo.update(input.tenantId, estimate.id, {
       viewToken,
+      viewTokenExpiresAt,
       sentAt: now,
       lastDispatchId: sent[sent.length - 1].dispatchId,
       status: estimate.status === 'draft' || estimate.status === 'ready_for_review'
@@ -204,6 +222,8 @@ export class SendService {
 
     const businessName = await this.resolveBusinessName(input.tenantId);
     const viewToken = invoice.viewToken ?? generateViewToken();
+    const viewTokenExpiresAt =
+      invoice.viewTokenExpiresAt ?? new Date(Date.now() + INVOICE_TOKEN_TTL_MS);
     const viewUrl = this.buildViewUrl('pay', viewToken);
 
     const channels = resolveChannels({
@@ -213,16 +233,20 @@ export class SendService {
       recipientEmail: input.recipientEmail,
     });
 
-    const sent: SendResult['channelsSent'] = [];
-    const errors: string[] = [];
-
-    for (const target of channels) {
-      try {
-        const dispatchId = await this.dispatchOne({
+    const sendStartedAt = Date.now();
+    const results = await Promise.allSettled(
+      channels.map((target) =>
+        this.dispatchOne({
           tenantId: input.tenantId,
           entityType: 'invoice',
           entityId: invoice.id,
           target,
+          idempotencyKey: this.buildIdempotencyKey(
+            'invoice',
+            invoice.id,
+            target.channel,
+            sendStartedAt
+          ),
           render: () =>
             target.channel === 'sms'
               ? this.renderInvoiceSmsMessage(target.recipient, {
@@ -243,16 +267,24 @@ export class SendService {
                   dueDateIso: invoice.dueDate?.toISOString(),
                   customMessage: input.customMessage,
                 }),
-        });
-        sent.push(dispatchId);
-      } catch (err) {
+        })
+      )
+    );
+
+    const sent: SendResult['channelsSent'] = [];
+    const errors: string[] = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        sent.push(r.value);
+      } else {
+        const target = channels[i];
         errors.push(
           `${target.channel} to ${target.recipient}: ${
-            err instanceof Error ? err.message : 'unknown error'
+            r.reason instanceof Error ? r.reason.message : 'unknown error'
           }`
         );
       }
-    }
+    });
 
     if (sent.length === 0) {
       throw new ValidationError(
@@ -263,6 +295,7 @@ export class SendService {
     const now = new Date();
     await this.deps.invoiceRepo.update(input.tenantId, invoice.id, {
       viewToken,
+      viewTokenExpiresAt,
       sentAt: now,
       lastDispatchId: sent[sent.length - 1].dispatchId,
       updatedAt: now,
@@ -284,6 +317,22 @@ export class SendService {
   private buildViewUrl(prefix: 'e' | 'pay', token: string): string {
     const base = this.deps.publicBaseUrl.replace(/\/$/, '');
     return `${base}/${prefix}/${token}`;
+  }
+
+  /**
+   * Stable per-attempt key. Quantizes the timestamp to a 1-minute window
+   * so a user double-clicking "Send" within seconds dedupes at the
+   * provider, while a deliberate re-send 5 minutes later is treated as
+   * a new dispatch.
+   */
+  private buildIdempotencyKey(
+    entityType: 'estimate' | 'invoice',
+    entityId: string,
+    channel: 'sms' | 'email',
+    nowMs: number
+  ): string {
+    const minute = Math.floor(nowMs / 60_000);
+    return `${entityType}:${entityId}:${channel}:${minute}`;
   }
 
   private renderEstimateSmsMessage(
@@ -324,25 +373,50 @@ export class SendService {
     entityId: string;
     target: ChannelTarget;
     render: () => SmsMessage | EmailMessage;
+    /** Stable dedupe key — provider should reject identical retries within ~24h. */
+    idempotencyKey: string;
   }): Promise<SendResult['channelsSent'][number]> {
     const message = args.render();
     let providerMessageId: string;
     let provider: string;
 
-    if (args.target.channel === 'sms') {
-      const result = await this.deps.delivery.sendSms({
-        ...(message as SmsMessage),
-        tenantId: args.tenantId,
-      });
-      providerMessageId = result.providerMessageId;
-      provider = result.provider;
-    } else {
-      const result = await this.deps.delivery.sendEmail({
-        ...(message as EmailMessage),
-        tenantId: args.tenantId,
-      });
-      providerMessageId = result.providerMessageId;
-      provider = result.provider;
+    try {
+      if (args.target.channel === 'sms') {
+        const result = await this.deps.delivery.sendSms({
+          ...(message as SmsMessage),
+          tenantId: args.tenantId,
+          idempotencyKey: args.idempotencyKey,
+        });
+        providerMessageId = result.providerMessageId;
+        provider = result.provider;
+      } else {
+        const result = await this.deps.delivery.sendEmail({
+          ...(message as EmailMessage),
+          tenantId: args.tenantId,
+          idempotencyKey: args.idempotencyKey,
+        });
+        providerMessageId = result.providerMessageId;
+        provider = result.provider;
+      }
+    } catch (err) {
+      // Audit the failed attempt before propagating, so support has a
+      // record of every channel attempt (success or failure).
+      await this.deps.dispatchRepo
+        .create({
+          tenantId: args.tenantId,
+          entityType: args.entityType,
+          entityId: args.entityId,
+          channel: args.target.channel,
+          recipient: args.target.recipient,
+          provider: 'unknown',
+          status: 'failed',
+          errorMessage: err instanceof Error ? err.message : 'unknown error',
+          idempotencyKey: args.idempotencyKey,
+        })
+        .catch(() => {
+          // Best-effort audit — never let failure-to-record-failure mask the original error.
+        });
+      throw err;
     }
 
     const dispatch = await this.deps.dispatchRepo.create({
@@ -354,6 +428,7 @@ export class SendService {
       provider,
       providerMessageId,
       status: 'sent',
+      idempotencyKey: args.idempotencyKey,
     });
 
     return {
@@ -410,3 +485,8 @@ function resolveChannels(args: {
 function generateViewToken(): string {
   return randomBytes(24).toString('base64url');
 }
+
+/** 90 days for estimate view links — matches typical quote validity windows. */
+const ESTIMATE_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+/** 60 days for invoice payment links — covers Net-30 plus dunning. */
+const INVOICE_TOKEN_TTL_MS = 60 * 24 * 60 * 60 * 1000;

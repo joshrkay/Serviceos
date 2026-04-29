@@ -127,6 +127,8 @@ import {
   PgDispatchRepository,
 } from './notifications/dispatch-repository';
 import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
+import { PublicEstimateService } from './estimates/public-estimate-service';
+import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -556,6 +558,15 @@ export function createApp() {
 
   // Public feedback routes are mounted before /api auth middleware.
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+
+  // Public unauthenticated estimate approval flow (token-authenticated).
+  const publicEstimateService = new PublicEstimateService({
+    estimateRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+  });
+  app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';

@@ -18,10 +18,26 @@ export interface Estimate {
   internalNotes?: string;
   /** Random URL-safe token for unauthenticated customer view links. Set on first send. */
   viewToken?: string;
+  /** Timestamp the view_token becomes invalid (typically sent_at + 90 days). */
+  viewTokenExpiresAt?: Date;
   /** Timestamp of the most recent send. */
   sentAt?: Date;
   /** ID of the most recent message_dispatches row. */
   lastDispatchId?: string;
+  /** First time the customer opened the public link. */
+  firstViewedAt?: Date;
+  /** Total number of times the public link has been opened. */
+  viewCount?: number;
+  /** Customer-side acceptance — captured at the public approval route. */
+  acceptedAt?: Date;
+  acceptedByName?: string;
+  acceptedByIp?: string;
+  acceptedUserAgent?: string;
+  /** Base64-encoded data URL of the signature canvas, if collected. */
+  acceptedSignatureData?: string;
+  /** Customer-side decline. */
+  rejectedAt?: Date;
+  rejectedReason?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -55,6 +71,14 @@ export interface EstimateRepository {
   findByJob(tenantId: string, jobId: string): Promise<Estimate[]>;
   findByTenant(tenantId: string): Promise<Estimate[]>;
   update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null>;
+  /**
+   * Public lookup by view-token. Used by unauthenticated customer-facing
+   * routes (`/public/estimates/:token`). Bypasses tenant scoping at the
+   * call site — the token IS the auth — but should still apply RLS in
+   * the Pg implementation by switching tenant context after a token-only
+   * lookup. Returns null if no estimate with this token exists.
+   */
+  findByViewToken?(token: string): Promise<Estimate | null>;
 }
 
 export const ESTIMATE_STATUS_TRANSITIONS: Record<EstimateStatus, EstimateStatus[]> = {
@@ -220,5 +244,14 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     const updated = { ...e, ...updates };
     this.estimates.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async findByViewToken(token: string): Promise<Estimate | null> {
+    for (const e of this.estimates.values()) {
+      if (e.viewToken === token) {
+        return { ...e, lineItems: [...e.lineItems] };
+      }
+    }
+    return null;
   }
 }

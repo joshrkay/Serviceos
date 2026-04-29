@@ -22,10 +22,16 @@ export interface Invoice {
   customerMessage?: string;
   /** Random URL-safe token for unauthenticated customer payment-page links. */
   viewToken?: string;
+  /** Timestamp the view_token becomes invalid. */
+  viewTokenExpiresAt?: Date;
   /** Timestamp of the most recent send. */
   sentAt?: Date;
   /** ID of the most recent message_dispatches row. */
   lastDispatchId?: string;
+  /** First time the customer opened the public payment link. */
+  firstViewedAt?: Date;
+  /** Number of times the public payment link has been opened. */
+  viewCount?: number;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

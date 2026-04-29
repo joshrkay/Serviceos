@@ -1051,6 +1051,25 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_message_dispatches ON message_dispatches
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '046_estimate_view_expiry_and_acceptance': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_token_expires_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_by_name TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_by_ip TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_user_agent TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_signature_data TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS rejected_reason TEXT;
+  `,
+
+  '047_invoice_view_expiry': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_token_expires_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -160,6 +160,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         setClauses.push(`last_dispatch_id = $${paramIndex++}`);
         values.push(updates.lastDispatchId);
       }
+      if (updates.viewTokenExpiresAt !== undefined) {
+        setClauses.push(`view_token_expires_at = $${paramIndex++}`);
+        values.push(updates.viewTokenExpiresAt);
+      }
+      if (updates.firstViewedAt !== undefined) {
+        setClauses.push(`first_viewed_at = $${paramIndex++}`);
+        values.push(updates.firstViewedAt);
+      }
+      if (updates.viewCount !== undefined) {
+        setClauses.push(`view_count = $${paramIndex++}`);
+        values.push(updates.viewCount);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -272,8 +284,11 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       dueDate: row.due_date ? new Date(row.due_date) : undefined,
       customerMessage: row.customer_message ?? undefined,
       viewToken: row.view_token ?? undefined,
+      viewTokenExpiresAt: row.view_token_expires_at ? new Date(row.view_token_expires_at) : undefined,
       sentAt: row.sent_at ? new Date(row.sent_at) : undefined,
       lastDispatchId: row.last_dispatch_id ?? undefined,
+      firstViewedAt: row.first_viewed_at ? new Date(row.first_viewed_at) : undefined,
+      viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

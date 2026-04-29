@@ -323,3 +323,81 @@ describe('SendService.sendInvoice', () => {
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });
+
+describe('SendService — failure audit and idempotency', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  it('writes a failed dispatch row when a channel throws', async () => {
+    const c = makeCustomer();
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    // Stub the delivery provider to fail SMS but succeed email.
+    const failingDelivery = {
+      sendSms: async () => {
+        throw new Error('Twilio rejected: invalid phone');
+      },
+      sendEmail: async () => ({
+        providerMessageId: 'sg-ok',
+        provider: 'twilio-sendgrid',
+        channel: 'email' as const,
+      }),
+    };
+    const send = new SendService({
+      delivery: failingDelivery,
+      estimateRepo: h.estimate,
+      invoiceRepo: h.invoice,
+      jobRepo: h.job,
+      customerRepo: h.customer,
+      settingsRepo: h.settings,
+      dispatchRepo: h.dispatch,
+      publicBaseUrl: 'https://app.example.com',
+    });
+
+    const result = await send.sendEstimate({
+      tenantId: TENANT,
+      estimateId: est.id,
+      channel: 'both',
+    });
+
+    // Only the email channel succeeded.
+    expect(result.channelsSent).toHaveLength(1);
+    expect(result.channelsSent[0].channel).toBe('email');
+
+    // BOTH a failed (sms) and a sent (email) dispatch were written.
+    const dispatches = await h.dispatch.findByEntity(TENANT, 'estimate', est.id);
+    expect(dispatches).toHaveLength(2);
+    const failed = dispatches.find((d) => d.status === 'failed');
+    expect(failed?.channel).toBe('sms');
+    expect(failed?.errorMessage).toContain('invalid phone');
+    const succeeded = dispatches.find((d) => d.status === 'sent');
+    expect(succeeded?.channel).toBe('email');
+  });
+
+  it('passes a stable idempotency key to the delivery provider', async () => {
+    const c = makeCustomer();
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const result = await h.send.sendEstimate({
+      tenantId: TENANT,
+      estimateId: est.id,
+      channel: 'sms',
+    });
+
+    expect(result.channelsSent[0].channel).toBe('sms');
+    // The InMemoryDeliveryProvider records the message; we expect an idempotency key set.
+    expect(h.delivery.sentSms[0].idempotencyKey).toMatch(
+      new RegExp(`^estimate:${est.id}:sms:\\d+$`)
+    );
+  });
+});
