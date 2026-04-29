@@ -159,6 +159,89 @@ describe('GET /api/customers/:id', () => {
   });
 });
 
+describe('P1-018 — listCustomers search + pagination', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('search by name returns matching customers (legacy array shape)', async () => {
+    await createCustomer(app, { firstName: 'Alice', lastName: 'Smith' });
+    await createCustomer(app, { firstName: 'Bob', lastName: 'Jones' });
+    await createCustomer(app, { firstName: 'Carol', lastName: 'Smith' });
+
+    const res = await request(app).get('/api/customers?search=smith');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    const names = res.body.map((c: { displayName: string }) => c.displayName).sort();
+    expect(names).toEqual(['Alice Smith', 'Carol Smith']);
+  });
+
+  it('pagination with paginated=true returns { data, total } shape', async () => {
+    for (let i = 0; i < 5; i++) {
+      await createCustomer(app, { firstName: `User${i}`, lastName: 'Z' });
+    }
+    const res = await request(app).get('/api/customers?paginated=true&limit=2&offset=0');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('data');
+    expect(res.body).toHaveProperty('total');
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.total).toBe(5);
+  });
+
+  it('pagination with limit/offset implicitly switches to { data, total } shape', async () => {
+    for (let i = 0; i < 3; i++) {
+      await createCustomer(app, { firstName: `Z${i}`, lastName: 'Last' });
+    }
+    const page1 = await request(app).get('/api/customers?limit=2&offset=0');
+    const page2 = await request(app).get('/api/customers?limit=2&offset=2');
+    expect(page1.body.data).toHaveLength(2);
+    expect(page1.body.total).toBe(3);
+    expect(page2.body.data).toHaveLength(1);
+    expect(page2.body.total).toBe(3);
+    // Ensure no overlap between pages
+    const ids1 = page1.body.data.map((c: { id: string }) => c.id);
+    const ids2 = page2.body.data.map((c: { id: string }) => c.id);
+    expect(ids1.some((id: string) => ids2.includes(id))).toBe(false);
+  });
+
+  it('rejects limit > 200 with 400', async () => {
+    const res = await request(app).get('/api/customers?limit=500');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects negative offset with 400', async () => {
+    const res = await request(app).get('/api/customers?offset=-1');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('search combined with pagination returns accurate filtered total', async () => {
+    await createCustomer(app, {
+      firstName: 'Alice',
+      lastName: 'Smith',
+      email: 'alice@example.com',
+    });
+    await createCustomer(app, {
+      firstName: 'Alicia',
+      lastName: 'Brown',
+      email: 'alicia@example.com',
+    });
+    await createCustomer(app, {
+      firstName: 'Robert',
+      lastName: 'Jones',
+      email: 'rob@example.com',
+    });
+
+    const res = await request(app).get('/api/customers?search=ali&paginated=true&limit=10');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.data).toHaveLength(2);
+  });
+});
+
 describe('POST /api/customers/:id/archive', () => {
   let app: Express;
 

@@ -55,15 +55,35 @@ export interface UpdateCustomerInput {
 export interface CustomerListOptions {
   includeArchived?: boolean;
   search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (display_name). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface CustomerListResult {
+  data: Customer[];
+  total: number;
 }
 
 export interface CustomerRepository {
   create(customer: Customer): Promise<Customer>;
   findById(tenantId: string, id: string): Promise<Customer | null>;
   findByTenant(tenantId: string, options?: CustomerListOptions): Promise<Customer[]>;
+  /**
+   * Paginated list with total count. Optional for InMemory parity in older
+   * tests — implementations should provide this when supporting paginated UIs.
+   */
+  listWithMeta?(tenantId: string, options?: CustomerListOptions): Promise<CustomerListResult>;
   update(tenantId: string, id: string, updates: Partial<Customer>): Promise<Customer | null>;
   search(tenantId: string, query: string): Promise<Customer[]>;
 }
+
+/** Server-side pagination defaults / caps. */
+export const DEFAULT_LIST_LIMIT = 50;
+export const MAX_LIST_LIMIT = 200;
 
 function computeDisplayName(firstName: string, lastName: string, companyName?: string): string {
   const name = `${firstName} ${lastName}`.trim();
@@ -303,6 +323,26 @@ export async function listCustomers(
   return repository.findByTenant(tenantId, options);
 }
 
+/**
+ * P1-018: Paginated list helper for routes that need `{ data, total }` to
+ * drive frontend pagination. Falls back to `findByTenant` + in-memory paging
+ * when the repository hasn't implemented `listWithMeta` (keeps older repo
+ * implementations functional).
+ */
+export async function listCustomersWithMeta(
+  tenantId: string,
+  repository: CustomerRepository,
+  options?: CustomerListOptions
+): Promise<CustomerListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
+}
+
 export async function searchCustomers(
   tenantId: string,
   query: string,
@@ -336,10 +376,33 @@ export class InMemoryCustomerRepository implements CustomerRepository {
         (c) =>
           c.displayName.toLowerCase().includes(q) ||
           (c.companyName && c.companyName.toLowerCase().includes(q)) ||
-          (c.email && c.email.toLowerCase().includes(q))
+          (c.email && c.email.toLowerCase().includes(q)) ||
+          (c.primaryPhone && c.primaryPhone.toLowerCase().includes(q))
       );
     }
+    // Default sort: name ASC. P1-018 lets callers flip direction.
+    const sortDir = options?.sort === 'desc' ? -1 : 1;
+    results.sort((a, b) => sortDir * a.displayName.localeCompare(b.displayName));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_LIST_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
     return results.map((c) => ({ ...c }));
+  }
+
+  async listWithMeta(tenantId: string, options?: CustomerListOptions): Promise<CustomerListResult> {
+    // Compute total against the unpaginated filtered set so the count
+    // reflects the full result the user could page through.
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Customer>): Promise<Customer | null> {

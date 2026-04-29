@@ -65,11 +65,34 @@ export interface UpdateEstimateInput {
   internalNotes?: string;
 }
 
+export interface EstimateListOptions {
+  status?: EstimateStatus;
+  jobId?: string;
+  /** ILIKE search on estimate_number / customer_message. */
+  search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (created_at). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface EstimateListResult {
+  data: Estimate[];
+  total: number;
+}
+
+export const DEFAULT_ESTIMATE_LIMIT = 50;
+export const MAX_ESTIMATE_LIMIT = 200;
+
 export interface EstimateRepository {
   create(estimate: Estimate): Promise<Estimate>;
   findById(tenantId: string, id: string): Promise<Estimate | null>;
   findByJob(tenantId: string, jobId: string): Promise<Estimate[]>;
-  findByTenant(tenantId: string): Promise<Estimate[]>;
+  findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]>;
+  /** P1-018: paginated `{ data, total }` form for list UIs. */
+  listWithMeta?(tenantId: string, options?: EstimateListOptions): Promise<EstimateListResult>;
   update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null>;
   /**
    * Public lookup by view-token. Used by unauthenticated customer-facing
@@ -155,9 +178,28 @@ export async function createEstimate(
 
 export async function listEstimates(
   tenantId: string,
-  repository: EstimateRepository
+  repository: EstimateRepository,
+  options?: EstimateListOptions
 ): Promise<Estimate[]> {
-  return repository.findByTenant(tenantId);
+  return repository.findByTenant(tenantId, options);
+}
+
+/**
+ * P1-018: paginated estimate list. Falls back to in-memory pagination over
+ * `findByTenant` when the repo doesn't yet implement `listWithMeta`.
+ */
+export async function listEstimatesWithMeta(
+  tenantId: string,
+  repository: EstimateRepository,
+  options?: EstimateListOptions
+): Promise<EstimateListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_ESTIMATE_LIMIT, MAX_ESTIMATE_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
 }
 
 export async function getEstimate(
@@ -232,10 +274,39 @@ export class InMemoryEstimateRepository implements EstimateRepository {
       .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
   }
 
-  async findByTenant(tenantId: string): Promise<Estimate[]> {
-    return Array.from(this.estimates.values())
-      .filter((e) => e.tenantId === tenantId)
-      .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
+  async findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]> {
+    let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId);
+    if (options?.status) results = results.filter((e) => e.status === options.status);
+    if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
+    if (options?.search) {
+      const q = options.search.toLowerCase();
+      results = results.filter(
+        (e) =>
+          e.estimateNumber.toLowerCase().includes(q) ||
+          (e.customerMessage && e.customerMessage.toLowerCase().includes(q))
+      );
+    }
+    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
+    const sortDir = options?.sort === 'asc' ? 1 : -1;
+    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_ESTIMATE_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
+    return results.map((e) => ({ ...e, lineItems: [...e.lineItems] }));
+  }
+
+  async listWithMeta(tenantId: string, options?: EstimateListOptions): Promise<EstimateListResult> {
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null> {

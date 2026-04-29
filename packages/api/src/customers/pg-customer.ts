@@ -1,6 +1,13 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Customer, CustomerListOptions, CustomerRepository } from './customer';
+import {
+  Customer,
+  CustomerListOptions,
+  CustomerListResult,
+  CustomerRepository,
+  DEFAULT_LIST_LIMIT,
+  MAX_LIST_LIMIT,
+} from './customer';
 
 function mapRow(row: Record<string, unknown>): Customer {
   return {
@@ -72,30 +79,76 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     });
   }
 
+  /**
+   * Build the parameterized WHERE clause used by both `findByTenant` and
+   * `listWithMeta` so the data + count queries see identical filters.
+   * tenant_id is always the FIRST predicate (defense-in-depth alongside RLS).
+   */
+  private buildListWhere(tenantId: string, options?: CustomerListOptions): {
+    where: string;
+    params: unknown[];
+  } {
+    const conditions: string[] = ['tenant_id = $1'];
+    const params: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (!options?.includeArchived) {
+      conditions.push('is_archived = false');
+    }
+
+    if (options?.search) {
+      const searchParam = `%${options.search}%`;
+      conditions.push(
+        `(display_name ILIKE $${paramIndex} OR company_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex} OR primary_phone ILIKE $${paramIndex})`
+      );
+      params.push(searchParam);
+      paramIndex++;
+    }
+
+    return { where: `WHERE ${conditions.join(' AND ')}`, params };
+  }
+
   async findByTenant(tenantId: string, options?: CustomerListOptions): Promise<Customer[]> {
     return this.withTenant(tenantId, async (client) => {
-      const conditions: string[] = ['tenant_id = $1'];
-      const params: unknown[] = [tenantId];
-      let paramIndex = 2;
+      return this.queryListRows(client, tenantId, options);
+    });
+  }
 
-      if (!options?.includeArchived) {
-        conditions.push('is_archived = false');
-      }
+  private async queryListRows(
+    client: PoolClient,
+    tenantId: string,
+    options?: CustomerListOptions
+  ): Promise<Customer[]> {
+    const { where, params } = this.buildListWhere(tenantId, options);
+    // P1-018: default sort = display_name ASC for customers per spec.
+    const sortDirection = options?.sort === 'desc' ? 'DESC' : 'ASC';
+    const usePagination = options?.limit !== undefined || options?.offset !== undefined;
+    let sql = `SELECT * FROM customers ${where} ORDER BY display_name ${sortDirection}`;
+    let queryParams = params;
+    if (usePagination) {
+      const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
+      const offset = options?.offset ?? 0;
+      sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      queryParams = [...params, limit, offset];
+    }
+    const result = await client.query(sql, queryParams);
+    return result.rows.map(mapRow);
+  }
 
-      if (options?.search) {
-        const searchParam = `%${options.search}%`;
-        conditions.push(
-          `(display_name ILIKE $${paramIndex} OR company_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`
-        );
-        params.push(searchParam);
-        paramIndex++;
-      }
-
-      const result = await client.query(
-        `SELECT * FROM customers WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
+  async listWithMeta(
+    tenantId: string,
+    options?: CustomerListOptions
+  ): Promise<CustomerListResult> {
+    return this.withTenant(tenantId, async (client) => {
+      const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
+      const offset = options?.offset ?? 0;
+      const data = await this.queryListRows(client, tenantId, { ...options, limit, offset });
+      const { where, params } = this.buildListWhere(tenantId, options);
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS total FROM customers ${where}`,
         params
       );
-      return result.rows.map(mapRow);
+      return { data, total: countResult.rows[0].total as number };
     });
   }
 
