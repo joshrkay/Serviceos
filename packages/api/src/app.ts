@@ -139,6 +139,7 @@ import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
+import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
@@ -736,6 +737,21 @@ export function createApp() {
       : undefined,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
+
+  // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
+  // Returns a `client_secret` so the customer's browser can confirm the
+  // payment directly with Stripe — card data never touches our server.
+  // Lives under /api/public-payments (not /public) so the frontend's
+  // existing /api/* base URL config picks it up.
+  app.use(
+    '/api/public-payments',
+    createPublicPaymentsRouter({
+      invoiceRepo,
+      stripeConfig: process.env.STRIPE_SECRET_KEY
+        ? { apiKey: process.env.STRIPE_SECRET_KEY }
+        : null,
+    }),
+  );
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';

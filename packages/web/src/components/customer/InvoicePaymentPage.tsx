@@ -1,9 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent, useMemo } from 'react';
 import {
   Lock, Check, Phone, Mail,
-  CheckCircle2, ChevronDown, ChevronUp, Shield, AlertCircle, ExternalLink,
+  CheckCircle2, ChevronDown, ChevronUp, Shield, AlertCircle,
 } from 'lucide-react';
 import { useParams, useSearchParams } from 'react-router';
+import {
+  Elements,
+  PaymentElement,
+  useElements,
+  useStripe,
+} from '@stripe/react-stripe-js';
+import { loadStripe, Stripe } from '@stripe/stripe-js';
 
 // ─── API types ──────────────────────────────────────────────────────────────
 
@@ -47,6 +54,29 @@ function formatDate(iso?: string) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// ─── Stripe loader ─────────────────────────────────────────────────────────
+//
+// Resolved once at module load. When the publishable key is missing (dev
+// without Stripe configured, or test runs that mock the module), the promise
+// resolves to null and we fall back to a "Stripe not configured" message.
+
+function getPublishableKey(): string | undefined {
+  // import.meta.env is replaced by Vite at build time. Guard the access so
+  // the test environment (where import.meta.env may not be defined) does
+  // not crash on first import.
+  try {
+    return (import.meta as { env?: Record<string, string | undefined> })
+      .env?.VITE_STRIPE_PUBLISHABLE_KEY;
+  } catch {
+    return undefined;
+  }
+}
+
+const stripePromise: Promise<Stripe | null> = (() => {
+  const key = getPublishableKey();
+  return key ? loadStripe(key) : Promise.resolve(null);
+})();
+
 async function fetchInvoice(token: string): Promise<PublicInvoiceView> {
   const res = await fetch(`/public/invoices/${token}`);
   if (!res.ok) {
@@ -60,14 +90,21 @@ async function pingView(token: string) {
   await fetch(`/public/invoices/${token}/view`, { method: 'POST' }).catch(() => undefined);
 }
 
-async function createCheckout(token: string): Promise<string> {
-  const res = await fetch(`/public/invoices/${token}/checkout`, { method: 'POST' });
+async function createPaymentIntent(invoiceId: string, viewToken: string): Promise<string> {
+  const res = await fetch('/api/public-payments/create-payment-intent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ invoiceId, viewToken }),
+  });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { message?: string };
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    if (body.error === 'STRIPE_NOT_CONFIGURED') {
+      throw new Error('STRIPE_NOT_CONFIGURED');
+    }
     throw new Error(body.message ?? `Error ${res.status}`);
   }
-  const data = await res.json() as { url: string };
-  return data.url;
+  const data = await res.json() as { clientSecret: string };
+  return data.clientSecret;
 }
 
 // ─── Success screen ────────────────────────────────────────────────────────
@@ -114,6 +151,81 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
   );
 }
 
+// ─── Stripe payment form ───────────────────────────────────────────────────
+
+type PayStatus = 'idle' | 'processing' | 'succeeded' | 'failed';
+
+function PaymentForm({ amountCents }: { amountCents: number }) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [status, setStatus] = useState<PayStatus>('idle');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!stripe || !elements || status === 'processing') return;
+    setStatus('processing');
+    setErrorMessage(null);
+    const { error } = await stripe.confirmPayment({
+      elements,
+      confirmParams: {
+        return_url: `${window.location.origin}${window.location.pathname}?success=true`,
+      },
+      redirect: 'if_required',
+    });
+    if (error) {
+      setStatus('failed');
+      setErrorMessage(error.message ?? 'Payment failed. Please try a different card.');
+      return;
+    }
+    // On stay-on-page success (no redirect needed), reload so the public
+    // invoice GET can re-evaluate the paid state via webhook reconciliation.
+    setStatus('succeeded');
+    window.location.search = '?success=true';
+  }
+
+  const disabled = !stripe || !elements || status === 'processing';
+
+  return (
+    <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
+      {errorMessage && (
+        <div
+          role="alert"
+          className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
+          {errorMessage}
+        </div>
+      )}
+      <div className="mb-4">
+        <PaymentElement
+          options={{
+            // Mobile-friendly defaults: tabs layout + responsive billing
+            // details so the iframe sizes to the viewport.
+            layout: { type: 'tabs', defaultCollapsed: false },
+          }}
+        />
+      </div>
+      <button
+        type="submit"
+        disabled={disabled}
+        className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
+          disabled
+            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
+        }`}
+      >
+        {status === 'processing'
+          ? <><span className="size-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" /> Processing payment…</>
+          : <><Lock size={14} /> Pay ${formatMoney(amountCents)} securely</>
+        }
+      </button>
+      <p className="text-xs text-slate-400 text-center mt-3">
+        Powered by Stripe · Your card details never touch our servers
+      </p>
+    </form>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────
 
 export function InvoicePaymentPage() {
@@ -124,10 +236,13 @@ export function InvoicePaymentPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
-  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
-  // Stripe redirects back with ?success=true after a completed checkout session.
+  // Stripe PaymentIntent state — fetched once after the invoice loads.
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [intentError, setIntentError] = useState<string | null>(null);
+  const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
+
+  // Stripe redirects back with ?success=true after a completed checkout.
   const paymentSucceeded = searchParams.get('success') === 'true';
 
   useEffect(() => {
@@ -144,30 +259,29 @@ export function InvoicePaymentPage() {
       });
   }, [token]);
 
-  async function handlePayNow() {
-    if (!token || checkoutLoading) return;
-    setCheckoutLoading(true);
-    setCheckoutError(null);
-    try {
-      const url = await createCheckout(token);
-      // Validate the URL is a legitimate Stripe-hosted checkout page before
-      // navigating — guards against a compromised API response injecting
-      // javascript: URIs or redirecting to arbitrary hosts.
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        throw new Error('Invalid checkout URL returned by server');
-      }
-      if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.stripe.com')) {
-        throw new Error('Unexpected checkout URL returned by server');
-      }
-      window.location.href = url;
-    } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : 'Could not start checkout. Please try again.');
-      setCheckoutLoading(false);
-    }
-  }
+  // After the invoice loads, request a PaymentIntent client_secret for
+  // payable invoices. Skip when already paid or success-redirect.
+  useEffect(() => {
+    if (!invoice || !token) return;
+    if (invoice.isPaid || invoice.amountDueCents <= 0 || paymentSucceeded) return;
+    let cancelled = false;
+    createPaymentIntent(invoice.id, token)
+      .then((secret) => { if (!cancelled) setClientSecret(secret); })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        if (err.message === 'STRIPE_NOT_CONFIGURED') {
+          setStripeNotConfigured(true);
+        } else {
+          setIntentError(err.message);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [invoice, token, paymentSucceeded]);
+
+  const elementsOptions = useMemo(
+    () => (clientSecret ? { clientSecret, appearance: { theme: 'stripe' as const } } : undefined),
+    [clientSecret],
+  );
 
   if (loading) {
     return (
@@ -194,8 +308,6 @@ export function InvoicePaymentPage() {
   // Show paid screen when:
   //   • invoice is fully settled (isPaid or amountDueCents === 0)
   //   • Stripe redirected back with ?success=true (webhook may not have fired yet)
-  // amountDueCents === 0 guard prevents showing the pay form during the
-  // 1–5 second window between Stripe's redirect and webhook processing.
   if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded) {
     return (
       <PaidScreen
@@ -320,31 +432,36 @@ export function InvoicePaymentPage() {
           </div>
         </div>
 
-        {/* Pay button */}
-        <div className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
-          {checkoutError && (
-            <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-              {checkoutError}
-            </div>
-          )}
-          <button
-            onClick={handlePayNow}
-            disabled={checkoutLoading}
-            className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
-              checkoutLoading
-                ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
-            }`}
+        {/* Stripe Elements payment form */}
+        {stripeNotConfigured ? (
+          <div
+            data-testid="stripe-not-configured"
+            className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4 mb-5 text-sm text-amber-800"
           >
-            {checkoutLoading
-              ? <><span className="size-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" /> Opening secure checkout…</>
-              : <><Lock size={14} /> Pay ${formatMoney(inv.amountDueCents)} securely <ExternalLink size={12} /></>
-            }
-          </button>
-          <p className="text-xs text-slate-400 text-center mt-3">
-            You'll be taken to a secure Stripe checkout page
-          </p>
-        </div>
+            <p className="mb-1">Online payment is temporarily unavailable.</p>
+            <p className="text-xs text-amber-700">
+              Please contact {inv.businessName} {inv.businessPhone ? `at ${inv.businessPhone}` : ''} to settle this invoice.
+            </p>
+          </div>
+        ) : intentError ? (
+          <div
+            role="alert"
+            className="rounded-2xl bg-red-50 border border-red-200 px-4 py-4 mb-5 text-sm text-red-700"
+          >
+            {intentError}
+          </div>
+        ) : !clientSecret || !elementsOptions ? (
+          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-8 mb-5 flex items-center justify-center">
+            <span
+              data-testid="payment-form-loading"
+              className="size-5 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin"
+            />
+          </div>
+        ) : (
+          <Elements stripe={stripePromise} options={elementsOptions}>
+            <PaymentForm amountCents={inv.amountDueCents} />
+          </Elements>
+        )}
 
         {/* Trust signals */}
         <div className="flex flex-col items-center gap-2 pb-8">
