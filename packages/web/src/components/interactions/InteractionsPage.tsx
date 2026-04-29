@@ -550,7 +550,6 @@ Following up on the estimate we sent over for your HVAC service — EST-0046 for
 Let me know if you have any questions or if you'd like to discuss the scope. We can also adjust the quote if anything has changed.
 
 Best,
-Mike Ortega
 Austin Pro Services | (512) 555-0000`);
   const [editField, setEdit] = useState<string | null>(null);
 

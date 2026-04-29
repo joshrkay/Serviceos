@@ -101,6 +101,98 @@ export function resetConfig(): void {
   cachedConfig = null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// P0-026 — Startup environment validation (Zod schema)
+//
+// `validateEnvSchema(env)` is a sibling to `loadConfig`/`validateProductionConfig`
+// that returns a strongly typed, parsed `Env` object. It is the canonical entry
+// point for fail-fast startup validation; existing call sites of `loadConfig`
+// keep their current contract (we don't want to break `app.ts`).
+//
+// Required vars:           DATABASE_URL, CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY,
+//                          CORS_ORIGIN (not the literal 'true' in production),
+//                          NODE_ENV
+// Optional with defaults:  PORT (8080), LOG_LEVEL (info)
+//
+// In `NODE_ENV=development` (or `dev`/`test`) the Clerk and DATABASE_URL keys
+// become optional so that local boot does not require production secrets.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const envEnum = z.enum(['development', 'dev', 'test', 'staging', 'production', 'prod']);
+
+const baseEnvShape = {
+  NODE_ENV: envEnum.default('development'),
+  PORT: z.coerce.number().int().positive().default(8080),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  CORS_ORIGIN: z.string().min(1).optional(),
+  STRIPE_SECRET_KEY: z.string().min(1).optional(),
+} as const;
+
+const devEnvSchema = z.object({
+  ...baseEnvShape,
+  // In dev, DATABASE_URL may be absent (in-memory repos) but if provided
+  // it still must be a valid URL.
+  DATABASE_URL: z
+    .string()
+    .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' })
+    .optional(),
+  CLERK_SECRET_KEY: z.string().min(1).optional(),
+  CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
+});
+
+const prodEnvSchema = z.object({
+  ...baseEnvShape,
+  DATABASE_URL: z
+    .string({ required_error: 'Required' })
+    .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' }),
+  CLERK_SECRET_KEY: z
+    .string({ required_error: 'Required' })
+    .min(1, { message: 'Required' }),
+  CLERK_PUBLISHABLE_KEY: z
+    .string({ required_error: 'Required' })
+    .min(1, { message: 'Required' }),
+  CORS_ORIGIN: z
+    .string({ required_error: 'Required' })
+    .min(1, { message: 'Required' })
+    .refine((v) => v !== 'true', {
+      message: "Cannot be 'true' in production. Set a specific origin.",
+    }),
+});
+
+export type Env = z.infer<typeof devEnvSchema> & Partial<z.infer<typeof prodEnvSchema>>;
+
+function isProductionEnv(value: string | undefined): boolean {
+  return value === 'production' || value === 'prod';
+}
+
+/**
+ * Parses and validates `process.env` against the runtime environment schema.
+ *
+ * @returns A frozen, typed `Env` object. Pure parse — calling twice with the
+ *   same input yields equivalent objects (idempotent, no caching).
+ * @throws Error with one line per missing/invalid var when validation fails.
+ *   Each line names the variable so an operator can fix it directly.
+ */
+export function validateEnvSchema(
+  env: Record<string, string | undefined> = process.env
+): Env {
+  const schema = isProductionEnv(env.NODE_ENV) ? prodEnvSchema : devEnvSchema;
+  const result = schema.safeParse(env);
+
+  if (!result.success) {
+    const lines = result.error.issues.map((issue) => {
+      const name = issue.path.join('.') || '(root)';
+      return `  - ${name}: ${issue.message}`;
+    });
+    throw new Error(
+      `Environment validation failed:\n${lines.join('\n')}\n` +
+        'Set these environment variables before starting the service.'
+    );
+  }
+
+  return result.data as Env;
+}
+
 export interface SecretResolver {
   resolve(secretName: string): Promise<string>;
 }
