@@ -198,13 +198,17 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
       'utf8'
     );
 
-    // ProtectedRoute is referenced as the Component for the guarded branch.
-    expect(src).toMatch(/Component:\s*ProtectedRoute/);
+    // Find the ProtectedRoute reference. Use a regex anchored on the
+    // declaration syntax so trivial reformatting doesn't break the test.
+    const guardMatch = src.match(/Component:\s*ProtectedRoute/);
+    const guardIdx = guardMatch?.index ?? -1;
+    expect(guardIdx, 'ProtectedRoute component must be used for a route')
+      .toBeGreaterThan(-1);
 
-    // Every public path is declared somewhere in the file…
-    // Codex P2 follow-up: include `/onboarding` and
-    // `/public/feedback/:token` so a future change that accidentally
-    // nests either route under the guard is caught.
+    // Public routes — declared BEFORE the ProtectedRoute branch (siblings,
+    // not children of the guard). Gemini high follow-up: regex on
+    // `path: '<value>'` is robust against whitespace + comment changes
+    // and avoids false positives that bare substring matching would hit.
     const publicPaths = [
       '/login',
       '/signup',
@@ -215,24 +219,38 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
       '/public/feedback/:token',
     ];
     for (const p of publicPaths) {
-      expect(src).toContain(`'${p}'`);
-    }
-
-    // …and they appear BEFORE the ProtectedRoute branch (i.e. they are
-    // top-level siblings, not children of the guard).
-    const guardIdx = src.indexOf('Component: ProtectedRoute');
-    expect(guardIdx).toBeGreaterThan(-1);
-    for (const p of publicPaths) {
-      const pIdx = src.indexOf(`'${p}'`);
-      expect(pIdx, `public route ${p} must precede the ProtectedRoute branch`)
+      const m = src.match(new RegExp(`path:\\s*'${p.replace(/\//g, '\\/')}'`));
+      const idx = m?.index ?? -1;
+      expect(idx, `public route ${p} must be defined in routes.ts`)
+        .toBeGreaterThan(-1);
+      expect(idx, `public route ${p} must precede the ProtectedRoute branch`)
         .toBeLessThan(guardIdx);
     }
 
-    // Internal routes the story names must appear AFTER the guard (i.e. inside
-    // the guarded branch).
-    for (const p of ['jobs', 'estimates', 'invoices', 'customers', 'settings']) {
-      const pIdx = src.indexOf(`'${p}'`);
-      expect(pIdx, `internal route ${p} must be guarded`).toBeGreaterThan(guardIdx);
+    // Internal routes — defined AFTER the guard (children of the guarded
+    // branch). Mirror the actual route entries in routes.ts so a new
+    // dispatcher route under the guard is verified, and a route that
+    // accidentally moves OUT of the guarded subtree fails the test.
+    const internalPaths = [
+      'assistant',
+      'jobs',
+      'schedule',
+      'customers',
+      'leads',
+      'estimates',
+      'invoices',
+      'contracts',
+      'interactions',
+      'settings',
+      'technician/day',
+    ];
+    for (const p of internalPaths) {
+      const m = src.match(new RegExp(`path:\\s*'${p.replace(/\//g, '\\/')}'`));
+      const idx = m?.index ?? -1;
+      expect(idx, `internal route '${p}' must be defined in routes.ts`)
+        .toBeGreaterThan(-1);
+      expect(idx, `internal route '${p}' must be guarded by ProtectedRoute`)
+        .toBeGreaterThan(guardIdx);
     }
   });
 });
