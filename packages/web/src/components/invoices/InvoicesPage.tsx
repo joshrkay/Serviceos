@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import {
   Plus, Send, ArrowLeft, DollarSign, CheckCircle, CheckCircle2,
   Clock, AlertCircle, FileText, CreditCard, ChevronRight, X,
@@ -789,11 +790,46 @@ const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
   { label: 'Paid',    value: 'Paid'    },
 ];
 
+/**
+ * P5-018 — refresh interval for the dispatcher invoice list. 30s gives
+ * ~near-real-time visibility on payment receipts without hammering the
+ * API. Lifted to a constant so tests can reason about it.
+ */
+const INVOICE_LIST_REFRESH_MS = 30_000;
+
 export function InvoicesPage() {
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(null);
 
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
+
+  // P5-018 — Auto-refresh loop. Webhooks update the DB; the dispatcher
+  // sees the change on the next poll. Pause polling while a detail
+  // page is open so the user isn't yanked around.
+  useEffect(() => {
+    if (selected) return;
+    const id = setInterval(() => {
+      refetch();
+    }, INVOICE_LIST_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [selected, refetch]);
+
+  // P5-018 — Toast when an invoice transitions to paid. We track the
+  // previous status map across renders; a transition `previous !== paid
+  // && next === paid` fires a Sonner toast.
+  const previousStatusesRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    const previous = previousStatusesRef.current;
+    const next = new Map<string, string>();
+    for (const inv of data) {
+      next.set(inv.id, inv.status);
+      const prev = previous.get(inv.id);
+      if (prev && prev !== 'paid' && inv.status === 'paid') {
+        toast.success(`Payment received on ${inv.invoiceNumber}`);
+      }
+    }
+    previousStatusesRef.current = next;
+  }, [data]);
 
   if (selected) {
     return <InvoiceDetail invoiceId={selected} onBack={() => setSelected(null)} />;
