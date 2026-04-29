@@ -4,14 +4,31 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { InvoicePaymentPage } from './InvoicePaymentPage';
 
+const mockInvoice = {
+  id: 'inv_1',
+  invoiceNumber: 'INV-001',
+  status: 'open',
+  customerName: 'Jane Customer',
+  businessName: 'HVAC Pro',
+  lineItems: [{ description: 'AC Repair', quantity: 1, unitPriceCents: 42500, totalCents: 42500 }],
+  totalCents: 42500,
+  subtotalCents: 42500,
+  taxCents: 0,
+  discountCents: 0,
+  amountPaidCents: 0,
+  amountDueCents: 42500,
+  isPaid: false,
+  viewCount: 1,
+};
+
 describe('InvoicePaymentPage', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  function renderPage() {
+  function renderPage(path = '/pay/i2') {
     return render(
-      <MemoryRouter initialEntries={['/pay/i2']}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/pay/:id" element={<InvoicePaymentPage />} />
         </Routes>
@@ -19,44 +36,64 @@ describe('InvoicePaymentPage', () => {
     );
   }
 
-  it('shows success screen when payment request succeeds', async () => {
+  it('shows paid screen when invoice is already paid', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
-      status: 200,
-      json: async () => ({ ok: true }),
+      json: async () => ({ ...mockInvoice, isPaid: true, amountPaidCents: 42500, amountDueCents: 0 }),
     } as Response);
 
     renderPage();
-
-    fireEvent.change(screen.getByPlaceholderText('1234 5678 9012 3456'), { target: { value: '4111111111111111' } });
-    fireEvent.change(screen.getByPlaceholderText('MM/YY'), { target: { value: '12/29' } });
-    fireEvent.change(screen.getByPlaceholderText('123'), { target: { value: '123' } });
-    fireEvent.change(screen.getByPlaceholderText('Full name'), { target: { value: 'Jane Customer' } });
-    fireEvent.change(screen.getByPlaceholderText('78701'), { target: { value: '78701' } });
-
-    fireEvent.click(screen.getByRole('button', { name: /pay \$425 securely/i }));
 
     await waitFor(() => {
       expect(screen.getByText('Payment received!')).toBeInTheDocument();
     });
   });
 
-  it('shows inline error when payment request fails', async () => {
+  it('shows paid screen when Stripe redirects back with ?success=true', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
-      ok: false,
-      status: 503,
-      json: async () => ({ message: 'Payment service unavailable' }),
+      ok: true,
+      json: async () => mockInvoice,
+    } as Response);
+
+    renderPage('/pay/i2?success=true');
+
+    await waitFor(() => {
+      expect(screen.getByText('Payment received!')).toBeInTheDocument();
+    });
+  });
+
+  it('shows Pay button after invoice loads', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => mockInvoice,
     } as Response);
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText('1234 5678 9012 3456'), { target: { value: '4111111111111111' } });
-    fireEvent.change(screen.getByPlaceholderText('MM/YY'), { target: { value: '12/29' } });
-    fireEvent.change(screen.getByPlaceholderText('123'), { target: { value: '123' } });
-    fireEvent.change(screen.getByPlaceholderText('Full name'), { target: { value: 'Jane Customer' } });
-    fireEvent.change(screen.getByPlaceholderText('78701'), { target: { value: '78701' } });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /pay.*securely/i })).toBeInTheDocument();
+    });
+  });
 
-    fireEvent.click(screen.getByRole('button', { name: /pay \$425 securely/i }));
+  it('shows inline error when checkout request fails', async () => {
+    vi.spyOn(global, 'fetch')
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockInvoice,
+      } as Response) // GET invoice
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) } as Response) // POST view (pingView)
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ message: 'Payment service unavailable' }),
+      } as Response); // POST checkout
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /pay.*securely/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /pay.*securely/i }));
 
     await waitFor(() => {
       expect(screen.getByText('Payment service unavailable')).toBeInTheDocument();
