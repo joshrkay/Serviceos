@@ -82,8 +82,11 @@ function validateProductionConfig(config: AppConfig): void {
     if (!config.DB_PASSWORD) missing.push('DB_PASSWORD (or DATABASE_URL)');
   }
 
-  // Auth
+  // Auth — both keys are required. The publishable key is used at request time
+  // to derive the Clerk JWKS host; without it every authenticated request 401s
+  // (P0-033). Fail fast at startup instead of waiting for the first request.
   if (!config.CLERK_SECRET_KEY) missing.push('CLERK_SECRET_KEY');
+  if (!config.CLERK_PUBLISHABLE_KEY) missing.push('CLERK_PUBLISHABLE_KEY');
 
   // Webhooks — signing secrets required to verify inbound webhooks
   if (!config.CLERK_WEBHOOK_SECRET) missing.push('CLERK_WEBHOOK_SECRET');

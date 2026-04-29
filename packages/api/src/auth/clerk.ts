@@ -66,6 +66,7 @@ export interface JwksResolver {
 }
 
 const JWKS_TTL_MS = 10 * 60 * 1000; // 10 minutes per the story spec
+const JWKS_FETCH_TIMEOUT_MS = 5_000; // 5 second hard cap on every JWKS fetch
 
 interface JwksCacheEntry {
   keys: JwksKey[];
@@ -75,9 +76,15 @@ interface JwksCacheEntry {
 /**
  * The default resolver fetches and caches JWKS over HTTPS. Cache entries are
  * keyed by host so multiple Clerk instances (multi-tenant) can co-exist.
+ *
+ * Concurrent-fetch protection: when the cache is cold or expired, we cache
+ * the in-flight fetch *promise* in `inflight` so concurrent requests for
+ * the same host await a single network round-trip instead of stampeding
+ * the JWKS endpoint (Gemini PR #197 review).
  */
 class HttpsJwksResolver implements JwksResolver {
   private readonly cache = new Map<string, JwksCacheEntry>();
+  private readonly inflight = new Map<string, Promise<JwksKey[]>>();
 
   async getKeys(host: string, forceRefresh = false): Promise<JwksKey[]> {
     const now = Date.now();
@@ -85,29 +92,53 @@ class HttpsJwksResolver implements JwksResolver {
       const cached = this.cache.get(host);
       if (cached && cached.expiresAt > now) return cached.keys;
     }
-    const keys = await this.fetchJwks(host);
-    this.cache.set(host, { keys, expiresAt: now + JWKS_TTL_MS });
-    return keys;
+    // Coalesce concurrent fetches for the same host. A `forceRefresh` still
+    // joins an in-flight fetch — we don't double-fire on a kid miss.
+    const existing = this.inflight.get(host);
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        const keys = await this.fetchJwks(host);
+        this.cache.set(host, { keys, expiresAt: Date.now() + JWKS_TTL_MS });
+        return keys;
+      } finally {
+        this.inflight.delete(host);
+      }
+    })();
+    this.inflight.set(host, promise);
+    return promise;
   }
 
   /**
    * Fetch the JWKS JSON document from `https://{host}/.well-known/jwks.json`
    * and convert each entry into a Node `KeyObject`. Uses the global `fetch`
    * available since Node 18.
+   *
+   * Hard 5-second timeout via AbortController so a Clerk network stall can't
+   * become an auth-latency amplifier (Codex PR #197 review).
    */
   private async fetchJwks(host: string): Promise<JwksKey[]> {
     const url = `https://${host}/.well-known/jwks.json`;
-    // `fetch` is global in Node 18+. We don't use a wrapped client because we
-    // want zero new transitive deps in this auth path.
-    const res = await fetch(url, { method: 'GET' });
-    if (!res.ok) {
-      throw new Error(`JWKS fetch failed: ${res.status} ${res.statusText}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'GET', signal: controller.signal });
+      if (!res.ok) {
+        throw new Error(`JWKS fetch failed: ${res.status} ${res.statusText}`);
+      }
+      const body = (await res.json()) as { keys?: Array<Record<string, unknown>> };
+      if (!Array.isArray(body.keys)) {
+        throw new Error('JWKS response missing "keys" array');
+      }
+      return body.keys.map((jwk) => jwkToJwksKey(jwk));
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`JWKS fetch timed out after ${JWKS_FETCH_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    const body = (await res.json()) as { keys?: Array<Record<string, unknown>> };
-    if (!Array.isArray(body.keys)) {
-      throw new Error('JWKS response missing "keys" array');
-    }
-    return body.keys.map((jwk) => jwkToJwksKey(jwk));
   }
 }
 
@@ -204,10 +235,10 @@ function validateClerkClaims(
   const now = Math.floor(Date.now() / 1000);
 
   if (typeof payload.sub !== 'string' || !payload.sub) {
-    throw new Error('Missing required token claims');
+    throw new Error("Missing or invalid 'sub' (subject) claim");
   }
   if (typeof payload.sid !== 'string' || !payload.sid) {
-    throw new Error('Missing required token claims');
+    throw new Error("Missing or invalid 'sid' (session ID) claim");
   }
   if (typeof payload.exp !== 'number') {
     throw new Error('Token missing expiration claim');
