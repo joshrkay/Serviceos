@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createEstimateSchema } from '../shared/contracts';
@@ -14,12 +15,14 @@ import {
 } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
 import { getNextEstimateNumber, SettingsRepository } from '../settings/settings';
+import { SendService } from '../notifications/send-service';
 
 export function createEstimateRouter(
   estimateRepo: EstimateRepository,
   settingsRepo: SettingsRepository,
   auditRepo: AuditRepository,
-  ownership: TenantOwnership
+  ownership: TenantOwnership,
+  sendService?: SendService
 ): Router {
   const router = Router();
 
@@ -140,6 +143,45 @@ export function createEstimateRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
+    '/:id/send',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!sendService) {
+          res
+            .status(503)
+            .json({
+              error: 'NOT_CONFIGURED',
+              message: 'Message delivery is not configured for this environment',
+            });
+          return;
+        }
+        const parsed = z.object({
+          channel: z.enum(['sms', 'email', 'both']).default('sms'),
+          recipientPhone: z.string().optional(),
+          recipientEmail: z.string().optional(),
+          customMessage: z.string().optional(),
+        }).safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+          return;
+        }
+        const result = await sendService.sendEstimate({
+          tenantId: req.auth!.tenantId,
+          estimateId: req.params.id,
+          ...parsed.data,
+        });
+        res.status(202).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
