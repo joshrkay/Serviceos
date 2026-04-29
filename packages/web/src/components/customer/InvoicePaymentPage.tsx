@@ -65,17 +65,27 @@ function getPublishableKey(): string | undefined {
   // the test environment (where import.meta.env may not be defined) does
   // not crash on first import.
   try {
-    return (import.meta as { env?: Record<string, string | undefined> })
+    const fromImport = (import.meta as { env?: Record<string, string | undefined> })
       .env?.VITE_STRIPE_PUBLISHABLE_KEY;
+    if (fromImport) return fromImport;
   } catch {
-    return undefined;
+    /* import.meta unavailable (Node test) — fall through */
   }
+  // Test fallback: vitest's `vi.stubEnv` writes to process.env. Vite
+  // strips this branch in production builds via dead-code elimination
+  // (process.env is undefined on the client there).
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+  }
+  return undefined;
 }
 
-const stripePromise: Promise<Stripe | null> = (() => {
-  const key = getPublishableKey();
-  return key ? loadStripe(key) : Promise.resolve(null);
-})();
+// Stripe's docs recommend calling `loadStripe` once at module level,
+// but doing so reads `import.meta.env` at module-load time, which makes
+// the env effectively immutable across the test runtime. We resolve it
+// at component-mount time via `useMemo` (below) — the underlying
+// `loadStripe` cache still ensures a single network roundtrip per
+// publishable key per page load.
 
 async function fetchInvoice(token: string): Promise<PublicInvoiceView> {
   const res = await fetch(`/public/invoices/${token}`);
@@ -153,7 +163,12 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
 
 // ─── Stripe payment form ───────────────────────────────────────────────────
 
-type PayStatus = 'idle' | 'processing' | 'succeeded' | 'failed';
+type PayStatus =
+  | 'idle'
+  | 'processing'        // submit in flight (waiting for Stripe)
+  | 'processing_async'  // intent settling async (ACH / capture-later)
+  | 'succeeded'         // intent.status === 'succeeded'
+  | 'failed';
 
 function PaymentForm({
   amountCents,
@@ -178,27 +193,70 @@ function PaymentForm({
     if (!stripe || !elements || status === 'processing') return;
     setStatus('processing');
     setErrorMessage(null);
-    const { error } = await stripe.confirmPayment({
+    const result = await stripe.confirmPayment({
       elements,
       confirmParams: {
         return_url: `${window.location.origin}${window.location.pathname}?success=true`,
       },
       redirect: 'if_required',
     });
-    if (error) {
+    if (result.error) {
       setStatus('failed');
-      setErrorMessage(error.message ?? 'Payment failed. Please try a different card.');
+      setErrorMessage(
+        result.error.message ?? 'Payment failed. Please try a different card.',
+      );
       return;
     }
-    // On stay-on-page success (no redirect needed), flip to the success
-    // screen via react-router. Avoids a full-page reload — the parent
-    // re-renders against the same invoice data, and webhook
-    // reconciliation flips `paid_at` server-side independently.
-    setStatus('succeeded');
-    onSucceeded();
+    // P1 review fix: confirmPayment returning without `error` does NOT
+    // mean payment is settled. With `redirect: 'if_required'` the
+    // resolved paymentIntent can still be in `processing` /
+    // `requires_action` / `requires_capture` states for delayed payment
+    // methods. Only flip to "Payment received" on `succeeded`. For
+    // intermediate states, show a processing screen and let the webhook
+    // reconciliation be the source of truth.
+    const intentStatus = result.paymentIntent?.status;
+    if (intentStatus === 'succeeded') {
+      setStatus('succeeded');
+      onSucceeded();
+      return;
+    }
+    if (intentStatus === 'processing' || intentStatus === 'requires_capture') {
+      // Bank/ACH or capture-later flows: payment is in flight but not
+      // settled. The Stripe webhook will mark the invoice paid when the
+      // intent transitions to succeeded; the customer doesn't need to
+      // refresh.
+      setStatus('processing_async');
+      setErrorMessage(null);
+      return;
+    }
+    // requires_action / requires_payment_method / canceled / unknown —
+    // leave as failed with an actionable message.
+    setStatus('failed');
+    setErrorMessage(
+      `Payment is not yet complete (status: ${intentStatus ?? 'unknown'}). ` +
+        'Please try again or contact support if the issue persists.',
+    );
   }
 
   const disabled = !stripe || !elements || status === 'processing';
+
+  if (status === 'processing_async') {
+    // ACH / capture-later flows where the intent has cleared the
+    // submit step but isn't yet `succeeded`. Webhook reconciliation
+    // will mark the invoice paid when Stripe finishes.
+    return (
+      <div
+        role="status"
+        className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
+      >
+        <p className="text-sm text-slate-700">
+          We've received your payment instructions and they're processing
+          with your bank. You'll get a confirmation email when the funds
+          settle. You can close this window.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
@@ -256,6 +314,14 @@ export function InvoicePaymentPage() {
   const [intentError, setIntentError] = useState<string | null>(null);
   const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
 
+  // Built per mount so vitest can stub the publishable key. `loadStripe`
+  // de-dupes internally so this still results in a single network call
+  // per key over the page lifecycle.
+  const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    const key = getPublishableKey();
+    return key ? loadStripe(key) : Promise.resolve(null);
+  }, []);
+
   // Stripe redirects back with ?success=true after a completed checkout.
   const paymentSucceeded = searchParams.get('success') === 'true';
 
@@ -273,11 +339,27 @@ export function InvoicePaymentPage() {
       });
   }, [token]);
 
+  // P2 review fix: detect missing FRONTEND publishable key by awaiting
+  // `stripePromise`. When `loadStripe` resolves to null (or no key is
+  // configured), show the same not-configured fallback we use for the
+  // backend 503 path — otherwise <Elements> would render a permanently
+  // disabled form with no actionable message.
+  useEffect(() => {
+    let cancelled = false;
+    stripePromise.then((stripe) => {
+      if (!cancelled && !stripe) setStripeNotConfigured(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // After the invoice loads, request a PaymentIntent client_secret for
   // payable invoices. Skip when already paid or success-redirect.
   useEffect(() => {
     if (!invoice || !token) return;
     if (invoice.isPaid || invoice.amountDueCents <= 0 || paymentSucceeded) return;
+    if (stripeNotConfigured) return;
     let cancelled = false;
     createPaymentIntent(invoice.id, token)
       .then((secret) => { if (!cancelled) setClientSecret(secret); })
@@ -290,7 +372,7 @@ export function InvoicePaymentPage() {
         }
       });
     return () => { cancelled = true; };
-  }, [invoice, token, paymentSucceeded]);
+  }, [invoice, token, paymentSucceeded, stripeNotConfigured]);
 
   const elementsOptions = useMemo(
     () => (clientSecret ? { clientSecret, appearance: { theme: 'stripe' as const } } : undefined),

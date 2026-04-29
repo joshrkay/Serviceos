@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
@@ -100,9 +100,19 @@ function renderPage(path = '/pay/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') {
 }
 
 describe('P5-016 InvoicePaymentPage — Stripe Elements integration', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.restoreAllMocks();
     confirmPaymentMock.mockReset();
+    // Default: a fake publishable key is configured so loadStripe is
+    // invoked and returns a non-null Stripe object. Tests for the
+    // missing-key path delete this env entry instead.
+    process.env.VITE_STRIPE_PUBLISHABLE_KEY = 'pk_test_unit_test_key';
+    const stripeJs = await import('@stripe/stripe-js');
+    vi.mocked(stripeJs.loadStripe).mockReturnValue(Promise.resolve({} as never));
+  });
+
+  afterEach(() => {
+    delete process.env.VITE_STRIPE_PUBLISHABLE_KEY;
   });
 
   it('happy path — Stripe Elements wraps the payment form once the client_secret loads', async () => {
@@ -135,6 +145,53 @@ describe('P5-016 InvoicePaymentPage — Stripe Elements integration', () => {
     });
   });
 
+  it('processing_async — confirmPayment with intent.status=processing shows processing banner, NOT "Payment received"', async () => {
+    // Codex P1 fix: ACH / capture-later flows return without an error
+    // but the intent is still settling. Don't show success yet.
+    mockFetch({});
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_1', status: 'processing' } });
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /pay.*securely/i }));
+    fireEvent.click(screen.getByRole('button', { name: /pay.*securely/i }));
+
+    await waitFor(() => expect(confirmPaymentMock).toHaveBeenCalled());
+    // Processing banner appears
+    await waitFor(() => {
+      expect(screen.getByText(/processing with your bank/i)).toBeInTheDocument();
+    });
+    // Premature "Payment received" must NOT be shown.
+    expect(screen.queryByText(/payment received/i)).not.toBeInTheDocument();
+  });
+
+  it('processing_async — requires_capture also shows processing banner, not success', async () => {
+    mockFetch({});
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_1', status: 'requires_capture' } });
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /pay.*securely/i }));
+    fireEvent.click(screen.getByRole('button', { name: /pay.*securely/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/processing with your bank/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/payment received/i)).not.toBeInTheDocument();
+  });
+
+  it('intermediate states — requires_action surfaces a clear "not yet complete" error rather than fake success', async () => {
+    mockFetch({});
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_1', status: 'requires_action' } });
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /pay.*securely/i }));
+    fireEvent.click(screen.getByRole('button', { name: /pay.*securely/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/not yet complete/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/payment received/i)).not.toBeInTheDocument();
+  });
+
   it('failure — confirmPayment returning an error renders the error message', async () => {
     mockFetch({});
     confirmPaymentMock.mockResolvedValue({ error: { message: 'Your card was declined.' } });
@@ -146,6 +203,25 @@ describe('P5-016 InvoicePaymentPage — Stripe Elements integration', () => {
     await waitFor(() => {
       expect(screen.getByText('Your card was declined.')).toBeInTheDocument();
     });
+  });
+
+  it('Codex P2: missing publishable key surfaces not-configured fallback (no dead form)', async () => {
+    // Without the publishable key on the frontend, loadStripe is never
+    // called and stripePromise resolves to null — <Elements> would
+    // render a permanently disabled form. We short-circuit BEFORE
+    // requesting the intent and show the not-configured fallback
+    // (same path as the backend 503).
+    delete process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+    const fetchSpy = mockFetch({});
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('stripe-not-configured')).toBeInTheDocument();
+    });
+    // Crucially: the create-payment-intent endpoint was NOT called.
+    const calls = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes('create-payment-intent'))).toBe(false);
   });
 
   it('mock mode — when backend returns STRIPE_NOT_CONFIGURED, falls back gracefully', async () => {
