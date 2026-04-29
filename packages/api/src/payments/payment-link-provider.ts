@@ -98,21 +98,35 @@ export interface PaymentLinkProviderDeps {
   logger?: { warn: (message: string, meta?: Record<string, unknown>) => void };
 }
 
-function isProduction(nodeEnv: string | undefined): boolean {
-  return nodeEnv === 'production' || nodeEnv === 'prod';
+function isProductionLike(nodeEnv: string | undefined): boolean {
+  // staging is treated as production-like elsewhere in the codebase
+  // (shared/config.ts:63 calls validateProductionConfig for both prod and
+  // staging). Mirror that here so a staging deploy without Stripe keys
+  // fails fast instead of silently falling back to the mock provider.
+  return nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  // Treat empty / whitespace-only env values as missing. Without this,
+  // a deployment with `STRIPE_SECRET_KEY=''` and a valid legacy
+  // `STRIPE_API_KEY` would short-circuit to the empty string and fail
+  // production startup, breaking the intended backward compat.
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /**
  * Resolves the active `PaymentLinkProvider` for the given environment.
  *
- * @throws Error in production when no Stripe key is present — refuses to
- *   silently fall back to the mock provider.
+ * @throws Error in production / staging when no Stripe key is present —
+ *   refuses to silently fall back to the mock provider.
  */
 export function createPaymentLinkProvider(
   env: PaymentLinkProviderEnv,
   deps: PaymentLinkProviderDeps,
 ): PaymentLinkProvider {
-  const stripeKey = env.STRIPE_SECRET_KEY ?? env.STRIPE_API_KEY;
+  const stripeKey = nonEmpty(env.STRIPE_SECRET_KEY) ?? nonEmpty(env.STRIPE_API_KEY);
 
   if (stripeKey) {
     return new StripePaymentLinkProvider(
@@ -121,7 +135,7 @@ export function createPaymentLinkProvider(
     );
   }
 
-  if (isProduction(env.NODE_ENV)) {
+  if (isProductionLike(env.NODE_ENV)) {
     throw new Error(
       'MockPaymentLinkProvider is forbidden in production. ' +
         'Set STRIPE_SECRET_KEY (or STRIPE_API_KEY) to use the real Stripe provider.',

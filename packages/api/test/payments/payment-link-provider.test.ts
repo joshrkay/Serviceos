@@ -125,4 +125,42 @@ describe('P5-017: MockPaymentLinkProvider production guard', () => {
       }
     });
   });
+
+  describe('Production-like environments (P5-017 review follow-up)', () => {
+    it('throws in NODE_ENV=staging without a Stripe key (treated production-like)', () => {
+      expect(() =>
+        createPaymentLinkProvider({ NODE_ENV: 'staging' }, makeDeps()),
+      ).toThrow(/MockPaymentLinkProvider is forbidden|STRIPE_SECRET_KEY/);
+    });
+
+    it('returns StripePaymentLinkProvider in staging when STRIPE_SECRET_KEY is set', () => {
+      const provider = createPaymentLinkProvider(
+        { NODE_ENV: 'staging', STRIPE_SECRET_KEY: 'sk_test_x' },
+        makeDeps(),
+      );
+      expect(provider).toBeInstanceOf(StripePaymentLinkProvider);
+    });
+
+    it('treats empty-string STRIPE_SECRET_KEY as missing and falls back to STRIPE_API_KEY', () => {
+      const provider = createPaymentLinkProvider(
+        {
+          NODE_ENV: 'production',
+          STRIPE_SECRET_KEY: '',
+          STRIPE_API_KEY: 'sk_legacy_x',
+        },
+        makeDeps(),
+      );
+      expect(provider).toBeInstanceOf(StripePaymentLinkProvider);
+    });
+
+    it('treats whitespace-only STRIPE_SECRET_KEY as missing in production', () => {
+      // Both keys whitespace -> throw, not silent mock.
+      expect(() =>
+        createPaymentLinkProvider(
+          { NODE_ENV: 'production', STRIPE_SECRET_KEY: '   ', STRIPE_API_KEY: '' },
+          makeDeps(),
+        ),
+      ).toThrow(/MockPaymentLinkProvider is forbidden|STRIPE_SECRET_KEY/);
+    });
+  });
 });
