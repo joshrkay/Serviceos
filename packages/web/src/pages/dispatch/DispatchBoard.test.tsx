@@ -255,7 +255,7 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     expect(body.payload.appointmentId).toBe('assigned-1');
   });
 
-  it('unassigned — drag from a lane to the unassigned queue creates a cancel_assignment proposal', async () => {
+  it('unassigned — drag from a lane to the unassigned queue creates a cancel_appointment proposal', async () => {
     render(<DispatchBoard />);
     const sourceLane = screen
       .getAllByTestId('technician-lane')
@@ -270,7 +270,7 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
 
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
     const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
-    expect(body.proposalType).toBe('cancel_assignment');
+    expect(body.proposalType).toBe('cancel_appointment');
     expect(body.payload.appointmentId).toBe('assigned-1');
     expect(body.payload.cancellationType).toBeTruthy();
   });
@@ -362,7 +362,7 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     expect(body.payload.fromTechnicianId).toBeUndefined();
   });
 
-  it('error — failed proposal POST surfaces an error toast and clears the dialog', async () => {
+  it('error — failed proposal POST surfaces an error toast and keeps the dialog open so the user can retry without re-dragging', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       json: () => Promise.resolve({}),
@@ -379,6 +379,7 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
-    expect(screen.queryByTestId('confirm-proposal-dialog')).toBeNull();
+    // Dialog STAYS open so the user can retry without re-performing the drag.
+    expect(screen.queryByTestId('confirm-proposal-dialog')).not.toBeNull();
   });
 });

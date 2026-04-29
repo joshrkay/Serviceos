@@ -146,7 +146,7 @@ export function DispatchBoard() {
       let targetDescription: string;
 
       if (target.kind === 'unassigned') {
-        proposalType = 'cancel_assignment';
+        proposalType = 'cancel_appointment';
         targetDescription = 'Remove from technician — return to unassigned queue';
       } else if (
         dragSource.sourceTechnicianId &&
@@ -249,7 +249,7 @@ export function DispatchBoard() {
       };
       summary = 'Reschedule appointment within technician lane';
     } else {
-      // cancel_assignment
+      // cancel_appointment
       payload = {
         appointmentId: source.appointmentId,
         reason: 'Removed from technician via dispatch board drag-and-drop',
@@ -292,12 +292,14 @@ export function DispatchBoard() {
           },
         },
       });
+      // Only dismiss the dialog on success. On error we keep `pendingDrop`
+      // so the user can retry without re-performing the drag.
+      setPendingDrop(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       toast.error(`Could not create proposal: ${msg}`);
     } finally {
       setIsSubmittingProposal(false);
-      setPendingDrop(null);
     }
   }, [pendingDrop]);
 

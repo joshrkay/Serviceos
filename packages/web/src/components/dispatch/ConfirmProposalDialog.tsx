@@ -15,7 +15,7 @@ import React from 'react';
 export type ProposedProposalType =
   | 'reassign_appointment'
   | 'reschedule_appointment'
-  | 'cancel_assignment';
+  | 'cancel_appointment';
 
 export interface ConfirmProposalDialogProps {
   open: boolean;
@@ -30,7 +30,7 @@ export interface ConfirmProposalDialogProps {
 const PROPOSAL_TITLE: Record<ProposedProposalType, string> = {
   reassign_appointment: 'Reassign appointment?',
   reschedule_appointment: 'Reschedule appointment?',
-  cancel_assignment: 'Cancel this assignment?',
+  cancel_appointment: 'Cancel this assignment?',
 };
 
 const PROPOSAL_DESCRIPTION: Record<ProposedProposalType, string> = {
@@ -38,7 +38,7 @@ const PROPOSAL_DESCRIPTION: Record<ProposedProposalType, string> = {
     'A reassign proposal will be created. The appointment stays in its current lane until a teammate approves the proposal.',
   reschedule_appointment:
     'A reschedule proposal will be created. The appointment time will not change until a teammate approves the proposal.',
-  cancel_assignment:
+  cancel_appointment:
     'A cancel-assignment proposal will be created. The appointment stays assigned until a teammate approves the proposal.',
 };
 
@@ -51,6 +51,18 @@ export function ConfirmProposalDialog({
   onConfirm,
   onCancel,
 }: ConfirmProposalDialogProps) {
+  // Standard a11y for modal dialogs: Escape dismisses unless a submit
+  // is in flight (don't let the user dismiss while we're waiting on the
+  // server — we'd lose the round-trip context).
+  React.useEffect(() => {
+    if (!open) return;
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isSubmitting) onCancel();
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [open, isSubmitting, onCancel]);
+
   if (!open || !proposalType) return null;
 
   return (
