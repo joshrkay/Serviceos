@@ -414,13 +414,21 @@ export function InvoicePaymentPage() {
 
   // P5-018 — Poll the public status endpoint while an async payment
   // is settling. Stop polling as soon as the status flips to `paid`.
-  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid;
+  // We need to disable polling on BOTH the initial server-fetched
+  // invoice.isPaid (page loaded after a previous redirect) AND on
+  // polledStatus.status === 'paid' (the hook itself reported paid in a
+  // prior tick). Without the second clause the hook keeps firing 5s
+  // requests on the success screen forever.
+  const [polledPaid, setPolledPaid] = useState(false);
+  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid && !polledPaid;
   const { status: polledStatus } = useInvoiceStatus(
     invoice?.id ?? null,
     token ?? null,
     { enabled: pollEnabled, intervalMs: 5_000 },
   );
-  const polledPaid = polledStatus?.status === 'paid';
+  useEffect(() => {
+    if (polledStatus?.status === 'paid' && !polledPaid) setPolledPaid(true);
+  }, [polledStatus?.status, polledPaid]);
 
   if (loading) {
     return (

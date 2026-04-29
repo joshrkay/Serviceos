@@ -108,43 +108,6 @@ export function createInvoiceRouter(
     }
   );
 
-  /**
-   * P5-018 — Lean dispatcher-side invoice-status endpoint.
-   *
-   * The full GET /:id payload is large (line items, totals, audit
-   * fields). For polling-based payment confirmation the dispatcher
-   * really only needs status + balance, so we expose a minimal shape
-   * that auto-refresh loops can hit cheaply.
-   *
-   * Auth model: same requireAuth + requireTenant + invoices:view as
-   * the rest of the router.
-   */
-  router.get(
-    '/:id/status',
-    requireAuth,
-    requireTenant,
-    requirePermission('invoices:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await getInvoice(req.auth!.tenantId, req.params.id, invoiceRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
-          return;
-        }
-        res.json({
-          id: result.id,
-          status: result.status,
-          amountDueCents: result.amountDueCents,
-          amountPaidCents: result.amountPaidCents,
-          paidAt: null,
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
-  );
-
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const result = await updateInvoice(req.auth!.tenantId, req.params.id, req.body, invoiceRepo);
