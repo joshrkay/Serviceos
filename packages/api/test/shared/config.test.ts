@@ -28,6 +28,7 @@ describe('P0-006 — Secrets/config framework', () => {
       DB_USER: 'admin',
       DB_PASSWORD: 'secret',
       CLERK_SECRET_KEY: 'sk_test_staging',
+      CLERK_PUBLISHABLE_KEY: 'pk_test_staging',
       CLERK_WEBHOOK_SECRET: 'whsec_test',
       AI_PROVIDER_API_KEY: 'ak_test',
       AI_PROVIDER_BASE_URL: 'https://ai.example.com',
@@ -118,11 +119,25 @@ describe('P0-006 — Secrets/config framework', () => {
         NODE_ENV: 'prod',
         DATABASE_URL: 'postgres://u:p@h/d',
         CLERK_SECRET_KEY: 'sk_x',
+        CLERK_PUBLISHABLE_KEY: 'pk_x',
         CLERK_WEBHOOK_SECRET: 'whsec_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
       })
     ).not.toThrow();
+  });
+
+  it('AC#1 — production load fails when CLERK_PUBLISHABLE_KEY is missing', () => {
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'prod',
+        DATABASE_URL: 'postgres://u:p@h/d',
+        CLERK_SECRET_KEY: 'sk_x',
+        CLERK_WEBHOOK_SECRET: 'whsec_x',
+        AI_PROVIDER_API_KEY: 'ak_x',
+        CORS_ORIGIN: 'https://app.example.com',
+      })
+    ).toThrow(/CLERK_PUBLISHABLE_KEY/);
   });
 });
 

@@ -6,17 +6,21 @@ import { createLogger } from '../logging/logger';
 /**
  * DEV-ONLY auth bypass.
  *
- * Background: the existing verifyClerkSession in auth/clerk.ts verifies
- * the Clerk JWT with HMAC-SHA256 using CLERK_SECRET_KEY. Real Clerk
- * tokens are RS256-signed with a per-instance keypair (JWKS), so real
- * tokens never pass that check. This is a real bug that needs a
- * proper fix (use @clerk/backend or verify against the JWKS URL) in
- * production — tracked separately.
+ * Background: P0-033 made `verifyClerkSession` verify real RS256 Clerk
+ * session tokens via the published JWKS, so the production path now works
+ * end-to-end against a real Clerk instance. Two side-channels remain for
+ * local dev — both are hard-gated and refused in production:
  *
- * For local dev, this middleware lets Clerk tokens through without a
- * signature check so you can exercise the UI end-to-end. It also
- * auto-bootstraps a tenant for the Clerk user on first hit so
- * /api routes don't 403 after a fresh signup.
+ *   1. `DEV_AUTH_BYPASS=true` (this middleware): skips signature
+ *      verification entirely, decodes the JWT body, and auto-bootstraps a
+ *      tenant for the Clerk user. Use only when you don't have real
+ *      Clerk-issued tokens locally. MUST remain OFF in production.
+ *
+ *   2. `CLERK_DEV_HMAC_TOKENS=true` (gated inside `verifyClerkSession`):
+ *      keeps the legacy HMAC-SHA256 path so synthetic test tokens signed
+ *      with `CLERK_SECRET_KEY` continue to verify. Refused at startup in
+ *      production by `validateEnvSchema` and refused at runtime by
+ *      `verifyClerkSession`.
  *
  * Hard-gated on NODE_ENV=dev. No-ops in every other environment.
  * Refuses to activate without an explicit DEV_AUTH_BYPASS=true flag
