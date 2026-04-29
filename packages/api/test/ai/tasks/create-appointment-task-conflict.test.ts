@@ -10,12 +10,12 @@
  * another time / technician.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { CreateAppointmentAITaskHandler } from './create-appointment-task';
+import { CreateAppointmentAITaskHandler } from '../../../src/ai/tasks/create-appointment-task';
 import {
   SlotConflictChecker,
   SlotConflictResult,
-} from './slot-conflict-checker';
-import { LLMGateway, LLMResponse } from '../gateway/gateway';
+} from '../../../src/ai/tasks/slot-conflict-checker';
+import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {

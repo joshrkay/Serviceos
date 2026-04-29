@@ -6,16 +6,16 @@
  * slots. See `slot-conflict-checker.ts` for the design notes.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { DefaultSlotConflictChecker } from './slot-conflict-checker';
+import { DefaultSlotConflictChecker } from '../../../src/ai/tasks/slot-conflict-checker';
 import {
   Appointment,
   AppointmentRepository,
-} from '../../appointments/appointment';
+} from '../../../src/appointments/appointment';
 import {
   AppointmentAssignment,
   AssignmentRepository,
-} from '../../appointments/assignment';
-import { Job, JobRepository } from '../../jobs/job';
+} from '../../../src/appointments/assignment';
+import { Job, JobRepository } from '../../../src/jobs/job';
 
 const tenantId = 'tenant-1';
 const technicianId = 'tech-1';
