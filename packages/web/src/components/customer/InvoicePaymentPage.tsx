@@ -11,6 +11,7 @@ import {
   useStripe,
 } from '@stripe/react-stripe-js';
 import { loadStripe, Stripe } from '@stripe/stripe-js';
+import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 
 // ─── API types ──────────────────────────────────────────────────────────────
 
@@ -119,12 +120,24 @@ async function createPaymentIntent(invoiceId: string, viewToken: string): Promis
 
 // ─── Success screen ────────────────────────────────────────────────────────
 
-function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: {
+function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone, paidAt }: {
   customerName: string;
   invoiceNumber: string;
   totalCents: number;
   businessPhone?: string;
+  /** ISO date string. When provided, rendered in the receipt block. */
+  paidAt?: string | null;
 }) {
+  // P5-018: keep the receipt block intentionally minimal — invoice
+  // number, amount paid, and a paid timestamp. We deliberately do NOT
+  // surface card brand / last-4 / payment-intent ids in the customer
+  // view. Stripe sends an emailed receipt with that detail.
+  const paidAtLabel = paidAt
+    ? new Date(paidAt).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      })
+    : null;
   return (
     <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center">
       <div className="flex flex-col items-center gap-5 max-w-xs" style={{ animation: 'popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) both' }}>
@@ -147,6 +160,12 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
             <span className="text-slate-500">Amount</span>
             <span className="text-slate-800">${formatMoney(totalCents)}</span>
           </div>
+          {paidAtLabel && (
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-500">Paid on</span>
+              <span className="text-slate-800">{paidAtLabel}</span>
+            </div>
+          )}
           <div className="flex justify-between text-sm">
             <span className="text-slate-500">Status</span>
             <span className="text-green-700 flex items-center gap-1"><Check size={12} /> Paid</span>
@@ -173,6 +192,7 @@ type PayStatus =
 function PaymentForm({
   amountCents,
   onSucceeded,
+  onProcessingAsync,
 }: {
   amountCents: number;
   /**
@@ -182,6 +202,12 @@ function PaymentForm({
    * trigger a full-page reload (which would re-fetch the invoice).
    */
   onSucceeded: () => void;
+  /**
+   * P5-018: called when the PaymentIntent settles asynchronously (ACH /
+   * processing) so the parent page can start polling the status
+   * endpoint and flip to "Payment received" once the webhook lands.
+   */
+  onProcessingAsync?: () => void;
 }) {
   const stripe = useStripe();
   const elements = useElements();
@@ -224,9 +250,11 @@ function PaymentForm({
       // Bank/ACH or capture-later flows: payment is in flight but not
       // settled. The Stripe webhook will mark the invoice paid when the
       // intent transitions to succeeded; the customer doesn't need to
-      // refresh.
+      // refresh — the parent page polls the status endpoint and flips
+      // to "Payment received" automatically (P5-018).
       setStatus('processing_async');
       setErrorMessage(null);
+      onProcessingAsync?.();
       return;
     }
     // requires_action / requires_payment_method / canceled / unknown —
@@ -314,6 +342,11 @@ export function InvoicePaymentPage() {
   const [intentError, setIntentError] = useState<string | null>(null);
   const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
 
+  // P5-018: when Stripe returns an async-settling intent (ACH /
+  // capture-later), we kick off polling so the page can flip to
+  // "Payment received" once the webhook reconciliation lands.
+  const [processingAsync, setProcessingAsync] = useState(false);
+
   // Built per mount so vitest can stub the publishable key. `loadStripe`
   // de-dupes internally so this still results in a single network call
   // per key over the page lifecycle.
@@ -379,6 +412,16 @@ export function InvoicePaymentPage() {
     [clientSecret],
   );
 
+  // P5-018 — Poll the public status endpoint while an async payment
+  // is settling. Stop polling as soon as the status flips to `paid`.
+  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid;
+  const { status: polledStatus } = useInvoiceStatus(
+    invoice?.id ?? null,
+    token ?? null,
+    { enabled: pollEnabled, intervalMs: 5_000 },
+  );
+  const polledPaid = polledStatus?.status === 'paid';
+
   if (loading) {
     return (
       <div className="min-h-screen bg-white flex items-center justify-center">
@@ -404,13 +447,18 @@ export function InvoicePaymentPage() {
   // Show paid screen when:
   //   • invoice is fully settled (isPaid or amountDueCents === 0)
   //   • Stripe redirected back with ?success=true (webhook may not have fired yet)
-  if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded) {
+  //   • P5-018: async polling observed the status flipping to paid
+  if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded || polledPaid) {
+    const paidAmountCents = polledPaid && polledStatus
+      ? polledStatus.amountPaidCents
+      : inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents;
     return (
       <PaidScreen
         customerName={inv.customerName}
         invoiceNumber={inv.invoiceNumber}
-        totalCents={inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents}
+        totalCents={paidAmountCents}
         businessPhone={inv.businessPhone}
+        paidAt={polledStatus?.paidAt ?? null}
       />
     );
   }
@@ -558,6 +606,7 @@ export function InvoicePaymentPage() {
             <PaymentForm
               amountCents={inv.amountDueCents}
               onSucceeded={() => setSearchParams({ success: 'true' })}
+              onProcessingAsync={() => setProcessingAsync(true)}
             />
           </Elements>
         )}

@@ -172,6 +172,58 @@ describe('GET /api/invoices/:id', () => {
   });
 });
 
+describe('P5-018 invoice-status — GET /api/invoices/:id/status', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns the lean status shape for an existing invoice', async () => {
+    const created = await createInvoice(app);
+    const res = await request(app).get(`/api/invoices/${created.body.id}/status`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(created.body.id);
+    expect(res.body.status).toBe('draft');
+    expect(typeof res.body.amountDueCents).toBe('number');
+    expect(typeof res.body.amountPaidCents).toBe('number');
+    expect(res.body.paidAt).toBeNull();
+  });
+
+  it('omits heavy fields (lineItems, totals) from the status response', async () => {
+    const created = await createInvoice(app);
+    const res = await request(app).get(`/api/invoices/${created.body.id}/status`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('lineItems');
+    expect(res.body).not.toHaveProperty('totals');
+    expect(res.body).not.toHaveProperty('jobId');
+  });
+
+  it('reflects a transition to paid', async () => {
+    const created = await createInvoice(app);
+    await request(app)
+      .post(`/api/invoices/${created.body.id}/issue`)
+      .send({ paymentTermDays: 30 });
+    await request(app)
+      .post(`/api/invoices/${created.body.id}/payment`)
+      .send({ amountCents: 15000, method: 'cash' });
+
+    const res = await request(app).get(`/api/invoices/${created.body.id}/status`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('paid');
+    expect(res.body.amountDueCents).toBe(0);
+    expect(res.body.amountPaidCents).toBe(15000);
+  });
+
+  it('returns 404 for unknown invoice id', async () => {
+    const res = await request(app).get('/api/invoices/does-not-exist/status');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
 describe('GET /api/invoices', () => {
   let app: Express;
 

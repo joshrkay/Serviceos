@@ -121,5 +121,62 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
     }
   });
 
+  /**
+   * P5-018 — Public invoice-status polling endpoint.
+   *
+   * View-token gated (the same secret used to render the public payment
+   * page). Lets the customer's browser poll for status transitions while
+   * an async payment (ACH / processing intent) settles via the Stripe
+   * webhook. Response is intentionally minimal — it never exposes
+   * sensitive fields like payment-method details, customer PII, or
+   * line items.
+   *
+   * Already-paid invoices return 200 with `status: 'paid'` so the page
+   * can short-circuit polling without needing a 4xx-aware retry loop.
+   */
+  const statusQuerySchema = z.object({
+    token: z.string().min(16, 'token is too short'),
+  });
+
+  router.get('/status/:invoiceId', async (req: Request, res: Response) => {
+    try {
+      const { invoiceId } = req.params;
+      const { token: viewToken } = statusQuerySchema.parse(req.query);
+
+      if (!deps.invoiceRepo.findByViewToken) {
+        res.status(503).json({
+          error: 'NOT_SUPPORTED',
+          message: 'Token lookup not supported',
+        });
+        return;
+      }
+
+      const invoice = await deps.invoiceRepo.findByViewToken(viewToken);
+      // Same opacity model as create-payment-intent: a token mismatch
+      // and an id mismatch return identical 404s so the endpoint can't
+      // be used to enumerate ids.
+      if (!invoice || invoice.id !== invoiceId) {
+        res.status(404).json({
+          error: 'NOT_FOUND',
+          message: 'Invoice not found',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        status: invoice.status,
+        amountDueCents: invoice.amountDueCents,
+        amountPaidCents: invoice.amountPaidCents,
+        // `paidAt` is reserved for a future schema column. Surfaced as
+        // `null` today so the frontend hook contract is stable across
+        // the rollout.
+        paidAt: null,
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
   return router;
 }

@@ -68,9 +68,24 @@ function mockFetch(opts: {
   invoice?: unknown;
   invoiceOk?: boolean;
   intentResponse?: { ok: boolean; status?: number; body: unknown };
+  /**
+   * P5-018: per-call status responses. Each poll consumes one entry;
+   * the last entry is reused once exhausted.
+   */
+  statusResponses?: Array<{ ok?: boolean; status?: number; body: unknown }>;
 }) {
+  let statusIdx = 0;
   return vi.spyOn(global, 'fetch').mockImplementation(((input: RequestInfo) => {
     const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/api/public-payments/status/')) {
+      const list = opts.statusResponses ?? [
+        { ok: true, status: 200, body: { status: 'open', amountDueCents: 42500, amountPaidCents: 0, paidAt: null } },
+      ];
+      const r = list[Math.min(statusIdx, list.length - 1)];
+      statusIdx += 1;
+      const ok = r.ok ?? true;
+      return Promise.resolve(jsonResponse(r.body, ok, r.status ?? (ok ? 200 : 400)));
+    }
     if (url.includes('/api/public-payments/create-payment-intent')) {
       const r = opts.intentResponse ?? {
         ok: true,
@@ -271,4 +286,65 @@ describe('P5-016 InvoicePaymentPage — Stripe Elements integration', () => {
       expect(screen.getByText('Payment received!')).toBeInTheDocument();
     });
   });
+});
+
+describe('P5-018 InvoicePaymentPage — async settlement polling', () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    confirmPaymentMock.mockReset();
+    process.env.VITE_STRIPE_PUBLISHABLE_KEY = 'pk_test_unit_test_key';
+    const stripeJs = await import('@stripe/stripe-js');
+    vi.mocked(stripeJs.loadStripe).mockReturnValue(Promise.resolve({} as never));
+  });
+
+  afterEach(() => {
+    delete process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+  });
+
+  it('processing_async + polled paid status flips to "Payment received" without a redirect', async () => {
+    // Stripe returns processing → page enters processing_async → polling
+    // begins → second poll returns status: paid → paid screen renders.
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_async', status: 'processing' } });
+
+    mockFetch({
+      statusResponses: [
+        { ok: true, status: 200, body: { status: 'open', amountDueCents: 42500, amountPaidCents: 0, paidAt: null } },
+        { ok: true, status: 200, body: { status: 'paid', amountDueCents: 0, amountPaidCents: 42500, paidAt: '2026-04-29T12:00:00Z' } },
+        { ok: true, status: 200, body: { status: 'paid', amountDueCents: 0, amountPaidCents: 42500, paidAt: '2026-04-29T12:00:00Z' } },
+      ],
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /pay.*securely/i }));
+    fireEvent.click(screen.getByRole('button', { name: /pay.*securely/i }));
+
+    // First state: processing_async banner appears (immediate poll
+    // reports `open`, so the paid screen has not rendered yet).
+    await waitFor(() =>
+      expect(screen.getByText(/processing with your bank/i)).toBeInTheDocument(),
+    );
+
+    // Second poll fires after the 5s interval and observes status:paid.
+    await waitFor(() =>
+      expect(screen.getByText('Payment received!')).toBeInTheDocument(),
+    { timeout: 10_000 });
+  }, 15_000);
+
+  it('renders the paidAt timestamp on the receipt block when the polled status includes one', async () => {
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_async', status: 'processing' } });
+    mockFetch({
+      statusResponses: [
+        { ok: true, status: 200, body: { status: 'paid', amountDueCents: 0, amountPaidCents: 42500, paidAt: '2026-04-29T12:00:00Z' } },
+      ],
+    });
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /pay.*securely/i }));
+    fireEvent.click(screen.getByRole('button', { name: /pay.*securely/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText('Payment received!')).toBeInTheDocument(),
+    { timeout: 10_000 });
+    expect(screen.getByText('Paid on')).toBeInTheDocument();
+  }, 15_000);
 });
