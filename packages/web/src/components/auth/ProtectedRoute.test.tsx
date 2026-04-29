@@ -202,7 +202,18 @@ describe('P0-031 ProtectedRoute — routes.ts wiring (source-level)', () => {
     expect(src).toMatch(/Component:\s*ProtectedRoute/);
 
     // Every public path is declared somewhere in the file…
-    const publicPaths = ['/login', '/signup', '/e/:id', '/pay/:id', '/intake'];
+    // Codex P2 follow-up: include `/onboarding` and
+    // `/public/feedback/:token` so a future change that accidentally
+    // nests either route under the guard is caught.
+    const publicPaths = [
+      '/login',
+      '/signup',
+      '/onboarding',
+      '/e/:id',
+      '/pay/:id',
+      '/intake',
+      '/public/feedback/:token',
+    ];
     for (const p of publicPaths) {
       expect(src).toContain(`'${p}'`);
     }
