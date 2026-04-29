@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
+import { StripePaymentLinkProvider } from './stripe-payment-link';
+import type { PaymentReadinessRepository } from '../invoices/payment-readiness';
 
 export interface PaymentLinkRequest {
   tenantId: string;
@@ -60,4 +62,82 @@ export class MockPaymentLinkProvider implements PaymentLinkProvider {
   isActive(linkId: string): boolean {
     return this.links.get(linkId)?.active ?? false;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P5-017 — Production guard for MockPaymentLinkProvider.
+//
+// `MockPaymentLinkProvider` returns synthetic `https://pay.mock.com/...` URLs
+// that look real but route nowhere. If we ever booted a production process
+// without `STRIPE_SECRET_KEY`, the silent fallback would accept payments via
+// these synthetic URLs — money would be lost, and the failure mode is silent.
+//
+// The factory below fails fast at boot:
+//   - Stripe key set            → real `StripePaymentLinkProvider`
+//   - dev/test, key missing     → `MockPaymentLinkProvider` + dev-mode warning
+//   - prod/staging, key missing → throws (refuses to boot)
+//
+// `app.ts` calls this factory once during `createApp()`, so the throw
+// happens at boot before any route is mounted. A follow-up may also extend
+// `validateProductionConfig` in `shared/config.ts` to require the key —
+// this factory is the canonical guard regardless.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PaymentLinkProviderEnv {
+  NODE_ENV?: string;
+  STRIPE_SECRET_KEY?: string;
+  // Legacy alias still read by `StripePaymentLinkProvider` directly.
+  STRIPE_API_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+}
+
+export interface PaymentLinkProviderDeps {
+  readinessRepo: PaymentReadinessRepository;
+  // Logger is optional so the factory remains usable from places that don't
+  // have the structured logger wired (e.g. unit tests). Defaults to console.
+  logger?: { warn: (message: string, meta?: Record<string, unknown>) => void };
+}
+
+function isProduction(nodeEnv: string | undefined): boolean {
+  return nodeEnv === 'production' || nodeEnv === 'prod';
+}
+
+/**
+ * Resolves the active `PaymentLinkProvider` for the given environment.
+ *
+ * @throws Error in production when no Stripe key is present — refuses to
+ *   silently fall back to the mock provider.
+ */
+export function createPaymentLinkProvider(
+  env: PaymentLinkProviderEnv,
+  deps: PaymentLinkProviderDeps,
+): PaymentLinkProvider {
+  const stripeKey = env.STRIPE_SECRET_KEY ?? env.STRIPE_API_KEY;
+
+  if (stripeKey) {
+    return new StripePaymentLinkProvider(
+      { apiKey: stripeKey, webhookSecret: env.STRIPE_WEBHOOK_SECRET ?? '' },
+      deps.readinessRepo,
+    );
+  }
+
+  if (isProduction(env.NODE_ENV)) {
+    throw new Error(
+      'MockPaymentLinkProvider is forbidden in production. ' +
+        'Set STRIPE_SECRET_KEY (or STRIPE_API_KEY) to use the real Stripe provider.',
+    );
+  }
+
+  const logger = deps.logger ?? {
+    warn: (msg: string, meta?: Record<string, unknown>) => {
+      // eslint-disable-next-line no-console
+      console.warn(msg, meta ?? '');
+    },
+  };
+  logger.warn(
+    '[payments] ⚠️  STRIPE_SECRET_KEY missing — using MockPaymentLinkProvider. ' +
+      'Generated payment URLs (https://pay.mock.com/...) are synthetic and route nowhere. ' +
+      'Set STRIPE_SECRET_KEY before deploying outside of dev/test.',
+  );
+  return new MockPaymentLinkProvider();
 }
