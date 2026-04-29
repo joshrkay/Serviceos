@@ -1,5 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import { setTenantContext } from './schema';
+import { tenantContextStore } from '../middleware/tenant-context';
 
 /**
  * Base class for all Postgres-backed repositories.
@@ -11,8 +12,24 @@ export class PgBaseRepository {
   /**
    * Execute a callback within a tenant-scoped database context.
    * Sets `app.current_tenant_id` so RLS policies filter automatically.
+   *
+   * P0-024: when invoked from inside a request that owns a transaction-
+   * scoped client (set up by the `withTenantTransaction` middleware),
+   * we reuse that client so every query in the request runs inside the
+   * same transaction with the same `SET LOCAL` GUC. When invoked
+   * outside that scope (workers, public flows, tests), we fall back to
+   * the original per-call connection acquisition. The fallback uses
+   * the existing `setTenantContext` helper — preserving exact pre-PR
+   * behavior so non-request callers see no functional change.
    */
   protected async withTenant<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const ctx = tenantContextStore.getStore();
+    if (ctx && ctx.tenantId === tenantId) {
+      // Request-scoped client — already inside a transaction with
+      // app.current_tenant_id set LOCAL. Don't re-set, don't re-connect,
+      // don't release (the middleware owns the lifecycle).
+      return fn(ctx.client);
+    }
     const client = await this.pool.connect();
     try {
       await client.query(setTenantContext(tenantId));
