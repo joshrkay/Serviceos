@@ -8,6 +8,9 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createTelephonyRouter } from './routes/telephony';
+import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { InMemoryVoiceSessionStore } from './telephony/voice-session-store';
 import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
@@ -764,6 +767,30 @@ export function createApp() {
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
+    }),
+  );
+
+  // ── Twilio telephony webhooks (P8-011) ────────────────────────────────────
+  // Mounted under /api/telephony but BEFORE the Clerk auth middleware so
+  // Twilio's signed POSTs aren't rejected for missing a Clerk session.
+  // Authentication is enforced inside the router via X-Twilio-Signature
+  // verification (twilio-signature.ts).
+  const twilioVoiceSessionStore = new InMemoryVoiceSessionStore();
+  const twilioAdapter = new TwilioGatherAdapter({
+    store: twilioVoiceSessionStore,
+    gateway: llmGateway,
+    pool,
+    businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+    publicBaseUrl: process.env.PUBLIC_API_URL,
+  });
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter: twilioAdapter,
+      authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+      publicBaseUrl: process.env.PUBLIC_API_URL,
+      // Single-tenant fallback. TODO(P8-014): replace with phone-number → tenant lookup.
+      resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
     }),
   );
 
