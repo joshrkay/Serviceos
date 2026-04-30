@@ -68,7 +68,11 @@ function baseInput(overrides: Partial<SummarizeSessionInput> = {}): SummarizeSes
 describe('summarizeSession — happy path', () => {
   it('produces a summary, computes quality score, and inserts a row', async () => {
     const pool = mockPool();
-    const result = await summarizeSession(baseInput({ pool }));
+    // Pass an explicit recordingId so the call_id column gets populated;
+    // otherwise the skill writes NULL (in-app sessions don't yet have a
+    // voice_recordings row — that's wired in P8-014).
+    const recordingId = '11111111-1111-1111-1111-111111111111';
+    const result = await summarizeSession(baseInput({ pool, recordingId }));
 
     expect(result.summary).toBe('Caller scheduled an AC diagnostic for Friday.');
     expect(result.intentDetected).toBe('schedule_diagnostic');
@@ -81,12 +85,22 @@ describe('summarizeSession — happy path', () => {
     expect(callArgs[0]).toContain('INSERT INTO call_summaries');
     expect(callArgs[1]).toEqual([
       'tenant-1',
-      '11111111-1111-1111-1111-111111111111',
+      recordingId,
       'Caller scheduled an AC diagnostic for Friday.',
       'schedule_diagnostic',
       ['prop-1'],
       0.75,
     ]);
+  });
+
+  it('writes NULL call_id when no recordingId is provided (in-app sessions)', async () => {
+    const pool = mockPool();
+    await summarizeSession(baseInput({ pool })); // no recordingId
+
+    const callArgs = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Position 1 is call_id — must be NULL because no voice_recordings
+    // row exists for this session yet (P8-014 territory).
+    expect(callArgs[1][1]).toBeNull();
   });
 
   it('summary is at most 3 sentences (LLM contract)', async () => {

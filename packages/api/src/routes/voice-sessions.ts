@@ -77,6 +77,13 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
           res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
           return;
         }
+        if (session.ended) {
+          // 410 Gone is the right status here — the resource existed but
+          // is permanently terminated. Lets the frontend stop polling
+          // without confusing it with a 404.
+          res.status(410).json({ error: 'GONE', message: 'Session ended' });
+          return;
+        }
         const parsed = inputSchema.parse(req.body ?? {});
         const result = await deps.adapter.handleInput(req.params.id, parsed.text);
         res.json({

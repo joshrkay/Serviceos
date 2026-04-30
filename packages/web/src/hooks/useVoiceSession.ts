@@ -62,7 +62,11 @@ export function useVoiceSession(): UseVoiceSession {
   const [proposalIds, setProposalIds] = useState<string[]>([]);
   const [lastTtsText, setLastTtsText] = useState<string | null>(null);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  // We use a fetch-based SSE reader (not native EventSource) so we can send
+  // the Clerk bearer token in the Authorization header. The previous
+  // `?token=...` query-string approach leaked tokens into URL logs and
+  // referer headers — the server no longer accepts that fallback.
+  const sseAbortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const playAudio = useCallback((blob: Blob) => {
@@ -80,36 +84,79 @@ export function useVoiceSession(): UseVoiceSession {
     });
   }, []);
 
+  const handleSseLine = useCallback((line: string) => {
+    if (!line.startsWith('data:')) return; // skip comments/heartbeats
+    const data = line.slice(5).trim();
+    if (!data) return;
+    try {
+      const msg = JSON.parse(data) as VoiceSessionEventMessage;
+      if (msg.state) setState(msg.state);
+      if (msg.type === 'ended') {
+        setEnded(true);
+        sseAbortRef.current?.abort();
+        sseAbortRef.current = null;
+      }
+      if (msg.type === 'proposal_created' && msg.proposalId) {
+        setProposalIds((prev) => (prev.includes(msg.proposalId!) ? prev : [...prev, msg.proposalId!]));
+      }
+    } catch {
+      // ignore malformed payloads
+    }
+  }, []);
+
   const subscribeToEvents = useCallback(
     async (id: string) => {
-      // EventSource doesn't accept custom headers, so we tunnel the
-      // Clerk token via a query string. The server's auth middleware
-      // accepts either header- or query-supplied tokens; failing that,
-      // the SSE call simply never connects.
+      // Cancel any prior subscription before starting a new one.
+      sseAbortRef.current?.abort();
+      const controller = new AbortController();
+      sseAbortRef.current = controller;
+
       const token = await getToken();
-      const qs = token ? `?token=${encodeURIComponent(token)}` : '';
-      const es = new EventSource(`/api/voice/sessions/${id}/events${qs}`);
-      eventSourceRef.current = es;
-      es.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data) as VoiceSessionEventMessage;
-          if (msg.state) setState(msg.state);
-          if (msg.type === 'ended') {
-            setEnded(true);
-            es.close();
+      const headers: Record<string, string> = { Accept: 'text/event-stream' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      let response: Response;
+      try {
+        response = await fetch(`/api/voice/sessions/${id}/events`, {
+          method: 'GET',
+          headers,
+          signal: controller.signal,
+        });
+      } catch {
+        return; // aborted or network error — leave state to caller
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        // Surface auth failures explicitly instead of silently retrying.
+        setEnded(true);
+        return;
+      }
+      if (!response.ok || !response.body) return;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE event boundary is a blank line (\n\n). Process every
+          // complete event in the buffer; keep the trailing partial.
+          let idx;
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const eventBlock = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            for (const line of eventBlock.split('\n')) {
+              handleSseLine(line);
+            }
           }
-          if (msg.type === 'proposal_created' && msg.proposalId) {
-            setProposalIds((prev) => (prev.includes(msg.proposalId!) ? prev : [...prev, msg.proposalId!]));
-          }
-        } catch {
-          // ignore malformed payloads
         }
-      };
-      es.onerror = () => {
-        // Browser will auto-retry; on hard close we set ended below.
-      };
+      } catch {
+        // aborted or stream broken — caller drives reconnect via start()
+      }
     },
-    [getToken]
+    [getToken, handleSseLine]
   );
 
   const start = useCallback(async () => {
@@ -180,15 +227,15 @@ export function useVoiceSession(): UseVoiceSession {
       await api(`/api/voice/sessions/${sessionId}`, { method: 'DELETE' });
     } finally {
       setEnded(true);
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
+      sseAbortRef.current?.abort();
+      sseAbortRef.current = null;
     }
   }, [api, sessionId]);
 
   useEffect(() => {
     return () => {
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
+      sseAbortRef.current?.abort();
+      sseAbortRef.current = null;
     };
   }, []);
 

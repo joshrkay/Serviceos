@@ -17,6 +17,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import type { Pool } from 'pg';
 import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
@@ -29,6 +30,7 @@ import { classifyIntent } from '../../orchestration/intent-classifier';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
+import { estimateCostCents } from '../../skills/session-cost-tracker';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 
@@ -39,6 +41,11 @@ export interface InAppAdapterDeps {
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
   onCallRepo: OnCallRepository;
+  /**
+   * Postgres pool — when present, end-of-call summaries are persisted to
+   * call_summaries. Optional so dev mode (no DB) still works.
+   */
+  pool?: Pool;
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
 }
@@ -134,7 +141,36 @@ function toEscalationReason(reason: string | undefined): EscalationReason {
 }
 
 export class InAppVoiceAdapter {
+  /**
+   * Per-session promise chain. Serializes handleInput/endSession against
+   * concurrent calls for the same session so the FSM dispatch chain and
+   * transcript/proposalIds mutations don't interleave. Entries are
+   * dropped when the session ends (or via store.delete).
+   */
+  private readonly sessionLocks = new Map<string, Promise<void>>();
+
   constructor(private readonly deps: InAppAdapterDeps) {}
+
+  /** Run `body` while holding the per-session lock. */
+  private async withSessionLock<T>(sessionId: string, body: () => Promise<T>): Promise<T> {
+    const previous = this.sessionLocks.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.then(() => tail);
+    this.sessionLocks.set(sessionId, chained);
+    try {
+      await previous;
+      return await body();
+    } finally {
+      release();
+      // Drop the entry only if no later caller chained on top of us.
+      if (this.sessionLocks.get(sessionId) === chained) {
+        this.sessionLocks.delete(sessionId);
+      }
+    }
+  }
 
   /**
    * Open a new in-app session. Drives the FSM through the
@@ -193,6 +229,10 @@ export class InAppVoiceAdapter {
   }
 
   async handleInput(sessionId: string, text: string): Promise<HandleInputResult> {
+    return this.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, text));
+  }
+
+  private async _handleInputLocked(sessionId: string, text: string): Promise<HandleInputResult> {
     const session = this.deps.store.get(sessionId);
     if (!session) {
       throw new Error(`voice session not found: ${sessionId}`);
@@ -207,12 +247,16 @@ export class InAppVoiceAdapter {
     // the FSM still progresses (and the operator gets a clarification
     // prompt) instead of silently dropping the turn.
     let fsmEvent: CallingAgentEvent;
+    let classifierUsage: { input: number; output: number } | undefined;
     try {
       const classification = await classifyIntent(
         text,
         { tenantId: session.tenantId },
         this.deps.gateway
       );
+      classifierUsage = classification.tokenUsage
+        ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
+        : undefined;
       fsmEvent = classifierToFsmEvent(
         classification.intentType,
         classification.confidence,
@@ -220,6 +264,24 @@ export class InAppVoiceAdapter {
       );
     } catch {
       fsmEvent = { type: 'confidence_low', threshold: 0.6, score: 0 };
+    }
+
+    // Wire the classifier's token usage into the cost tracker. If the
+    // cap is exceeded, dispatch the global cost_cap_exceeded event so
+    // the FSM escalates instead of finishing the turn normally.
+    if (classifierUsage) {
+      const cents = estimateCostCents(classifierUsage.input, classifierUsage.output);
+      const capEvents = session.costTracker.recordUsage({
+        inputTokens: classifierUsage.input,
+        outputTokens: classifierUsage.output,
+        costCents: cents,
+      });
+      const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
+      if (exceeded) {
+        // Override the classifier's event — escalation supersedes the
+        // intent dispatch for the current turn.
+        fsmEvent = { type: 'cost_cap_exceeded' };
+      }
     }
 
     const allSideEffects: SideEffect[] = [];
@@ -322,6 +384,10 @@ export class InAppVoiceAdapter {
   }
 
   async endSession(sessionId: string): Promise<void> {
+    return this.withSessionLock(sessionId, () => this._endSessionLocked(sessionId));
+  }
+
+  private async _endSessionLocked(sessionId: string): Promise<void> {
     const session = this.deps.store.peek(sessionId);
     if (!session) return;
     if (!session.ended) {
@@ -335,6 +401,8 @@ export class InAppVoiceAdapter {
     }
     session.events.emit('voice-event', { type: 'ended', reason: 'manual_end' });
     this.deps.store.delete(sessionId);
+    // Drop any lock entry so we don't leak resolved promises after delete.
+    this.sessionLocks.delete(sessionId);
   }
 
   /**
@@ -347,6 +415,12 @@ export class InAppVoiceAdapter {
     effects: SideEffect[]
   ): Promise<{ lastProposalId?: string }> {
     let lastProposalId: string | undefined;
+    if (effects.length > 0) {
+      // Bump activity from the side-effect path so a slow turn (TTS
+      // synthesis, LLM call) doesn't let the idle reaper steal the
+      // session out from under us mid-execution.
+      this.deps.store.touch(session.id);
+    }
     for (const effect of effects) {
       switch (effect.type) {
         case 'audit_log':
@@ -472,6 +546,10 @@ export class InAppVoiceAdapter {
   private async runSummary(session: VoiceSession): Promise<void> {
     const durationMs = Date.now() - session.createdAt.getTime();
     try {
+      // recordingId is intentionally omitted: in-app sessions don't have
+      // a voice_recordings row (P8-014 wires that for telephony only).
+      // Persisting NULL into call_summaries.call_id keeps the FK happy.
+      const intentDetected = session.machine.currentContext.currentIntent;
       await summarizeSession({
         tenantId: session.tenantId,
         sessionId: session.id,
@@ -479,6 +557,8 @@ export class InAppVoiceAdapter {
         proposalIds: session.proposalIds,
         durationMs,
         gateway: this.deps.gateway,
+        ...(intentDetected ? { intentDetected } : {}),
+        ...(this.deps.pool ? { pool: this.deps.pool } : {}),
       });
     } catch {
       // Summary is best-effort — the call still ended successfully.

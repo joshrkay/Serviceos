@@ -1254,6 +1254,12 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_call_summaries ON call_summaries;
     CREATE POLICY tenant_isolation_call_summaries ON call_summaries
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    -- Partial unique index: idempotent retries of summarizeSession for the
+    -- same recording collide cleanly. NULL call_id (no recording yet) is
+    -- intentionally excluded so multiple in-app sessions can coexist.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_summaries_tenant_call
+      ON call_summaries (tenant_id, call_id)
+      WHERE call_id IS NOT NULL;
 
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS call_sid TEXT,

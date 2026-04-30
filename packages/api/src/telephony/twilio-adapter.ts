@@ -18,14 +18,23 @@
  * - No real-time / streaming work happens here. That's P8-012.
  */
 
+import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { classifyIntent } from '../ai/orchestration/intent-classifier';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { confirmIntent } from '../ai/skills/confirm-intent';
-import type { SideEffect } from '../ai/agents/customer-calling/types';
-import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import { summarizeSession } from '../ai/skills/summarize-session';
+import { escalateToHuman } from '../ai/skills/escalate-to-human';
+import { estimateCostCents } from '../ai/skills/session-cost-tracker';
+import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
+import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { ProposalRepository, ProposalType } from '../proposals/proposal';
+import { createProposal as buildProposal } from '../proposals/proposal';
+import type { AuditRepository } from '../audit/audit';
+import { createAuditEvent } from '../audit/audit';
+import type { OnCallRepository } from '../oncall/rotation';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -38,8 +47,14 @@ const logger = createLogger({
 export interface TwilioAdapterDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
-  /** Postgres pool — passed to identifyCaller. Optional in dev. */
+  /** Postgres pool — passed to identifyCaller and summarizeSession. */
   pool?: Pool;
+  /** Repos used to persist side-effect rows (audit/proposal/escalation). */
+  proposalRepo?: ProposalRepository;
+  auditRepo?: AuditRepository;
+  onCallRepo?: OnCallRepository;
+  /** Used as actorId on proposal/audit rows when none is in scope. */
+  systemActorId?: string;
   /** Business name used in recording disclosure copy. */
   businessName: string;
   /**
@@ -48,6 +63,27 @@ export interface TwilioAdapterDeps {
    * webhook is hit from a public IP. Falls back to a relative path.
    */
   publicBaseUrl?: string;
+}
+
+function intentToProposalType(intent: string | undefined): ProposalType {
+  switch (intent) {
+    case 'create_invoice': return 'draft_invoice';
+    case 'update_invoice': return 'update_invoice';
+    case 'issue_invoice': return 'issue_invoice';
+    case 'send_invoice': return 'send_invoice';
+    case 'record_payment': return 'record_payment';
+    case 'draft_estimate': return 'draft_estimate';
+    case 'update_estimate': return 'update_estimate';
+    case 'create_appointment': return 'create_appointment';
+    case 'reschedule_appointment': return 'reschedule_appointment';
+    case 'cancel_appointment': return 'cancel_appointment';
+    case 'reassign_appointment': return 'reassign_appointment';
+    case 'create_customer': return 'create_customer';
+    case 'create_job': return 'create_job';
+    case 'add_note': return 'add_note';
+    case 'emergency_dispatch': return 'emergency_dispatch';
+    default: return 'voice_clarification';
+  }
 }
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
@@ -144,7 +180,23 @@ export class TwilioGatherAdapter {
     to: string;
     tenantId: string;
   }): Promise<string> {
-    const session = await this.deps.store.create(opts.tenantId, 'telephony', {
+    // CallSid replay protection: Twilio retries the /voice webhook if it
+    // doesn't get a 2xx in time. Without this, every retry creates a
+    // fresh session AND fires duplicate audit/notify_oncall side effects.
+    // We rebuild the same greeting TwiML for the existing session.
+    const existing = this.deps.store.findByCallSid(opts.callSid);
+    if (existing && existing.tenantId === opts.tenantId) {
+      logger.info('handleInbound: replay for existing CallSid — reusing session', {
+        callSid: opts.callSid,
+        sessionId: existing.id,
+      });
+      return buildTwiML(
+        [{ type: 'tts_play', payload: { text: 'One moment, please.' } }],
+        { gatherActionUrl: this.gatherUrl(existing.id) },
+      );
+    }
+
+    const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
 
@@ -158,6 +210,7 @@ export class TwilioGatherAdapter {
     // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),
     //    skip and treat as unknown_caller below.
     let callerKnown: { customerId: string; customerName: string } | null = null;
+    let identifyFailed = false;
     if (this.deps.pool) {
       try {
         const result = await identifyCaller({
@@ -176,6 +229,7 @@ export class TwilioGatherAdapter {
           error: err instanceof Error ? err.message : String(err),
           callSid: opts.callSid,
         });
+        identifyFailed = true;
       }
     }
 
@@ -205,7 +259,10 @@ export class TwilioGatherAdapter {
       return fx;
     });
 
-    // 5. Drive FSM forward: greeted_ok → identifying, then caller_known or unknown_caller.
+    // 5. Drive FSM forward: greeted_ok → identifying, then caller_known,
+    //    caller_identification_failed, or unknown_caller. We escalate on
+    //    identifyFailed (DB error) instead of falling through to anonymous,
+    //    which would create proposals against the wrong customer.
     expanded.push(...session.machine.dispatch({ type: 'greeted_ok' }));
 
     if (callerKnown) {
@@ -215,19 +272,37 @@ export class TwilioGatherAdapter {
           customerId: callerKnown.customerId,
         })
       );
+    } else if (identifyFailed) {
+      expanded.push(
+        ...session.machine.dispatch({
+          type: 'caller_identification_failed',
+          reason: 'identify_caller_threw',
+        })
+      );
     } else {
       expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
     }
 
-    // 6. Execute non-TwiML side effects (audit_log, etc.) — currently no-op
-    //    for inline execution; logs are surfaced by the FSM tests. P8-014
-    //    persists audit events to the audit table via the audit repo.
-    this.executeSideEffects(expanded, opts.tenantId);
+    // 6. Execute non-TwiML side effects (audit_log, create_proposal,
+    //    notify_oncall) against the wired repos.
+    await this.executeSideEffects(session, expanded, opts.tenantId);
 
     // 7. Build TwiML.
-    return buildTwiML(expanded, {
+    const twiml = buildTwiML(expanded, {
       gatherActionUrl: this.gatherUrl(session.id),
     });
+
+    // 8. If the FSM drove straight to 'terminated' (escalation chain
+    //    that emits end_session), kick off the summary so call_summaries
+    //    captures even calls that never reached intent_capture.
+    if (session.machine.currentState === 'terminated' && !session.ended) {
+      session.ended = true;
+      void this.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+
+    return twiml;
   }
 
   /**
@@ -254,7 +329,7 @@ export class TwilioGatherAdapter {
     }
 
     // 1. Append caller utterance to transcript.
-    await this.deps.store.appendTranscript(opts.sessionId, {
+    this.deps.store.appendTranscript(opts.sessionId, {
       speaker: 'caller',
       text: opts.speechResult,
       ts: Date.now(),
@@ -262,6 +337,21 @@ export class TwilioGatherAdapter {
 
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
+
+    // Empty SpeechResult (silent caller / Twilio timeout) maps to a
+    // confidence_low so the bounded reprompt path kicks in instead of
+    // running the classifier on an empty string.
+    if (opts.speechResult.trim().length === 0) {
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+      await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+      return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+    }
 
     // 2. Branch on FSM state.
     if (currentState === 'intent_confirm') {
@@ -275,7 +365,11 @@ export class TwilioGatherAdapter {
           tenantId: opts.tenantId,
           gateway: this.deps.gateway,
         });
-        if (confirmation.confirmed) {
+        // Wire token usage into the cost tracker.
+        const capExceeded = this.recordCost(session, confirmation.tokenUsage);
+        if (capExceeded) {
+          sideEffectsAll.push(...session.machine.dispatch({ type: 'cost_cap_exceeded' }));
+        } else if (confirmation.confirmed) {
           sideEffectsAll.push(...session.machine.dispatch({ type: 'confirmed' }));
         } else {
           sideEffectsAll.push(
@@ -299,50 +393,56 @@ export class TwilioGatherAdapter {
         );
       }
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
-      // 3. Classify intent.
-      const classification = await classifyIntent(
-        opts.speechResult,
-        { tenantId: opts.tenantId },
-        this.deps.gateway
-      );
-
-      if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
-        sideEffectsAll.push(
-          ...session.machine.dispatch({
+      // 3. Classify intent. Failure → confidence_low so the bounded
+      //    reprompt path triggers instead of bubbling 5xx out to Twilio
+      //    (which would hang the caller mid-call).
+      let classifierEvent: CallingAgentEvent | null = null;
+      try {
+        const classification = await classifyIntent(
+          opts.speechResult,
+          { tenantId: opts.tenantId },
+          this.deps.gateway,
+        );
+        const capExceeded = this.recordCost(session, classification.tokenUsage);
+        if (capExceeded) {
+          classifierEvent = { type: 'cost_cap_exceeded' };
+        } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
+          classifierEvent = {
             type: 'intent_classified',
             intentType: classification.intentType,
             entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
             confidence: classification.confidence,
-          })
-        );
-
-        // After intent_classified, the FSM is in 'entity_resolution' (unless
-        // emergency_dispatch fast-path took us to 'escalating'). For Gather
-        // mode we don't run a separate entity-resolver — auto-advance with
-        // entity_resolved using whatever entities the classifier extracted
-        // so the FSM proceeds to intent_confirm. A real entity-resolution
-        // skill is P8-005's territory; this is the minimum to get the loop
-        // closed end-to-end.
-        if (session.machine.currentState === 'entity_resolution') {
-          sideEffectsAll.push(
-            ...session.machine.dispatch({
-              type: 'entity_resolved',
-              refs: {},
-            })
-          );
-
-          // The FSM's intent_confirm tts_play uses a template marker —
-          // replace with a concrete readback so callers actually hear it.
-          this.expandIntentConfirmTemplate(sideEffectsAll, classification.intentType);
-        }
-      } else {
-        sideEffectsAll.push(
-          ...session.machine.dispatch({
+          };
+        } else {
+          classifierEvent = {
             type: 'confidence_low',
             threshold: TAU_INT,
             score: classification.confidence,
-          })
+          };
+        }
+      } catch (err) {
+        logger.error('classifyIntent failed in handleGather', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: opts.sessionId,
+        });
+        classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
+
+      // After intent_classified, the FSM is in 'entity_resolution' (unless
+      // emergency_dispatch fast-path took us to 'escalating'). For Gather
+      // mode we don't run a separate entity-resolver — auto-advance with
+      // entity_resolved using whatever entities the classifier extracted
+      // so the FSM proceeds to intent_confirm.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        session.machine.currentState === 'entity_resolution'
+      ) {
+        sideEffectsAll.push(
+          ...session.machine.dispatch({ type: 'entity_resolved', refs: {} }),
         );
+        this.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
     } else {
       // Other states: log and reprompt with a generic message. Treat as a
@@ -360,11 +460,55 @@ export class TwilioGatherAdapter {
       );
     }
 
-    this.executeSideEffects(sideEffectsAll, opts.tenantId);
+    await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+    return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+  }
 
-    return buildTwiML(sideEffectsAll, {
-      gatherActionUrl: this.gatherUrl(opts.sessionId),
+  /**
+   * Build TwiML and, when the FSM has reached `terminated`, kick off
+   * the end-of-call summary in the background. Centralizes the
+   * end-of-handler wrap-up shared by handleGather and handleInbound.
+   */
+  private finalizeTwiml(
+    session: VoiceSession,
+    sideEffects: SideEffect[],
+    sessionId: string,
+  ): string {
+    const twiml = buildTwiML(sideEffects, { gatherActionUrl: this.gatherUrl(sessionId) });
+    const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
+    if (ttsLast && typeof ttsLast.payload.text === 'string') {
+      // Capture the agent's reply so summarizeSession sees both sides
+      // of the conversation, not just the caller turns.
+      this.deps.store.appendTranscript(sessionId, {
+        speaker: 'agent',
+        text: ttsLast.payload.text,
+        ts: Date.now(),
+      });
+    }
+    if (session.machine.currentState === 'terminated' && !session.ended) {
+      session.ended = true;
+      void this.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+    return twiml;
+  }
+
+  /**
+   * Push token usage from an LLM skill into the per-session cost tracker.
+   * Returns true when a hard cap was crossed (caller should escalate).
+   */
+  private recordCost(
+    session: VoiceSession,
+    usage: { input: number; output: number } | undefined,
+  ): boolean {
+    if (!usage) return false;
+    const events = session.costTracker.recordUsage({
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      costCents: estimateCostCents(usage.input, usage.output),
     });
+    return events.some((e) => e.type === 'cost_cap_exceeded');
   }
 
   /** Build the absolute Gather action URL. */
@@ -395,20 +539,164 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * Execute (or stub) the non-TwiML side effects. Audit and proposal
-   * persistence is wired in P8-014 / P8-015; for now we log so manual
-   * tests can verify the FSM ran the right steps.
+   * Execute the non-TwiML side effects against the wired repos. Each
+   * branch swallows its own errors so a single repo blip never breaks
+   * the in-flight TwiML response (Twilio would retry, doubling work).
    */
-  private executeSideEffects(sideEffects: SideEffect[], tenantId: string): void {
+  private async executeSideEffects(
+    session: VoiceSession,
+    sideEffects: SideEffect[],
+    tenantId: string,
+  ): Promise<void> {
+    if (sideEffects.length > 0) {
+      // Touch lastActivityAt from the side-effect path so a long Gather
+      // / TTS turn doesn't let the idle reaper steal the session.
+      this.deps.store.touch(session.id);
+    }
     for (const fx of sideEffects) {
       if (fx.type === 'audit_log') {
-        logger.debug('audit_log', { tenantId, payload: fx.payload });
+        await this.handleAuditLog(session, fx, tenantId);
       } else if (fx.type === 'create_proposal') {
-        logger.info('create_proposal (stub — P8-015 will persist)', {
-          tenantId,
-          payload: fx.payload,
-        });
+        await this.handleCreateProposal(session, fx, tenantId);
+      } else if (fx.type === 'notify_oncall') {
+        await this.handleNotifyOncall(session, fx, tenantId);
       }
+    }
+  }
+
+  private async handleAuditLog(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    if (!this.deps.auditRepo) {
+      logger.debug('audit_log (no auditRepo wired)', { tenantId, payload: fx.payload });
+      return;
+    }
+    const eventType = typeof fx.payload.eventType === 'string' ? fx.payload.eventType : 'agent.calling.unknown';
+    try {
+      const ev = createAuditEvent({
+        tenantId,
+        actorId: this.deps.systemActorId ?? 'calling-agent',
+        actorRole: 'system',
+        eventType,
+        entityType: 'voice_session',
+        entityId: session.id,
+        correlationId: session.id,
+        metadata: fx.payload,
+      });
+      await this.deps.auditRepo.create(ev);
+    } catch (err) {
+      logger.warn('audit_log persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  private async handleCreateProposal(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    if (!this.deps.proposalRepo) {
+      logger.info('create_proposal (no proposalRepo wired)', { tenantId, payload: fx.payload });
+      return;
+    }
+    const intent = typeof fx.payload.intent === 'string' ? fx.payload.intent : undefined;
+    const entities =
+      typeof fx.payload.entities === 'object' && fx.payload.entities !== null
+        ? (fx.payload.entities as Record<string, unknown>)
+        : {};
+    try {
+      const proposal = buildProposal({
+        tenantId,
+        proposalType: intentToProposalType(intent),
+        payload: {
+          intent,
+          entities,
+          sessionId: session.id,
+          callSid: session.callSid,
+        },
+        summary: intent ? `Voice intent: ${intent}` : 'Voice clarification needed',
+        sourceContext: {
+          source: 'calling-agent',
+          channel: 'telephony',
+          sessionId: session.id,
+        },
+        aiRunId: uuidv4(),
+        createdBy: typeof fx.payload.customerId === 'string'
+          ? fx.payload.customerId
+          : this.deps.systemActorId ?? 'calling-agent',
+      });
+      const stored = await this.deps.proposalRepo.create(proposal);
+      session.proposalIds.push(stored.id);
+      // Keep the FSM moving: emit proposal_queued so it advances to closing.
+      session.machine.dispatch({ type: 'proposal_queued', proposalId: stored.id });
+    } catch (err) {
+      logger.warn('create_proposal persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  private async handleNotifyOncall(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    if (!this.deps.onCallRepo || !this.deps.auditRepo) {
+      logger.warn('notify_oncall (oncall/audit repos not wired)', {
+        tenantId,
+        payload: fx.payload,
+      });
+      return;
+    }
+    const reason = typeof fx.payload.reason === 'string' ? fx.payload.reason : 'low_confidence';
+    try {
+      await escalateToHuman({
+        tenantId,
+        sessionId: session.id,
+        reason: reason as Parameters<typeof escalateToHuman>[0]['reason'],
+        channel: 'telephony',
+        onCallRepo: this.deps.onCallRepo,
+        auditRepo: this.deps.auditRepo,
+      });
+    } catch (err) {
+      logger.warn('escalateToHuman failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /**
+   * Persist an end-of-call summary to call_summaries. Best-effort —
+   * failures are logged but never bubble out (the call already ended).
+   */
+  private async runSummary(session: VoiceSession): Promise<void> {
+    const durationMs = Date.now() - session.createdAt.getTime();
+    try {
+      const intentDetected = session.machine.currentContext.currentIntent;
+      // recordingId intentionally omitted: voice_recordings rows are
+      // created by the P8-014 recording webhook. Until that lands,
+      // summaries persist with NULL call_id.
+      await summarizeSession({
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        transcript: session.transcript,
+        proposalIds: session.proposalIds,
+        durationMs,
+        gateway: this.deps.gateway,
+        ...(intentDetected ? { intentDetected } : {}),
+        ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+      });
+    } catch (err) {
+      logger.warn('summarizeSession failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
     }
   }
 }

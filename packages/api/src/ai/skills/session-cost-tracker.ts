@@ -31,6 +31,24 @@ export const DEFAULT_INAPP_CAPS: SessionCapConfig = {
 
 const WARN_THRESHOLD = 0.8;
 
+/**
+ * Conservative blended cost estimate in integer cents from token counts.
+ *
+ * Wave 8B doesn't yet have per-model pricing wired through the gateway
+ * response, so we use a single rate that approximates Sonnet-class
+ * pricing ($3/MTok input, $15/MTok output) as a directional signal —
+ * enough to fire the per-session cost cap when usage grows. Replace
+ * with provider-reported pricing once the gateway threads it through.
+ *
+ * Returns 0 (not a fractional value) when usage is below 1 cent so
+ * the cap math still works on integers.
+ */
+export function estimateCostCents(input: number, output: number): number {
+  const inputCents = (input * 0.0003);  // $3 per 1M = 0.0003¢/token
+  const outputCents = (output * 0.0015); // $15 per 1M = 0.0015¢/token
+  return Math.max(0, Math.round(inputCents + outputCents));
+}
+
 type CapDimension = 'tokens' | 'cost' | 'duration';
 
 export class SessionCostTracker {

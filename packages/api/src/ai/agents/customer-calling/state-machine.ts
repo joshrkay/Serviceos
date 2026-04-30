@@ -14,8 +14,8 @@ export class CallingAgentStateMachine {
   private state: CallingAgentState = 'idle';
   private context: CallingAgentContext;
 
-  constructor(context: Omit<CallingAgentContext, 'retryCount' | 'startedAt'>) {
-    this.context = { ...context, retryCount: 0, startedAt: Date.now() };
+  constructor(context: Omit<CallingAgentContext, 'retryCount' | 'repromptCount' | 'startedAt'>) {
+    this.context = { ...context, retryCount: 0, repromptCount: 0, startedAt: Date.now() };
   }
 
   /** Current FSM state (read-only). */

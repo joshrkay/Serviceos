@@ -122,6 +122,11 @@ export class VoiceSessionStore {
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS
     );
     const now = new Date();
+    const events = new EventEmitter();
+    // Per-session listener cap: SSE reconnects can stack a handful of
+    // listeners. 20 is comfortably above expected fan-out and silences
+    // the default Node warning at 10.
+    events.setMaxListeners(20);
     const session: VoiceSession = {
       id,
       tenantId,
@@ -135,10 +140,34 @@ export class VoiceSessionStore {
       ended: false,
       createdAt: now,
       lastActivityAt: now,
-      events: new EventEmitter(),
+      events,
     };
     this.sessions.set(id, session);
     return session;
+  }
+
+  /**
+   * Look up an active session by Twilio CallSid. Used by the Twilio
+   * adapter's /voice handler to detect Twilio's webhook retries within
+   * the short retry window so we don't create duplicate sessions
+   * (and duplicate side effects) for the same call.
+   *
+   * Linear scan — Phase 1 scale assumes O(active calls) is small. When
+   * we move to Redis we'll keep a callSid → sessionId secondary index.
+   */
+  findByCallSid(callSid: string): VoiceSession | undefined {
+    for (const session of this.sessions.values()) {
+      if (session.callSid === callSid && !session.ended) return session;
+    }
+    return undefined;
+  }
+
+  /** Touch lastActivityAt on a session — used by adapters when emitting
+   *  side effects so a long TTS/Gather doesn't let the reaper steal an
+   *  in-flight call. No-op if the session is unknown. */
+  touch(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.lastActivityAt = new Date();
   }
 
   /** Append a turn to the session transcript as a formatted string. No-op if session unknown. */
