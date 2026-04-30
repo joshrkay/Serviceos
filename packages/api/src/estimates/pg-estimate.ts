@@ -1,6 +1,14 @@
 import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Estimate, EstimateRepository, EstimateStatus } from './estimate';
+import {
+  Estimate,
+  EstimateListOptions,
+  EstimateListResult,
+  EstimateRepository,
+  EstimateStatus,
+  DEFAULT_ESTIMATE_LIMIT,
+  MAX_ESTIMATE_LIMIT,
+} from './estimate';
 import { LineItem, DocumentTotals } from '../shared/billing-engine';
 
 export class PgEstimateRepository extends PgBaseRepository implements EstimateRepository {
@@ -74,19 +82,87 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
     });
   }
 
-  async findByTenant(tenantId: string): Promise<Estimate[]> {
-    return this.withTenant(tenantId, async (client) => {
-      const { rows } = await client.query(
-        `SELECT * FROM estimates WHERE tenant_id = $1 ORDER BY created_at DESC`,
-        [tenantId],
-      );
+  /**
+   * Build the parameterized WHERE clause shared between data and count queries.
+   * tenant_id is the FIRST predicate (defense-in-depth alongside RLS).
+   */
+  private buildListWhere(tenantId: string, options?: EstimateListOptions): {
+    where: string;
+    params: unknown[];
+  } {
+    const conditions: string[] = ['tenant_id = $1'];
+    const params: unknown[] = [tenantId];
+    let paramIndex = 2;
 
-      return Promise.all(
-        rows.map(async (row) => {
-          const lineItems = await this.fetchLineItems(client, tenantId, row.id);
-          return this.mapRowToEstimate(row, lineItems);
-        }),
+    if (options?.status) {
+      conditions.push(`status = $${paramIndex}`);
+      params.push(options.status);
+      paramIndex++;
+    }
+
+    if (options?.jobId) {
+      conditions.push(`job_id = $${paramIndex}`);
+      params.push(options.jobId);
+      paramIndex++;
+    }
+
+    if (options?.search) {
+      const searchParam = `%${options.search}%`;
+      conditions.push(
+        `(estimate_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex})`
       );
+      params.push(searchParam);
+      paramIndex++;
+    }
+
+    return { where: `WHERE ${conditions.join(' AND ')}`, params };
+  }
+
+  async findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]> {
+    return this.withTenant(tenantId, async (client) => {
+      return this.queryListRows(client, tenantId, options);
+    });
+  }
+
+  private async queryListRows(
+    client: PoolClient,
+    tenantId: string,
+    options?: EstimateListOptions
+  ): Promise<Estimate[]> {
+    const { where, params } = this.buildListWhere(tenantId, options);
+    const sortDirection = options?.sort === 'asc' ? 'ASC' : 'DESC';
+    const usePagination = options?.limit !== undefined || options?.offset !== undefined;
+    let sql = `SELECT * FROM estimates ${where} ORDER BY created_at ${sortDirection}`;
+    let queryParams = params;
+    if (usePagination) {
+      const limit = Math.min(options?.limit ?? DEFAULT_ESTIMATE_LIMIT, MAX_ESTIMATE_LIMIT);
+      const offset = options?.offset ?? 0;
+      sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      queryParams = [...params, limit, offset];
+    }
+    const { rows } = await client.query(sql, queryParams);
+    return Promise.all(
+      rows.map(async (row) => {
+        const lineItems = await this.fetchLineItems(client, tenantId, row.id);
+        return this.mapRowToEstimate(row, lineItems);
+      }),
+    );
+  }
+
+  async listWithMeta(
+    tenantId: string,
+    options?: EstimateListOptions
+  ): Promise<EstimateListResult> {
+    return this.withTenant(tenantId, async (client) => {
+      const limit = Math.min(options?.limit ?? DEFAULT_ESTIMATE_LIMIT, MAX_ESTIMATE_LIMIT);
+      const offset = options?.offset ?? 0;
+      const data = await this.queryListRows(client, tenantId, { ...options, limit, offset });
+      const { where, params } = this.buildListWhere(tenantId, options);
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS total FROM estimates ${where}`,
+        params
+      );
+      return { data, total: countResult.rows[0].total as number };
     });
   }
 

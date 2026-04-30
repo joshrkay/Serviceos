@@ -8,11 +8,15 @@ import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoiceWithNextNumber,
   listInvoices,
+  listInvoicesWithMeta,
   getInvoice,
   updateInvoice,
   issueInvoice,
   transitionInvoiceStatus,
   InvoiceRepository,
+  InvoiceStatus,
+  DEFAULT_INVOICE_LIMIT,
+  MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
 import { AuditRepository } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
@@ -77,9 +81,69 @@ export function createInvoiceRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
-        const result = jobId
-          ? await invoiceRepo.findByJob(req.auth!.tenantId, jobId)
-          : await listInvoices(req.auth!.tenantId, invoiceRepo);
+        const status = typeof req.query.status === 'string' ? req.query.status as InvoiceStatus : undefined;
+        const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+        const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+
+        // P1-018 — date range filters: dueAfter / dueBefore (ISO).
+        const dueAfter = typeof req.query.dueAfter === 'string' ? req.query.dueAfter : undefined;
+        const dueBefore = typeof req.query.dueBefore === 'string' ? req.query.dueBefore : undefined;
+        const fromDueDate = dueAfter ? new Date(dueAfter) : undefined;
+        const toDueDate = dueBefore ? new Date(dueBefore) : undefined;
+        if (fromDueDate && Number.isNaN(fromDueDate.getTime())) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'dueAfter must be a valid ISO date' });
+          return;
+        }
+        if (toDueDate && Number.isNaN(toDueDate.getTime())) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'dueBefore must be a valid ISO date' });
+          return;
+        }
+
+        // Legacy single-job lookup still returns the bare array shape so
+        // existing UI code continues to work without an opt-in.
+        if (jobId && req.query.paginated !== 'true' && req.query.limit === undefined && req.query.offset === undefined) {
+          const result = await invoiceRepo.findByJob(req.auth!.tenantId, jobId);
+          res.json(result);
+          return;
+        }
+
+        const wantsPaginated =
+          req.query.paginated === 'true' ||
+          req.query.limit !== undefined ||
+          req.query.offset !== undefined;
+
+        const limitRaw = req.query.limit as string | undefined;
+        const offsetRaw = req.query.offset as string | undefined;
+        const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_INVOICE_LIMIT;
+        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+        if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_INVOICE_LIMIT)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `limit must be between 1 and ${MAX_INVOICE_LIMIT}`,
+          });
+          return;
+        }
+        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'offset must be a non-negative integer',
+          });
+          return;
+        }
+
+        const baseOptions = { status, jobId, search, fromDueDate, toDueDate, sort } as const;
+
+        if (wantsPaginated) {
+          const result = await listInvoicesWithMeta(req.auth!.tenantId, invoiceRepo, {
+            ...baseOptions,
+            limit,
+            offset,
+          });
+          res.json(result);
+          return;
+        }
+
+        const result = await listInvoices(req.auth!.tenantId, invoiceRepo, baseOptions);
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
