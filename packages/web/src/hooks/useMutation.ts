@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { toast } from 'sonner';
-import { apiFetch } from '../utils/api-fetch';
+import { useApiClient } from '../lib/apiClient';
 
 /**
  * Built-in success/error toast copy keyed by common entity actions used
@@ -46,11 +46,21 @@ function formatErrorMessage(
   return template;
 }
 
+/**
+ * Authenticated mutation hook (P0-030).
+ *
+ * Every request goes through {@link useApiClient}, which sets the Clerk
+ * Bearer token, cancels mid-sign-out requests with an AbortError, and
+ * redirects to /login on a persistent 401. The hook's public API
+ * (`{ mutate, isLoading, error }`) and the toast-options contract from
+ * P0-032 are preserved.
+ */
 export function useMutation<TBody, TResult>(
   method: 'POST' | 'PUT' | 'PATCH',
   path: string,
   options: MutationOptions<TBody, TResult> = {}
 ): MutationResult<TBody, TResult> {
+  const apiFetch = useApiClient();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +82,14 @@ export function useMutation<TBody, TResult>(
       options.onSuccess?.(data, body);
       return data;
     } catch (err) {
+      // AbortError from the apiClient means the request was cancelled
+      // because no auth token was available (sign-out transition).
+      // We DO NOT toast for that case — the user is being signed out.
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError(null);
+        throw err;
+      }
+
       const msg = err instanceof Error ? err.message : 'Unknown error';
       setError(msg);
 
@@ -84,7 +102,7 @@ export function useMutation<TBody, TResult>(
     } finally {
       setIsLoading(false);
     }
-  }, [method, path, options]);
+  }, [apiFetch, method, path, options]);
 
   return { mutate, isLoading, error };
 }
