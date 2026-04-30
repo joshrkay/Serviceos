@@ -8,6 +8,8 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createTelephonyRouter } from './routes/telephony';
+import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
@@ -149,6 +151,11 @@ import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './worke
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import { createTtsProvider } from './ai/tts/tts-provider';
+import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
@@ -767,6 +774,33 @@ export function createApp() {
     }),
   );
 
+  // ── Twilio telephony webhooks (P8-011) ────────────────────────────────────
+  // Mounted under /api/telephony but BEFORE the Clerk auth middleware so
+  // Twilio's signed POSTs aren't rejected for missing a Clerk session.
+  // Authentication is enforced inside the router via X-Twilio-Signature
+  // verification (twilio-signature.ts).
+  // Single shared voice session store: in-app and telephony both create
+  // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
+  // is uniform across channels. Process-local; idle-reaped via setInterval.
+  const voiceSessionStore = new VoiceSessionStore();
+  const twilioAdapter = new TwilioGatherAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    pool,
+    businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+    publicBaseUrl: process.env.PUBLIC_API_URL,
+  });
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter: twilioAdapter,
+      authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+      publicBaseUrl: process.env.PUBLIC_API_URL,
+      // Single-tenant fallback. TODO(P8-014): replace with phone-number → tenant lookup.
+      resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
+    }),
+  );
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -852,6 +886,28 @@ export function createApp() {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
+  // unified TTS provider, and the existing proposal/audit/oncall repos.
+  // The voiceSessionStore is shared with the Twilio adapter (created above).
+  const ttsProvider = createTtsProvider({
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+  });
+  const onCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  const inAppVoiceAdapter = new InAppVoiceAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    ...(ttsProvider ? { ttsProvider } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo,
+  });
+  app.use(
+    '/api/voice/sessions',
+    createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
 
   const featureFlagRepo: FeatureFlagRepository = pool
     ? new PgFeatureFlagRepository(pool)
