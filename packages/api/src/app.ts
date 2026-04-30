@@ -176,6 +176,7 @@ import {
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
+import { withTenantTransaction } from './middleware/tenant-context';
 
 /**
  * In-memory dev fallback for the WebhookEvent idempotency repo.
@@ -792,6 +793,16 @@ export function createApp() {
   // to opt into the per-route gate. The decisions test suite guards this
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
+
+  // P0-024: open a request-scoped transaction with `app.current_tenant_id`
+  // set LOCAL so every query in the request reuses the same client and
+  // RLS fires automatically. Public routes (health, /public/*, and
+  // /api/public-payments) are mounted earlier and never reach this line.
+  // Skipped when no pool is wired (in-memory dev mode) — there's no
+  // database to attach a transaction to.
+  if (pool) {
+    app.use('/api', withTenantTransaction(pool));
+  }
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
