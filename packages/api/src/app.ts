@@ -783,12 +783,19 @@ export function createApp() {
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
   const voiceSessionStore = new VoiceSessionStore();
+  // OnCall repo is created here so both the telephony adapter (notify_oncall
+  // side effect) and the in-app adapter (escalation) share a single
+  // implementation. The in-app block below reuses this same instance.
+  const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
-    pool,
+    ...(pool ? { pool } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo: sharedOnCallRepo,
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
-    publicBaseUrl: process.env.PUBLIC_API_URL,
+    ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
   });
   app.use(
     '/api/telephony',
@@ -895,14 +902,14 @@ export function createApp() {
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
-  const onCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
   const inAppVoiceAdapter = new InAppVoiceAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
     ...(ttsProvider ? { ttsProvider } : {}),
     proposalRepo,
     auditRepo,
-    onCallRepo,
+    onCallRepo: sharedOnCallRepo,
+    ...(pool ? { pool } : {}),
   });
   app.use(
     '/api/voice/sessions',
@@ -932,23 +939,26 @@ export function createApp() {
   // don't stack handlers, and we exit only when the pool finishes draining
   // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
   // this handler only takes responsibility for the DB pool.
-  if (pool) {
-    const shutdown = async (signal: NodeJS.Signals) => {
-      try {
-        // eslint-disable-next-line no-console
-        console.log(`[app] ${signal} received — closing pg pool`);
+  const shutdown = async (signal: NodeJS.Signals) => {
+    try {
+      // eslint-disable-next-line no-console
+      console.log(`[app] ${signal} received — closing voice sessions and pg pool`);
+      // Stop the voice-session-store reaper interval so the process can
+      // exit cleanly even when no DB pool is wired (dev / in-memory mode).
+      voiceSessionStore.dispose();
+      if (pool) {
         await Promise.race([
           pool.end(),
           new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('[app] pool.end() failed', err);
       }
-    };
-    process.once('SIGTERM', shutdown);
-    process.once('SIGINT', shutdown);
-  }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[app] shutdown failed', err);
+    }
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 
   return app;
 }

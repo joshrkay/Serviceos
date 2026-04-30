@@ -25,8 +25,13 @@ import { LLMGateway } from '../gateway/gateway';
 
 export interface SummarizeSessionInput {
   tenantId: string;
-  /** call_id in DB (voice_recordings.id). */
+  /** Voice session id — used in audit/logging metadata, not the DB FK. */
   sessionId: string;
+  /**
+   * voice_recordings.id when one exists for this session (set by P8-014's
+   * recording webhook). When omitted, call_id is persisted as NULL.
+   */
+  recordingId?: string;
   /** Ordered speaker turns, e.g. "agent: ..." / "caller: ...". */
   transcript: string[];
   proposalIds: string[];
@@ -62,12 +67,30 @@ function parseSummary(content: string): ParsedSummary | null {
   return { summary: obj.summary.trim() };
 }
 
+// Word-boundary match avoids false positives like "transfer money" or
+// "transfer station". Match "escalat(e|ed|ing)" outright, or "transfer"
+// followed within ~40 chars (no sentence break) by a person/place that
+// implies a human handoff: human, manager, agent, supervisor,
+// representative, person, support, dispatcher, team.
+const ESCALATION_REGEX =
+  /\bescalat(?:e|ed|ing)\b|\btransfer(?:ring|red)?\b[^.!?]{0,40}?\b(?:human|manager|agent|supervisor|representative|person|support|dispatcher|team)\b/i;
+
 function isEscalated(transcript: string[]): boolean {
   if (transcript.length === 0) return false;
   // Escalation cues land near the end; scan the last few turns only.
-  const tail = transcript.slice(-3).join(' ').toLowerCase();
-  return tail.includes('escalate') || tail.includes('transfer');
+  const tail = transcript.slice(-3).join(' ');
+  return ESCALATION_REGEX.test(tail);
 }
+
+/** Cap a model-produced summary to its first 3 sentences as a guardrail. */
+function capSentences(text: string, max: number): string {
+  const parts = text.split(/(?<=[.!?])\s+/);
+  if (parts.length <= max) return text.trim();
+  return parts.slice(0, max).join(' ').trim();
+}
+
+/** Cap transcript length sent into the LLM to bound prompt size. */
+const MAX_TRANSCRIPT_TURNS = 30;
 
 function computeQualityScore(args: {
   hasProposals: boolean;
@@ -90,6 +113,7 @@ export async function summarizeSession(
   const {
     tenantId,
     sessionId,
+    recordingId,
     transcript,
     proposalIds,
     intentDetected,
@@ -105,8 +129,12 @@ export async function summarizeSession(
     escalated,
   });
 
-  const transcriptBlock = transcript.length > 0
-    ? transcript.join('\n')
+  // Bound prompt size — only the most recent turns carry intent + outcome.
+  const transcriptForPrompt = transcript.length > MAX_TRANSCRIPT_TURNS
+    ? transcript.slice(-MAX_TRANSCRIPT_TURNS)
+    : transcript;
+  const transcriptBlock = transcriptForPrompt.length > 0
+    ? transcriptForPrompt.join('\n')
     : '(empty transcript)';
 
   const prompt = `Summarize the following customer service call in 3 sentences or fewer.
@@ -135,16 +163,24 @@ Return JSON: { "summary": "..." }
 
   const parsed = parseSummary(response.content);
   // Fall back to a deterministic stub if the model returns something unparseable.
-  const summary = parsed?.summary ?? 'Call completed; no structured summary available.';
+  const rawSummary = parsed?.summary ?? 'Call completed; no structured summary available.';
+  const summary = capSentences(rawSummary, 3);
 
   if (pool) {
+    // call_id references voice_recordings(id) which only has rows once
+    // the P8-014 recording webhook fires. For sessions without a real
+    // recording, persist NULL — the column is nullable. The partial
+    // unique index in schema.ts protects against duplicate rows once
+    // recordingId is supplied; in-app sessions all share NULL call_id
+    // and are deduplicated by the per-session mutex on the adapter
+    // side rather than in SQL.
     await pool.query(
       `INSERT INTO call_summaries
          (tenant_id, call_id, summary, detected_intent, proposal_ids, quality_score)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         tenantId,
-        sessionId,
+        recordingId ?? null,
         summary,
         intentDetected ?? null,
         proposalIds,
@@ -152,6 +188,9 @@ Return JSON: { "summary": "..." }
       ]
     );
   }
+  // sessionId is intentionally surfaced via metadata only; the FK
+  // column is reserved for voice_recordings.id.
+  void sessionId;
 
   const result: SummarizeSessionResult = {
     summary,

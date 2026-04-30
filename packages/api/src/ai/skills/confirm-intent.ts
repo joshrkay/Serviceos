@@ -44,6 +44,8 @@ export interface ConfirmIntentResult {
   correction?: string;
   /** TTS audio of the readback question, if ttsProvider was provided and synthesis succeeded. */
   readbackAudio?: Buffer;
+  /** Token usage from the yes/no classification call — fed into the per-session cost cap. */
+  tokenUsage?: { input: number; output: number };
 }
 
 /** Shape we expect the LLM to return for the yes/no classification. */
@@ -115,6 +117,9 @@ Rules:
   });
 
   const classification = parseYesNo(response.content);
+  const tokenUsage = response.tokenUsage
+    ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
+    : undefined;
 
   // Step 4: Parse result. Unparseable response → treat as correction (safe default).
   if (!classification || classification.answer === 'no') {
@@ -122,11 +127,13 @@ Rules:
       confirmed: false,
       correction: callerResponse,
       ...(readbackAudio !== undefined ? { readbackAudio } : {}),
+      ...(tokenUsage ? { tokenUsage } : {}),
     };
   }
 
   return {
     confirmed: true,
     ...(readbackAudio !== undefined ? { readbackAudio } : {}),
+    ...(tokenUsage ? { tokenUsage } : {}),
   };
 }

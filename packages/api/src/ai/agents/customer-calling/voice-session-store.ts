@@ -88,6 +88,18 @@ export interface VoiceSessionStoreOptions {
 
 export class VoiceSessionStore {
   private readonly sessions = new Map<string, VoiceSession>();
+  /**
+   * Secondary index: Twilio CallSid → sessionId. Maintained on
+   * create/delete so findByCallSid is O(1) instead of an O(n) scan
+   * across all active sessions.
+   */
+  private readonly callSidIndex = new Map<string, string>();
+  /**
+   * Per-session promise chain used by withSessionLock. Both adapters
+   * share this so concurrent webhook deliveries (Twilio retries, parallel
+   * /input requests, etc.) are serialized against the FSM.
+   */
+  private readonly locks = new Map<string, Promise<void>>();
   private readonly idleTtlMs: number;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
 
@@ -122,6 +134,11 @@ export class VoiceSessionStore {
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS
     );
     const now = new Date();
+    const events = new EventEmitter();
+    // Per-session listener cap: SSE reconnects can stack a handful of
+    // listeners. 20 is comfortably above expected fan-out and silences
+    // the default Node warning at 10.
+    events.setMaxListeners(20);
     const session: VoiceSession = {
       id,
       tenantId,
@@ -135,10 +152,67 @@ export class VoiceSessionStore {
       ended: false,
       createdAt: now,
       lastActivityAt: now,
-      events: new EventEmitter(),
+      events,
     };
     this.sessions.set(id, session);
+    if (opts.callSid) this.callSidIndex.set(opts.callSid, id);
     return session;
+  }
+
+  /**
+   * Look up an active session by Twilio CallSid. Used by the Twilio
+   * adapter's /voice handler to detect Twilio's webhook retries within
+   * the short retry window so we don't create duplicate sessions
+   * (and duplicate side effects) for the same call.
+   *
+   * O(1) via the callSidIndex secondary index. The index is kept in
+   * sync with the main map by create() and delete().
+   */
+  findByCallSid(callSid: string): VoiceSession | undefined {
+    const id = this.callSidIndex.get(callSid);
+    if (!id) return undefined;
+    const session = this.sessions.get(id);
+    if (!session || session.ended) return undefined;
+    return session;
+  }
+
+  /**
+   * Run `body` while holding the per-session lock. Serializes
+   * concurrent webhook handlers (e.g., Twilio retries, parallel /input
+   * requests) against the FSM dispatch + transcript mutations.
+   *
+   * `previous.catch(() => {})` is critical: without it, a single
+   * thrown handler would poison the promise chain and break every
+   * subsequent caller for that session.
+   */
+  async withSessionLock<T>(sessionId: string, body: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.catch(() => {}).then(() => tail);
+    this.locks.set(sessionId, chained);
+    try {
+      // Swallow upstream rejection inside the wait; the body always runs
+      // after the prior caller's tail resolves (success or failure).
+      await previous.catch(() => {});
+      return await body();
+    } finally {
+      release();
+      // Drop the entry only if no later caller chained on top of us.
+      if (this.locks.get(sessionId) === chained) {
+        this.locks.delete(sessionId);
+      }
+    }
+  }
+
+  /** Touch lastActivityAt on a session — used by adapters when emitting
+   *  side effects so a long TTS/Gather doesn't let the reaper steal an
+   *  in-flight call. No-op if the session is unknown. */
+  touch(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.lastActivityAt = new Date();
   }
 
   /** Append a turn to the session transcript as a formatted string. No-op if session unknown. */
@@ -185,6 +259,8 @@ export class VoiceSessionStore {
     if (!session) return;
     // Drop subscribers so SSE handlers can flush their res.end().
     session.events.removeAllListeners();
+    if (session.callSid) this.callSidIndex.delete(session.callSid);
+    this.locks.delete(sessionId);
     this.sessions.delete(sessionId);
   }
 
@@ -223,6 +299,8 @@ export class VoiceSessionStore {
       session.events.removeAllListeners();
     }
     this.sessions.clear();
+    this.callSidIndex.clear();
+    this.locks.clear();
   }
 }
 

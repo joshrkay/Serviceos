@@ -55,6 +55,8 @@ export type CallingAgentEvent =
   | { type: 'greeted_ok' }
   | { type: 'caller_known'; customerId: string }
   | { type: 'unknown_caller' }
+  | { type: 'caller_identification_failed'; reason: string }
+  | { type: 'system_failure'; reason: string }
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }
   | { type: 'closed' }
@@ -74,6 +76,13 @@ export interface CallingAgentContext {
   extractedEntities?: Record<string, unknown>;
   pendingProposalId?: string;
   retryCount: number;
+  /**
+   * Per-session reprompt counter for empty / low-confidence Gather turns
+   * (telephony) and confidence_low events (in-app). Independent of
+   * retryCount, which is scoped to ask_caller / intent_capture
+   * substates. Bounded by MAX_REPROMPTS in transitions.ts.
+   */
+  repromptCount: number;
   escalationReason?: string;
   startedAt: number; // Date.now()
 }

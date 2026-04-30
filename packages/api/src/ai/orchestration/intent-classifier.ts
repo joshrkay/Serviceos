@@ -125,6 +125,13 @@ export interface IntentClassification {
    * pipeline. Empty / undefined when every enum is valid.
    */
   invalidEnumFields?: Array<{ field: string; value: unknown }>;
+  /**
+   * Token usage from the underlying LLM call, surfaced so callers
+   * (e.g., the calling-agent adapter) can feed the SessionCostTracker
+   * and enforce per-session caps. Omitted when the classifier
+   * short-circuits without an LLM call.
+   */
+  tokenUsage?: { input: number; output: number };
 }
 
 export interface ClassifyContext {
@@ -460,17 +467,24 @@ export async function classifyIntent(
     metadata: { tenantId: context.tenantId },
   });
 
+  const tokenUsage = response.tokenUsage
+    ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
+    : undefined;
+
   const parsed = parseClassifierJson(response.content);
   if (!parsed) {
-    return unknownResult('could not parse classifier output', 'parse_failed');
+    const result = unknownResult('could not parse classifier output', 'parse_failed');
+    if (tokenUsage) result.tokenUsage = tokenUsage;
+    return result;
   }
+  if (tokenUsage) parsed.tokenUsage = tokenUsage;
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
   // We keep the original intent and confidence in the result so the router
   // can emit a clarification proposal that offers the low-confidence intent
   // as a suggestion ("did you mean: create invoice?") instead of dropping.
   if (parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD) {
-    return {
+    const lowConf: IntentClassification = {
       intentType: 'unknown',
       confidence: parsed.confidence,
       reasoning:
@@ -481,6 +495,8 @@ export async function classifyIntent(
       lowConfidenceIntent:
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
+    if (tokenUsage) lowConf.tokenUsage = tokenUsage;
+    return lowConf;
   }
 
   // Classifier picked 'unknown' at adequate confidence — nothing to route.

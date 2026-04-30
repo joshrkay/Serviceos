@@ -17,6 +17,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import type { Pool } from 'pg';
 import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
@@ -25,10 +26,12 @@ import type { ProposalType } from '../../../proposals/proposal';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
-import { classifyIntent } from '../../orchestration/intent-classifier';
+import { classifyIntent, CLASSIFIER_CONFIDENCE_THRESHOLD } from '../../orchestration/intent-classifier';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
+import { estimateCostCents } from '../../skills/session-cost-tracker';
+import { TAU_INT } from './transitions';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 
@@ -39,6 +42,11 @@ export interface InAppAdapterDeps {
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
   onCallRepo: OnCallRepository;
+  /**
+   * Postgres pool — when present, end-of-call summaries are persisted to
+   * call_summaries. Optional so dev mode (no DB) still works.
+   */
+  pool?: Pool;
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
 }
@@ -61,14 +69,25 @@ export interface HandleInputResult {
 
 const GREETING_TEXT_INAPP = 'Hi, this is your assistant. How can I help today?';
 
-/** Map a classifier intent + entities into the FSM event shape. */
+/**
+ * Map a classifier intent + entities into the FSM event shape.
+ *
+ * Two thresholds in play here on purpose:
+ *  - CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) — below this the classifier
+ *    has already coerced intentType to 'unknown'; the threshold value
+ *    is reported back to the FSM only for audit/log purposes.
+ *  - TAU_INT (0.75) — the FSM's "act on this intent" gate, applied
+ *    in transitionIntentCapture. Confidence in the [0.6, 0.75) band
+ *    will be classified but reprompted by the FSM. Both adapters
+ *    rely on this same FSM gate, so behavior is now consistent.
+ */
 function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
 ): CallingAgentEvent {
   if (intentType === 'unknown') {
-    return { type: 'confidence_low', threshold: 0.6, score: confidence };
+    return { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: confidence };
   }
   return {
     type: 'intent_classified',
@@ -193,6 +212,10 @@ export class InAppVoiceAdapter {
   }
 
   async handleInput(sessionId: string, text: string): Promise<HandleInputResult> {
+    return this.deps.store.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, text));
+  }
+
+  private async _handleInputLocked(sessionId: string, text: string): Promise<HandleInputResult> {
     const session = this.deps.store.get(sessionId);
     if (!session) {
       throw new Error(`voice session not found: ${sessionId}`);
@@ -207,19 +230,41 @@ export class InAppVoiceAdapter {
     // the FSM still progresses (and the operator gets a clarification
     // prompt) instead of silently dropping the turn.
     let fsmEvent: CallingAgentEvent;
+    let classifierUsage: { input: number; output: number } | undefined;
     try {
       const classification = await classifyIntent(
         text,
         { tenantId: session.tenantId },
         this.deps.gateway
       );
+      classifierUsage = classification.tokenUsage
+        ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
+        : undefined;
       fsmEvent = classifierToFsmEvent(
         classification.intentType,
         classification.confidence,
         classification.extractedEntities as Record<string, unknown> | undefined
       );
     } catch {
-      fsmEvent = { type: 'confidence_low', threshold: 0.6, score: 0 };
+      fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
+    }
+
+    // Wire the classifier's token usage into the cost tracker. If the
+    // cap is exceeded, dispatch the global cost_cap_exceeded event so
+    // the FSM escalates instead of finishing the turn normally.
+    if (classifierUsage) {
+      const cents = estimateCostCents(classifierUsage.input, classifierUsage.output);
+      const capEvents = session.costTracker.recordUsage({
+        inputTokens: classifierUsage.input,
+        outputTokens: classifierUsage.output,
+        costCents: cents,
+      });
+      const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
+      if (exceeded) {
+        // Override the classifier's event — escalation supersedes the
+        // intent dispatch for the current turn.
+        fsmEvent = { type: 'cost_cap_exceeded' };
+      }
     }
 
     const allSideEffects: SideEffect[] = [];
@@ -322,6 +367,10 @@ export class InAppVoiceAdapter {
   }
 
   async endSession(sessionId: string): Promise<void> {
+    return this.deps.store.withSessionLock(sessionId, () => this._endSessionLocked(sessionId));
+  }
+
+  private async _endSessionLocked(sessionId: string): Promise<void> {
     const session = this.deps.store.peek(sessionId);
     if (!session) return;
     if (!session.ended) {
@@ -334,6 +383,7 @@ export class InAppVoiceAdapter {
       });
     }
     session.events.emit('voice-event', { type: 'ended', reason: 'manual_end' });
+    // store.delete() also drops the per-session lock entry.
     this.deps.store.delete(sessionId);
   }
 
@@ -347,6 +397,12 @@ export class InAppVoiceAdapter {
     effects: SideEffect[]
   ): Promise<{ lastProposalId?: string }> {
     let lastProposalId: string | undefined;
+    if (effects.length > 0) {
+      // Bump activity from the side-effect path so a slow turn (TTS
+      // synthesis, LLM call) doesn't let the idle reaper steal the
+      // session out from under us mid-execution.
+      this.deps.store.touch(session.id);
+    }
     for (const effect of effects) {
       switch (effect.type) {
         case 'audit_log':
@@ -472,6 +528,10 @@ export class InAppVoiceAdapter {
   private async runSummary(session: VoiceSession): Promise<void> {
     const durationMs = Date.now() - session.createdAt.getTime();
     try {
+      // recordingId is intentionally omitted: in-app sessions don't have
+      // a voice_recordings row (P8-014 wires that for telephony only).
+      // Persisting NULL into call_summaries.call_id keeps the FK happy.
+      const intentDetected = session.machine.currentContext.currentIntent;
       await summarizeSession({
         tenantId: session.tenantId,
         sessionId: session.id,
@@ -479,6 +539,8 @@ export class InAppVoiceAdapter {
         proposalIds: session.proposalIds,
         durationMs,
         gateway: this.deps.gateway,
+        ...(intentDetected ? { intentDetected } : {}),
+        ...(this.deps.pool ? { pool: this.deps.pool } : {}),
       });
     } catch {
       // Summary is best-effort — the call still ended successfully.

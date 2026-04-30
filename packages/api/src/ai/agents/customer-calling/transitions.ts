@@ -17,14 +17,28 @@ import type {
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
-/** Intent classification confidence threshold (τ_int) */
-const TAU_INT = 0.75;
+/**
+ * Intent classification confidence threshold (τ_int). Below this the
+ * FSM treats a classified intent as `confidence_low` and reprompts.
+ *
+ * Exported so adapters (telephony, in-app) gate the same way the FSM
+ * does — keeps the act-on-intent threshold consistent across channels
+ * instead of letting each adapter pick its own number.
+ */
+export const TAU_INT = 0.75;
 
 /** Maximum retries in ask_caller substate before escalating */
 const MAX_ASK_CALLER_RETRIES = 2;
 
 /** Maximum reprompts in intent_capture before escalating */
 const MAX_INTENT_CAPTURE_RETRIES = 1;
+
+/**
+ * Hard cap on consecutive `confidence_low` events per session. Bounds the
+ * silent-caller / broken-classifier loop so the FSM escalates instead of
+ * waiting on the 30-minute idle reaper.
+ */
+const MAX_REPROMPTS = 3;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -140,6 +154,41 @@ function checkGlobalGuards(
         endSession(context, `abuse_detected:${event.category}`),
       ],
       updatedContext: { ...context, escalationReason: `abuse_detected:${event.category}` },
+    };
+  }
+
+  // caller_identification_failed → escalating (any state). The telephony
+  // adapter dispatches this when identifyCaller throws so we don't
+  // silently downgrade the caller to anonymous and create proposals
+  // against the wrong customer.
+  if (event.type === 'caller_identification_failed') {
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(context, state, 'escalating', 'caller_identification_failed', {
+          reason: event.reason,
+        }),
+        ttsPlay("I'm having trouble pulling up your account. Let me connect you with a team member."),
+        notifyOncall(context, 'caller_identification_failed'),
+      ],
+      updatedContext: { ...context, escalationReason: 'caller_identification_failed' },
+    };
+  }
+
+  // system_failure → escalating (any state). Dispatched when a side-effect
+  // execution fails in a way that strands the FSM (e.g., proposalRepo.create
+  // throws, leaving us in proposal_draft with no way out). Without this,
+  // subsequent gather turns hit the "unhandled state" branch and the caller
+  // gets looped forever.
+  if (event.type === 'system_failure') {
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(context, state, 'escalating', 'system_failure', { reason: event.reason }),
+        ttsPlay("I'm having trouble completing that. Let me connect you with a team member."),
+        notifyOncall(context, `system_failure:${event.reason}`),
+      ],
+      updatedContext: { ...context, escalationReason: `system_failure:${event.reason}` },
     };
   }
 
@@ -397,7 +446,11 @@ function transitionIntentCapture(
   // confidence_low internal event (alternative path)
   if (event.type === 'confidence_low') {
     const newRetryCount = context.retryCount + 1;
-    if (newRetryCount > MAX_INTENT_CAPTURE_RETRIES) {
+    const newRepromptCount = context.repromptCount + 1;
+    // Hard cap on cumulative reprompts across the session — bounds the
+    // empty-SpeechResult / broken-classifier loop independently of the
+    // per-state retryCount.
+    if (newRepromptCount >= MAX_REPROMPTS || newRetryCount > MAX_INTENT_CAPTURE_RETRIES) {
       return {
         nextState: 'escalating',
         sideEffects: [
@@ -405,6 +458,7 @@ function transitionIntentCapture(
             threshold: event.threshold,
             score: event.score,
             retryCount: newRetryCount,
+            repromptCount: newRepromptCount,
           }),
           ttsPlay("I'm having trouble understanding your request. Let me connect you with a team member."),
           notifyOncall(context, 'low_confidence_intent'),
@@ -412,6 +466,7 @@ function transitionIntentCapture(
         updatedContext: {
           ...context,
           retryCount: newRetryCount,
+          repromptCount: newRepromptCount,
           escalationReason: 'low_confidence_intent',
         },
       };
@@ -424,10 +479,15 @@ function transitionIntentCapture(
           threshold: event.threshold,
           score: event.score,
           retryCount: newRetryCount,
+          repromptCount: newRepromptCount,
         }),
         ttsPlay("I want to make sure I got that right — can you say that again?"),
       ],
-      updatedContext: { ...context, retryCount: newRetryCount },
+      updatedContext: {
+        ...context,
+        retryCount: newRetryCount,
+        repromptCount: newRepromptCount,
+      },
     };
   }
 
