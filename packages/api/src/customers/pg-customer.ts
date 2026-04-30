@@ -209,4 +209,72 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
       return result.rows.map(mapRow);
     });
   }
+
+  /**
+   * P1-019: Pg-backed dedup candidate query.
+   *
+   * Hard requirement (see /docs/superpowers/contracts/repository-conventions.md):
+   *   tenant_id MUST be the FIRST predicate in the WHERE clause.
+   *   RLS enforces this at the row level, but defense-in-depth means
+   *   we also bind `tenant_id = $1` explicitly so a misconfigured RLS
+   *   context can never leak cross-tenant rows.
+   *
+   * Phone matching strategy:
+   *   The `primary_phone` column stores the user-provided string, not
+   *   a normalized form. Existing data may include `(415) 555-1234`,
+   *   `415-555-1234`, `+14155551234`, etc. To match across formats we
+   *   strip non-digits in SQL via `regexp_replace(..., '\D', '', 'g')`
+   *   and compare against the normalized input. This is a sequential
+   *   scan within the tenant; for a v1 with low customer counts per
+   *   tenant this is acceptable. See follow-up note in commit body
+   *   re: a future expression index.
+   *
+   * Email matching strategy:
+   *   `lower(trim(...))` on both sides, parameterized.
+   *
+   * All variables are bound via $N — never concatenated.
+   */
+  async findDuplicates(
+    tenantId: string,
+    criteria: { phone?: string; email?: string }
+  ): Promise<Customer[]> {
+    const normalizedPhone = criteria.phone ? normalizePhone(criteria.phone) : '';
+    const normalizedEmail = criteria.email ? normalizeEmail(criteria.email) : '';
+
+    // Phone shorter than 7 digits is too ambiguous for a high-confidence
+    // match — skip the predicate (mirrors checkCustomerDuplicates).
+    const includePhone = normalizedPhone.length >= 7;
+    const includeEmail = normalizedEmail.length > 0;
+
+    if (!includePhone && !includeEmail) return [];
+
+    return this.withTenant(tenantId, async (client) => {
+      const conditions: string[] = ['tenant_id = $1', 'is_archived = false'];
+      const params: unknown[] = [tenantId];
+      const matchClauses: string[] = [];
+      let paramIndex = 2;
+
+      if (includePhone) {
+        // Strip non-digits server-side for tolerant matching.
+        matchClauses.push(
+          `regexp_replace(coalesce(primary_phone, ''), '\\D', '', 'g') = $${paramIndex}`
+        );
+        params.push(normalizedPhone);
+        paramIndex++;
+      }
+      if (includeEmail) {
+        matchClauses.push(`lower(trim(coalesce(email, ''))) = $${paramIndex}`);
+        params.push(normalizedEmail);
+        paramIndex++;
+      }
+
+      conditions.push(`(${matchClauses.join(' OR ')})`);
+
+      const result = await client.query(
+        `SELECT * FROM customers WHERE ${conditions.join(' AND ')}`,
+        params
+      );
+      return result.rows.map(mapRow);
+    });
+  }
 }
