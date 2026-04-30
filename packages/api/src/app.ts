@@ -149,6 +149,11 @@ import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './worke
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import { createTtsProvider } from './ai/tts/tts-provider';
+import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
@@ -852,6 +857,29 @@ export function createApp() {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
+  // unified TTS provider, and the existing proposal/audit/oncall repos.
+  // The store is process-local and idle-reaped — see VoiceSessionStore.
+  const voiceSessionStore = new VoiceSessionStore();
+  const ttsProvider = createTtsProvider({
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+  });
+  const onCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  const inAppVoiceAdapter = new InAppVoiceAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    ...(ttsProvider ? { ttsProvider } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo,
+  });
+  app.use(
+    '/api/voice/sessions',
+    createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
 
   const featureFlagRepo: FeatureFlagRepository = pool
     ? new PgFeatureFlagRepository(pool)
