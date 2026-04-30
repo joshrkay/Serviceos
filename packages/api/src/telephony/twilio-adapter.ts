@@ -25,7 +25,7 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import type { SideEffect } from '../ai/agents/customer-calling/types';
-import type { VoiceSessionStore } from './voice-session-store';
+import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -36,14 +36,6 @@ const logger = createLogger({
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface TwilioAdapterDeps {
-  /**
-   * Voice session store. P8-011 ships a placeholder
-   * (`./voice-session-store.ts`) — P8-009 owns the canonical
-   * implementation that this adapter will swap to. The interface
-   * must match `VoiceSessionStore` exactly.
-   *
-   * TODO(P8-011 → P8-009): replace import path once P8-009 lands.
-   */
   store: VoiceSessionStore;
   gateway: LLMGateway;
   /** Postgres pool — passed to identifyCaller. Optional in dev. */

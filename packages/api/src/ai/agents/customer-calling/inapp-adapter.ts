@@ -28,22 +28,7 @@ import type { OnCallRepository } from '../../../oncall/rotation';
 import { classifyIntent } from '../../orchestration/intent-classifier';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
-// TODO(P8-010): wire summarize-session skill once it lands on main.
-// Tracked in `packages/api/src/ai/skills/summarize-session.ts` (story
-// P8-010 is in flight in parallel). The local stub below preserves the
-// call site so the build stays clean — replace the import with:
-//   import { summarizeSession } from '../../skills/summarize-session';
-async function summarizeSession(_input: {
-  tenantId: string;
-  sessionId: string;
-  transcript: string[];
-  proposalIds: string[];
-  durationMs: number;
-  gateway: LLMGateway;
-}): Promise<void> {
-  // Intentional no-op until P8-010 wires the real skill.
-  return;
-}
+import { summarizeSession } from '../../skills/summarize-session';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 

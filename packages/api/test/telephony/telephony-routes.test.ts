@@ -11,7 +11,7 @@ import request from 'supertest';
 import twilio from 'twilio';
 import { createTelephonyRouter } from '../../src/routes/telephony';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
-import { InMemoryVoiceSessionStore } from '../../src/telephony/voice-session-store';
+import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 
 const AUTH_TOKEN = 'test-tw-token-xyz';
@@ -30,7 +30,7 @@ function makeGateway(content: string): LLMGateway {
 }
 
 function buildHarness() {
-  const store = new InMemoryVoiceSessionStore();
+  const store = new VoiceSessionStore();
   const gateway = makeGateway(
     JSON.stringify({
       intentType: 'create_invoice',
@@ -116,7 +116,7 @@ describe('POST /api/telephony/voice', () => {
 
 describe('POST /api/telephony/gather', () => {
   let app: express.Application;
-  let store: InMemoryVoiceSessionStore;
+  let store: VoiceSessionStore;
   let sessionId: string;
 
   beforeEach(async () => {

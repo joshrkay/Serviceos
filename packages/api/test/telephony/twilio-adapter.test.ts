@@ -4,7 +4,7 @@ import {
   buildTwiML,
   xmlEscape,
 } from '../../src/telephony/twilio-adapter';
-import { InMemoryVoiceSessionStore } from '../../src/telephony/voice-session-store';
+import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -25,9 +25,9 @@ function makeGatewayReturning(content: string): LLMGateway {
 
 function makeAdapter(opts: {
   gateway?: LLMGateway;
-  store?: InMemoryVoiceSessionStore;
+  store?: VoiceSessionStore;
 } = {}) {
-  const store = opts.store ?? new InMemoryVoiceSessionStore();
+  const store = opts.store ?? new VoiceSessionStore();
   const gateway =
     opts.gateway ??
     makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
@@ -155,7 +155,7 @@ describe('TwilioGatherAdapter.handleInbound', () => {
 describe('TwilioGatherAdapter.handleGather', () => {
   let gateway: LLMGateway;
   let adapter: TwilioGatherAdapter;
-  let store: InMemoryVoiceSessionStore;
+  let store: VoiceSessionStore;
   let sessionId: string;
 
   beforeEach(async () => {
@@ -206,11 +206,10 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(xml).toMatch(/<Say.*confirm/i);
     expect(xml).toContain('<Gather');
 
-    // Caller transcript was appended.
-    expect(snap?.transcript[0]).toMatchObject({
-      speaker: 'caller',
-      text: 'Create an invoice for Acme for 450 dollars',
-    });
+    // Caller transcript was appended (canonical store stores formatted strings).
+    expect(snap?.transcript[0]).toBe(
+      'caller: Create an invoice for Acme for 450 dollars'
+    );
   });
 
   it('low-confidence classification triggers a reprompt (stays in intent_capture)', async () => {

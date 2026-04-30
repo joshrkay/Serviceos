@@ -14,7 +14,12 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import { CallingAgentStateMachine } from './state-machine';
-import type { CallingAgentChannel, CallingAgentState, SideEffect } from './types';
+import type {
+  CallingAgentChannel,
+  CallingAgentContext,
+  CallingAgentState,
+  SideEffect,
+} from './types';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
 
 /** Session is reaped this many ms after last activity. */
@@ -31,10 +36,20 @@ export type VoiceSessionEvent =
   /** A proposal was created during this turn. */
   | { type: 'proposal_created'; proposalId: string };
 
+export interface TranscriptEntry {
+  speaker: 'caller' | 'agent';
+  text: string;
+  ts?: number;
+}
+
 export interface VoiceSession {
   id: string;
   tenantId: string;
   channel: CallingAgentChannel;
+  /** Twilio CallSid for telephony sessions; undefined for in-app. */
+  callSid?: string;
+  /** Linked conversation row for persisting transcript / proposals. */
+  conversationId?: string;
   machine: CallingAgentStateMachine;
   costTracker: SessionCostTracker;
   /** Accumulated turns ("agent: ..." / "caller: ..."). Used by summarizeSession. */
@@ -45,6 +60,20 @@ export interface VoiceSession {
   createdAt: Date;
   lastActivityAt: Date;
   events: EventEmitter;
+}
+
+/** Immutable view used by telephony tests / observability. */
+export interface VoiceSessionSnapshot {
+  id: string;
+  tenantId: string;
+  channel: CallingAgentChannel;
+  callSid?: string;
+  state: CallingAgentState;
+  context: Readonly<CallingAgentContext>;
+  transcript: string[];
+  proposalIds: string[];
+  ended: boolean;
+  createdAt: Date;
 }
 
 export interface VoiceSessionStoreOptions {
@@ -76,12 +105,18 @@ export class VoiceSessionStore {
   }
 
   /** Create a new session and return it. */
-  create(tenantId: string, channel: CallingAgentChannel): VoiceSession {
+  create(
+    tenantId: string,
+    channel: CallingAgentChannel,
+    opts: { callSid?: string; conversationId?: string } = {}
+  ): VoiceSession {
     const id = uuidv4();
     const machine = new CallingAgentStateMachine({
       sessionId: id,
       tenantId,
       channel,
+      callSid: opts.callSid,
+      conversationId: opts.conversationId,
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS
@@ -91,6 +126,8 @@ export class VoiceSessionStore {
       id,
       tenantId,
       channel,
+      callSid: opts.callSid,
+      conversationId: opts.conversationId,
       machine,
       costTracker,
       transcript: [],
@@ -102,6 +139,32 @@ export class VoiceSessionStore {
     };
     this.sessions.set(id, session);
     return session;
+  }
+
+  /** Append a turn to the session transcript as a formatted string. No-op if session unknown. */
+  appendTranscript(sessionId: string, entry: TranscriptEntry): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.transcript.push(`${entry.speaker}: ${entry.text}`);
+    session.lastActivityAt = new Date();
+  }
+
+  /** Read-only snapshot of session state. Returns null if unknown. */
+  snapshot(sessionId: string): VoiceSessionSnapshot | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    return {
+      id: session.id,
+      tenantId: session.tenantId,
+      channel: session.channel,
+      callSid: session.callSid,
+      state: session.machine.currentState,
+      context: session.machine.currentContext,
+      transcript: [...session.transcript],
+      proposalIds: [...session.proposalIds],
+      ended: session.ended,
+      createdAt: session.createdAt,
+    };
   }
 
   /** Look up a session by id. Updates lastActivityAt as a side effect. */

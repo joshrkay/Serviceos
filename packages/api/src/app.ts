@@ -10,7 +10,6 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
-import { InMemoryVoiceSessionStore } from './telephony/voice-session-store';
 import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
@@ -780,9 +779,12 @@ export function createApp() {
   // Twilio's signed POSTs aren't rejected for missing a Clerk session.
   // Authentication is enforced inside the router via X-Twilio-Signature
   // verification (twilio-signature.ts).
-  const twilioVoiceSessionStore = new InMemoryVoiceSessionStore();
+  // Single shared voice session store: in-app and telephony both create
+  // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
+  // is uniform across channels. Process-local; idle-reaped via setInterval.
+  const voiceSessionStore = new VoiceSessionStore();
   const twilioAdapter = new TwilioGatherAdapter({
-    store: twilioVoiceSessionStore,
+    store: voiceSessionStore,
     gateway: llmGateway,
     pool,
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -887,8 +889,7 @@ export function createApp() {
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
-  // The store is process-local and idle-reaped — see VoiceSessionStore.
-  const voiceSessionStore = new VoiceSessionStore();
+  // The voiceSessionStore is shared with the Twilio adapter (created above).
   const ttsProvider = createTtsProvider({
     TTS_PROVIDER: process.env.TTS_PROVIDER,
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
