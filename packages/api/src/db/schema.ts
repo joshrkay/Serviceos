@@ -1188,9 +1188,9 @@ export const MIGRATIONS = {
   '051_p8_entity_resolution_indexes': `
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
     CREATE INDEX IF NOT EXISTS idx_customers_name_trgm
-      ON customers USING GIN (name gin_trgm_ops);
+      ON customers USING GIN (display_name gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS idx_jobs_title_trgm
-      ON jobs USING GIN (title gin_trgm_ops);
+      ON jobs USING GIN (summary gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS idx_invoices_number_trgm
       ON invoices USING GIN (invoice_number gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_for
