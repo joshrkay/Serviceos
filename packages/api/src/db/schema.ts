@@ -1182,112 +1182,86 @@ export const MIGRATIONS = {
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
   `,
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // POST-#194-MERGE RECOVERY (round 2). PR #195's recovery migrations were
-  // dropped a SECOND time during the schema.ts conflict resolution when
-  // PR #194 merged on top of PR #195. Restore the four tables/ALTERs that
-  // backing code in main now references at runtime. (The 049 webhook
-  // partial index is intentionally skipped — performance only, and the
-  // UNIQUE constraint from migration 012 already provides correctness.)
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Phase 8: Customer Calling Agent ────────────────────────────────────────
 
-  // platform_admins: cross-tenant authority table for the feature-flag
-  // admin gate (P0-034). Without it, requirePlatformAdmin returns 503
-  // on every admin request. Columns are TEXT (not UUID) because Clerk
-  // session ids are TEXT — matches users.clerk_user_id, tenants.owner_id,
-  // audit_events.actor_id. RLS is intentionally NOT enabled — this is a
-  // global authority table, never tenant-scoped.
-  '051_create_platform_admins': `
-    CREATE TABLE IF NOT EXISTS platform_admins (
-      user_id TEXT PRIMARY KEY,
-      granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      granted_by TEXT NOT NULL,
-      notes TEXT
-    );
+  // P8-001: pg_trgm fuzzy-match indexes for entity resolution
+  '051_p8_entity_resolution_indexes': `
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE INDEX IF NOT EXISTS idx_customers_name_trgm
+      ON customers USING GIN (display_name gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_jobs_title_trgm
+      ON jobs USING GIN (summary gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_invoices_number_trgm
+      ON invoices USING GIN (invoice_number gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_for
+      ON appointments (tenant_id, scheduled_start);
   `,
 
-  // P0-022 operational metrics. Two tables consumed by code already in
-  // main: pg-analytics.ts and pg-delay-notice-state.ts. Without these
-  // CREATE TABLEs, every dispatch metric write or delay-notice upsert
-  // throws "relation does not exist".
-  '052_create_operational_metrics': `
-    CREATE TABLE IF NOT EXISTS dispatch_analytics (
+  // P8-002: tenant-local DNC list for compliance skill
+  '052_p8_tenant_dnc_list': `
+    CREATE TABLE IF NOT EXISTS tenant_dnc_list (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      event_type TEXT NOT NULL,
-      -- ON DELETE SET NULL: keep the analytics row when the parent
-      -- appointment is removed (this is an audit log; we want history
-      -- to survive deletion) but null out the dangling reference.
-      appointment_id UUID REFERENCES appointments(id) ON DELETE SET NULL,
-      technician_id TEXT,
-      metadata JSONB DEFAULT '{}'::jsonb,
-      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      phone TEXT NOT NULL,
+      added_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded
-      ON dispatch_analytics(tenant_id, recorded_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_event_type
-      ON dispatch_analytics(tenant_id, event_type, recorded_at DESC);
-    ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE dispatch_analytics FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
-    CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dnc_tenant_phone
+      ON tenant_dnc_list (tenant_id, phone);
+    ALTER TABLE tenant_dnc_list ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dnc ON tenant_dnc_list;
+    CREATE POLICY tenant_isolation_dnc ON tenant_dnc_list
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
-
-    CREATE TABLE IF NOT EXISTS delay_notice_state (
-      -- idempotency_key alone is the primary key, NOT (tenant_id, idempotency_key).
-      -- The locked InMemory interface exposes findByKey(idempotencyKey)
-      -- without a tenant arg — it expects at most one row per key
-      -- globally. Keys are constructed from tenant-scoped appointment
-      -- ids, so cross-tenant collisions are not realistic. A composite
-      -- PK without a separate UNIQUE INDEX on the key alone would
-      -- allow collisions and cause findByKey to silently return the
-      -- wrong tenant's row (rows[0]).
-      idempotency_key TEXT PRIMARY KEY,
-      tenant_id UUID NOT NULL REFERENCES tenants(id),
-      -- ON DELETE CASCADE: notification state has no value once the
-      -- parent appointment is gone. Cleanup happens automatically.
-      appointment_id UUID NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
-      delay_version INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      channel TEXT NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      max_attempts INTEGER NOT NULL DEFAULT 3,
-      last_error TEXT,
-      provider_message_id TEXT,
-      trigger_context JSONB DEFAULT '{}'::jsonb,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS idx_delay_notice_state_tenant_appt
-      ON delay_notice_state(tenant_id, appointment_id);
-    ALTER TABLE delay_notice_state ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE delay_notice_state FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_delay_notice_state ON delay_notice_state;
-    -- delay_notice_state.findByKey is a deliberate cross-tenant read
-    -- path (the locked InMemory interface gives the caller no tenantId
-    -- to pass — the idempotency key is globally unique by PRIMARY KEY).
-    -- Allow that read by tolerating a missing GUC: when
-    -- app.current_tenant_id is unset (withClient() path), the second
-    -- arg to current_setting returns NULL instead of erroring, the
-    -- IS NULL short-circuits to true, and the row is returned. All
-    -- write paths (upsert) go through withTenant() which sets the GUC,
-    -- so per-tenant isolation is still enforced on writes.
-    CREATE POLICY tenant_isolation_delay_notice_state ON delay_notice_state
-      USING (
-        current_setting('app.current_tenant_id', true) IS NULL
-        OR tenant_id = current_setting('app.current_tenant_id', true)::UUID
-      );
   `,
 
-  // diff_analyses.id was originally UUID (from migration 011), but the
-  // P0-021 code in main writes deterministic TEXT keys via
-  // diffAnalysisIdFor(...) — e.g. "diff:tenant:doc:from:to". UUID columns
-  // throw "invalid input syntax for type uuid" on those keys, so every
-  // INSERT crashes today. Convert in place. Safe because the new repo
-  // has never written successfully (it's been throwing) and 011's
-  // gen_random_uuid() default was only used by InMemory paths.
-  '053_diff_analyses_id_to_text': `
-    ALTER TABLE diff_analyses ALTER COLUMN id DROP DEFAULT;
-    ALTER TABLE diff_analyses ALTER COLUMN id TYPE TEXT USING id::TEXT;
+  // P8-006: normalized phone index for identify_caller skill
+  '053_p8_customers_phone_index': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone_normalized TEXT
+      GENERATED ALWAYS AS (regexp_replace(primary_phone, '[^0-9]', '', 'g')) STORED;
+    CREATE INDEX IF NOT EXISTS idx_customers_phone_normalized
+      ON customers (tenant_id, phone_normalized);
+  `,
+
+  // P8-008 + P8-014: on-call rotation, call summaries, voice_recordings extensions
+  '054_p8_telephony_tables': `
+    CREATE TABLE IF NOT EXISTS tenant_oncall_rotation (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id UUID NOT NULL REFERENCES users(id),
+      order_index INTEGER NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_oncall_tenant_order
+      ON tenant_oncall_rotation (tenant_id, order_index) WHERE active = true;
+    ALTER TABLE tenant_oncall_rotation ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_oncall ON tenant_oncall_rotation;
+    CREATE POLICY tenant_isolation_oncall ON tenant_oncall_rotation
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS call_summaries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      call_id UUID REFERENCES voice_recordings(id),
+      summary TEXT NOT NULL,
+      detected_intent TEXT,
+      proposal_ids UUID[] DEFAULT '{}',
+      quality_score NUMERIC(3,2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_summaries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_summaries ON call_summaries;
+    CREATE POLICY tenant_isolation_call_summaries ON call_summaries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS call_sid TEXT,
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inapp_voice'
+        CHECK (source IN ('inbound_call', 'inapp_voice', 'batch_upload')),
+      ADD COLUMN IF NOT EXISTS recording_url TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_call_sid
+      ON voice_recordings (call_sid) WHERE call_sid IS NOT NULL;
   `,
 };
 

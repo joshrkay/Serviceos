@@ -27,6 +27,7 @@ import {
   SendInvoiceTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
+  EmergencyDispatchTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 
 /**
@@ -105,6 +106,7 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   add_note: 'add_note',
   send_invoice: 'send_invoice',
   record_payment: 'record_payment',
+  emergency_dispatch: 'emergency_dispatch',
 };
 
 /**
@@ -181,6 +183,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
+  handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   return handlers;
 }
 
