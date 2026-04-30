@@ -1,9 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent, useMemo } from 'react';
 import {
   Lock, Check, Phone, Mail,
-  CheckCircle2, ChevronDown, ChevronUp, Shield, AlertCircle, ExternalLink,
+  CheckCircle2, ChevronDown, ChevronUp, Shield, AlertCircle,
 } from 'lucide-react';
 import { useParams, useSearchParams } from 'react-router';
+import {
+  Elements,
+  PaymentElement,
+  useElements,
+  useStripe,
+} from '@stripe/react-stripe-js';
+import { loadStripe, Stripe } from '@stripe/stripe-js';
+import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 
 // ─── API types ──────────────────────────────────────────────────────────────
 
@@ -47,6 +55,39 @@ function formatDate(iso?: string) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// ─── Stripe loader ─────────────────────────────────────────────────────────
+//
+// Resolved once at module load. When the publishable key is missing (dev
+// without Stripe configured, or test runs that mock the module), the promise
+// resolves to null and we fall back to a "Stripe not configured" message.
+
+function getPublishableKey(): string | undefined {
+  // import.meta.env is replaced by Vite at build time. Guard the access so
+  // the test environment (where import.meta.env may not be defined) does
+  // not crash on first import.
+  try {
+    const fromImport = (import.meta as { env?: Record<string, string | undefined> })
+      .env?.VITE_STRIPE_PUBLISHABLE_KEY;
+    if (fromImport) return fromImport;
+  } catch {
+    /* import.meta unavailable (Node test) — fall through */
+  }
+  // Test fallback: vitest's `vi.stubEnv` writes to process.env. Vite
+  // strips this branch in production builds via dead-code elimination
+  // (process.env is undefined on the client there).
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+  }
+  return undefined;
+}
+
+// Stripe's docs recommend calling `loadStripe` once at module level,
+// but doing so reads `import.meta.env` at module-load time, which makes
+// the env effectively immutable across the test runtime. We resolve it
+// at component-mount time via `useMemo` (below) — the underlying
+// `loadStripe` cache still ensures a single network roundtrip per
+// publishable key per page load.
+
 async function fetchInvoice(token: string): Promise<PublicInvoiceView> {
   const res = await fetch(`/public/invoices/${token}`);
   if (!res.ok) {
@@ -60,24 +101,43 @@ async function pingView(token: string) {
   await fetch(`/public/invoices/${token}/view`, { method: 'POST' }).catch(() => undefined);
 }
 
-async function createCheckout(token: string): Promise<string> {
-  const res = await fetch(`/public/invoices/${token}/checkout`, { method: 'POST' });
+async function createPaymentIntent(invoiceId: string, viewToken: string): Promise<string> {
+  const res = await fetch('/api/public-payments/create-payment-intent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ invoiceId, viewToken }),
+  });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { message?: string };
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    if (body.error === 'STRIPE_NOT_CONFIGURED') {
+      throw new Error('STRIPE_NOT_CONFIGURED');
+    }
     throw new Error(body.message ?? `Error ${res.status}`);
   }
-  const data = await res.json() as { url: string };
-  return data.url;
+  const data = await res.json() as { clientSecret: string };
+  return data.clientSecret;
 }
 
 // ─── Success screen ────────────────────────────────────────────────────────
 
-function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: {
+function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone, paidAt }: {
   customerName: string;
   invoiceNumber: string;
   totalCents: number;
   businessPhone?: string;
+  /** ISO date string. When provided, rendered in the receipt block. */
+  paidAt?: string | null;
 }) {
+  // P5-018: keep the receipt block intentionally minimal — invoice
+  // number, amount paid, and a paid timestamp. We deliberately do NOT
+  // surface card brand / last-4 / payment-intent ids in the customer
+  // view. Stripe sends an emailed receipt with that detail.
+  const paidAtLabel = paidAt
+    ? new Date(paidAt).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      })
+    : null;
   return (
     <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center">
       <div className="flex flex-col items-center gap-5 max-w-xs" style={{ animation: 'popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) both' }}>
@@ -100,6 +160,12 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
             <span className="text-slate-500">Amount</span>
             <span className="text-slate-800">${formatMoney(totalCents)}</span>
           </div>
+          {paidAtLabel && (
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-500">Paid on</span>
+              <span className="text-slate-800">{paidAtLabel}</span>
+            </div>
+          )}
           <div className="flex justify-between text-sm">
             <span className="text-slate-500">Status</span>
             <span className="text-green-700 flex items-center gap-1"><Check size={12} /> Paid</span>
@@ -114,20 +180,182 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone }: 
   );
 }
 
+// ─── Stripe payment form ───────────────────────────────────────────────────
+
+type PayStatus =
+  | 'idle'
+  | 'processing'        // submit in flight (waiting for Stripe)
+  | 'processing_async'  // intent settling async (ACH / capture-later)
+  | 'succeeded'         // intent.status === 'succeeded'
+  | 'failed';
+
+function PaymentForm({
+  amountCents,
+  onSucceeded,
+  onProcessingAsync,
+}: {
+  amountCents: number;
+  /**
+   * Called after a successful inline confirmation (no redirect path).
+   * Implementations should re-render the success screen — typically by
+   * setting a `success=true` query param via react-router so we don't
+   * trigger a full-page reload (which would re-fetch the invoice).
+   */
+  onSucceeded: () => void;
+  /**
+   * P5-018: called when the PaymentIntent settles asynchronously (ACH /
+   * processing) so the parent page can start polling the status
+   * endpoint and flip to "Payment received" once the webhook lands.
+   */
+  onProcessingAsync?: () => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [status, setStatus] = useState<PayStatus>('idle');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!stripe || !elements || status === 'processing') return;
+    setStatus('processing');
+    setErrorMessage(null);
+    const result = await stripe.confirmPayment({
+      elements,
+      confirmParams: {
+        return_url: `${window.location.origin}${window.location.pathname}?success=true`,
+      },
+      redirect: 'if_required',
+    });
+    if (result.error) {
+      setStatus('failed');
+      setErrorMessage(
+        result.error.message ?? 'Payment failed. Please try a different card.',
+      );
+      return;
+    }
+    // P1 review fix: confirmPayment returning without `error` does NOT
+    // mean payment is settled. With `redirect: 'if_required'` the
+    // resolved paymentIntent can still be in `processing` /
+    // `requires_action` / `requires_capture` states for delayed payment
+    // methods. Only flip to "Payment received" on `succeeded`. For
+    // intermediate states, show a processing screen and let the webhook
+    // reconciliation be the source of truth.
+    const intentStatus = result.paymentIntent?.status;
+    if (intentStatus === 'succeeded') {
+      setStatus('succeeded');
+      onSucceeded();
+      return;
+    }
+    if (intentStatus === 'processing' || intentStatus === 'requires_capture') {
+      // Bank/ACH or capture-later flows: payment is in flight but not
+      // settled. The Stripe webhook will mark the invoice paid when the
+      // intent transitions to succeeded; the customer doesn't need to
+      // refresh — the parent page polls the status endpoint and flips
+      // to "Payment received" automatically (P5-018).
+      setStatus('processing_async');
+      setErrorMessage(null);
+      onProcessingAsync?.();
+      return;
+    }
+    // requires_action / requires_payment_method / canceled / unknown —
+    // leave as failed with an actionable message.
+    setStatus('failed');
+    setErrorMessage(
+      `Payment is not yet complete (status: ${intentStatus ?? 'unknown'}). ` +
+        'Please try again or contact support if the issue persists.',
+    );
+  }
+
+  const disabled = !stripe || !elements || status === 'processing';
+
+  if (status === 'processing_async') {
+    // ACH / capture-later flows where the intent has cleared the
+    // submit step but isn't yet `succeeded`. Webhook reconciliation
+    // will mark the invoice paid when Stripe finishes.
+    return (
+      <div
+        role="status"
+        className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
+      >
+        <p className="text-sm text-slate-700">
+          We've received your payment instructions and they're processing
+          with your bank. You'll get a confirmation email when the funds
+          settle. You can close this window.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
+      {errorMessage && (
+        <div
+          role="alert"
+          className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
+          {errorMessage}
+        </div>
+      )}
+      <div className="mb-4">
+        <PaymentElement
+          options={{
+            // Mobile-friendly defaults: tabs layout + responsive billing
+            // details so the iframe sizes to the viewport.
+            layout: { type: 'tabs', defaultCollapsed: false },
+          }}
+        />
+      </div>
+      <button
+        type="submit"
+        disabled={disabled}
+        className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
+          disabled
+            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
+        }`}
+      >
+        {status === 'processing'
+          ? <><span className="size-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" /> Processing payment…</>
+          : <><Lock size={14} /> Pay ${formatMoney(amountCents)} securely</>
+        }
+      </button>
+      <p className="text-xs text-slate-400 text-center mt-3">
+        Powered by Stripe · Your card details never touch our servers
+      </p>
+    </form>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────
 
 export function InvoicePaymentPage() {
   const { id: token } = useParams<{ id: string }>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [invoice, setInvoice] = useState<PublicInvoiceView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
-  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
-  // Stripe redirects back with ?success=true after a completed checkout session.
+  // Stripe PaymentIntent state — fetched once after the invoice loads.
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [intentError, setIntentError] = useState<string | null>(null);
+  const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
+
+  // P5-018: when Stripe returns an async-settling intent (ACH /
+  // capture-later), we kick off polling so the page can flip to
+  // "Payment received" once the webhook reconciliation lands.
+  const [processingAsync, setProcessingAsync] = useState(false);
+
+  // Built per mount so vitest can stub the publishable key. `loadStripe`
+  // de-dupes internally so this still results in a single network call
+  // per key over the page lifecycle.
+  const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    const key = getPublishableKey();
+    return key ? loadStripe(key) : Promise.resolve(null);
+  }, []);
+
+  // Stripe redirects back with ?success=true after a completed checkout.
   const paymentSucceeded = searchParams.get('success') === 'true';
 
   useEffect(() => {
@@ -144,30 +372,63 @@ export function InvoicePaymentPage() {
       });
   }, [token]);
 
-  async function handlePayNow() {
-    if (!token || checkoutLoading) return;
-    setCheckoutLoading(true);
-    setCheckoutError(null);
-    try {
-      const url = await createCheckout(token);
-      // Validate the URL is a legitimate Stripe-hosted checkout page before
-      // navigating — guards against a compromised API response injecting
-      // javascript: URIs or redirecting to arbitrary hosts.
-      let parsed: URL;
-      try {
-        parsed = new URL(url);
-      } catch {
-        throw new Error('Invalid checkout URL returned by server');
-      }
-      if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.stripe.com')) {
-        throw new Error('Unexpected checkout URL returned by server');
-      }
-      window.location.href = url;
-    } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : 'Could not start checkout. Please try again.');
-      setCheckoutLoading(false);
-    }
-  }
+  // P2 review fix: detect missing FRONTEND publishable key by awaiting
+  // `stripePromise`. When `loadStripe` resolves to null (or no key is
+  // configured), show the same not-configured fallback we use for the
+  // backend 503 path — otherwise <Elements> would render a permanently
+  // disabled form with no actionable message.
+  useEffect(() => {
+    let cancelled = false;
+    stripePromise.then((stripe) => {
+      if (!cancelled && !stripe) setStripeNotConfigured(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // After the invoice loads, request a PaymentIntent client_secret for
+  // payable invoices. Skip when already paid or success-redirect.
+  useEffect(() => {
+    if (!invoice || !token) return;
+    if (invoice.isPaid || invoice.amountDueCents <= 0 || paymentSucceeded) return;
+    if (stripeNotConfigured) return;
+    let cancelled = false;
+    createPaymentIntent(invoice.id, token)
+      .then((secret) => { if (!cancelled) setClientSecret(secret); })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        if (err.message === 'STRIPE_NOT_CONFIGURED') {
+          setStripeNotConfigured(true);
+        } else {
+          setIntentError(err.message);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [invoice, token, paymentSucceeded, stripeNotConfigured]);
+
+  const elementsOptions = useMemo(
+    () => (clientSecret ? { clientSecret, appearance: { theme: 'stripe' as const } } : undefined),
+    [clientSecret],
+  );
+
+  // P5-018 — Poll the public status endpoint while an async payment
+  // is settling. Stop polling as soon as the status flips to `paid`.
+  // We need to disable polling on BOTH the initial server-fetched
+  // invoice.isPaid (page loaded after a previous redirect) AND on
+  // polledStatus.status === 'paid' (the hook itself reported paid in a
+  // prior tick). Without the second clause the hook keeps firing 5s
+  // requests on the success screen forever.
+  const [polledPaid, setPolledPaid] = useState(false);
+  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid && !polledPaid;
+  const { status: polledStatus } = useInvoiceStatus(
+    invoice?.id ?? null,
+    token ?? null,
+    { enabled: pollEnabled, intervalMs: 5_000 },
+  );
+  useEffect(() => {
+    if (polledStatus?.status === 'paid' && !polledPaid) setPolledPaid(true);
+  }, [polledStatus?.status, polledPaid]);
 
   if (loading) {
     return (
@@ -194,15 +455,18 @@ export function InvoicePaymentPage() {
   // Show paid screen when:
   //   • invoice is fully settled (isPaid or amountDueCents === 0)
   //   • Stripe redirected back with ?success=true (webhook may not have fired yet)
-  // amountDueCents === 0 guard prevents showing the pay form during the
-  // 1–5 second window between Stripe's redirect and webhook processing.
-  if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded) {
+  //   • P5-018: async polling observed the status flipping to paid
+  if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded || polledPaid) {
+    const paidAmountCents = polledPaid && polledStatus
+      ? polledStatus.amountPaidCents
+      : inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents;
     return (
       <PaidScreen
         customerName={inv.customerName}
         invoiceNumber={inv.invoiceNumber}
-        totalCents={inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents}
+        totalCents={paidAmountCents}
         businessPhone={inv.businessPhone}
+        paidAt={polledStatus?.paidAt ?? null}
       />
     );
   }
@@ -320,31 +584,40 @@ export function InvoicePaymentPage() {
           </div>
         </div>
 
-        {/* Pay button */}
-        <div className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
-          {checkoutError && (
-            <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-              {checkoutError}
-            </div>
-          )}
-          <button
-            onClick={handlePayNow}
-            disabled={checkoutLoading}
-            className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
-              checkoutLoading
-                ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
-            }`}
+        {/* Stripe Elements payment form */}
+        {stripeNotConfigured ? (
+          <div
+            data-testid="stripe-not-configured"
+            className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4 mb-5 text-sm text-amber-800"
           >
-            {checkoutLoading
-              ? <><span className="size-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" /> Opening secure checkout…</>
-              : <><Lock size={14} /> Pay ${formatMoney(inv.amountDueCents)} securely <ExternalLink size={12} /></>
-            }
-          </button>
-          <p className="text-xs text-slate-400 text-center mt-3">
-            You'll be taken to a secure Stripe checkout page
-          </p>
-        </div>
+            <p className="mb-1">Online payment is temporarily unavailable.</p>
+            <p className="text-xs text-amber-700">
+              Please contact {inv.businessName} {inv.businessPhone ? `at ${inv.businessPhone}` : ''} to settle this invoice.
+            </p>
+          </div>
+        ) : intentError ? (
+          <div
+            role="alert"
+            className="rounded-2xl bg-red-50 border border-red-200 px-4 py-4 mb-5 text-sm text-red-700"
+          >
+            {intentError}
+          </div>
+        ) : !clientSecret || !elementsOptions ? (
+          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-8 mb-5 flex items-center justify-center">
+            <span
+              data-testid="payment-form-loading"
+              className="size-5 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin"
+            />
+          </div>
+        ) : (
+          <Elements stripe={stripePromise} options={elementsOptions}>
+            <PaymentForm
+              amountCents={inv.amountDueCents}
+              onSucceeded={() => setSearchParams({ success: 'true' })}
+              onProcessingAsync={() => setProcessingAsync(true)}
+            />
+          </Elements>
+        )}
 
         {/* Trust signals */}
         <div className="flex flex-col items-center gap-2 pb-8">

@@ -71,6 +71,73 @@ describe('POST /api/appointments', () => {
   });
 });
 
+describe('P1-018 — listAppointments date range + pagination', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function seedAt(jobId: string, hoursOffset: number) {
+    const start = new Date(Date.now() + hoursOffset * 60 * 60 * 1000);
+    const end = new Date(Date.now() + (hoursOffset + 2) * 60 * 60 * 1000);
+    return request(app).post('/api/appointments').send({
+      jobId,
+      scheduledStart: start.toISOString(),
+      scheduledEnd: end.toISOString(),
+      timezone: 'UTC',
+    });
+  }
+
+  it('filter by date range returns only appointments in window', async () => {
+    await seedAt('job-1', 1); // tomorrow + 1h
+    await seedAt('job-2', 24 * 7); // a week out
+    const fromDate = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30m from now
+    const toDate = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(); // 6h from now
+
+    const res = await request(app).get(
+      `/api/appointments?fromDate=${encodeURIComponent(fromDate)}&toDate=${encodeURIComponent(toDate)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('data');
+    expect(res.body).toHaveProperty('total');
+    expect(res.body.total).toBe(1);
+    expect(res.body.data[0].jobId).toBe('job-1');
+  });
+
+  it('pagination with limit/offset returns { data, total }', async () => {
+    await seedAt('job-1', 1);
+    await seedAt('job-2', 2);
+    await seedAt('job-3', 3);
+    const res = await request(app).get('/api/appointments?limit=2&offset=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.total).toBe(3);
+  });
+
+  it('rejects limit > 200 with 400', async () => {
+    const res = await request(app).get('/api/appointments?limit=500');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('rejects invalid fromDate with 400', async () => {
+    const res = await request(app).get('/api/appointments?fromDate=not-a-date');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('legacy ?jobId= still returns bare array of appointments', async () => {
+    await seedAt('job-x', 1);
+    await seedAt('job-x', 4);
+    await seedAt('job-y', 1);
+    const res = await request(app).get('/api/appointments?jobId=job-x');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(2);
+  });
+});
+
 describe('POST /api/appointments/:id/delay-ack', () => {
   function buildDelayAckApp(options?: { delayNotificationCoordinator?: DelayNotificationEnqueuer }): Express {
     const app = express();

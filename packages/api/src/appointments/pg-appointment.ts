@@ -1,6 +1,13 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Appointment, AppointmentRepository } from './appointment';
+import {
+  Appointment,
+  AppointmentListOptions,
+  AppointmentListResult,
+  AppointmentRepository,
+  DEFAULT_APPOINTMENT_LIMIT,
+  MAX_APPOINTMENT_LIMIT,
+} from './appointment';
 
 function mapRow(row: Record<string, unknown>): Appointment {
   return {
@@ -87,6 +94,81 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         [tenantId, start, end]
       );
       return result.rows.map(mapRow);
+    });
+  }
+
+  /**
+   * Build the parameterized WHERE clause shared between data and count
+   * queries in `listWithMeta`. tenant_id is the FIRST predicate (defense
+   * in depth alongside RLS). technicianId filters via an EXISTS subquery
+   * on appointment_assignments so we don't change the response columns.
+   */
+  private buildListWhere(tenantId: string, options?: AppointmentListOptions): {
+    where: string;
+    params: unknown[];
+  } {
+    const conditions: string[] = ['a.tenant_id = $1'];
+    const params: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (options?.fromDate) {
+      conditions.push(`a.scheduled_start >= $${paramIndex}`);
+      params.push(options.fromDate);
+      paramIndex++;
+    }
+    if (options?.toDate) {
+      conditions.push(`a.scheduled_start <= $${paramIndex}`);
+      params.push(options.toDate);
+      paramIndex++;
+    }
+    if (options?.jobId) {
+      conditions.push(`a.job_id = $${paramIndex}`);
+      params.push(options.jobId);
+      paramIndex++;
+    }
+    if (options?.status) {
+      conditions.push(`a.status = $${paramIndex}`);
+      params.push(options.status);
+      paramIndex++;
+    }
+    if (options?.technicianId) {
+      conditions.push(
+        `EXISTS (SELECT 1 FROM appointment_assignments aa
+                 WHERE aa.appointment_id = a.id
+                   AND aa.tenant_id = a.tenant_id
+                   AND aa.technician_id = $${paramIndex})`
+      );
+      params.push(options.technicianId);
+      paramIndex++;
+    }
+
+    return { where: `WHERE ${conditions.join(' AND ')}`, params };
+  }
+
+  async listWithMeta(
+    tenantId: string,
+    options?: AppointmentListOptions
+  ): Promise<AppointmentListResult> {
+    return this.withTenant(tenantId, async (client) => {
+      const { where, params } = this.buildListWhere(tenantId, options);
+      // Default sort for appointments is scheduled_start ASC per spec.
+      const sortDirection = options?.sort === 'desc' ? 'DESC' : 'ASC';
+      const limit = Math.min(options?.limit ?? DEFAULT_APPOINTMENT_LIMIT, MAX_APPOINTMENT_LIMIT);
+      const offset = options?.offset ?? 0;
+
+      const dataQuery = `SELECT a.* FROM appointments a ${where}
+        ORDER BY a.scheduled_start ${sortDirection}
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      const data = await client.query(dataQuery, [...params, limit, offset]);
+
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS total FROM appointments a ${where}`,
+        params
+      );
+      return {
+        data: data.rows.map(mapRow),
+        total: countResult.rows[0].total as number,
+      };
     });
   }
 

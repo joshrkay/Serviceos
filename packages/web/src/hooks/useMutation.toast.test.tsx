@@ -8,6 +8,11 @@ import {
   COMMON_TOAST_MESSAGES,
 } from './useMutation';
 
+// P0-030 note: useMutation now reads the Clerk JWT via useAuth(). The global
+// test-setup.ts installs a permissive Clerk mock that returns a static token
+// — these tests can continue to focus on the toast surface without their own
+// mock block.
+
 /**
  * Tests for P0-032 — useMutation toast integration + Toaster mount accessibility.
  *

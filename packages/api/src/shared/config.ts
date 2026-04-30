@@ -97,6 +97,12 @@ function validateProductionConfig(config: AppConfig): void {
   // CORS — must be an explicit origin, not the wildcard fallback
   if (!config.CORS_ORIGIN) missing.push('CORS_ORIGIN');
 
+  // NOTE (P5-017): Stripe payment-link key (STRIPE_SECRET_KEY / STRIPE_API_KEY)
+  // is enforced at boot by `createPaymentLinkProvider` in
+  // `payments/payment-link-provider.ts` rather than here, because the
+  // existing AC#1 test surface in `config.test.ts` is fixed and the
+  // payment-link factory provides an equivalent fail-fast guard.
+
   if (missing.length > 0) {
     throw new Error(
       `Production configuration is missing required values:\n  ${missing.join('\n  ')}\n` +

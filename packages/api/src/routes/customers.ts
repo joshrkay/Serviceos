@@ -8,8 +8,11 @@ import {
   getCustomer,
   updateCustomer,
   listCustomers,
+  listCustomersWithMeta,
   archiveCustomer,
   CustomerRepository,
+  MAX_LIST_LIMIT,
+  DEFAULT_LIST_LIMIT,
 } from '../customers/customer';
 import { AuditRepository } from '../audit/audit';
 
@@ -54,9 +57,52 @@ export function createCustomerRouter(
       try {
         const includeArchived = req.query.includeArchived === 'true';
         const search = req.query.search as string | undefined;
+        const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
+
+        // P1-018: when `paginated=true` (or limit/offset are present) we
+        // return `{ data, total }` so the frontend can drive UI pagination.
+        // Without those query params we keep the legacy bare-array shape so
+        // existing list consumers don't need changes.
+        const wantsPaginated =
+          req.query.paginated === 'true' ||
+          req.query.limit !== undefined ||
+          req.query.offset !== undefined;
+
+        const limitRaw = req.query.limit as string | undefined;
+        const offsetRaw = req.query.offset as string | undefined;
+        const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
+        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+        if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `limit must be between 1 and ${MAX_LIST_LIMIT}`,
+          });
+          return;
+        }
+        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'offset must be a non-negative integer',
+          });
+          return;
+        }
+
+        if (wantsPaginated) {
+          const result = await listCustomersWithMeta(req.auth!.tenantId, customerRepo, {
+            includeArchived,
+            search,
+            limit,
+            offset,
+            sort,
+          });
+          res.json(result);
+          return;
+        }
+
         const result = await listCustomers(req.auth!.tenantId, customerRepo, {
           includeArchived,
           search,
+          sort,
         });
         res.json(result);
       } catch (err) {

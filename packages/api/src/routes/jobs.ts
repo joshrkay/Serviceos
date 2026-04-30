@@ -4,7 +4,16 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { createJobSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
-import { createJob, getJob, updateJob, listJobs, JobRepository } from '../jobs/job';
+import {
+  createJob,
+  getJob,
+  updateJob,
+  listJobs,
+  listJobsWithMeta,
+  JobRepository,
+  DEFAULT_JOB_LIMIT,
+  MAX_JOB_LIMIT,
+} from '../jobs/job';
 import {
   transitionJobStatus,
   JobTimelineRepository,
@@ -61,12 +70,53 @@ export function createJobRouter(
     requirePermission('jobs:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await listJobs(req.auth!.tenantId, jobRepo, {
+        const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+
+        // P1-018: opt-in to `{ data, total }` shape via paginated/limit/offset.
+        // Default keeps the legacy bare-array contract for older consumers.
+        const wantsPaginated =
+          req.query.paginated === 'true' ||
+          req.query.limit !== undefined ||
+          req.query.offset !== undefined;
+
+        const limitRaw = req.query.limit as string | undefined;
+        const offsetRaw = req.query.offset as string | undefined;
+        const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_JOB_LIMIT;
+        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+        if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_JOB_LIMIT)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `limit must be between 1 and ${MAX_JOB_LIMIT}`,
+          });
+          return;
+        }
+        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'offset must be a non-negative integer',
+          });
+          return;
+        }
+
+        const baseOptions = {
           status: req.query.status as any,
           customerId: req.query.customerId as string,
           technicianId: req.query.technicianId as string,
           search: req.query.search as string,
-        });
+          sort,
+        };
+
+        if (wantsPaginated) {
+          const result = await listJobsWithMeta(req.auth!.tenantId, jobRepo, {
+            ...baseOptions,
+            limit,
+            offset,
+          });
+          res.json(result);
+          return;
+        }
+
+        const result = await listJobs(req.auth!.tenantId, jobRepo, baseOptions);
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

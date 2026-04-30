@@ -47,6 +47,8 @@ import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
 import { InMemoryPaymentRepository } from './invoices/payment';
+import { InMemoryPaymentReadinessRepository } from './invoices/payment-readiness';
+import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
@@ -137,12 +139,14 @@ import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
+import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
 import { InMemoryProposalRepository } from './proposals/proposal';
@@ -172,6 +176,7 @@ import {
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
+import { withTenantTransaction } from './middleware/tenant-context';
 
 /**
  * In-memory dev fallback for the WebhookEvent idempotency repo.
@@ -380,6 +385,18 @@ export function createApp() {
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  // P5-017: Resolve the payment-link provider via the factory so the mock
+  // is hard-blocked in production. The factory throws at boot if
+  // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
+  // and emits a loud dev-mode warning when the mock is used.
+  const paymentReadinessRepo = new InMemoryPaymentReadinessRepository();
+  const paymentLinkProvider = createPaymentLinkProvider(process.env, {
+    readinessRepo: paymentReadinessRepo,
+  });
+  // Reference the variable so TS doesn't drop it; the provider will be
+  // wired into routes/workers in a follow-up. The factory call itself is
+  // load-bearing — it asserts the production guard at boot time.
+  void paymentLinkProvider;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
@@ -631,9 +648,21 @@ export function createApp() {
   // transcription worker's onTranscribed hook, classifies intent,
   // and persists a proposal via proposalRepo. Registered now that
   // proposalRepo is available.
+  //
+  // P0-035 wiring (PR #202 follow-up): pass a SlotConflictChecker so
+  // create_appointment proposals run a pre-draft availability check
+  // and emit a voice_clarification proposal on conflict instead of a
+  // create_appointment that the dispatcher will reject. Without this
+  // construction, the checker shipped in PR #201 is dead code.
+  const slotConflictChecker = new DefaultSlotConflictChecker({
+    appointmentRepo,
+    assignmentRepo,
+    jobRepo,
+  });
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    slotConflictChecker,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -723,6 +752,21 @@ export function createApp() {
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
+  // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
+  // Returns a `client_secret` so the customer's browser can confirm the
+  // payment directly with Stripe — card data never touches our server.
+  // Lives under /api/public-payments (not /public) so the frontend's
+  // existing /api/* base URL config picks it up.
+  app.use(
+    '/api/public-payments',
+    createPublicPaymentsRouter({
+      invoiceRepo,
+      stripeConfig: process.env.STRIPE_SECRET_KEY
+        ? { apiKey: process.env.STRIPE_SECRET_KEY }
+        : null,
+    }),
+  );
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -749,6 +793,16 @@ export function createApp() {
   // to opt into the per-route gate. The decisions test suite guards this
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
+
+  // P0-024: open a request-scoped transaction with `app.current_tenant_id`
+  // set LOCAL so every query in the request reuses the same client and
+  // RLS fires automatically. Public routes (health, /public/*, and
+  // /api/public-payments) are mounted earlier and never reach this line.
+  // Skipped when no pool is wired (in-memory dev mode) — there's no
+  // database to attach a transaction to.
+  if (pool) {
+    app.use('/api', withTenantTransaction(pool));
+  }
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));

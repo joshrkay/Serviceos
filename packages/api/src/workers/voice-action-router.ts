@@ -15,6 +15,7 @@ import {
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
+import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -73,6 +74,20 @@ export interface VoiceActionRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
   recentReferents?: RecentReferentProvider;
+  /**
+   * Optional: pre-draft slot-conflict checker for `create_appointment`
+   * proposals (P0-035). When present, the AI will emit a
+   * `voice_clarification` proposal instead of a conflicting
+   * `create_appointment` whenever the proposed slot overlaps an
+   * existing appointment for the same technician or customer.
+   *
+   * Wire this in `app.ts` with a `DefaultSlotConflictChecker` whose
+   * deps are the same `appointmentRepo`, `assignmentRepo`, and
+   * `jobRepo` already in scope. Leaving it undefined preserves the
+   * pre-P0-035 behavior — useful for tests that don't care about the
+   * pre-check path.
+   */
+  slotConflictChecker?: SlotConflictChecker;
 }
 
 const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalType> = {
@@ -152,7 +167,10 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   const handlers = new Map<ProposalType, TaskHandler>();
   handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway));
   handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
-  handlers.set('create_appointment', new CreateAppointmentAITaskHandler(deps.gateway));
+  handlers.set(
+    'create_appointment',
+    new CreateAppointmentAITaskHandler(deps.gateway, deps.slotConflictChecker),
+  );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo));
