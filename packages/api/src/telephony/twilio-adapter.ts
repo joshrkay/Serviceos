@@ -28,6 +28,7 @@ import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import { escalateToHuman } from '../ai/skills/escalate-to-human';
 import { estimateCostCents } from '../ai/skills/session-cost-tracker';
+import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
@@ -162,9 +163,6 @@ export function buildTwiML(
 }
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
-
-/** Confidence threshold below which we dispatch `confidence_low`, not `intent_classified`. */
-const TAU_INT = 0.75;
 
 export class TwilioGatherAdapter {
   constructor(private deps: TwilioAdapterDeps) {}
@@ -316,7 +314,20 @@ export class TwilioGatherAdapter {
     confidence: number;
     tenantId: string;
   }): Promise<string> {
-    const session = await this.deps.store.get(opts.sessionId);
+    // Per-session lock: Twilio retries (or duplicate webhook deliveries)
+    // for the same sessionId could otherwise interleave FSM dispatch +
+    // transcript writes. Same primitive as the in-app adapter.
+    return this.deps.store.withSessionLock(opts.sessionId, () => this._handleGatherLocked(opts));
+  }
+
+  private async _handleGatherLocked(opts: {
+    sessionId: string;
+    callSid: string;
+    speechResult: string;
+    confidence: number;
+    tenantId: string;
+  }): Promise<string> {
+    const session = this.deps.store.get(opts.sessionId);
     if (!session) {
       logger.warn('handleGather: unknown session', { sessionId: opts.sessionId });
       return buildTwiML(
@@ -439,8 +450,17 @@ export class TwilioGatherAdapter {
         classifierEvent.type === 'intent_classified' &&
         session.machine.currentState === 'entity_resolution'
       ) {
+        // Forward classifier-extracted string entities (customerName,
+        // jobReference, etc.) into the FSM context. Without this, the
+        // entities pulled from the caller's utterance would be lost
+        // before intent_confirm and any downstream proposal builder
+        // would see an empty extractedEntities map.
+        const refs: Record<string, string> = {};
+        for (const [k, v] of Object.entries(classifierEvent.entities)) {
+          if (typeof v === 'string') refs[k] = v;
+        }
         sideEffectsAll.push(
-          ...session.machine.dispatch({ type: 'entity_resolved', refs: {} }),
+          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
         );
         this.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
       }
@@ -553,11 +573,15 @@ export class TwilioGatherAdapter {
       // / TTS turn doesn't let the idle reaper steal the session.
       this.deps.store.touch(session.id);
     }
+    // for-of over an array sees items pushed during iteration. We rely
+    // on that so handleCreateProposal's proposal_queued / system_failure
+    // dispatches (and the audit_log + tts_play they emit) flow back into
+    // sideEffects and end up in the TwiML response.
     for (const fx of sideEffects) {
       if (fx.type === 'audit_log') {
         await this.handleAuditLog(session, fx, tenantId);
       } else if (fx.type === 'create_proposal') {
-        await this.handleCreateProposal(session, fx, tenantId);
+        await this.handleCreateProposal(session, fx, tenantId, sideEffects);
       } else if (fx.type === 'notify_oncall') {
         await this.handleNotifyOncall(session, fx, tenantId);
       }
@@ -598,6 +622,7 @@ export class TwilioGatherAdapter {
     session: VoiceSession,
     fx: SideEffect,
     tenantId: string,
+    sideEffectsSink: SideEffect[],
   ): Promise<void> {
     if (!this.deps.proposalRepo) {
       logger.info('create_proposal (no proposalRepo wired)', { tenantId, payload: fx.payload });
@@ -631,13 +656,29 @@ export class TwilioGatherAdapter {
       });
       const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
-      // Keep the FSM moving: emit proposal_queued so it advances to closing.
-      session.machine.dispatch({ type: 'proposal_queued', proposalId: stored.id });
+      // Advance the FSM: proposal_queued moves us into 'closing' and emits
+      // a final tts_play ("Great, I've got that taken care of..."). Push
+      // those follow-up effects back into the side-effect array so they
+      // reach buildTwiML — without this the caller never hears the close.
+      const followUps = session.machine.dispatch({
+        type: 'proposal_queued',
+        proposalId: stored.id,
+      });
+      sideEffectsSink.push(...followUps);
     } catch (err) {
       logger.warn('create_proposal persist failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
+      // Persistence failure strands the FSM in proposal_draft. Dispatch
+      // a global system_failure so we land in 'escalating' with a real
+      // tts_play + notify_oncall instead of looping the caller through
+      // an unhandled-state reprompt.
+      const recovery = session.machine.dispatch({
+        type: 'system_failure',
+        reason: 'proposal_persist_failed',
+      });
+      sideEffectsSink.push(...recovery);
     }
   }
 

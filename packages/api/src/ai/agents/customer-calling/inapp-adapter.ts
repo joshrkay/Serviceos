@@ -26,11 +26,12 @@ import type { ProposalType } from '../../../proposals/proposal';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
 import type { OnCallRepository } from '../../../oncall/rotation';
-import { classifyIntent } from '../../orchestration/intent-classifier';
+import { classifyIntent, CLASSIFIER_CONFIDENCE_THRESHOLD } from '../../orchestration/intent-classifier';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
 import { estimateCostCents } from '../../skills/session-cost-tracker';
+import { TAU_INT } from './transitions';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 
@@ -68,14 +69,25 @@ export interface HandleInputResult {
 
 const GREETING_TEXT_INAPP = 'Hi, this is your assistant. How can I help today?';
 
-/** Map a classifier intent + entities into the FSM event shape. */
+/**
+ * Map a classifier intent + entities into the FSM event shape.
+ *
+ * Two thresholds in play here on purpose:
+ *  - CLASSIFIER_CONFIDENCE_THRESHOLD (0.6) — below this the classifier
+ *    has already coerced intentType to 'unknown'; the threshold value
+ *    is reported back to the FSM only for audit/log purposes.
+ *  - TAU_INT (0.75) — the FSM's "act on this intent" gate, applied
+ *    in transitionIntentCapture. Confidence in the [0.6, 0.75) band
+ *    will be classified but reprompted by the FSM. Both adapters
+ *    rely on this same FSM gate, so behavior is now consistent.
+ */
 function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
 ): CallingAgentEvent {
   if (intentType === 'unknown') {
-    return { type: 'confidence_low', threshold: 0.6, score: confidence };
+    return { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: confidence };
   }
   return {
     type: 'intent_classified',
@@ -141,36 +153,7 @@ function toEscalationReason(reason: string | undefined): EscalationReason {
 }
 
 export class InAppVoiceAdapter {
-  /**
-   * Per-session promise chain. Serializes handleInput/endSession against
-   * concurrent calls for the same session so the FSM dispatch chain and
-   * transcript/proposalIds mutations don't interleave. Entries are
-   * dropped when the session ends (or via store.delete).
-   */
-  private readonly sessionLocks = new Map<string, Promise<void>>();
-
   constructor(private readonly deps: InAppAdapterDeps) {}
-
-  /** Run `body` while holding the per-session lock. */
-  private async withSessionLock<T>(sessionId: string, body: () => Promise<T>): Promise<T> {
-    const previous = this.sessionLocks.get(sessionId) ?? Promise.resolve();
-    let release!: () => void;
-    const tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const chained = previous.then(() => tail);
-    this.sessionLocks.set(sessionId, chained);
-    try {
-      await previous;
-      return await body();
-    } finally {
-      release();
-      // Drop the entry only if no later caller chained on top of us.
-      if (this.sessionLocks.get(sessionId) === chained) {
-        this.sessionLocks.delete(sessionId);
-      }
-    }
-  }
 
   /**
    * Open a new in-app session. Drives the FSM through the
@@ -229,7 +212,7 @@ export class InAppVoiceAdapter {
   }
 
   async handleInput(sessionId: string, text: string): Promise<HandleInputResult> {
-    return this.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, text));
+    return this.deps.store.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, text));
   }
 
   private async _handleInputLocked(sessionId: string, text: string): Promise<HandleInputResult> {
@@ -263,7 +246,7 @@ export class InAppVoiceAdapter {
         classification.extractedEntities as Record<string, unknown> | undefined
       );
     } catch {
-      fsmEvent = { type: 'confidence_low', threshold: 0.6, score: 0 };
+      fsmEvent = { type: 'confidence_low', threshold: CLASSIFIER_CONFIDENCE_THRESHOLD, score: 0 };
     }
 
     // Wire the classifier's token usage into the cost tracker. If the
@@ -384,7 +367,7 @@ export class InAppVoiceAdapter {
   }
 
   async endSession(sessionId: string): Promise<void> {
-    return this.withSessionLock(sessionId, () => this._endSessionLocked(sessionId));
+    return this.deps.store.withSessionLock(sessionId, () => this._endSessionLocked(sessionId));
   }
 
   private async _endSessionLocked(sessionId: string): Promise<void> {
@@ -400,9 +383,8 @@ export class InAppVoiceAdapter {
       });
     }
     session.events.emit('voice-event', { type: 'ended', reason: 'manual_end' });
+    // store.delete() also drops the per-session lock entry.
     this.deps.store.delete(sessionId);
-    // Drop any lock entry so we don't leak resolved promises after delete.
-    this.sessionLocks.delete(sessionId);
   }
 
   /**

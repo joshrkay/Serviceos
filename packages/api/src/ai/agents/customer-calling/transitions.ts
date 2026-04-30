@@ -17,8 +17,15 @@ import type {
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
-/** Intent classification confidence threshold (τ_int) */
-const TAU_INT = 0.75;
+/**
+ * Intent classification confidence threshold (τ_int). Below this the
+ * FSM treats a classified intent as `confidence_low` and reprompts.
+ *
+ * Exported so adapters (telephony, in-app) gate the same way the FSM
+ * does — keeps the act-on-intent threshold consistent across channels
+ * instead of letting each adapter pick its own number.
+ */
+export const TAU_INT = 0.75;
 
 /** Maximum retries in ask_caller substate before escalating */
 const MAX_ASK_CALLER_RETRIES = 2;
@@ -165,6 +172,23 @@ function checkGlobalGuards(
         notifyOncall(context, 'caller_identification_failed'),
       ],
       updatedContext: { ...context, escalationReason: 'caller_identification_failed' },
+    };
+  }
+
+  // system_failure → escalating (any state). Dispatched when a side-effect
+  // execution fails in a way that strands the FSM (e.g., proposalRepo.create
+  // throws, leaving us in proposal_draft with no way out). Without this,
+  // subsequent gather turns hit the "unhandled state" branch and the caller
+  // gets looped forever.
+  if (event.type === 'system_failure') {
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(context, state, 'escalating', 'system_failure', { reason: event.reason }),
+        ttsPlay("I'm having trouble completing that. Let me connect you with a team member."),
+        notifyOncall(context, `system_failure:${event.reason}`),
+      ],
+      updatedContext: { ...context, escalationReason: `system_failure:${event.reason}` },
     };
   }
 

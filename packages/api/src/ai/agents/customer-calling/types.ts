@@ -56,6 +56,7 @@ export type CallingAgentEvent =
   | { type: 'caller_known'; customerId: string }
   | { type: 'unknown_caller' }
   | { type: 'caller_identification_failed'; reason: string }
+  | { type: 'system_failure'; reason: string }
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }
   | { type: 'closed' }

@@ -226,9 +226,17 @@ export function useVoiceSession(): UseVoiceSession {
     try {
       await api(`/api/voice/sessions/${sessionId}`, { method: 'DELETE' });
     } finally {
-      setEnded(true);
+      // Reset the full session-scoped state so the user can start a new
+      // session in the same component lifecycle. start() short-circuits
+      // when sessionId is set, so leaving it populated would lock the
+      // panel into the ended state until a remount.
       sseAbortRef.current?.abort();
       sseAbortRef.current = null;
+      setSessionId(null);
+      setState(null);
+      setEnded(true);
+      setProposalIds([]);
+      setLastTtsText(null);
     }
   }, [api, sessionId]);
 
