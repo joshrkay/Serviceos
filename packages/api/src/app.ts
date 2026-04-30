@@ -29,6 +29,11 @@ import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
+import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { createTtsProvider } from './ai/tts/tts-provider';
+import { PgOnCallRepository, InMemoryOnCallRepository } from './oncall/rotation';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -852,6 +857,25 @@ export function createApp() {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  // P8-009: In-app voice session adapter + SSE events
+  const voiceSessionStore = new VoiceSessionStore();
+  const ttsProvider = createTtsProvider(process.env as {
+    TTS_PROVIDER?: string;
+    ELEVENLABS_API_KEY?: string;
+    AI_PROVIDER_API_KEY?: string;
+  });
+  const onCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  const inAppVoiceAdapter = new InAppVoiceAdapter({
+    gateway: llmGateway,
+    proposalRepo,
+    pool,
+    ttsProvider,
+    onCallRepo,
+    auditRepo,
+    sessionStore: voiceSessionStore,
+  });
+  app.use('/api/voice/sessions', createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, sessionStore: voiceSessionStore }));
 
   const featureFlagRepo: FeatureFlagRepository = pool
     ? new PgFeatureFlagRepository(pool)
