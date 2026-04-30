@@ -8,6 +8,7 @@ import {
   DEFAULT_LIST_LIMIT,
   MAX_LIST_LIMIT,
 } from './customer';
+import { normalizeEmail, normalizePhone } from './dedup';
 
 function mapRow(row: Record<string, unknown>): Customer {
   return {
