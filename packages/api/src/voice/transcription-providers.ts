@@ -269,6 +269,111 @@ function parseRetryAfter(value: string | null): number | null {
   return null;
 }
 
+// ─── Streaming STT (Deepgram) — required by P8-012 Media Streams ─────────────
+
+export interface StreamingTranscriptEvent {
+  type: 'partial' | 'final';
+  transcript: string;
+  confidence: number;
+  isFinal: boolean;
+}
+
+export type StreamingTranscriptCallback = (event: StreamingTranscriptEvent) => void;
+
+export interface StreamingSession {
+  /** Push raw PCM audio (16 kHz, 16-bit mono LE) into the stream. */
+  send(chunk: Buffer): void;
+  /** Signal end of audio — provider flushes any pending results, then closes. */
+  finish(): void;
+  /** Abort immediately without waiting for results. */
+  destroy(): void;
+}
+
+export interface StreamingTranscriptionProvider {
+  openSession(
+    onEvent: StreamingTranscriptCallback,
+    onError: (err: Error) => void,
+    onClose: () => void
+  ): Promise<StreamingSession>;
+}
+
+/**
+ * Deepgram Nova-3 real-time streaming transcription provider.
+ *
+ * Uses Node 22's native `WebSocket`. Requires DEEPGRAM_API_KEY.
+ * Audio must be raw PCM: 16 kHz, 16-bit signed little-endian mono.
+ * Deepgram fires interim_results so the state machine can detect
+ * caller interruptions before the utterance is complete.
+ *
+ * P8-012 wires this into the Twilio Media Streams WebSocket handler.
+ * Whisper stays in place for the existing async technician voice path.
+ */
+export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
+  private readonly wsUrl: string;
+
+  constructor(private readonly apiKey: string) {
+    if (!apiKey) throw new Error('DeepgramStreamingProvider requires DEEPGRAM_API_KEY');
+    this.wsUrl =
+      'wss://api.deepgram.com/v1/listen' +
+      '?model=nova-3&language=en&encoding=linear16&sample_rate=16000' +
+      '&channels=1&interim_results=true&smart_format=true&endpointing=300';
+  }
+
+  async openSession(
+    onEvent: StreamingTranscriptCallback,
+    onError: (err: Error) => void,
+    onClose: () => void
+  ): Promise<StreamingSession> {
+    const ws = new WebSocket(this.wsUrl, {
+      headers: { Authorization: `Token ${this.apiKey}` },
+    } as ConstructorParameters<typeof WebSocket>[1]);
+
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener('open', () => resolve(), { once: true });
+      ws.addEventListener('error', (e) => reject(new Error(String(e))), { once: true });
+    });
+
+    ws.addEventListener('message', (msg) => {
+      try {
+        const data = JSON.parse(msg.data as string) as {
+          type?: string;
+          channel?: { alternatives?: Array<{ transcript: string; confidence: number }> };
+          is_final?: boolean;
+        };
+        if (data.type !== 'Results') return;
+        const alt = data.channel?.alternatives?.[0];
+        if (!alt || alt.transcript.trim() === '') return;
+        onEvent({
+          type: data.is_final ? 'final' : 'partial',
+          transcript: alt.transcript,
+          confidence: alt.confidence ?? 1,
+          isFinal: data.is_final ?? false,
+        });
+      } catch {
+        // malformed JSON from provider — ignore single frame
+      }
+    });
+
+    ws.addEventListener('error', (e) => onError(new Error(String(e))));
+    ws.addEventListener('close', () => onClose());
+
+    return {
+      send(chunk: Buffer) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+      },
+      finish() {
+        // Deepgram flushes on close_stream message
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'CloseStream' }));
+        }
+      },
+      destroy() {
+        ws.close();
+      },
+    };
+  }
+}
+
 /**
  * P0-027 factory — returns the hardened Whisper provider when the OpenAI key
  * is configured, otherwise returns the dev no-op (NOT a fake-data mock) and

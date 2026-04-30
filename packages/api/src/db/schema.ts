@@ -1181,6 +1181,88 @@ export const MIGRATIONS = {
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
   `,
+
+  // ── Phase 8: Customer Calling Agent ────────────────────────────────────────
+
+  // P8-001: pg_trgm fuzzy-match indexes for entity resolution
+  '051_p8_entity_resolution_indexes': `
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE INDEX IF NOT EXISTS idx_customers_name_trgm
+      ON customers USING GIN (name gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_jobs_title_trgm
+      ON jobs USING GIN (title gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_invoices_number_trgm
+      ON invoices USING GIN (invoice_number gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_for
+      ON appointments (tenant_id, scheduled_for);
+  `,
+
+  // P8-002: tenant-local DNC list for compliance skill
+  '052_p8_tenant_dnc_list': `
+    CREATE TABLE IF NOT EXISTS tenant_dnc_list (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      phone TEXT NOT NULL,
+      added_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dnc_tenant_phone
+      ON tenant_dnc_list (tenant_id, phone);
+    ALTER TABLE tenant_dnc_list ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dnc ON tenant_dnc_list;
+    CREATE POLICY tenant_isolation_dnc ON tenant_dnc_list
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P8-006: normalized phone index for identify_caller skill
+  '053_p8_customers_phone_index': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone_normalized TEXT
+      GENERATED ALWAYS AS (regexp_replace(phone, '[^0-9]', '', 'g')) STORED;
+    CREATE INDEX IF NOT EXISTS idx_customers_phone_normalized
+      ON customers (tenant_id, phone_normalized);
+  `,
+
+  // P8-008 + P8-014: on-call rotation, call summaries, voice_recordings extensions
+  '054_p8_telephony_tables': `
+    CREATE TABLE IF NOT EXISTS tenant_oncall_rotation (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id UUID NOT NULL REFERENCES users(id),
+      order_index INTEGER NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_oncall_tenant_order
+      ON tenant_oncall_rotation (tenant_id, order_index) WHERE active = true;
+    ALTER TABLE tenant_oncall_rotation ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_oncall ON tenant_oncall_rotation;
+    CREATE POLICY tenant_isolation_oncall ON tenant_oncall_rotation
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS call_summaries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      call_id UUID REFERENCES voice_recordings(id),
+      summary TEXT NOT NULL,
+      detected_intent TEXT,
+      proposal_ids UUID[] DEFAULT '{}',
+      quality_score NUMERIC(3,2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_summaries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_summaries ON call_summaries;
+    CREATE POLICY tenant_isolation_call_summaries ON call_summaries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS call_sid TEXT,
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inapp_voice'
+        CHECK (source IN ('inbound_call', 'inapp_voice', 'batch_upload')),
+      ADD COLUMN IF NOT EXISTS recording_url TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_call_sid
+      ON voice_recordings (call_sid) WHERE call_sid IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

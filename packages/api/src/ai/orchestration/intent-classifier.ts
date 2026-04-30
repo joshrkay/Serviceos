@@ -27,6 +27,7 @@ export type IntentType =
   | 'add_note'
   | 'send_invoice'
   | 'record_payment'
+  | 'emergency_dispatch'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -44,6 +45,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'add_note',
   'send_invoice',
   'record_payment',
+  'emergency_dispatch',
   'unknown',
 ] as const;
 
@@ -226,6 +228,17 @@ Supported intents (return exactly ONE):
                            Examples: "Mark the Jones invoice paid, 450 cash"
                                      "Record a check for 200 from Smith, check 1042"
                                      "Rodriguez paid the invoice in full"
+- "emergency_dispatch"  — caller describes a life-safety or property-
+                           emergency situation requiring IMMEDIATE
+                           response: no heat/cool in extreme weather, gas
+                           smell, burning smell, smoke, sparks, flooding,
+                           burst pipe, sewage backup, no water. Skip normal
+                           intent confirmation — escalate directly to
+                           on-call dispatcher. Never auto-execute.
+                           Examples: "There's a gas smell coming from the furnace"
+                                     "My pipes burst and water is everywhere"
+                                     "No heat and it's 10 degrees outside"
+                                     "I smell burning from my AC unit"
 - "unknown"             — anything else: queries ("when is my next
                            appointment"), ambiguous transcripts, or edit
                            commands without a clear reference.

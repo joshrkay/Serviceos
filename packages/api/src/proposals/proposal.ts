@@ -14,7 +14,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -33,6 +33,7 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'add_note',
   'send_invoice',
   'record_payment',
+  'emergency_dispatch',
   'onboarding_tenant_settings',
   'onboarding_service_category',
   'onboarding_estimate_template',
@@ -199,6 +200,10 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // Cancellation is irreversible and must never auto-approve — the
     // operator always screen-taps. Per CLAUDE.md "Never auto-execute".
     case 'cancel_appointment':
+      return 'irreversible';
+    // Emergency dispatch escalates a live call to on-call personnel —
+    // irreversible in the sense that the notification fires immediately.
+    case 'emergency_dispatch':
       return 'irreversible';
     // Outbound communications: even with autonomous trust, we do not
     // let the system send a customer-facing message without an

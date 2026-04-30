@@ -90,6 +90,7 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   add_note: 'add_note',
   send_invoice: 'send_invoice',
   record_payment: 'record_payment',
+  emergency_dispatch: 'emergency_dispatch',
 };
 
 /**
