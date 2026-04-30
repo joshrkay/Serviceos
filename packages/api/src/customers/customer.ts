@@ -1,5 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditEventInput, AuditRepository, createAuditEvent } from '../audit/audit';
+import {
+  checkCustomerDuplicatesPg,
+  CustomerDuplicateLoader,
+  DuplicateWarning,
+  isCustomerDuplicateLoader,
+  normalizeEmail,
+  normalizePhone,
+} from './dedup';
+
+export type CustomerWithWarnings = Customer & { warnings?: DuplicateWarning[] };
 
 export type PreferredChannel = 'phone' | 'email' | 'sms' | 'none';
 
@@ -63,6 +73,20 @@ export interface CustomerRepository {
   findByTenant(tenantId: string, options?: CustomerListOptions): Promise<Customer[]>;
   update(tenantId: string, id: string, updates: Partial<Customer>): Promise<Customer | null>;
   search(tenantId: string, query: string): Promise<Customer[]>;
+  /**
+   * P1-019: Find candidate duplicates by normalized phone OR email,
+   * scoped to a single tenant. The normalization rules MUST match
+   * those used by `normalizePhone` / `normalizeEmail` in dedup.ts.
+   * Excludes archived rows.
+   *
+   * Optional on the interface so existing test fakes that stub
+   * `CustomerRepository` continue to type-check; the dedup code path
+   * uses `isCustomerDuplicateLoader()` to detect availability.
+   */
+  findDuplicates?(
+    tenantId: string,
+    criteria: { phone?: string; email?: string }
+  ): Promise<Customer[]>;
 }
 
 function computeDisplayName(firstName: string, lastName: string, companyName?: string): string {
@@ -150,9 +174,32 @@ export async function createCustomer(
   input: CreateCustomerInput,
   repository: CustomerRepository,
   auditRepo?: AuditRepository
-): Promise<Customer> {
+): Promise<CustomerWithWarnings> {
   const errors = validateCustomerInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
+  // P1-019: Advisory dedup BEFORE writing — never blocks creation.
+  // The build prompt is explicit: warnings only, frontend handles the
+  // "this looks like a duplicate" UX. We attach `warnings` to the
+  // returned object so the route can surface them without changing
+  // the existing 201 response contract.
+  let warnings: DuplicateWarning[] | undefined;
+  if (
+    (input.primaryPhone || input.email) &&
+    isCustomerDuplicateLoader(repository)
+  ) {
+    const found = await checkCustomerDuplicatesPg(
+      {
+        tenantId: input.tenantId,
+        firstName: input.firstName,
+        lastName: input.lastName,
+        primaryPhone: input.primaryPhone,
+        email: input.email,
+      },
+      repository as CustomerDuplicateLoader
+    );
+    if (found.length > 0) warnings = found;
+  }
 
   const customer: Customer = {
     id: uuidv4(),
@@ -187,7 +234,7 @@ export async function createCustomer(
     await auditRepo.create(event);
   }
 
-  return created;
+  return warnings ? { ...created, warnings } : created;
 }
 
 export async function getCustomer(
@@ -362,6 +409,31 @@ export class InMemoryCustomerRepository implements CustomerRepository {
             (c.email && c.email.toLowerCase().includes(q)) ||
             (c.primaryPhone && c.primaryPhone.includes(q)))
       )
+      .map((c) => ({ ...c }));
+  }
+
+  /**
+   * P1-019: In-memory mirror of the Pg-backed dedup query.
+   * Filters by tenant first, then by normalized phone OR email.
+   */
+  async findDuplicates(
+    tenantId: string,
+    criteria: { phone?: string; email?: string }
+  ): Promise<Customer[]> {
+    const phoneNorm = criteria.phone ? normalizePhone(criteria.phone) : '';
+    const emailNorm = criteria.email ? normalizeEmail(criteria.email) : '';
+    if (!phoneNorm && !emailNorm) return [];
+    return Array.from(this.customers.values())
+      .filter((c) => c.tenantId === tenantId && !c.isArchived)
+      .filter((c) => {
+        const phoneMatch =
+          phoneNorm.length >= 7 &&
+          c.primaryPhone &&
+          normalizePhone(c.primaryPhone) === phoneNorm;
+        const emailMatch =
+          !!emailNorm && c.email && normalizeEmail(c.email) === emailNorm;
+        return phoneMatch || emailMatch;
+      })
       .map((c) => ({ ...c }));
   }
 

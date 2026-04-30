@@ -1,5 +1,7 @@
 import {
   checkCustomerDuplicates,
+  checkCustomerDuplicatesPg,
+  isCustomerDuplicateLoader,
   normalizePhone,
   normalizeEmail,
   normalizeName,
@@ -103,6 +105,175 @@ describe('P1-004 — Deterministic duplicate prevention (customers)', () => {
         lastName: 'Doe',
         email: 'john@example.com',
       },
+      repo
+    );
+    expect(warnings).toHaveLength(0);
+  });
+});
+
+describe('P1-019 — Pg-backed customer dedup (checkCustomerDuplicatesPg)', () => {
+  let repo: InMemoryCustomerRepository;
+
+  beforeEach(async () => {
+    repo = new InMemoryCustomerRepository();
+    // Tenant 1 baseline customer
+    await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        primaryPhone: '(415) 555-1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    // Tenant 2 has a customer with the EXACT same phone/email — must
+    // not surface as a duplicate when querying tenant 1.
+    await createCustomer(
+      {
+        tenantId: 'tenant-2',
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        primaryPhone: '(415) 555-1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+  });
+
+  it('isCustomerDuplicateLoader — InMemoryCustomerRepository implements the loader contract', () => {
+    expect(isCustomerDuplicateLoader(repo)).toBe(true);
+  });
+
+  it('Phone match — normalized phone finds existing customer', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Different',
+        lastName: 'Person',
+        primaryPhone: '4155551234',
+      },
+      repo
+    );
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    const phoneMatch = warnings.find((w) => w.matchType === 'phone');
+    expect(phoneMatch).toBeDefined();
+    expect(phoneMatch!.confidence).toBe('high');
+    expect(phoneMatch!.score).toBe(1.0);
+  });
+
+  it('Email match — case-insensitive email finds existing customer', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Different',
+        lastName: 'Person',
+        email: '  JOHN@EXAMPLE.COM  ',
+      },
+      repo
+    );
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    const emailMatch = warnings.find((w) => w.matchType === 'email');
+    expect(emailMatch).toBeDefined();
+    expect(emailMatch!.confidence).toBe('high');
+    expect(emailMatch!.score).toBe(1.0);
+  });
+
+  it('No match — new unique customer returns no warnings', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+        primaryPhone: '555-999-8888',
+      },
+      repo
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('Cross-tenant — same phone on different tenant is NOT a match', async () => {
+    // Querying tenant-3 with the phone that exists in tenants 1 and 2
+    // must NOT return the tenant-1 or tenant-2 row.
+    const warnings = await checkCustomerDuplicatesPg(
+      {
+        tenantId: 'tenant-3',
+        primaryPhone: '(415) 555-1234',
+        email: 'john@example.com',
+      },
+      repo
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('Multiple matches — phone AND email on the same record return both warnings', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      {
+        tenantId: 'tenant-1',
+        primaryPhone: '4155551234',
+        email: 'john@example.com',
+      },
+      repo
+    );
+    // The same record matches both phone and email — both warnings
+    // are emitted (different matchType keys are deduplicated, but
+    // not collapsed across types).
+    expect(warnings.length).toBe(2);
+    const types = warnings.map((w) => w.matchType).sort();
+    expect(types).toEqual(['email', 'phone']);
+  });
+
+  it('Multiple matches — distinct customers each surface as a warning', async () => {
+    // Add a second customer in tenant-1 with the same email, different phone.
+    await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Janet',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        primaryPhone: '555-000-1111',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    const warnings = await checkCustomerDuplicatesPg(
+      {
+        tenantId: 'tenant-1',
+        email: 'JOHN@example.com',
+      },
+      repo
+    );
+    // Two customers in tenant-1 share this email → two warnings.
+    expect(warnings.filter((w) => w.matchType === 'email').length).toBe(2);
+    const ids = new Set(warnings.map((w) => w.existingId));
+    expect(ids.size).toBe(2);
+  });
+
+  it('Empty inputs — no phone and no email returns no warnings (no-op)', async () => {
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', firstName: 'No', lastName: 'Contact' },
+      repo
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it('Archived rows — archived customer is NOT returned as a duplicate', async () => {
+    const orphan = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Archived',
+        lastName: 'Customer',
+        email: 'archived@example.com',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    await repo.update('tenant-1', orphan.id, { isArchived: true });
+    const warnings = await checkCustomerDuplicatesPg(
+      { tenantId: 'tenant-1', email: 'archived@example.com' },
       repo
     );
     expect(warnings).toHaveLength(0);
