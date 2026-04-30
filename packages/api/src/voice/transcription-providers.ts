@@ -324,11 +324,13 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
     onError: (err: Error) => void,
     onClose: () => void
   ): Promise<StreamingSession> {
-    const ws = new WebSocket(this.wsUrl, {
-      headers: { Authorization: `Token ${this.apiKey}` },
-    } as ConstructorParameters<typeof WebSocket>[1]);
+    // Node 22 native WebSocket follows the WHATWG spec and does not accept
+    // a headers option. Pass the API key via query param instead.
+    const ws = new WebSocket(`${this.wsUrl}&token=${this.apiKey}`);
 
-    await new Promise<void>((resolve, reject) => {
+    // Attach message listener BEFORE awaiting open to avoid missing frames
+    // that Deepgram sends immediately on connection.
+    const openPromise = new Promise<void>((resolve, reject) => {
       ws.addEventListener('open', () => resolve(), { once: true });
       ws.addEventListener('error', (e) => reject(new Error(String(e))), { once: true });
     });
@@ -356,6 +358,8 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 
     ws.addEventListener('error', (e) => onError(new Error(String(e))));
     ws.addEventListener('close', () => onClose());
+
+    await openPromise;
 
     return {
       send(chunk: Buffer) {

@@ -1194,7 +1194,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_number_trgm
       ON invoices USING GIN (invoice_number gin_trgm_ops);
     CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_for
-      ON appointments (tenant_id, scheduled_for);
+      ON appointments (tenant_id, scheduled_start);
   `,
 
   // P8-002: tenant-local DNC list for compliance skill
@@ -1217,7 +1217,7 @@ export const MIGRATIONS = {
   // P8-006: normalized phone index for identify_caller skill
   '053_p8_customers_phone_index': `
     ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone_normalized TEXT
-      GENERATED ALWAYS AS (regexp_replace(phone, '[^0-9]', '', 'g')) STORED;
+      GENERATED ALWAYS AS (regexp_replace(primary_phone, '[^0-9]', '', 'g')) STORED;
     CREATE INDEX IF NOT EXISTS idx_customers_phone_normalized
       ON customers (tenant_id, phone_normalized);
   `,

@@ -27,6 +27,7 @@ import {
   SendInvoiceTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
+  EmergencyDispatchTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 
 /**
@@ -182,6 +183,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
+  handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   return handlers;
 }
 
