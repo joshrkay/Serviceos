@@ -41,7 +41,7 @@ Serviceos has strong **job → estimate → invoice → payment** operational fl
 **Automated checks:**
 ```bash
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --grep "leads|P9-001"
+cd packages/api && npm test -- -t "leads|P9-001"
 cd packages/web && npm test -- --run -t "Leads|P9-001"
 ```
 
@@ -73,7 +73,7 @@ cd packages/web && npm test -- --run -t "Leads|P9-001"
 **Automated checks:**
 ```bash
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --grep "timeline|P9-002"
+cd packages/api && npm test -- -t "timeline|P9-002"
 cd packages/web && npm test -- --run -t "Timeline|P9-002"
 ```
 
@@ -105,7 +105,7 @@ cd packages/web && npm test -- --run -t "Timeline|P9-002"
 **Automated checks:**
 ```bash
 cd packages/api && npx tsc --project tsconfig.build.json --noEmit
-cd packages/api && npm test -- --grep "agreement|recurring|P9-003"
+cd packages/api && npm test -- -t "agreement|recurring|P9-003"
 cd packages/web && npm test -- --run -t "Agreement|P9-003"
 ```
 

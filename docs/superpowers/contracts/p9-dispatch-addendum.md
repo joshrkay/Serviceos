@@ -55,7 +55,7 @@ P9-001 ships first because it establishes the migration cadence at 055 and edits
 ```bash
 cd /home/user/Serviceos && \
   (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
-  (cd packages/api && npm test -- --grep "leads|P9-001") && \
+  (cd packages/api && npm test -- -t "leads|P9-001") && \
   (cd packages/web && npm test -- --run -t "Leads|P9-001")
 ```
 
@@ -106,7 +106,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
-  (cd packages/api && npm test -- --grep "timeline|P9-002") && \
+  (cd packages/api && npm test -- -t "timeline|P9-002") && \
   (cd packages/web && npm test -- --run -t "Timeline|P9-002")
 ```
 
@@ -172,7 +172,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
-  (cd packages/api && npm test -- --grep "agreement|recurring|P9-003") && \
+  (cd packages/api && npm test -- -t "agreement|recurring|P9-003") && \
   (cd packages/web && npm test -- --run -t "Agreement|P9-003")
 ```
 
