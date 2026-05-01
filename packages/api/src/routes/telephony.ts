@@ -19,8 +19,15 @@
 
 import { Router, Request, Response } from 'express';
 import express from 'express';
+import type { Pool } from 'pg';
 import { TwilioGatherAdapter } from '../telephony/twilio-adapter';
 import { requireTwilioSignature } from '../telephony/twilio-signature';
+import {
+  createRecordingRouter,
+  type RecordingHandlerOptions,
+} from '../telephony/recording-webhook';
+import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { StorageProvider } from '../files/file-service';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -44,10 +51,59 @@ export interface TelephonyRouterDeps {
    * TODO(P8-014): replace with a real lookup keyed by the `To` field.
    */
   resolveTenantId: (opts: { to: string; from: string }) => string | undefined;
+  /**
+   * Recording webhook deps. When set, mounts `POST /recording` so Twilio
+   * can deliver finalized recording metadata from the inbound call's
+   * `<Record>` / `recordingStatusCallback` verb.
+   *
+   * Optional so tests/dev environments without S3 + DB wiring can still
+   * exercise the voice/gather routes without a recording sink.
+   */
+  recording?: {
+    /** Same VoiceSessionStore the adapter uses — tenant resolution by CallSid. */
+    store: VoiceSessionStore;
+    /** Pool for `voice_recordings` + `files` inserts. */
+    pool?: Pool;
+    /** S3 (or compatible) provider used to PUT the audio blob. */
+    storage: StorageProvider;
+    /** Bucket name. Per the story spec: `serviceos-recordings`. */
+    storageBucket: string;
+    /** Twilio creds for HTTP-basic on the signed RecordingUrl fetch. */
+    twilioAccountSid?: string;
+    twilioAuthToken?: string;
+    /** Test seam — replace fetch / upload with stubs. */
+    options?: RecordingHandlerOptions;
+  };
 }
 
 export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   const router = Router();
+
+  // Recording webhook (P8-014) gets its own sub-router so its sig
+  // middleware operates on a body parsed independently of the
+  // /voice + /gather body parser. Mount it BEFORE the parser/middleware
+  // below so its router-scoped middleware fully owns the /recording path.
+  if (deps.recording) {
+    router.use(
+      createRecordingRouter(
+        {
+          store: deps.recording.store,
+          ...(deps.recording.pool ? { pool: deps.recording.pool } : {}),
+          storage: deps.recording.storage,
+          storageBucket: deps.recording.storageBucket,
+          ...(deps.recording.twilioAccountSid
+            ? { twilioAccountSid: deps.recording.twilioAccountSid }
+            : {}),
+          ...(deps.recording.twilioAuthToken
+            ? { twilioAuthToken: deps.recording.twilioAuthToken }
+            : {}),
+          authTokenGetter: deps.authTokenGetter,
+          ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
+        },
+        deps.recording.options ?? {},
+      ),
+    );
+  }
 
   // Twilio sends application/x-www-form-urlencoded. The global
   // express.json() in app.ts won't parse that, so mount a urlencoded

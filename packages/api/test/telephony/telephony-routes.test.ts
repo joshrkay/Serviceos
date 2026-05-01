@@ -193,3 +193,115 @@ describe('POST /api/telephony/gather', () => {
     expect(res.status).toBe(400);
   });
 });
+
+// ─── P8-014: POST /api/telephony/recording wiring ────────────────────────────
+
+describe('POST /api/telephony/recording (P8-014 record_call)', () => {
+  // recordInboundCall calls setTenantContext, which validates UUID format,
+  // so this scenario uses a real UUID instead of the harness's symbolic id.
+  const TENANT_UUID = '00000000-0000-0000-0000-000000000aaa';
+
+  it('is mounted by createTelephonyRouter when `recording` deps are provided', async () => {
+    const store = new VoiceSessionStore();
+    const session = store.create(TENANT_UUID, 'telephony', { callSid: 'CA-route-rec' });
+    expect(session.tenantId).toBe(TENANT_UUID);
+
+    const gateway = makeGateway('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Test Co',
+      publicBaseUrl: PUBLIC_BASE_URL,
+      recordingCallbackPath: '/api/telephony/recording',
+    });
+
+    let uploadedKey: string | null = null;
+    const fakeStorage = {
+      generateUploadUrl: async (
+        bucket: string,
+        key: string,
+        contentType: string,
+      ): Promise<string> => {
+        uploadedKey = key;
+        void bucket;
+        void contentType;
+        return 'https://s3.fake/upload';
+      },
+      generateDownloadUrl: async () => 'https://s3.fake/download',
+      getObjectMetadata: async () => null,
+      deleteObject: async () => undefined,
+    };
+
+    const fakePool = {
+      connect: async () => ({
+        query: async (sql: string) => {
+          if (/SELECT id FROM voice_recordings/i.test(sql)) {
+            return { rows: [] };
+          }
+          return { rows: [] };
+        },
+        release: () => undefined,
+      }),
+    } as unknown as import('pg').Pool;
+
+    const fetchRecording = async () => Buffer.from('mp3-bytes');
+    const uploadObject = async () => undefined;
+
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createTelephonyRouter({
+        adapter,
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: PUBLIC_BASE_URL,
+        resolveTenantId: () => TENANT_UUID,
+        recording: {
+          store,
+          pool: fakePool,
+          storage: fakeStorage,
+          storageBucket: 'serviceos-recordings',
+          twilioAccountSid: 'ACtest',
+          twilioAuthToken: 'auth-test',
+          options: { fetchRecording, uploadObject },
+        },
+      }),
+    );
+
+    const path = '/api/telephony/recording';
+    const url = `${PUBLIC_BASE_URL}${path}`;
+    const params = {
+      CallSid: 'CA-route-rec',
+      RecordingSid: 'RE-route',
+      RecordingUrl: 'https://api.twilio.com/2010-04-01/RE-route',
+      RecordingDuration: '10',
+    };
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
+
+    const res = await request(app)
+      .post(path)
+      .set('X-Twilio-Signature', sig)
+      .type('form')
+      .send(params);
+
+    expect(res.status).toBe(200);
+    // The route reached the storage layer with a tenant-scoped key.
+    expect(uploadedKey).toBe(`${TENANT_UUID}/CA-route-rec.mp3`);
+  });
+
+  it('returns 403 for an unsigned recording webhook delivery', async () => {
+    const { app } = buildHarness();
+    // No `recording` deps wired in buildHarness — but the parent router
+    // still applies the signature middleware. An unsigned request
+    // should be rejected before reaching any handler.
+    const res = await request(app)
+      .post('/api/telephony/recording')
+      .type('form')
+      .send({
+        CallSid: 'CA1',
+        RecordingSid: 'RE1',
+        RecordingUrl: 'https://x',
+        RecordingDuration: '0',
+      });
+    expect(res.status).toBe(403);
+  });
+});
