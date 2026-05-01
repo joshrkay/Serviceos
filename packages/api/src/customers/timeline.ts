@@ -424,6 +424,7 @@ export function mergeAndSliceEvents(
     // Stable tiebreak so identical timestamps don't reorder under inserts.
     return a.sourceEntityId.localeCompare(b.sourceEntityId);
   });
-  const limit = Math.min(opts.limit ?? DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT);
+  const limit = opts.limit ?? DEFAULT_TIMELINE_LIMIT;
+  return filtered.slice(0, limit);
   return filtered.slice(0, limit);
 }
