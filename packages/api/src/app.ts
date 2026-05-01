@@ -10,6 +10,8 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { attachMediaStreamServer } from './telephony/media-streams';
+import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
@@ -808,17 +810,103 @@ export function createApp() {
     onCallRepo: sharedOnCallRepo,
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+    // P8-014: when set, the initial inbound TwiML emits a
+    // <Start><Record recordingStatusCallback="..."/></Start> block so
+    // Twilio asynchronously records the entire call and POSTs metadata
+    // to /api/telephony/recording on completion.
+    recordingCallbackPath: '/api/telephony/recording',
   });
+  // P8-012: feature flag the Media Streams (live audio) path. Default
+  // off — when off, the existing Gather adapter remains the only
+  // telephony surface. When on, /voice returns a <Connect><Stream/>
+  // TwiML and audio flows over the WebSocket attached below.
+  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
       authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
       publicBaseUrl: process.env.PUBLIC_API_URL,
-      // Single-tenant fallback. TODO(P8-014): replace with phone-number → tenant lookup.
+      // Single-tenant fallback. TODO: replace with phone-number → tenant lookup.
       resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
+      mediaStreamsEnabled,
+      // P8-014: mount the recording webhook in production. Without this
+      // block the route is unreachable and Twilio's recordingStatusCallback
+      // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
+      // optional from the router's perspective (handler degrades to
+      // "persistence skipped" with a warning) but should be wired in
+      // production environments.
+      recording: {
+        store: voiceSessionStore,
+        ...(pool ? { pool } : {}),
+        storage: storageProvider,
+        storageBucket,
+        ...(process.env.TWILIO_ACCOUNT_SID
+          ? { twilioAccountSid: process.env.TWILIO_ACCOUNT_SID }
+          : {}),
+        ...(process.env.TWILIO_AUTH_TOKEN
+          ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
+          : {}),
+      },
     }),
   );
+
+  // P8-012: attach the Media Streams WebSocketServer to the http.Server
+  // returned by app.listen(). We override `app.listen` so the bare
+  // `index.ts` entry point doesn't need any new wiring — when the
+  // server starts listening, the upgrade handler is already attached.
+  // The flag also gates whether DeepgramStreamingProvider is constructed
+  // (no DEEPGRAM_API_KEY required when the feature is disabled).
+  if (mediaStreamsEnabled) {
+    const deepgramKey = process.env.DEEPGRAM_API_KEY;
+    if (!deepgramKey) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[app] ⚠️  TWILIO_MEDIA_STREAMS_ENABLED=true but DEEPGRAM_API_KEY is unset. ' +
+        'Live-audio streaming will fail when calls connect. Set DEEPGRAM_API_KEY or ' +
+        'flip TWILIO_MEDIA_STREAMS_ENABLED=false.'
+      );
+    }
+    // ttsProvider is constructed below for the in-app adapter; we need
+    // it here too. Build a single instance and pass it to both.
+    const sharedTtsProvider = createTtsProvider({
+      TTS_PROVIDER: process.env.TTS_PROVIDER,
+      ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+      AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    });
+    const streamingProvider = deepgramKey
+      ? new DeepgramStreamingProvider(deepgramKey)
+      : null;
+    if (streamingProvider) {
+      const origListen = app.listen.bind(app);
+      // Wrap listen() so the WS upgrade handler is attached the moment
+      // the http.Server exists. Fire-and-forget; errors during attach
+      // are surfaced via the logger inside attachMediaStreamServer.
+      app.listen = ((...args: unknown[]) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const server = (origListen as any)(...args);
+        attachMediaStreamServer(
+          server,
+          {
+            store: voiceSessionStore,
+            streamingProvider,
+            ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
+              twilioAdapter.processCallerUtterance({
+                sessionId: session.id,
+                callSid,
+                speechResult,
+                tenantId,
+              }),
+            authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+            ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+          },
+        );
+        return server;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+    }
+  }
 
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';

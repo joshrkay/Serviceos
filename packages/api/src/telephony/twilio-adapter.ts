@@ -36,6 +36,9 @@ import { createProposal as buildProposal } from '../proposals/proposal';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { OnCallRepository } from '../oncall/rotation';
+import type { TwilioCallControl } from './twilio-call-control';
+import { maskPhone } from './twilio-call-control';
+import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -64,6 +67,30 @@ export interface TwilioAdapterDeps {
    * webhook is hit from a public IP. Falls back to a relative path.
    */
   publicBaseUrl?: string;
+  /**
+   * Twilio call-control surface used by the escalation path to emit
+   * `<Dial>` TwiML. When undefined, `notify_oncall` keeps its v1
+   * audit-only behavior. P8-013 wires this in.
+   */
+  callControl?: TwilioCallControl;
+  /**
+   * Resolves a rotation entry's userId → phone number. Required to
+   * actually `<Dial>` a dispatcher. Without it, the escalation
+   * silently degrades to the v1 in-app behavior. P8-013 wires this in.
+   */
+  dispatcherPhoneResolver?: DispatcherPhoneResolver;
+  /**
+   * P8-014: when set, the initial inbound TwiML emits a
+   * `<Start><Record recordingStatusCallback="..."/></Start>` block so
+   * Twilio asynchronously records the entire call and POSTs the
+   * finalized metadata to the recording webhook. Should be the absolute
+   * URL of `POST /api/telephony/recording`. Falls back to a relative
+   * path when `publicBaseUrl` is unset.
+   *
+   * When unset, no recording block is emitted — useful for tests and
+   * dev environments without a recording sink.
+   */
+  recordingCallbackPath?: string;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -104,6 +131,14 @@ export function xmlEscape(s: string): string {
 interface BuildTwimlOpts {
   /** Absolute URL (or path) Twilio will POST the next Gather result to. */
   gatherActionUrl: string;
+  /**
+   * Optional URL that Twilio will POST the finalized recording metadata
+   * to. When set, the response begins with a `<Start><Record/></Start>`
+   * block — fired only on the initial inbound TwiML so Twilio records
+   * the entire call asynchronously. Subsequent <Gather> turns leave it
+   * undefined.
+   */
+  recordingStatusCallback?: string;
 }
 
 const GATHER_VOICE = 'Polly.Joanna';
@@ -114,7 +149,11 @@ const GATHER_VOICE = 'Polly.Joanna';
  * Mapping:
  *   tts_play       → <Say voice="Polly.Joanna">…</Say>
  *   end_session    → <Hangup/>
- *   notify_oncall  → no-op (P8-013 will turn this into <Dial>)
+ *   notify_oncall  → no-op here — the adapter's `handleNotifyOncall`
+ *                    drives the rotation + emits a `<Dial>` transfer
+ *                    TwiML out-of-band (P8-013). buildTwiML stays
+ *                    pure so unit tests can still feed in side-effect
+ *                    arrays directly.
  *   audit_log      → no-op (the side effect was executed by the caller)
  *   create_proposal→ no-op (executed by the caller)
  *   start_transcription → no-op (P8-012)
@@ -125,6 +164,19 @@ export function buildTwiML(
 ): string {
   const parts: string[] = [];
   let ended = false;
+
+  // P8-014: when present, prepend a <Start><Record/></Start> block so
+  // Twilio records the entire call asynchronously and POSTs metadata to
+  // /api/telephony/recording on completion. Only emitted on the initial
+  // inbound TwiML — subsequent <Gather> turns must NOT re-emit it (would
+  // start a second concurrent recording).
+  if (opts.recordingStatusCallback) {
+    parts.push(
+      `<Start><Record recordingStatusCallback="${xmlEscape(
+        opts.recordingStatusCallback,
+      )}" recordingStatusCallbackMethod="POST"/></Start>`,
+    );
+  }
 
   for (const fx of sideEffects) {
     if (fx.type === 'tts_play') {
@@ -141,9 +193,10 @@ export function buildTwiML(
       parts.push('<Hangup/>');
       ended = true;
     } else if (fx.type === 'notify_oncall') {
-      // P8-013 turns this into <Dial>. For now we just log so we can see
-      // when the agent fired escalation and the call kept going.
-      logger.warn('notify_oncall side effect — no <Dial> yet (P8-013)', {
+      // P8-013: the adapter's `handleNotifyOncall` consumes this side
+      // effect and produces a `<Dial>` TwiML out-of-band via
+      // `pendingTransferTwiml`; buildTwiML itself stays pure.
+      logger.debug('notify_oncall side effect (handled out-of-band)', {
         payload: fx.payload,
       });
     }
@@ -165,7 +218,249 @@ export function buildTwiML(
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
 export class TwilioGatherAdapter {
+  /**
+   * Per-session pending TwiML override. Set by `handleNotifyOncall` when
+   * the escalate skill returns a `<Dial>` transfer descriptor; consumed
+   * (and cleared) by `finalizeTwiml` so the next webhook response
+   * bridges the call to the dispatcher instead of looping back to
+   * `<Gather>`. Keyed by sessionId — survives long enough for the
+   * current webhook turn only.
+   */
+  private readonly pendingTransferTwiml = new Map<string, string>();
+
   constructor(private deps: TwilioAdapterDeps) {}
+
+  /**
+   * P8-012 — Initial /voice handler when Media Streams is enabled.
+   *
+   * Creates (or replays) the session, then returns a
+   * `<Connect><Stream/></Connect>` TwiML that points Twilio at our WS
+   * server. We do NOT run the disclose_recording / identify_caller /
+   * `incoming_call` flow here — those will run on the WS adapter side
+   * once the stream's `start` event arrives, so the session has a
+   * tenantId attached before any FSM dispatch happens. (Today we
+   * intentionally keep the WS-side bootstrap minimal: the session is
+   * created with tenantId + CallSid, and the FSM lazily greets on the
+   * first final transcript.)
+   *
+   * This avoids racing TTS playback over a Stream frame: the FSM's
+   * greeting tts_play would otherwise try to render via the WS audio
+   * channel before Twilio finishes the connect.
+   */
+  async handleInboundForStream(opts: {
+    callSid: string;
+    tenantId: string;
+  }): Promise<string> {
+    const existing = this.deps.store.findByCallSid(opts.callSid);
+    if (existing && existing.tenantId === opts.tenantId) {
+      return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
+    }
+    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+      callSid: opts.callSid,
+    });
+    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+  }
+
+  /**
+   * P8-012 — Build the `<Connect><Stream/></Connect>` TwiML used when
+   * `TWILIO_MEDIA_STREAMS_ENABLED=true`. Called from the /voice route
+   * after we've created (or replayed) the session. The Media Streams
+   * adapter owns audio + transcripts from there; the Gather code path
+   * is bypassed entirely on this branch.
+   *
+   * The resulting URL is wss:// because Twilio rejects ws:// for any
+   * public deployment. Falls back to a relative-ish URL keyed off
+   * `publicBaseUrl`'s host when set; otherwise emits an explicit
+   * placeholder so a missing publicBaseUrl is loud at deploy time.
+   */
+  buildStreamTwiML(opts: { sessionId: string; callSid: string }): string {
+    const baseRaw = this.deps.publicBaseUrl?.replace(/\/+$/, '') ?? '';
+    // Translate http(s):// → ws(s):// so Twilio gets a valid ws URL even
+    // when the operator only configured PUBLIC_API_URL.
+    const wsBase = baseRaw
+      ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
+      : 'wss://media-streams-base-url-not-configured';
+    const streamUrl = `${wsBase}/api/telephony/stream`;
+    return (
+      `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<Response>` +
+      `<Connect>` +
+      `<Stream url="${xmlEscape(streamUrl)}">` +
+      `<Parameter name="sessionId" value="${xmlEscape(opts.sessionId)}"/>` +
+      `<Parameter name="callSid" value="${xmlEscape(opts.callSid)}"/>` +
+      `</Stream>` +
+      `</Connect>` +
+      `</Response>`
+    );
+  }
+
+  /**
+   * P8-012 — Drive a single speech turn through the FSM and return the
+   * resulting side effects (without rendering TwiML). Used by the
+   * Media Streams adapter on a `final` Deepgram transcript.
+   *
+   * Behaviorally equivalent to `_handleGatherLocked` minus the TwiML
+   * build step and minus the automatic per-session lock — the caller
+   * is responsible for wrapping in `withSessionLock`.
+   *
+   * Returns the full side-effect array including any tts_play and
+   * end_session emitted by the FSM. The caller decides how to render
+   * those (TTS synthesis for the WS path; <Say> for Gather).
+   */
+  async processCallerUtterance(opts: {
+    sessionId: string;
+    callSid: string;
+    speechResult: string;
+    tenantId: string;
+  }): Promise<SideEffect[]> {
+    const session = this.deps.store.get(opts.sessionId);
+    if (!session) {
+      logger.warn('processCallerUtterance: unknown session', { sessionId: opts.sessionId });
+      return [
+        { type: 'tts_play', payload: { text: "I'm sorry, your session has ended. Please call again." } },
+        { type: 'end_session', payload: { reason: 'session_not_found' } },
+      ];
+    }
+
+    // 1. Append caller utterance to transcript.
+    this.deps.store.appendTranscript(opts.sessionId, {
+      speaker: 'caller',
+      text: opts.speechResult,
+      ts: Date.now(),
+    });
+
+    const sideEffectsAll: SideEffect[] = [];
+    const currentState = session.machine.currentState;
+
+    if (opts.speechResult.trim().length === 0) {
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+      await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+      return sideEffectsAll;
+    }
+
+    if (currentState === 'intent_confirm') {
+      try {
+        const ctx = session.machine.currentContext;
+        const intentSummary = ctx.currentIntent ?? 'that';
+        const confirmation = await confirmIntent({
+          intentSummary,
+          callerResponse: opts.speechResult,
+          tenantId: opts.tenantId,
+          gateway: this.deps.gateway,
+        });
+        const capExceeded = this.recordCost(session, confirmation.tokenUsage);
+        if (capExceeded) {
+          sideEffectsAll.push(...session.machine.dispatch({ type: 'cost_cap_exceeded' }));
+        } else if (confirmation.confirmed) {
+          sideEffectsAll.push(...session.machine.dispatch({ type: 'confirmed' }));
+        } else {
+          sideEffectsAll.push(
+            ...session.machine.dispatch({
+              type: 'correction',
+              newTranscript: confirmation.correction ?? opts.speechResult,
+            }),
+          );
+        }
+      } catch (err) {
+        logger.error('processCallerUtterance: confirmIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: opts.sessionId,
+        });
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'correction',
+            newTranscript: opts.speechResult,
+          }),
+        );
+      }
+    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+      let classifierEvent: CallingAgentEvent | null = null;
+      try {
+        const classification = await classifyIntent(
+          opts.speechResult,
+          { tenantId: opts.tenantId },
+          this.deps.gateway,
+        );
+        const capExceeded = this.recordCost(session, classification.tokenUsage);
+        if (capExceeded) {
+          classifierEvent = { type: 'cost_cap_exceeded' };
+        } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
+          classifierEvent = {
+            type: 'intent_classified',
+            intentType: classification.intentType,
+            entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+            confidence: classification.confidence,
+          };
+        } else {
+          classifierEvent = {
+            type: 'confidence_low',
+            threshold: TAU_INT,
+            score: classification.confidence,
+          };
+        }
+      } catch (err) {
+        logger.error('processCallerUtterance: classifyIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: opts.sessionId,
+        });
+        classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
+
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        session.machine.currentState === 'entity_resolution'
+      ) {
+        const refs: Record<string, string> = {};
+        for (const [k, v] of Object.entries(classifierEvent.entities)) {
+          if (typeof v === 'string') refs[k] = v;
+        }
+        sideEffectsAll.push(
+          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
+        );
+        this.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+      }
+    } else {
+      logger.info('processCallerUtterance: unhandled state, treating as confidence_low', {
+        state: currentState,
+        sessionId: opts.sessionId,
+      });
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+    }
+
+    await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+
+    // Capture the agent's reply in the transcript so summarizeSession sees both sides.
+    const ttsLast = [...sideEffectsAll].reverse().find((e) => e.type === 'tts_play');
+    if (ttsLast && typeof ttsLast.payload.text === 'string') {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'agent',
+        text: ttsLast.payload.text,
+        ts: Date.now(),
+      });
+    }
+    if (session.machine.currentState === 'terminated' && !session.ended) {
+      session.ended = true;
+      void this.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+
+    return sideEffectsAll;
+  }
 
   /**
    * Handle the initial `POST /api/telephony/voice` webhook.
@@ -285,10 +580,21 @@ export class TwilioGatherAdapter {
     //    notify_oncall) against the wired repos.
     await this.executeSideEffects(session, expanded, opts.tenantId);
 
-    // 7. Build TwiML.
-    const twiml = buildTwiML(expanded, {
-      gatherActionUrl: this.gatherUrl(session.id),
-    });
+    // 7. Build TwiML — P8-013 may have produced a <Dial> transfer for
+    //    the rare case where notify_oncall fires during the inbound
+    //    handshake (caller_identification_failed). Honor it here.
+    //    Otherwise build standard TwiML; recordingStatusCallback is only
+    //    set on the initial inbound response so Twilio doesn't start a
+    //    second concurrent recording on each <Gather> turn (P8-014).
+    const transferTwiml = this.takePendingTransferTwiml(session.id);
+    const twiml =
+      transferTwiml ??
+      buildTwiML(expanded, {
+        gatherActionUrl: this.gatherUrl(session.id),
+        ...(this.deps.recordingCallbackPath
+          ? { recordingStatusCallback: this.recordingCallbackUrl() }
+          : {}),
+      });
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain
     //    that emits end_session), kick off the summary so call_summaries
@@ -494,6 +800,25 @@ export class TwilioGatherAdapter {
     sideEffects: SideEffect[],
     sessionId: string,
   ): string {
+    // P8-013: when a notify_oncall side effect produced a <Dial>
+    // transfer descriptor, we hand back that TwiML directly instead
+    // of looping into another <Gather>. Twilio will POST the dial
+    // result back to /dial-result, which advances the rotation.
+    const transferTwiml = this.takePendingTransferTwiml(sessionId);
+    if (transferTwiml) {
+      // Still capture any agent TTS line for the transcript so
+      // summarizeSession can see "the agent said: connecting you...".
+      const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
+      if (ttsLast && typeof ttsLast.payload.text === 'string') {
+        this.deps.store.appendTranscript(sessionId, {
+          speaker: 'agent',
+          text: ttsLast.payload.text,
+          ts: Date.now(),
+        });
+      }
+      return transferTwiml;
+    }
+
     const twiml = buildTwiML(sideEffects, { gatherActionUrl: this.gatherUrl(sessionId) });
     const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
     if (ttsLast && typeof ttsLast.payload.text === 'string') {
@@ -534,6 +859,18 @@ export class TwilioGatherAdapter {
   /** Build the absolute Gather action URL. */
   private gatherUrl(sessionId: string): string {
     const path = `/api/telephony/gather?sid=${encodeURIComponent(sessionId)}`;
+    if (this.deps.publicBaseUrl) {
+      return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
+    }
+    return path;
+  }
+
+  /**
+   * Absolute URL Twilio POSTs the finalized recording metadata to.
+   * Caller verified `recordingCallbackPath` is set before calling.
+   */
+  private recordingCallbackUrl(): string {
+    const path = this.deps.recordingCallbackPath ?? '/api/telephony/recording';
     if (this.deps.publicBaseUrl) {
       return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
     }
@@ -696,20 +1033,180 @@ export class TwilioGatherAdapter {
     }
     const reason = typeof fx.payload.reason === 'string' ? fx.payload.reason : 'low_confidence';
     try {
-      await escalateToHuman({
+      const result = await escalateToHuman({
         tenantId,
         sessionId: session.id,
         reason: reason as Parameters<typeof escalateToHuman>[0]['reason'],
         channel: 'telephony',
         onCallRepo: this.deps.onCallRepo,
         auditRepo: this.deps.auditRepo,
+        // P8-013: when a callControl + resolver are wired, the skill
+        // walks the rotation and returns a transfer descriptor we use
+        // to render <Dial> TwiML in place of the next <Gather>.
+        ...(this.deps.callControl ? { callControl: this.deps.callControl } : {}),
+        ...(this.deps.dispatcherPhoneResolver
+          ? { dispatcherPhoneResolver: this.deps.dispatcherPhoneResolver }
+          : {}),
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        dialActionUrl: this.dialResultUrl(session.id),
       });
+
+      if (result.transfer) {
+        // Hand the dial TwiML to finalizeTwiml so the webhook response
+        // bridges to the dispatcher. Mask the phone for any log line.
+        this.pendingTransferTwiml.set(session.id, result.transfer.fallbackTwiml);
+        logger.info('notify_oncall: dialing dispatcher', {
+          sessionId: session.id,
+          rotationIndex: result.transfer.rotationIndex,
+          dispatcherPhone: maskPhone(result.transfer.dispatcherPhone),
+        });
+      } else if (!result.escalated && this.deps.callControl) {
+        // Rotation was empty / exhausted on first attempt and the
+        // caller wired callControl (i.e. we *can* dial in principle —
+        // the rotation just has no eligible entries). Queue the
+        // customer-callback proposal immediately and override the
+        // TwiML so the caller hears "we'll call you back" with the
+        // business name instead of a `<Gather>` they can't answer.
+        await this.queueCallbackProposal(session, tenantId, reason, 'rotation_empty');
+        const safeName = xmlEscape(this.deps.businessName);
+        this.pendingTransferTwiml.set(
+          session.id,
+          `<?xml version="1.0" encoding="UTF-8"?>` +
+            `<Response>` +
+            `<Say voice="Polly.Joanna">I'm sorry, no one is available right now. ${safeName} will call you back as soon as possible. Thank you for calling.</Say>` +
+            `<Hangup/>` +
+            `</Response>`,
+        );
+        session.ended = true;
+      }
     } catch (err) {
       logger.warn('escalateToHuman failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
     }
+  }
+
+  /**
+   * Build the absolute /dial-result URL Twilio POSTs once a `<Dial>`
+   * verb completes. Mirrors `gatherUrl` but for the dial-result route.
+   */
+  private dialResultUrl(sessionId: string): string {
+    const path = `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`;
+    if (this.deps.publicBaseUrl) {
+      return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
+    }
+    return path;
+  }
+
+  /**
+   * Queue the `customer_callback_required` proposal when the rotation
+   * cascade is exhausted. Idempotent against the session: subsequent
+   * calls (e.g. if the caller redials) will create a new proposal,
+   * which is intentional — operators want one row per request.
+   *
+   * Public so the route layer (`/dial-result`) can call it after
+   * walking the rotation cursor off the end.
+   */
+  async queueCallbackProposal(
+    session: VoiceSession,
+    tenantId: string,
+    reason: string,
+    outcome: 'rotation_empty' | 'rotation_exhausted',
+  ): Promise<void> {
+    if (!this.deps.proposalRepo) {
+      logger.warn('queueCallbackProposal: proposalRepo not wired', {
+        sessionId: session.id,
+        outcome,
+      });
+      return;
+    }
+    try {
+      const proposal = buildProposal({
+        tenantId,
+        // No dedicated `customer_callback_required` ProposalType
+        // exists; voice_clarification is the closest existing bucket
+        // (it's the "needs human follow-up" capture-class proposal).
+        // The semantic intent rides in payload.intent so the review
+        // UI / future executor can branch on it.
+        proposalType: 'voice_clarification',
+        payload: {
+          intent: 'customer_callback_required',
+          reason,
+          outcome,
+          sessionId: session.id,
+          callSid: session.callSid,
+        },
+        summary: `Customer callback required (${outcome})`,
+        sourceContext: {
+          source: 'calling-agent',
+          channel: 'telephony',
+          sessionId: session.id,
+          escalationReason: reason,
+        },
+        aiRunId: uuidv4(),
+        createdBy: this.deps.systemActorId ?? 'calling-agent',
+      });
+      const stored = await this.deps.proposalRepo.create(proposal);
+      session.proposalIds.push(stored.id);
+
+      // Audit for parity with normal escalation paths: operators
+      // searching for "callback queued" want a single audit row to
+      // jump from.
+      if (this.deps.auditRepo) {
+        try {
+          const auditEvent = createAuditEvent({
+            tenantId,
+            actorId: this.deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'customer_callback_required',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: {
+              proposalId: stored.id,
+              reason,
+              outcome,
+              callSid: session.callSid,
+            },
+          });
+          await this.deps.auditRepo.create(auditEvent);
+        } catch (err) {
+          logger.warn('queueCallbackProposal: audit persist failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
+      }
+
+      // Drop the rotation cursor — the call is done with the dial flow.
+      this.deps.callControl?.clearCursor(session.id);
+    } catch (err) {
+      logger.warn('queueCallbackProposal failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /**
+   * Public accessor for the route layer (`/dial-result`) so the
+   * dispatcher rotation cascade can walk the same rotation as the
+   * initial escalation.
+   */
+  getDeps(): Readonly<TwilioAdapterDeps> {
+    return this.deps;
+  }
+
+  /**
+   * Pop the pending transfer TwiML for a session, if any. Used by
+   * the route layer to short-circuit the normal Gather response when
+   * the escalation flow produced a `<Dial>`.
+   */
+  takePendingTransferTwiml(sessionId: string): string | undefined {
+    const twiml = this.pendingTransferTwiml.get(sessionId);
+    if (twiml) this.pendingTransferTwiml.delete(sessionId);
+    return twiml;
   }
 
   /**
