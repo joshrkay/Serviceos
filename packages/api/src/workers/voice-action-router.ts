@@ -16,6 +16,7 @@ import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
+import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -89,6 +90,16 @@ export interface VoiceActionRouterDeps {
    * pre-check path.
    */
   slotConflictChecker?: SlotConflictChecker;
+  /**
+   * Optional: availability finder used to surface alternative open
+   * slots in the voice_clarification proposal whenever
+   * `slotConflictChecker` rejects the AI's proposed time. The
+   * dispatcher sees up to 3 next-available windows for the same
+   * duration (and same technician, when one was proposed) so they
+   * don't have to scan the calendar by hand. Leaving this undefined
+   * preserves the no-alternatives wording.
+   */
+  availabilityFinder?: AvailabilityFinder;
 }
 
 const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalType> = {
@@ -170,7 +181,11 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
   handlers.set(
     'create_appointment',
-    new CreateAppointmentAITaskHandler(deps.gateway, deps.slotConflictChecker),
+    new CreateAppointmentAITaskHandler(
+      deps.gateway,
+      deps.slotConflictChecker,
+      deps.availabilityFinder,
+    ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));

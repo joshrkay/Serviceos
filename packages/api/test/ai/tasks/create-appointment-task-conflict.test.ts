@@ -168,6 +168,110 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
     expect(result.taskType).toBe('create_appointment');
   });
 
+  it('attaches alternative slots to voice_clarification when AvailabilityFinder is wired', async () => {
+    const conflictWindow = {
+      start: new Date('2026-04-21T11:00:00Z'),
+      end: new Date('2026-04-21T12:00:00Z'),
+    };
+    const checker = stubChecker({
+      ok: false,
+      conflict: 'technician_busy',
+      appointmentId: 'appt-existing',
+      conflictWindow,
+    });
+    const altSlot = {
+      start: new Date('2026-04-21T13:00:00Z'),
+      end: new Date('2026-04-21T14:00:00Z'),
+    };
+    const finder = {
+      find: vi.fn(async () => ({ ok: true as const, slots: [altSlot] })),
+    };
+    const handler = new CreateAppointmentAITaskHandler(
+      mockGateway(baseLlmJson),
+      checker,
+      finder,
+    );
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'Schedule a follow-up at 11am',
+    });
+
+    expect(result.taskType).toBe('voice_clarification');
+    const ctx = result.proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.alternatives).toEqual([
+      { start: altSlot.start.toISOString(), end: altSlot.end.toISOString() },
+    ]);
+    expect(result.proposal.explanation ?? '').toContain('Suggested alternative slot');
+    // Finder was called with the conflicted slot's duration.
+    const findCall = finder.find.mock.calls[0][0];
+    expect(findCall.durationMs).toBe(60 * 60 * 1000);
+    expect(findCall.searchFrom.toISOString()).toBe('2026-04-21T11:00:00.000Z');
+    expect(findCall.technicianId).toBe(technicianId);
+  });
+
+  it('falls back to no-alternatives wording when AvailabilityFinder reports unavailable', async () => {
+    const checker = stubChecker({
+      ok: false,
+      conflict: 'technician_busy',
+      appointmentId: 'appt-existing',
+      conflictWindow: {
+        start: new Date('2026-04-21T11:00:00Z'),
+        end: new Date('2026-04-21T12:00:00Z'),
+      },
+    });
+    const finder = {
+      find: vi.fn(async () => ({ ok: false as const, reason: 'connection reset' })),
+    };
+    const handler = new CreateAppointmentAITaskHandler(
+      mockGateway(baseLlmJson),
+      checker,
+      finder,
+    );
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'Schedule a follow-up at 11am',
+    });
+
+    expect(result.taskType).toBe('voice_clarification');
+    const ctx = result.proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.alternatives).toBeUndefined();
+    // Explanation falls back to the bare wording — no "Suggested alternative slot" suffix.
+    expect(result.proposal.explanation ?? '').not.toContain('Suggested alternative slot');
+  });
+
+  it('omits alternatives when finder returns an empty slot list', async () => {
+    const checker = stubChecker({
+      ok: false,
+      conflict: 'technician_busy',
+      appointmentId: 'appt-existing',
+      conflictWindow: {
+        start: new Date('2026-04-21T11:00:00Z'),
+        end: new Date('2026-04-21T12:00:00Z'),
+      },
+    });
+    const finder = {
+      find: vi.fn(async () => ({ ok: true as const, slots: [] })),
+    };
+    const handler = new CreateAppointmentAITaskHandler(
+      mockGateway(baseLlmJson),
+      checker,
+      finder,
+    );
+
+    const result = await handler.handle({
+      tenantId,
+      userId,
+      message: 'Schedule a follow-up at 11am',
+    });
+
+    const ctx = result.proposal.sourceContext as Record<string, unknown>;
+    expect(ctx.alternatives).toBeUndefined();
+  });
+
   it('skips the conflict check when payload is missing customerId / dates', async () => {
     // The LLM didn't surface a customerId — we can't run the customer
     // overlap check, so the original path runs and the dispatcher

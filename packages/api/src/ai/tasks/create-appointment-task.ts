@@ -3,6 +3,7 @@ import { createProposal, CreateProposalInput, Proposal } from '../../proposals/p
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence } from '../guardrails/confidence';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
+import { AvailabilityFinder, OpenSlot } from './availability-finder';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -83,14 +84,23 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
 function buildClarificationProposal(
   context: TaskContext,
   conflict: Exclude<SlotConflictResult, { ok: true }>,
-  proposedPayload: Record<string, unknown>
+  proposedPayload: Record<string, unknown>,
+  alternatives?: OpenSlot[]
 ): Proposal {
-  const explanation = explanationForConflict(conflict);
+  const explanation = explanationForConflict(conflict, alternatives);
   const sourceContext: Record<string, unknown> = {
     source: 'voice',
     transcript: context.message,
     proposedAppointment: proposedPayload,
     conflict: serializeConflict(conflict),
+    ...(alternatives && alternatives.length > 0
+      ? {
+          alternatives: alternatives.map((s) => ({
+            start: s.start.toISOString(),
+            end: s.end.toISOString(),
+          })),
+        }
+      : {}),
     ...(context.conversationId ? { conversationId: context.conversationId } : {}),
   };
 
@@ -133,16 +143,26 @@ function summaryForConflict(
 }
 
 function explanationForConflict(
-  conflict: Exclude<SlotConflictResult, { ok: true }>
+  conflict: Exclude<SlotConflictResult, { ok: true }>,
+  alternatives?: OpenSlot[]
 ): string {
-  switch (conflict.conflict) {
-    case 'technician_busy':
-      return 'I drafted this appointment, but the proposed technician is already booked during that window. Please pick a different technician or another time.';
-    case 'customer_busy':
-      return 'I drafted this appointment, but the customer already has an appointment that overlaps that window. Please pick another time.';
-    case 'could_not_verify':
-      return "I couldn't verify availability for that slot — please confirm there's no conflict before approving.";
-  }
+  const base = (() => {
+    switch (conflict.conflict) {
+      case 'technician_busy':
+        return 'I drafted this appointment, but the proposed technician is already booked during that window. Please pick a different technician or another time.';
+      case 'customer_busy':
+        return 'I drafted this appointment, but the customer already has an appointment that overlaps that window. Please pick another time.';
+      case 'could_not_verify':
+        return "I couldn't verify availability for that slot — please confirm there's no conflict before approving.";
+    }
+  })();
+
+  if (!alternatives || alternatives.length === 0) return base;
+
+  const altList = alternatives
+    .map((s) => `${s.start.toISOString()} – ${s.end.toISOString()}`)
+    .join('; ');
+  return `${base} Suggested alternative slot${alternatives.length === 1 ? '' : 's'}: ${altList}.`;
 }
 
 function serializeConflict(
@@ -165,10 +185,16 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   readonly taskType = 'create_appointment' as const;
   private readonly gateway: LLMGateway;
   private readonly slotConflictChecker?: SlotConflictChecker;
+  private readonly availabilityFinder?: AvailabilityFinder;
 
-  constructor(gateway: LLMGateway, slotConflictChecker?: SlotConflictChecker) {
+  constructor(
+    gateway: LLMGateway,
+    slotConflictChecker?: SlotConflictChecker,
+    availabilityFinder?: AvailabilityFinder
+  ) {
     this.gateway = gateway;
     this.slotConflictChecker = slotConflictChecker;
+    this.availabilityFinder = availabilityFinder;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -208,7 +234,13 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       });
 
       if (!result.ok) {
-        const proposal = buildClarificationProposal(context, result, payload);
+        const alternatives = await this.findAlternatives(
+          context.tenantId,
+          new Date(scheduledStart),
+          new Date(scheduledEnd),
+          technicianId
+        );
+        const proposal = buildClarificationProposal(context, result, payload, alternatives);
         return { proposal, taskType: 'voice_clarification' };
       }
     }
@@ -237,6 +269,47 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       parts.push(`Known entities: ${JSON.stringify(context.existingEntities)}`);
     }
     return parts.join('\n');
+  }
+
+  /**
+   * Look up alternative open slots when the proposed time conflicts.
+   * Failure-open: any error returns `undefined`, and the clarification
+   * proposal falls back to the no-alternatives wording. Search window
+   * spans from the conflicted slot's start through the end of the next
+   * day, which covers same-day reschedules and "first thing tomorrow"
+   * without scanning the full calendar.
+   */
+  private async findAlternatives(
+    tenantId: string,
+    proposedStart: Date,
+    proposedEnd: Date,
+    technicianId: string | undefined
+  ): Promise<OpenSlot[] | undefined> {
+    const finder = this.availabilityFinder;
+    if (!finder) return undefined;
+
+    const durationMs = proposedEnd.getTime() - proposedStart.getTime();
+    if (durationMs <= 0) return undefined;
+
+    // 36h is enough to catch "later today" + "first thing tomorrow"
+    // without an unreasonably large repo scan.
+    const SEARCH_WINDOW_MS = 36 * 60 * 60 * 1000;
+    const searchTo = new Date(proposedStart.getTime() + SEARCH_WINDOW_MS);
+
+    try {
+      const result = await finder.find({
+        tenantId,
+        searchFrom: proposedStart,
+        searchTo,
+        durationMs,
+        technicianId,
+        count: 3,
+      });
+      if (!result.ok) return undefined;
+      return result.slots.length > 0 ? result.slots : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }
 
