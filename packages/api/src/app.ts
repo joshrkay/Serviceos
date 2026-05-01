@@ -148,6 +148,14 @@ import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
+import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { InMemoryAgreementRepository } from './agreements/agreement';
+import { PgAgreementRepository } from './agreements/pg-agreement';
+import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
+import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
+import { createAgreementsRouter } from './routes/agreements';
+import { createJob as createJobDomain } from './jobs/job';
+import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
@@ -986,6 +994,113 @@ export function createApp() {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  // ── Service agreements (P9-003) ─────────────────────────────────────────
+  // Recurring service contracts auto-generate a job + draft invoice on
+  // their cadence. Bypasses the proposals layer because the customer-
+  // signing-up step is the approval; subsequent runs execute it.
+  const agreementRepo = pool
+    ? new PgAgreementRepository(pool)
+    : new InMemoryAgreementRepository();
+  const agreementRunRepo = pool
+    ? new PgAgreementRunRepository(pool)
+    : new InMemoryAgreementRunRepository();
+  const agreementsJobsService = {
+    async createJob(input: {
+      tenantId: string;
+      customerId: string;
+      locationId: string;
+      summary: string;
+      createdBy: string;
+    }) {
+      const job = await createJobDomain(
+        {
+          tenantId: input.tenantId,
+          customerId: input.customerId,
+          locationId: input.locationId,
+          summary: input.summary,
+          createdBy: input.createdBy,
+          actorRole: 'system',
+        },
+        jobRepo,
+        auditRepo,
+      );
+      return { id: job.id };
+    },
+  };
+  const agreementsInvoicesService = {
+    async createDraftInvoice(input: {
+      tenantId: string;
+      jobId: string;
+      priceCents: number;
+      description: string;
+      createdBy: string;
+    }) {
+      const invoice = await createInvoiceDomain(
+        {
+          tenantId: input.tenantId,
+          jobId: input.jobId,
+          invoiceNumber: `AGREEMENT-${Date.now()}`,
+          lineItems: [
+            {
+              id: `agreement-${Date.now()}`,
+              description: input.description,
+              quantity: 1,
+              unitPriceCents: input.priceCents,
+              totalCents: input.priceCents,
+              sortOrder: 0,
+              taxable: false,
+            },
+          ],
+          customerMessage: undefined,
+          createdBy: input.createdBy,
+        },
+        invoiceRepo,
+        auditRepo,
+      );
+      return { id: invoice.id };
+    },
+  };
+  app.use(
+    '/api/agreements',
+    createAgreementsRouter({
+      agreementRepo,
+      runRepo: agreementRunRepo,
+      auditRepo,
+      jobsService: agreementsJobsService,
+      invoicesService: agreementsInvoicesService,
+    }),
+  );
+
+  // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
+  // setInterval driver pattern as the execution-worker (P0-009). The
+  // tenant lister falls back to an empty list outside of pg mode so
+  // the in-memory dev server doesn't churn.
+  const agreementsLogger = createLogger({
+    service: 'recurring-agreements-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runRecurringAgreementsSweep({
+        agreementRepo,
+        runRepo: agreementRunRepo,
+        jobsService: agreementsJobsService,
+        invoicesService: agreementsInvoicesService,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: agreementsLogger,
+      });
+    } catch (err) {
+      agreementsLogger.error('Recurring-agreements sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60_000);
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.

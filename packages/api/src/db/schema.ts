@@ -1270,37 +1270,54 @@ export const MIGRATIONS = {
       ON voice_recordings (call_sid) WHERE call_sid IS NOT NULL;
   `,
 
-  // P9-001: lead pipeline + source attribution + customer conversion
-  '055_create_leads': `
-    CREATE TABLE IF NOT EXISTS leads (
+  '056_create_service_agreements': `
+    CREATE TABLE IF NOT EXISTS service_agreements (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      first_name TEXT NOT NULL DEFAULT '',
-      last_name TEXT NOT NULL DEFAULT '',
-      company_name TEXT,
-      primary_phone TEXT,
-      email TEXT,
-      source TEXT NOT NULL CHECK (source IN ('web_form', 'phone_call', 'referral', 'walk_in', 'marketplace', 'other')),
-      source_detail TEXT,
-      stage TEXT NOT NULL DEFAULT 'new' CHECK (stage IN ('new', 'contacted', 'qualified', 'quoted', 'won', 'lost')),
-      estimated_value_cents BIGINT,
-      notes TEXT,
-      assigned_user_id UUID REFERENCES users(id),
-      converted_customer_id UUID REFERENCES customers(id),
-      lost_reason TEXT,
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      location_id UUID REFERENCES service_locations(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      recurrence_rule TEXT NOT NULL,
+      price_cents BIGINT NOT NULL DEFAULT 0,
+      auto_generate_invoice BOOLEAN NOT NULL DEFAULT TRUE,
+      auto_generate_job BOOLEAN NOT NULL DEFAULT TRUE,
+      next_run_at TIMESTAMPTZ NOT NULL,
+      last_run_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','cancelled')),
+      starts_on DATE NOT NULL,
+      ends_on DATE,
       created_by TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(tenant_id, stage);
-    CREATE INDEX IF NOT EXISTS idx_leads_source ON leads(tenant_id, source);
-    CREATE INDEX IF NOT EXISTS idx_leads_assigned ON leads(tenant_id, assigned_user_id);
-    CREATE INDEX IF NOT EXISTS idx_leads_converted ON leads(tenant_id, converted_customer_id);
-    ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE leads FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
-    CREATE POLICY tenant_isolation_leads ON leads
+    CREATE INDEX IF NOT EXISTS idx_agreements_tenant ON service_agreements(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_agreements_customer ON service_agreements(tenant_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_agreements_status_next ON service_agreements(tenant_id, status, next_run_at);
+    ALTER TABLE service_agreements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_agreements FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_agreements ON service_agreements;
+    CREATE POLICY tenant_isolation_service_agreements ON service_agreements
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS service_agreement_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      agreement_id UUID NOT NULL REFERENCES service_agreements(id) ON DELETE CASCADE,
+      scheduled_for DATE NOT NULL,
+      generated_job_id UUID,
+      generated_invoice_id UUID,
+      status TEXT NOT NULL CHECK (status IN ('pending','generated','skipped','failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (agreement_id, scheduled_for)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agreement_runs_tenant ON service_agreement_runs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_agreement_runs_agreement ON service_agreement_runs(tenant_id, agreement_id);
+    ALTER TABLE service_agreement_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_agreement_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_agreement_runs ON service_agreement_runs;
+    CREATE POLICY tenant_isolation_service_agreement_runs ON service_agreement_runs
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
