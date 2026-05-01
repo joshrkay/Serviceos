@@ -1,5 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import { setTenantContext } from './schema';
+import { tenantContextStore } from '../middleware/tenant-context';
 
 /**
  * Base class for all Postgres-backed repositories.
@@ -11,8 +12,24 @@ export class PgBaseRepository {
   /**
    * Execute a callback within a tenant-scoped database context.
    * Sets `app.current_tenant_id` so RLS policies filter automatically.
+   *
+   * P0-024: when invoked from inside a request that owns a transaction-
+   * scoped client (set up by the `withTenantTransaction` middleware),
+   * we reuse that client so every query in the request runs inside the
+   * same transaction with the same `SET LOCAL` GUC. When invoked
+   * outside that scope (workers, public flows, tests), we fall back to
+   * the original per-call connection acquisition. The fallback uses
+   * the existing `setTenantContext` helper — preserving exact pre-PR
+   * behavior so non-request callers see no functional change.
    */
   protected async withTenant<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const ctx = tenantContextStore.getStore();
+    if (ctx && ctx.tenantId === tenantId) {
+      // Request-scoped client — already inside a transaction with
+      // app.current_tenant_id set LOCAL. Don't re-set, don't re-connect,
+      // don't release (the middleware owns the lifecycle).
+      return fn(ctx.client);
+    }
     const client = await this.pool.connect();
     try {
       await client.query(setTenantContext(tenantId));
@@ -25,8 +42,31 @@ export class PgBaseRepository {
   /**
    * Execute a callback within a tenant-scoped transaction.
    * Rolls back on error.
+   *
+   * P0-024 + Codex P1 follow-up: when invoked from inside a request
+   * that owns a transaction-scoped client (set up by the
+   * `withTenantTransaction` middleware), reuse that client and SKIP
+   * the inner BEGIN/COMMIT/ROLLBACK — the middleware already owns
+   * the transaction lifecycle for the entire request. Calling
+   * `BEGIN` again on the same client would either error
+   * ("already in transaction") or be a no-op depending on
+   * configuration; either way it's wrong. On caller error, the
+   * exception propagates up; the middleware's `res.once('close')`
+   * triggers a ROLLBACK of the whole-request transaction.
+   *
+   * Without this reuse, a write path under a 1-connection pool would
+   * deadlock: the middleware holds client A until response.finish,
+   * but the repo would call pool.connect() and wait for client B
+   * which can't be acquired until A releases.
+   *
+   * Outside the request scope (workers, public flows, tests), we
+   * still do the full BEGIN/COMMIT/ROLLBACK on a fresh connection.
    */
   protected async withTenantTransaction<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const ctx = tenantContextStore.getStore();
+    if (ctx && ctx.tenantId === tenantId) {
+      return fn(ctx.client);
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

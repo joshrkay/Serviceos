@@ -177,4 +177,57 @@ describe('InvoiceDetail', () => {
       expect(screen.getByTestId('payment-submit-error').textContent).toContain('400');
     });
   });
+
+  describe('P5-018 InvoiceDetail — payment history & partial balance', () => {
+    it('renders a row for each historical payment with amount, date, and method', () => {
+      vi.mocked(useDetailQuery).mockReturnValue({
+        data: {
+          id: 'inv-history', invoiceNumber: 'INV-100', status: 'partially_paid', jobId: 'j1',
+          subtotalCents: 30000, discountCents: 0, taxCents: 0, totalCents: 30000,
+          amountPaidCents: 15000, amountDueCents: 15000,
+          createdAt: '2026-01-10T00:00:00Z',
+          lineItems: [],
+          payments: [
+            { id: 'p1', amountCents: 5000,  method: 'credit_card', status: 'completed', createdAt: '2026-01-15T10:00:00Z' },
+            { id: 'p2', amountCents: 10000, method: 'bank_transfer', status: 'completed', createdAt: '2026-01-20T14:30:00Z' },
+          ],
+        },
+        isLoading: false, error: null, refetch: vi.fn(),
+      });
+
+      render(<InvoiceDetail invoiceId="inv-history" />);
+
+      // Both payment rows render with their formatted amounts.
+      expect(screen.getByText('$50.00')).toBeInTheDocument();
+      expect(screen.getByText('$100.00')).toBeInTheDocument();
+      // Methods rendered with friendly labels.
+      expect(screen.getByText('Credit Card')).toBeInTheDocument();
+      expect(screen.getByText('ACH / Bank Transfer')).toBeInTheDocument();
+      // Dates rendered as full timestamps.
+      const ts1 = new Date('2026-01-15T10:00:00Z').toLocaleString();
+      const ts2 = new Date('2026-01-20T14:30:00Z').toLocaleString();
+      expect(screen.getAllByText(ts1).length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText(ts2).length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('partial payment — Amount Due reflects the remaining balance', () => {
+      vi.mocked(useDetailQuery).mockReturnValue({
+        data: {
+          id: 'inv-partial', invoiceNumber: 'INV-200', status: 'partially_paid', jobId: 'j1',
+          subtotalCents: 50000, discountCents: 0, taxCents: 0, totalCents: 50000,
+          amountPaidCents: 20000, amountDueCents: 30000,
+          createdAt: '2026-02-01T00:00:00Z',
+          lineItems: [],
+          payments: [
+            { id: 'p1', amountCents: 20000, method: 'cash', status: 'completed', createdAt: '2026-02-05T12:00:00Z' },
+          ],
+        },
+        isLoading: false, error: null, refetch: vi.fn(),
+      });
+
+      render(<InvoiceDetail invoiceId="inv-partial" />);
+      expect(screen.getByText('Amount Paid: $200.00')).toBeInTheDocument();
+      expect(screen.getByText('Amount Due: $300.00')).toBeInTheDocument();
+    });
+  });
 });

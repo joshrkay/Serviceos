@@ -79,6 +79,76 @@ export class OpenAiTtsProvider implements TtsProvider {
 }
 
 /**
+ * ElevenLabs TTS implementation. Uses `eleven_turbo_v2_5` which generates
+ * audio in ~250 ms (vs ~800 ms for OpenAI tts-1), cutting time-to-first-audio
+ * for the calling agent's spoken responses. Requires ELEVENLABS_API_KEY.
+ *
+ * Default voice is "Rachel" (21m00Tcm4TlvDq8ikWAM) — clear, professional,
+ * US English. Override with a custom voice ID via the constructor.
+ */
+export class ElevenLabsTtsProvider implements TtsProvider {
+  constructor(
+    private readonly apiKey: string,
+    private readonly voiceId: string = '21m00Tcm4TlvDq8ikWAM',
+    private readonly modelId: string = 'eleven_turbo_v2_5'
+  ) {
+    if (!apiKey) throw new Error('ElevenLabsTtsProvider requires ELEVENLABS_API_KEY');
+  }
+
+  async synthesize(input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> {
+    const res = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': this.apiKey,
+          'Content-Type': 'application/json',
+          Accept: 'audio/mpeg',
+        },
+        body: JSON.stringify({
+          text: input.text,
+          model_id: this.modelId,
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      }
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`ElevenLabs TTS error (${res.status}): ${body.slice(0, 200)}`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    return {
+      audio: buffer,
+      contentType: 'audio/mpeg',
+      provider: 'elevenlabs',
+    };
+  }
+}
+
+/**
+ * Factory — selects provider based on environment:
+ *   TTS_PROVIDER=elevenlabs → ElevenLabsTtsProvider (lower TTFA)
+ *   default                 → OpenAiTtsProvider
+ *
+ * Returns undefined when no API key is configured so callers can
+ * gracefully skip readback rather than throw at wire-up.
+ */
+export function createTtsProvider(env: {
+  TTS_PROVIDER?: string;
+  ELEVENLABS_API_KEY?: string;
+  AI_PROVIDER_API_KEY?: string;
+}): TtsProvider | undefined {
+  if (env.TTS_PROVIDER === 'elevenlabs') {
+    if (!env.ELEVENLABS_API_KEY) return undefined;
+    return new ElevenLabsTtsProvider(env.ELEVENLABS_API_KEY);
+  }
+  if (env.AI_PROVIDER_API_KEY) {
+    return new OpenAiTtsProvider(env.AI_PROVIDER_API_KEY);
+  }
+  return undefined;
+}
+
+/**
  * Dev/test provider that returns a zero-byte "audio" response so
  * tests can exercise readback plumbing without calling the real API.
  *

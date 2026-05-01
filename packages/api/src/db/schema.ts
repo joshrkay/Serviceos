@@ -1181,6 +1181,145 @@ export const MIGRATIONS = {
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
   `,
+
+  // ── Phase 8: Customer Calling Agent ────────────────────────────────────────
+
+  // P8-001: pg_trgm fuzzy-match indexes for entity resolution
+  '051_p8_entity_resolution_indexes': `
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE INDEX IF NOT EXISTS idx_customers_name_trgm
+      ON customers USING GIN (display_name gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_jobs_title_trgm
+      ON jobs USING GIN (summary gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_invoices_number_trgm
+      ON invoices USING GIN (invoice_number gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_for
+      ON appointments (tenant_id, scheduled_start);
+  `,
+
+  // P8-002: tenant-local DNC list for compliance skill
+  '052_p8_tenant_dnc_list': `
+    CREATE TABLE IF NOT EXISTS tenant_dnc_list (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      phone TEXT NOT NULL,
+      added_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dnc_tenant_phone
+      ON tenant_dnc_list (tenant_id, phone);
+    ALTER TABLE tenant_dnc_list ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dnc ON tenant_dnc_list;
+    CREATE POLICY tenant_isolation_dnc ON tenant_dnc_list
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P8-006: normalized phone index for identify_caller skill
+  '053_p8_customers_phone_index': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone_normalized TEXT
+      GENERATED ALWAYS AS (regexp_replace(primary_phone, '[^0-9]', '', 'g')) STORED;
+    CREATE INDEX IF NOT EXISTS idx_customers_phone_normalized
+      ON customers (tenant_id, phone_normalized);
+  `,
+
+  // P8-008 + P8-014: on-call rotation, call summaries, voice_recordings extensions
+  '054_p8_telephony_tables': `
+    CREATE TABLE IF NOT EXISTS tenant_oncall_rotation (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id UUID NOT NULL REFERENCES users(id),
+      order_index INTEGER NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_oncall_tenant_order
+      ON tenant_oncall_rotation (tenant_id, order_index) WHERE active = true;
+    ALTER TABLE tenant_oncall_rotation ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_oncall ON tenant_oncall_rotation;
+    CREATE POLICY tenant_isolation_oncall ON tenant_oncall_rotation
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS call_summaries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      call_id UUID REFERENCES voice_recordings(id),
+      summary TEXT NOT NULL,
+      detected_intent TEXT,
+      proposal_ids UUID[] DEFAULT '{}',
+      quality_score NUMERIC(3,2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_summaries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_summaries ON call_summaries;
+    CREATE POLICY tenant_isolation_call_summaries ON call_summaries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    -- Partial unique index: idempotent retries of summarizeSession for the
+    -- same recording collide cleanly. NULL call_id (no recording yet) is
+    -- intentionally excluded so multiple in-app sessions can coexist.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_summaries_tenant_call
+      ON call_summaries (tenant_id, call_id)
+      WHERE call_id IS NOT NULL;
+
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS call_sid TEXT,
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inapp_voice'
+        CHECK (source IN ('inbound_call', 'inapp_voice', 'batch_upload')),
+      ADD COLUMN IF NOT EXISTS recording_url TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_call_sid
+      ON voice_recordings (call_sid) WHERE call_sid IS NOT NULL;
+  `,
+
+  '056_create_service_agreements': `
+    CREATE TABLE IF NOT EXISTS service_agreements (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      location_id UUID REFERENCES service_locations(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      recurrence_rule TEXT NOT NULL,
+      price_cents BIGINT NOT NULL DEFAULT 0,
+      auto_generate_invoice BOOLEAN NOT NULL DEFAULT TRUE,
+      auto_generate_job BOOLEAN NOT NULL DEFAULT TRUE,
+      next_run_at TIMESTAMPTZ NOT NULL,
+      last_run_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','cancelled')),
+      starts_on DATE NOT NULL,
+      ends_on DATE,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_agreements_tenant ON service_agreements(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_agreements_customer ON service_agreements(tenant_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_agreements_status_next ON service_agreements(tenant_id, status, next_run_at);
+    ALTER TABLE service_agreements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_agreements FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_agreements ON service_agreements;
+    CREATE POLICY tenant_isolation_service_agreements ON service_agreements
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS service_agreement_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      agreement_id UUID NOT NULL REFERENCES service_agreements(id) ON DELETE CASCADE,
+      scheduled_for DATE NOT NULL,
+      generated_job_id UUID,
+      generated_invoice_id UUID,
+      status TEXT NOT NULL CHECK (status IN ('pending','generated','skipped','failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (agreement_id, scheduled_for)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agreement_runs_tenant ON service_agreement_runs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_agreement_runs_agreement ON service_agreement_runs(tenant_id, agreement_id);
+    ALTER TABLE service_agreement_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_agreement_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_agreement_runs ON service_agreement_runs;
+    CREATE POLICY tenant_isolation_service_agreement_runs ON service_agreement_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

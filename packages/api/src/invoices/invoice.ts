@@ -60,11 +60,39 @@ export interface UpdateInvoiceInput {
   customerMessage?: string;
 }
 
+export interface InvoiceListOptions {
+  status?: InvoiceStatus;
+  jobId?: string;
+  customerId?: string;
+  /** ISO date — invoices with `due_date >= fromDueDate` are included. */
+  fromDueDate?: Date;
+  /** ISO date — invoices with `due_date <= toDueDate` are included. */
+  toDueDate?: Date;
+  /** ILIKE search across invoice_number / customer_message. */
+  search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (created_at). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface InvoiceListResult {
+  data: Invoice[];
+  total: number;
+}
+
+export const DEFAULT_INVOICE_LIMIT = 50;
+export const MAX_INVOICE_LIMIT = 200;
+
 export interface InvoiceRepository {
   create(invoice: Invoice): Promise<Invoice>;
   findById(tenantId: string, id: string): Promise<Invoice | null>;
   findByJob(tenantId: string, jobId: string): Promise<Invoice[]>;
-  findByTenant(tenantId: string): Promise<Invoice[]>;
+  findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]>;
+  /** P1-018: paginated `{ data, total }` form for list UIs. */
+  listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
   update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
@@ -164,9 +192,29 @@ export async function createInvoice(
 
 export async function listInvoices(
   tenantId: string,
-  repository: InvoiceRepository
+  repository: InvoiceRepository,
+  options?: InvoiceListOptions
 ): Promise<Invoice[]> {
-  return repository.findByTenant(tenantId);
+  return repository.findByTenant(tenantId, options);
+}
+
+/**
+ * P1-018: paginated invoice list with `{ data, total }`. Falls back to
+ * in-memory pagination over `findByTenant` when the repo doesn't yet
+ * implement `listWithMeta`.
+ */
+export async function listInvoicesWithMeta(
+  tenantId: string,
+  repository: InvoiceRepository,
+  options?: InvoiceListOptions
+): Promise<InvoiceListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_INVOICE_LIMIT, MAX_INVOICE_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
 }
 
 /**
@@ -314,10 +362,47 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
   }
 
-  async findByTenant(tenantId: string): Promise<Invoice[]> {
-    return Array.from(this.invoices.values())
-      .filter((i) => i.tenantId === tenantId)
-      .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  async findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]> {
+    let results = Array.from(this.invoices.values()).filter((i) => i.tenantId === tenantId);
+    if (options?.status) results = results.filter((i) => i.status === options.status);
+    if (options?.jobId) results = results.filter((i) => i.jobId === options.jobId);
+    if (options?.fromDueDate) {
+      const from = options.fromDueDate.getTime();
+      results = results.filter((i) => i.dueDate !== undefined && i.dueDate.getTime() >= from);
+    }
+    if (options?.toDueDate) {
+      const to = options.toDueDate.getTime();
+      results = results.filter((i) => i.dueDate !== undefined && i.dueDate.getTime() <= to);
+    }
+    if (options?.search) {
+      const q = options.search.toLowerCase();
+      results = results.filter(
+        (i) =>
+          i.invoiceNumber.toLowerCase().includes(q) ||
+          (i.customerMessage && i.customerMessage.toLowerCase().includes(q))
+      );
+    }
+    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
+    const sortDir = options?.sort === 'asc' ? 1 : -1;
+    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_INVOICE_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
+    return results.map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  }
+
+  async listWithMeta(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult> {
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {

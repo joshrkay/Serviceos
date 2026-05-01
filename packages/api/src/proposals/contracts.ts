@@ -180,6 +180,11 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   add_note: addNotePayloadSchema,
   send_invoice: sendInvoicePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
+  emergency_dispatch: z.object({
+    callerPhone: z.string().optional(),
+    emergencyDescription: z.string(),
+    detectedKeywords: z.array(z.string()).default([]),
+  }),
   onboarding_tenant_settings: onboardingTenantSettingsPayloadSchema,
   onboarding_service_category: onboardingServiceCategoryPayloadSchema,
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,

@@ -8,10 +8,15 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createTelephonyRouter } from './routes/telephony';
+import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { attachMediaStreamServer } from './telephony/media-streams';
+import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
+import { createLeadsRouter } from './routes/leads';
 import { createLocationRouter } from './routes/locations';
 import { createJobRouter } from './routes/jobs';
 import { createAppointmentRouter } from './routes/appointments';
@@ -39,6 +44,7 @@ import { createFeedbackResponsesRouter } from './routes/feedback';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
+import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
 import { InMemoryJobTimelineRepository } from './jobs/job-lifecycle';
@@ -80,6 +86,7 @@ import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry }
 
 // Postgres-backed repositories (production)
 import { PgCustomerRepository } from './customers/pg-customer';
+import { PgLeadRepository } from './leads/pg-lead';
 import { PgLocationRepository } from './locations/pg-location';
 import { PgJobRepository } from './jobs/pg-job';
 import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
@@ -141,13 +148,27 @@ import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
+import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { InMemoryAgreementRepository } from './agreements/agreement';
+import { PgAgreementRepository } from './agreements/pg-agreement';
+import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
+import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
+import { createAgreementsRouter } from './routes/agreements';
+import { createJob as createJobDomain } from './jobs/job';
+import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import { createTtsProvider } from './ai/tts/tts-provider';
+import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
@@ -175,6 +196,7 @@ import {
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
+import { withTenantTransaction } from './middleware/tenant-context';
 
 /**
  * In-memory dev fallback for the WebhookEvent idempotency repo.
@@ -375,6 +397,7 @@ export function createApp() {
   }
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
@@ -646,9 +669,21 @@ export function createApp() {
   // transcription worker's onTranscribed hook, classifies intent,
   // and persists a proposal via proposalRepo. Registered now that
   // proposalRepo is available.
+  //
+  // P0-035 wiring (PR #202 follow-up): pass a SlotConflictChecker so
+  // create_appointment proposals run a pre-draft availability check
+  // and emit a voice_clarification proposal on conflict instead of a
+  // create_appointment that the dispatcher will reject. Without this
+  // construction, the checker shipped in PR #201 is dead code.
+  const slotConflictChecker = new DefaultSlotConflictChecker({
+    appointmentRepo,
+    assignmentRepo,
+    jobRepo,
+  });
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    slotConflictChecker,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -753,6 +788,126 @@ export function createApp() {
     }),
   );
 
+  // ── Twilio telephony webhooks (P8-011) ────────────────────────────────────
+  // Mounted under /api/telephony but BEFORE the Clerk auth middleware so
+  // Twilio's signed POSTs aren't rejected for missing a Clerk session.
+  // Authentication is enforced inside the router via X-Twilio-Signature
+  // verification (twilio-signature.ts).
+  // Single shared voice session store: in-app and telephony both create
+  // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
+  // is uniform across channels. Process-local; idle-reaped via setInterval.
+  const voiceSessionStore = new VoiceSessionStore();
+  // OnCall repo is created here so both the telephony adapter (notify_oncall
+  // side effect) and the in-app adapter (escalation) share a single
+  // implementation. The in-app block below reuses this same instance.
+  const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  const twilioAdapter = new TwilioGatherAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    ...(pool ? { pool } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo: sharedOnCallRepo,
+    businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+    ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+    // P8-014: when set, the initial inbound TwiML emits a
+    // <Start><Record recordingStatusCallback="..."/></Start> block so
+    // Twilio asynchronously records the entire call and POSTs metadata
+    // to /api/telephony/recording on completion.
+    recordingCallbackPath: '/api/telephony/recording',
+  });
+  // P8-012: feature flag the Media Streams (live audio) path. Default
+  // off — when off, the existing Gather adapter remains the only
+  // telephony surface. When on, /voice returns a <Connect><Stream/>
+  // TwiML and audio flows over the WebSocket attached below.
+  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter: twilioAdapter,
+      authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+      publicBaseUrl: process.env.PUBLIC_API_URL,
+      // Single-tenant fallback. TODO: replace with phone-number → tenant lookup.
+      resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
+      mediaStreamsEnabled,
+      // P8-014: mount the recording webhook in production. Without this
+      // block the route is unreachable and Twilio's recordingStatusCallback
+      // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
+      // optional from the router's perspective (handler degrades to
+      // "persistence skipped" with a warning) but should be wired in
+      // production environments.
+      recording: {
+        store: voiceSessionStore,
+        ...(pool ? { pool } : {}),
+        storage: storageProvider,
+        storageBucket,
+        ...(process.env.TWILIO_ACCOUNT_SID
+          ? { twilioAccountSid: process.env.TWILIO_ACCOUNT_SID }
+          : {}),
+        ...(process.env.TWILIO_AUTH_TOKEN
+          ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
+          : {}),
+      },
+    }),
+  );
+
+  // P8-012: attach the Media Streams WebSocketServer to the http.Server
+  // returned by app.listen(). We override `app.listen` so the bare
+  // `index.ts` entry point doesn't need any new wiring — when the
+  // server starts listening, the upgrade handler is already attached.
+  // The flag also gates whether DeepgramStreamingProvider is constructed
+  // (no DEEPGRAM_API_KEY required when the feature is disabled).
+  if (mediaStreamsEnabled) {
+    const deepgramKey = process.env.DEEPGRAM_API_KEY;
+    if (!deepgramKey) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[app] ⚠️  TWILIO_MEDIA_STREAMS_ENABLED=true but DEEPGRAM_API_KEY is unset. ' +
+        'Live-audio streaming will fail when calls connect. Set DEEPGRAM_API_KEY or ' +
+        'flip TWILIO_MEDIA_STREAMS_ENABLED=false.'
+      );
+    }
+    // ttsProvider is constructed below for the in-app adapter; we need
+    // it here too. Build a single instance and pass it to both.
+    const sharedTtsProvider = createTtsProvider({
+      TTS_PROVIDER: process.env.TTS_PROVIDER,
+      ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+      AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    });
+    const streamingProvider = deepgramKey
+      ? new DeepgramStreamingProvider(deepgramKey)
+      : null;
+    if (streamingProvider) {
+      const origListen = app.listen.bind(app);
+      // Wrap listen() so the WS upgrade handler is attached the moment
+      // the http.Server exists. Fire-and-forget; errors during attach
+      // are surfaced via the logger inside attachMediaStreamServer.
+      app.listen = ((...args: unknown[]) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const server = (origListen as any)(...args);
+        attachMediaStreamServer(
+          server,
+          {
+            store: voiceSessionStore,
+            streamingProvider,
+            ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
+              twilioAdapter.processCallerUtterance({
+                sessionId: session.id,
+                callSid,
+                speechResult,
+                tenantId,
+              }),
+            authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+            ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+          },
+        );
+        return server;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+    }
+  }
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -780,8 +935,19 @@ export function createApp() {
   // invariant in packages/api/test/decisions/decisions.test.ts (D6).
   app.use('/api', requireAuth);
 
+  // P0-024: open a request-scoped transaction with `app.current_tenant_id`
+  // set LOCAL so every query in the request reuses the same client and
+  // RLS fires automatically. Public routes (health, /public/*, and
+  // /api/public-payments) are mounted earlier and never reach this line.
+  // Skipped when no pool is wired (in-memory dev mode) — there's no
+  // database to attach a transaction to.
+  if (pool) {
+    app.use('/api', withTenantTransaction(pool));
+  }
+
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
   app.use(
@@ -829,6 +995,135 @@ export function createApp() {
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
+  // ── Service agreements (P9-003) ─────────────────────────────────────────
+  // Recurring service contracts auto-generate a job + draft invoice on
+  // their cadence. Bypasses the proposals layer because the customer-
+  // signing-up step is the approval; subsequent runs execute it.
+  const agreementRepo = pool
+    ? new PgAgreementRepository(pool)
+    : new InMemoryAgreementRepository();
+  const agreementRunRepo = pool
+    ? new PgAgreementRunRepository(pool)
+    : new InMemoryAgreementRunRepository();
+  const agreementsJobsService = {
+    async createJob(input: {
+      tenantId: string;
+      customerId: string;
+      locationId: string;
+      summary: string;
+      createdBy: string;
+    }) {
+      const job = await createJobDomain(
+        {
+          tenantId: input.tenantId,
+          customerId: input.customerId,
+          locationId: input.locationId,
+          summary: input.summary,
+          createdBy: input.createdBy,
+          actorRole: 'system',
+        },
+        jobRepo,
+        auditRepo,
+      );
+      return { id: job.id };
+    },
+  };
+  const agreementsInvoicesService = {
+    async createDraftInvoice(input: {
+      tenantId: string;
+      jobId: string;
+      priceCents: number;
+      description: string;
+      createdBy: string;
+    }) {
+      const invoice = await createInvoiceDomain(
+        {
+          tenantId: input.tenantId,
+          jobId: input.jobId,
+          invoiceNumber: `AGREEMENT-${Date.now()}`,
+          lineItems: [
+            {
+              id: `agreement-${Date.now()}`,
+              description: input.description,
+              quantity: 1,
+              unitPriceCents: input.priceCents,
+              totalCents: input.priceCents,
+              sortOrder: 0,
+              taxable: false,
+            },
+          ],
+          customerMessage: undefined,
+          createdBy: input.createdBy,
+        },
+        invoiceRepo,
+        auditRepo,
+      );
+      return { id: invoice.id };
+    },
+  };
+  app.use(
+    '/api/agreements',
+    createAgreementsRouter({
+      agreementRepo,
+      runRepo: agreementRunRepo,
+      auditRepo,
+      jobsService: agreementsJobsService,
+      invoicesService: agreementsInvoicesService,
+    }),
+  );
+
+  // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
+  // setInterval driver pattern as the execution-worker (P0-009). The
+  // tenant lister falls back to an empty list outside of pg mode so
+  // the in-memory dev server doesn't churn.
+  const agreementsLogger = createLogger({
+    service: 'recurring-agreements-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runRecurringAgreementsSweep({
+        agreementRepo,
+        runRepo: agreementRunRepo,
+        jobsService: agreementsJobsService,
+        invoicesService: agreementsInvoicesService,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: agreementsLogger,
+      });
+    } catch (err) {
+      agreementsLogger.error('Recurring-agreements sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60_000);
+
+  // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
+  // unified TTS provider, and the existing proposal/audit/oncall repos.
+  // The voiceSessionStore is shared with the Twilio adapter (created above).
+  const ttsProvider = createTtsProvider({
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+  });
+  const inAppVoiceAdapter = new InAppVoiceAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    ...(ttsProvider ? { ttsProvider } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo: sharedOnCallRepo,
+    ...(pool ? { pool } : {}),
+  });
+  app.use(
+    '/api/voice/sessions',
+    createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
+
   const featureFlagRepo: FeatureFlagRepository = pool
     ? new PgFeatureFlagRepository(pool)
     : new InMemoryFeatureFlagRepository();
@@ -852,23 +1147,26 @@ export function createApp() {
   // don't stack handlers, and we exit only when the pool finishes draining
   // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
   // this handler only takes responsibility for the DB pool.
-  if (pool) {
-    const shutdown = async (signal: NodeJS.Signals) => {
-      try {
-        // eslint-disable-next-line no-console
-        console.log(`[app] ${signal} received — closing pg pool`);
+  const shutdown = async (signal: NodeJS.Signals) => {
+    try {
+      // eslint-disable-next-line no-console
+      console.log(`[app] ${signal} received — closing voice sessions and pg pool`);
+      // Stop the voice-session-store reaper interval so the process can
+      // exit cleanly even when no DB pool is wired (dev / in-memory mode).
+      voiceSessionStore.dispose();
+      if (pool) {
         await Promise.race([
           pool.end(),
           new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('[app] pool.end() failed', err);
       }
-    };
-    process.once('SIGTERM', shutdown);
-    process.once('SIGINT', shutdown);
-  }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[app] shutdown failed', err);
+    }
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 
   return app;
 }

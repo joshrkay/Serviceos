@@ -44,12 +44,28 @@ export interface JobListOptions {
   customerId?: string;
   technicianId?: string;
   search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (created_at). */
+  sort?: 'asc' | 'desc';
 }
+
+export interface JobListResult {
+  data: Job[];
+  total: number;
+}
+
+export const DEFAULT_JOB_LIMIT = 50;
+export const MAX_JOB_LIMIT = 200;
 
 export interface JobRepository {
   create(job: Job): Promise<Job>;
   findById(tenantId: string, id: string): Promise<Job | null>;
   findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]>;
+  /** P1-018: paginated `{ data, total }` form for list UIs. */
+  listWithMeta?(tenantId: string, options?: JobListOptions): Promise<JobListResult>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
 }
@@ -154,6 +170,24 @@ export async function listJobs(
   return repository.findByTenant(tenantId, options);
 }
 
+/**
+ * P1-018: paginated job list. Falls back to in-memory pagination over
+ * `findByTenant` when the repo doesn't implement `listWithMeta`.
+ */
+export async function listJobsWithMeta(
+  tenantId: string,
+  repository: JobRepository,
+  options?: JobListOptions
+): Promise<JobListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_JOB_LIMIT, MAX_JOB_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
+}
+
 export class InMemoryJobRepository implements JobRepository {
   private jobs: Map<string, Job> = new Map();
   private counters: Map<string, number> = new Map();
@@ -182,7 +216,27 @@ export class InMemoryJobRepository implements JobRepository {
           j.jobNumber.toLowerCase().includes(q)
       );
     }
+    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
+    const sortDir = options?.sort === 'asc' ? 1 : -1;
+    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_JOB_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
     return results.map((j) => ({ ...j }));
+  }
+
+  async listWithMeta(tenantId: string, options?: JobListOptions): Promise<JobListResult> {
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null> {

@@ -1,6 +1,7 @@
 import React from 'react';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 
 interface Customer {
   id: string;
@@ -59,6 +60,14 @@ export function CustomerDetail({ customerId, onBack }: CustomerDetailProps) {
               <p>Preferred: {data.preferredChannel}</p>
             </div>
           ),
+        },
+        // P9-002 — unified activity timeline. Read-only aggregator across
+        // notes, jobs, estimates, invoices, payments, conversations, and
+        // appointments. Renders an empty state when the customer has zero
+        // activity, so we always include this section.
+        {
+          title: 'Activity',
+          content: <CommunicationTimeline customerId={customerId} />,
         },
       ]}
     />
