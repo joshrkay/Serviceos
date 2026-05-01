@@ -16,6 +16,7 @@ import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
+import { createLeadsRouter } from './routes/leads';
 import { createLocationRouter } from './routes/locations';
 import { createJobRouter } from './routes/jobs';
 import { createAppointmentRouter } from './routes/appointments';
@@ -43,6 +44,7 @@ import { createFeedbackResponsesRouter } from './routes/feedback';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
+import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
 import { InMemoryJobTimelineRepository } from './jobs/job-lifecycle';
@@ -84,6 +86,7 @@ import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry }
 
 // Postgres-backed repositories (production)
 import { PgCustomerRepository } from './customers/pg-customer';
+import { PgLeadRepository } from './leads/pg-lead';
 import { PgLocationRepository } from './locations/pg-location';
 import { PgJobRepository } from './jobs/pg-job';
 import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
@@ -386,6 +389,7 @@ export function createApp() {
   }
 
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
   const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
@@ -935,6 +939,7 @@ export function createApp() {
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
   app.use(
