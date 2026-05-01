@@ -79,6 +79,18 @@ export interface TwilioAdapterDeps {
    * silently degrades to the v1 in-app behavior. P8-013 wires this in.
    */
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
+  /**
+   * P8-014: when set, the initial inbound TwiML emits a
+   * `<Start><Record recordingStatusCallback="..."/></Start>` block so
+   * Twilio asynchronously records the entire call and POSTs the
+   * finalized metadata to the recording webhook. Should be the absolute
+   * URL of `POST /api/telephony/recording`. Falls back to a relative
+   * path when `publicBaseUrl` is unset.
+   *
+   * When unset, no recording block is emitted — useful for tests and
+   * dev environments without a recording sink.
+   */
+  recordingCallbackPath?: string;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -119,6 +131,14 @@ export function xmlEscape(s: string): string {
 interface BuildTwimlOpts {
   /** Absolute URL (or path) Twilio will POST the next Gather result to. */
   gatherActionUrl: string;
+  /**
+   * Optional URL that Twilio will POST the finalized recording metadata
+   * to. When set, the response begins with a `<Start><Record/></Start>`
+   * block — fired only on the initial inbound TwiML so Twilio records
+   * the entire call asynchronously. Subsequent <Gather> turns leave it
+   * undefined.
+   */
+  recordingStatusCallback?: string;
 }
 
 const GATHER_VOICE = 'Polly.Joanna';
@@ -144,6 +164,19 @@ export function buildTwiML(
 ): string {
   const parts: string[] = [];
   let ended = false;
+
+  // P8-014: when present, prepend a <Start><Record/></Start> block so
+  // Twilio records the entire call asynchronously and POSTs metadata to
+  // /api/telephony/recording on completion. Only emitted on the initial
+  // inbound TwiML — subsequent <Gather> turns must NOT re-emit it (would
+  // start a second concurrent recording).
+  if (opts.recordingStatusCallback) {
+    parts.push(
+      `<Start><Record recordingStatusCallback="${xmlEscape(
+        opts.recordingStatusCallback,
+      )}" recordingStatusCallbackMethod="POST"/></Start>`,
+    );
+  }
 
   for (const fx of sideEffects) {
     if (fx.type === 'tts_play') {
@@ -317,12 +350,18 @@ export class TwilioGatherAdapter {
 
     // 7. Build TwiML — P8-013 may have produced a <Dial> transfer for
     //    the rare case where notify_oncall fires during the inbound
-    //    handshake (caller_identification_failed). Honor it here too.
+    //    handshake (caller_identification_failed). Honor it here.
+    //    Otherwise build standard TwiML; recordingStatusCallback is only
+    //    set on the initial inbound response so Twilio doesn't start a
+    //    second concurrent recording on each <Gather> turn (P8-014).
     const transferTwiml = this.takePendingTransferTwiml(session.id);
     const twiml =
       transferTwiml ??
       buildTwiML(expanded, {
         gatherActionUrl: this.gatherUrl(session.id),
+        ...(this.deps.recordingCallbackPath
+          ? { recordingStatusCallback: this.recordingCallbackUrl() }
+          : {}),
       });
 
     // 8. If the FSM drove straight to 'terminated' (escalation chain
@@ -588,6 +627,18 @@ export class TwilioGatherAdapter {
   /** Build the absolute Gather action URL. */
   private gatherUrl(sessionId: string): string {
     const path = `/api/telephony/gather?sid=${encodeURIComponent(sessionId)}`;
+    if (this.deps.publicBaseUrl) {
+      return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
+    }
+    return path;
+  }
+
+  /**
+   * Absolute URL Twilio POSTs the finalized recording metadata to.
+   * Caller verified `recordingCallbackPath` is set before calling.
+   */
+  private recordingCallbackUrl(): string {
+    const path = this.deps.recordingCallbackPath ?? '/api/telephony/recording';
     if (this.deps.publicBaseUrl) {
       return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
     }

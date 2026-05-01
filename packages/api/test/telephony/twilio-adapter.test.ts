@@ -108,6 +108,43 @@ describe('buildTwiML', () => {
     expect(xml).toContain('<Gather');
     expect(xml).not.toContain('<Hangup');
   });
+
+  // ─── P8-014: recordingStatusCallback wiring ────────────────────────────────
+
+  describe('recordingStatusCallback (P8-014 record_call)', () => {
+    it('emits a <Start><Record/></Start> block when recordingStatusCallback is set', () => {
+      const xml = buildTwiML(
+        [{ type: 'tts_play', payload: { text: 'Hi' } }],
+        {
+          gatherActionUrl: '/g',
+          recordingStatusCallback: 'https://api.test/api/telephony/recording',
+        },
+      );
+      expect(xml).toContain(
+        '<Start><Record recordingStatusCallback="https://api.test/api/telephony/recording" recordingStatusCallbackMethod="POST"/></Start>'
+      );
+    });
+
+    it('omits the <Start><Record/></Start> block when recordingStatusCallback is unset', () => {
+      const xml = buildTwiML(
+        [{ type: 'tts_play', payload: { text: 'Hi' } }],
+        { gatherActionUrl: '/g' },
+      );
+      expect(xml).not.toContain('<Record');
+      expect(xml).not.toContain('<Start');
+    });
+
+    it('escapes XML metacharacters in the callback URL', () => {
+      const xml = buildTwiML(
+        [],
+        {
+          gatherActionUrl: '/g',
+          recordingStatusCallback: 'https://api.test/recording?a=1&b=2',
+        },
+      );
+      expect(xml).toContain('a=1&amp;b=2');
+    });
+  });
 });
 
 // ─── handleInbound ───────────────────────────────────────────────────────────
@@ -137,6 +174,47 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     expect(xml).toMatch(/recorded/i);
     expect(xml).toContain('<Gather input="speech"');
     expect(xml).toContain('action="https://example.com/api/telephony/gather?sid=');
+  });
+
+  it('P8-014: handleInbound emits <Start><Record/></Start> when recordingCallbackPath is set', async () => {
+    const store = new VoiceSessionStore();
+    const gateway = makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      recordingCallbackPath: '/api/telephony/recording',
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-rec',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).toContain(
+      '<Start><Record recordingStatusCallback="https://example.com/api/telephony/recording"',
+    );
+    // The replay path (second handleInbound for the same CallSid) must
+    // NOT emit a second <Record/> block — Twilio is already recording.
+    const replay = await adapter.handleInbound({
+      callSid: 'CA-rec',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(replay).not.toContain('<Record');
+  });
+
+  it('P8-014: handleInbound omits <Record/> when recordingCallbackPath is unset', async () => {
+    const { adapter } = makeAdapter();
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-no-rec',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(xml).not.toContain('<Record');
   });
 
   it('drives the FSM into intent_capture (or ask_caller) after inbound', async () => {
