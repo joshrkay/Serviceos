@@ -231,6 +231,238 @@ export class TwilioGatherAdapter {
   constructor(private deps: TwilioAdapterDeps) {}
 
   /**
+   * P8-012 — Initial /voice handler when Media Streams is enabled.
+   *
+   * Creates (or replays) the session, then returns a
+   * `<Connect><Stream/></Connect>` TwiML that points Twilio at our WS
+   * server. We do NOT run the disclose_recording / identify_caller /
+   * `incoming_call` flow here — those will run on the WS adapter side
+   * once the stream's `start` event arrives, so the session has a
+   * tenantId attached before any FSM dispatch happens. (Today we
+   * intentionally keep the WS-side bootstrap minimal: the session is
+   * created with tenantId + CallSid, and the FSM lazily greets on the
+   * first final transcript.)
+   *
+   * This avoids racing TTS playback over a Stream frame: the FSM's
+   * greeting tts_play would otherwise try to render via the WS audio
+   * channel before Twilio finishes the connect.
+   */
+  async handleInboundForStream(opts: {
+    callSid: string;
+    tenantId: string;
+  }): Promise<string> {
+    const existing = this.deps.store.findByCallSid(opts.callSid);
+    if (existing && existing.tenantId === opts.tenantId) {
+      return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
+    }
+    const session = this.deps.store.create(opts.tenantId, 'telephony', {
+      callSid: opts.callSid,
+    });
+    return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+  }
+
+  /**
+   * P8-012 — Build the `<Connect><Stream/></Connect>` TwiML used when
+   * `TWILIO_MEDIA_STREAMS_ENABLED=true`. Called from the /voice route
+   * after we've created (or replayed) the session. The Media Streams
+   * adapter owns audio + transcripts from there; the Gather code path
+   * is bypassed entirely on this branch.
+   *
+   * The resulting URL is wss:// because Twilio rejects ws:// for any
+   * public deployment. Falls back to a relative-ish URL keyed off
+   * `publicBaseUrl`'s host when set; otherwise emits an explicit
+   * placeholder so a missing publicBaseUrl is loud at deploy time.
+   */
+  buildStreamTwiML(opts: { sessionId: string; callSid: string }): string {
+    const baseRaw = this.deps.publicBaseUrl?.replace(/\/+$/, '') ?? '';
+    // Translate http(s):// → ws(s):// so Twilio gets a valid ws URL even
+    // when the operator only configured PUBLIC_API_URL.
+    const wsBase = baseRaw
+      ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
+      : 'wss://media-streams-base-url-not-configured';
+    const streamUrl = `${wsBase}/api/telephony/stream`;
+    return (
+      `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<Response>` +
+      `<Connect>` +
+      `<Stream url="${xmlEscape(streamUrl)}">` +
+      `<Parameter name="sessionId" value="${xmlEscape(opts.sessionId)}"/>` +
+      `<Parameter name="callSid" value="${xmlEscape(opts.callSid)}"/>` +
+      `</Stream>` +
+      `</Connect>` +
+      `</Response>`
+    );
+  }
+
+  /**
+   * P8-012 — Drive a single speech turn through the FSM and return the
+   * resulting side effects (without rendering TwiML). Used by the
+   * Media Streams adapter on a `final` Deepgram transcript.
+   *
+   * Behaviorally equivalent to `_handleGatherLocked` minus the TwiML
+   * build step and minus the automatic per-session lock — the caller
+   * is responsible for wrapping in `withSessionLock`.
+   *
+   * Returns the full side-effect array including any tts_play and
+   * end_session emitted by the FSM. The caller decides how to render
+   * those (TTS synthesis for the WS path; <Say> for Gather).
+   */
+  async processCallerUtterance(opts: {
+    sessionId: string;
+    callSid: string;
+    speechResult: string;
+    tenantId: string;
+  }): Promise<SideEffect[]> {
+    const session = this.deps.store.get(opts.sessionId);
+    if (!session) {
+      logger.warn('processCallerUtterance: unknown session', { sessionId: opts.sessionId });
+      return [
+        { type: 'tts_play', payload: { text: "I'm sorry, your session has ended. Please call again." } },
+        { type: 'end_session', payload: { reason: 'session_not_found' } },
+      ];
+    }
+
+    // 1. Append caller utterance to transcript.
+    this.deps.store.appendTranscript(opts.sessionId, {
+      speaker: 'caller',
+      text: opts.speechResult,
+      ts: Date.now(),
+    });
+
+    const sideEffectsAll: SideEffect[] = [];
+    const currentState = session.machine.currentState;
+
+    if (opts.speechResult.trim().length === 0) {
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+      await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+      return sideEffectsAll;
+    }
+
+    if (currentState === 'intent_confirm') {
+      try {
+        const ctx = session.machine.currentContext;
+        const intentSummary = ctx.currentIntent ?? 'that';
+        const confirmation = await confirmIntent({
+          intentSummary,
+          callerResponse: opts.speechResult,
+          tenantId: opts.tenantId,
+          gateway: this.deps.gateway,
+        });
+        const capExceeded = this.recordCost(session, confirmation.tokenUsage);
+        if (capExceeded) {
+          sideEffectsAll.push(...session.machine.dispatch({ type: 'cost_cap_exceeded' }));
+        } else if (confirmation.confirmed) {
+          sideEffectsAll.push(...session.machine.dispatch({ type: 'confirmed' }));
+        } else {
+          sideEffectsAll.push(
+            ...session.machine.dispatch({
+              type: 'correction',
+              newTranscript: confirmation.correction ?? opts.speechResult,
+            }),
+          );
+        }
+      } catch (err) {
+        logger.error('processCallerUtterance: confirmIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: opts.sessionId,
+        });
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'correction',
+            newTranscript: opts.speechResult,
+          }),
+        );
+      }
+    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+      let classifierEvent: CallingAgentEvent | null = null;
+      try {
+        const classification = await classifyIntent(
+          opts.speechResult,
+          { tenantId: opts.tenantId },
+          this.deps.gateway,
+        );
+        const capExceeded = this.recordCost(session, classification.tokenUsage);
+        if (capExceeded) {
+          classifierEvent = { type: 'cost_cap_exceeded' };
+        } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
+          classifierEvent = {
+            type: 'intent_classified',
+            intentType: classification.intentType,
+            entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+            confidence: classification.confidence,
+          };
+        } else {
+          classifierEvent = {
+            type: 'confidence_low',
+            threshold: TAU_INT,
+            score: classification.confidence,
+          };
+        }
+      } catch (err) {
+        logger.error('processCallerUtterance: classifyIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: opts.sessionId,
+        });
+        classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
+
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        session.machine.currentState === 'entity_resolution'
+      ) {
+        const refs: Record<string, string> = {};
+        for (const [k, v] of Object.entries(classifierEvent.entities)) {
+          if (typeof v === 'string') refs[k] = v;
+        }
+        sideEffectsAll.push(
+          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
+        );
+        this.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+      }
+    } else {
+      logger.info('processCallerUtterance: unhandled state, treating as confidence_low', {
+        state: currentState,
+        sessionId: opts.sessionId,
+      });
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+    }
+
+    await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+
+    // Capture the agent's reply in the transcript so summarizeSession sees both sides.
+    const ttsLast = [...sideEffectsAll].reverse().find((e) => e.type === 'tts_play');
+    if (ttsLast && typeof ttsLast.payload.text === 'string') {
+      this.deps.store.appendTranscript(opts.sessionId, {
+        speaker: 'agent',
+        text: ttsLast.payload.text,
+        ts: Date.now(),
+      });
+    }
+    if (session.machine.currentState === 'terminated' && !session.ended) {
+      session.ended = true;
+      void this.runSummary(session).catch(() => {
+        /* swallow — summary is best-effort */
+      });
+    }
+
+    return sideEffectsAll;
+  }
+
+  /**
    * Handle the initial `POST /api/telephony/voice` webhook.
    * Creates a session, runs the disclose_recording + identify_caller
    * skills, drives the FSM through `incoming_call`, and returns TwiML.
