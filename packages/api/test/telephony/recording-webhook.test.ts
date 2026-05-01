@@ -353,7 +353,14 @@ describe('P8-014 record_call recording webhook', () => {
       expect(storage.lastUploadKey?.startsWith(TENANT_ID)).toBe(true);
     });
 
-    it('returns 200 (no row) when no session matches the CallSid', async () => {
+    it('falls back to resolveTenantId when no session matches the CallSid', async () => {
+      // Recording callbacks can land on a different process instance or
+      // arrive after a session has been reaped. The webhook accepts a
+      // `resolveTenantIdFallback` (wired by the route from the parent
+      // `resolveTenantId`) so the recording is still persisted instead
+      // of dropped on the floor. Twilio's signature is verified upstream,
+      // so trusting `Called`/`To` here is no less safe than trusting any
+      // other signed field.
       const fakeBytes = Buffer.from('mp3');
       const fetchRecording = vi.fn(async () => fakeBytes);
       const uploadObject = vi.fn(async () => undefined);
@@ -364,12 +371,70 @@ describe('P8-014 record_call recording webhook', () => {
         RecordingSid: 'RE-orphan',
         RecordingUrl: 'https://api.twilio.com/2010-04-01/RE-orphan',
         RecordingDuration: '3',
+        Called: '+15125551111',
+        Caller: '+15125552222',
+      });
+
+      expect(res.status).toBe(200);
+      expect(pool.voiceRows).toHaveLength(1);
+      // Tenant came from the fallback (resolveTenantId returns TENANT_ID
+      // in the harness), not from the payload.
+      expect(pool.voiceRows[0].tenant_id).toBe(TENANT_ID);
+      expect(fetchRecording).toHaveBeenCalled();
+    });
+
+    it('returns 200 (no row) when no session matches and no fallback is wired', async () => {
+      // Build a router without `recording.resolveTenantIdFallback` by
+      // not wiring `resolveTenantId` to anything useful (returns
+      // undefined). Since `createTelephonyRouter` always passes
+      // `resolveTenantId` through, simulate the no-fallback case by
+      // having it return undefined for the orphan CallSid.
+      const fakeBytes = Buffer.from('mp3');
+      const fetchRecording = vi.fn(async () => fakeBytes);
+      const uploadObject = vi.fn(async () => undefined);
+      const store = new VoiceSessionStore();
+      const gateway = makeGateway();
+      const storage = new FakeStorageProvider();
+      const pool = new FakePool();
+      store.create(TENANT_ID, 'telephony', { callSid: 'CA-rec-1' });
+
+      const adapter = new TwilioGatherAdapter({
+        store,
+        gateway,
+        businessName: 'Test Co',
+        publicBaseUrl: PUBLIC_BASE_URL,
+        recordingCallbackPath: '/api/telephony/recording',
+      });
+      const app = express();
+      app.use(
+        '/api/telephony',
+        createTelephonyRouter({
+          adapter,
+          authTokenGetter: () => AUTH_TOKEN,
+          publicBaseUrl: PUBLIC_BASE_URL,
+          // Explicitly returns undefined so the fallback can't resolve.
+          resolveTenantId: () => undefined,
+          recording: {
+            store,
+            pool: pool as unknown as import('pg').Pool,
+            storage,
+            storageBucket: STORAGE_BUCKET,
+            twilioAccountSid: TWILIO_ACCOUNT_SID,
+            twilioAuthToken: TWILIO_AUTH_TOKEN,
+            options: { fetchRecording, uploadObject },
+          },
+        }),
+      );
+
+      const res = await signedRecordingRequest(app, {
+        CallSid: 'CA-not-in-store',
+        RecordingSid: 'RE-orphan-2',
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/RE-orphan-2',
+        RecordingDuration: '3',
       });
 
       expect(res.status).toBe(200);
       expect(pool.voiceRows).toHaveLength(0);
-      // We never even tried to fetch — refusing to insert a row for an
-      // unrecognised CallSid is the cross-tenant guard.
       expect(fetchRecording).not.toHaveBeenCalled();
     });
   });

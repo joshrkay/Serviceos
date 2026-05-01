@@ -57,6 +57,22 @@ export interface RecordingWebhookDeps {
   authTokenGetter: () => string | undefined;
   /** Optional public base URL used to reconstruct the signed URL. */
   publicBaseUrl?: string;
+  /**
+   * Optional fallback tenant resolver used when no in-process session
+   * exists for the inbound CallSid. The session cache is process-local;
+   * a recording callback can land on another API instance or after a
+   * restart/reap window. Without a fallback we'd drop the recording
+   * silently. Same shape as the `/voice` route's `resolveTenantId`.
+   *
+   * Twilio's signature has already been verified by middleware, so
+   * trusting `Called` / `To` is no worse than trusting any other
+   * field in the signed payload. The fallback is still secondary to
+   * the in-process session lookup.
+   */
+  resolveTenantIdFallback?: (opts: {
+    to: string;
+    from: string;
+  }) => string | undefined;
 }
 
 /**
@@ -170,20 +186,35 @@ export function createRecordingRouter(
       return;
     }
 
-    // Tenant resolution — DO NOT trust the payload. Twilio includes
-    // AccountSid but never our tenant_id; if no session exists for this
-    // CallSid we drop the recording on the floor (200 to suppress
-    // Twilio's retry storm; the payload is unverifiable).
+    // Tenant resolution — DO NOT trust the payload's AccountSid. Resolve
+    // primarily via in-process session map (immune to forged payloads).
+    // If the session is gone (different instance / restart / reap), fall
+    // back to the route's tenant resolver keyed off Twilio's `Called`/`To`.
+    // Twilio's signature is already verified upstream, so the fallback is
+    // no less safe than trusting any signed field — but the in-process
+    // session is preferred when available.
     const session = deps.store.findByCallSid(callSid);
-    if (!session) {
-      logger.warn('recording: no session for CallSid — refusing to insert', {
+    let tenantId: string | undefined = session?.tenantId;
+    if (!tenantId && deps.resolveTenantIdFallback) {
+      const to = body.Called ?? body.To ?? '';
+      const from = body.Caller ?? body.From ?? '';
+      tenantId = deps.resolveTenantIdFallback({ to, from });
+      if (tenantId) {
+        logger.info('recording: tenant resolved via fallback (no in-process session)', {
+          callSid,
+          recordingSid,
+          tenantId,
+        });
+      }
+    }
+    if (!tenantId) {
+      logger.warn('recording: no tenant resolvable for CallSid — refusing to insert', {
         callSid,
         recordingSid,
       });
-      res.status(200).type('text/plain').send('No session');
+      res.status(200).type('text/plain').send('No tenant');
       return;
     }
-    const tenantId = session.tenantId;
 
     if (!deps.pool) {
       logger.warn('recording: pool not configured — skipping persistence', {

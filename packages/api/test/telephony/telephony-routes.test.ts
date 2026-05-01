@@ -207,6 +207,7 @@ interface DialHarness {
   app: express.Application;
   store: VoiceSessionStore;
   adapter: TwilioGatherAdapter;
+  callControl: DefaultTwilioCallControl;
   onCallRepo: InMemoryOnCallRepository;
   auditRepo: InMemoryAuditRepository;
   proposalRepo: InMemoryProposalRepository;
@@ -252,7 +253,7 @@ function buildDialHarness(opts: {
       businessName: 'Acme Plumbing',
     }),
   );
-  return { app, store, adapter, onCallRepo, auditRepo, proposalRepo, resolver };
+  return { app, store, adapter, callControl, onCallRepo, auditRepo, proposalRepo, resolver };
 }
 
 function signDialResult(
@@ -302,7 +303,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
   });
 
   it('on no-answer, advances to next rotation entry and returns <Dial> for them', async () => {
-    const { app, store, resolver } = buildDialHarness({
+    const { app, store, resolver, callControl } = buildDialHarness({
       rotation: [
         { id: 'r1', userId: 'u1', orderIndex: 0 },
         { id: 'r2', userId: 'u2', orderIndex: 1 },
@@ -319,6 +320,11 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    // Simulate "u1 was already chosen and dialed by the prior
+    // notify_oncall pass" — in production handleNotifyOncall calls
+    // setCursorAfter when picking. The test bypasses handleNotifyOncall
+    // by driving the FSM directly, so stamp the cursor explicitly.
+    callControl.setCursorAfter(session.id, 0);
 
     const res = await signDialResult(app, session.id, {
       CallSid: 'CA-cascade',
@@ -338,7 +344,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
   });
 
   it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays "we will call you back"', async () => {
-    const { app, store, auditRepo, proposalRepo } = buildDialHarness({
+    const { app, store, auditRepo, proposalRepo, callControl } = buildDialHarness({
       rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
       phones: { u1: '+15125550101' },
     });
@@ -351,6 +357,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    // Simulate u1 already-attempted via notify_oncall path.
+    callControl.setCursorAfter(session.id, 0);
 
     const res = await signDialResult(app, session.id, {
       CallSid: 'CA-exh',
@@ -410,7 +418,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
   });
 
   it('cascade: dispatcher 1 no-answer → dispatcher 2 dialed → dispatcher 2 no-answer → callback', async () => {
-    const { app, store, proposalRepo, auditRepo } = buildDialHarness({
+    const { app, store, proposalRepo, auditRepo, callControl } = buildDialHarness({
       rotation: [
         { id: 'r1', userId: 'u1', orderIndex: 0 },
         { id: 'r2', userId: 'u2', orderIndex: 1 },
@@ -426,6 +434,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    // Simulate u1 already-attempted via notify_oncall path.
+    callControl.setCursorAfter(session.id, 0);
 
     // First no-answer → cascade to u2.
     const res1 = await signDialResult(app, session.id, {

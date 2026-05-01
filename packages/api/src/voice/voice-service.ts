@@ -145,17 +145,22 @@ export async function recordInboundCall(
 ): Promise<RecordInboundCallResult> {
   const client = await pool.connect();
   try {
+    // Wrap the SELECT-then-INSERT in a transaction so concurrent
+    // Twilio retries can't both pass the existence check and produce
+    // duplicate (files, voice_recordings) rows. The DB-level uniqueness
+    // is partial / advisory today; the transaction is what enforces
+    // atomicity here.
+    await client.query('BEGIN');
     await client.query(setTenantContext(input.tenantId));
-    // Idempotency check: a prior delivery for this same CallSid already
-    // produced a voice_recordings row. Bail early so we neither rewrite
-    // the row nor create a duplicate `files` entry.
     const existing = await client.query<{ id: string }>(
       `SELECT id FROM voice_recordings
        WHERE tenant_id = $1 AND call_sid = $2 AND source = 'inbound_call'
-       LIMIT 1`,
+       LIMIT 1
+       FOR UPDATE`,
       [input.tenantId, input.callSid],
     );
     if (existing.rows.length > 0) {
+      await client.query('COMMIT');
       return { voiceRecordingId: existing.rows[0].id, inserted: false };
     }
 
@@ -205,7 +210,13 @@ export async function recordInboundCall(
       ],
     );
 
+    await client.query('COMMIT');
     return { voiceRecordingId, inserted: true };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {
+      /* swallow — connection may already be in error state */
+    });
+    throw err;
   } finally {
     client.release();
   }

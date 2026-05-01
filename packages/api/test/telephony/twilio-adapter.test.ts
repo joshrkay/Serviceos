@@ -324,8 +324,11 @@ describe('P8-013 escalateToHuman telephony branch', () => {
     });
     expect(r1.transfer?.dispatcherUserId).toBe('u1');
 
-    // Cursor advance + second call: u2.
-    callControl.advanceCursor('s-y');
+    // escalateToHuman already called setCursorAfter(0) when picking u1,
+    // so the second invocation walks from index 1 and lands on u2 with
+    // no further cursor manipulation needed. (Pre-fix, this test had a
+    // stray `advanceCursor` call to compensate for the cursor lag bug
+    // Codex flagged on PR #220.)
     const r2 = await escalateToHuman({
       tenantId: 'tenant-abc',
       sessionId: 's-y',

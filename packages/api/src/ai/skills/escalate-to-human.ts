@@ -181,11 +181,20 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
           chosen = { entry, phone, index: i };
           break;
         }
-      } catch {
+      } catch (err) {
         // Resolver failed for this user — skip to the next rotation
         // entry rather than aborting the whole escalation. A real
         // operator can drop the broken entry from the rotation; we
-        // shouldn't strand the call on a single bad row.
+        // shouldn't strand the call on a single bad row. Log so the
+        // misconfiguration is debuggable; userId is fine to log,
+        // phone numbers are not (and we don't have one here anyway).
+        // eslint-disable-next-line no-console
+        console.warn('[escalate] dispatcherPhoneResolver failed for user', {
+          tenantId,
+          userId: entry.userId,
+          rotationIndex: i,
+          error: err instanceof Error ? err.message : String(err),
+        });
         continue;
       }
     }
@@ -210,6 +219,13 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         message: "No dispatcher available. We'll follow up shortly.",
       };
     }
+
+    // Stamp the cursor past the just-chosen index so subsequent walks
+    // (including /dial-result cascade) resume after it. `advanceCursor`
+    // alone only bumps +1 from the stored value, which can stall on the
+    // same dispatcher when earlier entries were skipped for missing
+    // phones. setCursorAfter is the source of truth here.
+    callControl.setCursorAfter(sessionId, chosen.index);
 
     // Build the dial TwiML. Action URL is required so Twilio POSTs the
     // outcome to /dial-result. Caller passes it via `dialActionUrl`;

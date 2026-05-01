@@ -798,6 +798,11 @@ export function createApp() {
     onCallRepo: sharedOnCallRepo,
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+    // P8-014: when set, the initial inbound TwiML emits a
+    // <Start><Record recordingStatusCallback="..."/></Start> block so
+    // Twilio asynchronously records the entire call and POSTs metadata
+    // to /api/telephony/recording on completion.
+    recordingCallbackPath: '/api/telephony/recording',
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -810,9 +815,27 @@ export function createApp() {
       adapter: twilioAdapter,
       authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
       publicBaseUrl: process.env.PUBLIC_API_URL,
-      // Single-tenant fallback. TODO(P8-014): replace with phone-number → tenant lookup.
+      // Single-tenant fallback. TODO: replace with phone-number → tenant lookup.
       resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
       mediaStreamsEnabled,
+      // P8-014: mount the recording webhook in production. Without this
+      // block the route is unreachable and Twilio's recordingStatusCallback
+      // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
+      // optional from the router's perspective (handler degrades to
+      // "persistence skipped" with a warning) but should be wired in
+      // production environments.
+      recording: {
+        store: voiceSessionStore,
+        ...(pool ? { pool } : {}),
+        storage: storageProvider,
+        storageBucket,
+        ...(process.env.TWILIO_ACCOUNT_SID
+          ? { twilioAccountSid: process.env.TWILIO_ACCOUNT_SID }
+          : {}),
+        ...(process.env.TWILIO_AUTH_TOKEN
+          ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
+          : {}),
+      },
     }),
   );
 

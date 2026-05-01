@@ -117,6 +117,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
             : {}),
           authTokenGetter: deps.authTokenGetter,
           ...(deps.publicBaseUrl ? { publicBaseUrl: deps.publicBaseUrl } : {}),
+          // Fallback so recording callbacks landing on a fresh API
+          // process / different instance don't drop the recording.
+          // Twilio's signature is verified upstream; trusting Called/To
+          // here is no less safe than trusting any other signed field.
+          resolveTenantIdFallback: deps.resolveTenantId,
         },
         deps.recording.options ?? {},
       ),
@@ -323,15 +328,15 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // Cascade: dispatcher didn't pick up. Advance the cursor and
-    // try the next rotation entry.
+    // Cascade: dispatcher didn't pick up. The cursor is already past the
+    // just-attempted entry (escalateToHuman calls setCursorAfter when it
+    // picks). Re-invoking escalateToHuman walks forward from there to
+    // find the next dispatcher with a resolvable phone.
     if (
       adapterDeps.callControl &&
       adapterDeps.dispatcherPhoneResolver &&
       adapterDeps.onCallRepo
     ) {
-      adapterDeps.callControl.advanceCursor(sessionId);
-
       try {
         const result = await escalateToHuman({
           tenantId,

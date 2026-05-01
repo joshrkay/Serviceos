@@ -86,6 +86,14 @@ export interface TwilioCallControl {
   /** Move the cursor forward by one rotation entry. */
   advanceCursor(sessionId: string): RotationCursor;
 
+  /**
+   * Record that a rotation entry at `scannedIndex` has been chosen so
+   * subsequent walks resume past it. Necessary when earlier entries are
+   * skipped (no resolvable phone) — `advanceCursor` alone only bumps `+1`
+   * from the stored value and could redial the same dispatcher.
+   */
+  setCursorAfter(sessionId: string, scannedIndex: number): RotationCursor;
+
   /** Drop any cursor state for the session (call ended / cleanup). */
   clearCursor(sessionId: string): void;
 }
@@ -190,6 +198,24 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     const next: RotationCursor = {
       index: current.index + 1,
       attempts: current.attempts + 1,
+    };
+    this.cursors.set(sessionId, next);
+    return { ...next };
+  }
+
+  /**
+   * Record that a rotation entry at `scannedIndex` has been chosen and
+   * should not be considered again on subsequent walks. Use this from
+   * `escalateToHuman` after picking an entry, especially when earlier
+   * entries were skipped (no resolvable phone). Without it, `advanceCursor`
+   * only bumps `+1` from the stored index and the next walk could redial
+   * the same dispatcher when its predecessors were unresolvable.
+   */
+  setCursorAfter(sessionId: string, scannedIndex: number): RotationCursor {
+    const current = this.cursors.get(sessionId) ?? { index: 0, attempts: 0 };
+    const next: RotationCursor = {
+      index: Math.max(current.index, scannedIndex + 1),
+      attempts: current.attempts,
     };
     this.cursors.set(sessionId, next);
     return { ...next };
