@@ -1269,6 +1269,40 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_voice_call_sid
       ON voice_recordings (call_sid) WHERE call_sid IS NOT NULL;
   `,
+
+  // P9-001: lead pipeline + source attribution + customer conversion
+  '055_create_leads': `
+    CREATE TABLE IF NOT EXISTS leads (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      first_name TEXT NOT NULL DEFAULT '',
+      last_name TEXT NOT NULL DEFAULT '',
+      company_name TEXT,
+      primary_phone TEXT,
+      email TEXT,
+      source TEXT NOT NULL CHECK (source IN ('web_form', 'phone_call', 'referral', 'walk_in', 'marketplace', 'other')),
+      source_detail TEXT,
+      stage TEXT NOT NULL DEFAULT 'new' CHECK (stage IN ('new', 'contacted', 'qualified', 'quoted', 'won', 'lost')),
+      estimated_value_cents BIGINT,
+      notes TEXT,
+      assigned_user_id UUID REFERENCES users(id),
+      converted_customer_id UUID REFERENCES customers(id),
+      lost_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(tenant_id, stage);
+    CREATE INDEX IF NOT EXISTS idx_leads_source ON leads(tenant_id, source);
+    CREATE INDEX IF NOT EXISTS idx_leads_assigned ON leads(tenant_id, assigned_user_id);
+    CREATE INDEX IF NOT EXISTS idx_leads_converted ON leads(tenant_id, converted_customer_id);
+    ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE leads FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
+    CREATE POLICY tenant_isolation_leads ON leads
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
