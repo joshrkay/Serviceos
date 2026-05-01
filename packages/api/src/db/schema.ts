@@ -1013,6 +1013,174 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_feedback_responses ON feedback_responses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Renamed from 044_* to 049_* after merge: upstream main also added a
+  // 044_create_ai_artifacts (P0-021). Keys are alphabetical at runtime so the
+  // exact number is informational; uniqueness matters because duplicates would
+  // silently lose a migration.
+  '049_add_view_tokens_to_estimates_and_invoices': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_token TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_dispatch_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_estimates_view_token ON estimates(view_token) WHERE view_token IS NOT NULL;
+
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_token TEXT;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS last_dispatch_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_view_token ON invoices(view_token) WHERE view_token IS NOT NULL;
+  `,
+
+  '045_create_message_dispatches': `
+    CREATE TABLE IF NOT EXISTS message_dispatches (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('estimate', 'invoice')),
+      entity_id UUID NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('sms', 'email')),
+      recipient TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'failed', 'bounced')),
+      error_message TEXT,
+      idempotency_key TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      delivered_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_entity ON message_dispatches(tenant_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_dispatches_provider_msg ON message_dispatches(provider, provider_message_id) WHERE provider_message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatches_idempotency ON message_dispatches(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE message_dispatches ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE message_dispatches FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_message_dispatches ON message_dispatches;
+    CREATE POLICY tenant_isolation_message_dispatches ON message_dispatches
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P0-019 — Postgres-backed AssignmentRepository.
+  //
+  // The `appointment_assignments` table itself was created by migration
+  // `019_create_appointment_assignments` (with RLS, tenant_isolation policy,
+  // and single-column indexes on appointment_id and technician_id).
+  //
+  // This migration is idempotent and:
+  //   * Re-asserts RLS + tenant_isolation policy (defense-in-depth — safe no-op
+  //     when the policy already matches).
+  //   * Adds composite indexes `(tenant_id, appointment_id)` and
+  //     `(tenant_id, technician_id)` to support the access patterns used by
+  //     `PgAssignmentRepository.findByAppointment` / `findByTechnician`,
+  //     which always filter by tenant_id first as defense-in-depth.
+  '048_create_assignments': `
+    CREATE TABLE IF NOT EXISTS appointment_assignments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL REFERENCES appointments(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      is_primary BOOLEAN NOT NULL DEFAULT true,
+      assigned_by TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_appointment
+      ON appointment_assignments(tenant_id, appointment_id);
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_technician
+      ON appointment_assignments(tenant_id, technician_id);
+    ALTER TABLE appointment_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_assignments FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_assignments ON appointment_assignments;
+    CREATE POLICY tenant_isolation_assignments ON appointment_assignments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P0-021 — Postgres-backed AI artifacts: document_revisions + diff_analyses.
+  //
+  // Both tables are append-only (the audit trail invariant). The Pg
+  // repositories implement create + read methods only; diff_analyses additionally
+  // exposes updateStatus to advance the worker state machine
+  // (pending -> processing -> completed/failed).
+  //
+  // Column-type rationale (driven by InMemory entity types):
+  //   * document_revisions.id is generated via uuidv4() in createRevision()
+  //     so we use UUID with gen_random_uuid() default.
+  //   * document_revisions.actor_id is TEXT (not UUID) — Clerk user ids are
+  //     TEXT throughout this codebase (see users.clerk_user_id, tenants.owner_id,
+  //     audit_events.actor_id).
+  //   * document_revisions.document_id is TEXT — the InMemory entity treats
+  //     documentId as an opaque string and several callers may pass non-UUID
+  //     ids (estimates / invoices / proposals across surfaces).
+  //   * diff_analyses.id is TEXT (not UUID) because diffAnalysisIdFor() builds
+  //     a deterministic key like `diff:<tenantId>:<docType>:<docId>:<from>:<to>`
+  //     so re-enqueueing the same revision pair is end-to-end idempotent.
+  //   * diff_analyses.diff is JSONB storing the DiffEntry[] array.
+  '044_create_ai_artifacts': `
+    CREATE TABLE IF NOT EXISTS document_revisions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      document_type TEXT NOT NULL CHECK (document_type IN ('estimate', 'invoice', 'proposal')),
+      document_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      snapshot JSONB NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'ai_generated', 'ai_revised')),
+      actor_id TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      ai_run_id UUID,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, document_type, document_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_tenant_doc
+      ON document_revisions(tenant_id, document_type, document_id);
+    ALTER TABLE document_revisions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE document_revisions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_document_revisions ON document_revisions;
+    CREATE POLICY tenant_isolation_document_revisions ON document_revisions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS diff_analyses (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      document_type TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      from_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      to_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      diff JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_tenant_doc
+      ON diff_analyses(tenant_id, document_type, document_id);
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_revisions
+      ON diff_analyses(tenant_id, from_revision_id, to_revision_id);
+    ALTER TABLE diff_analyses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE diff_analyses FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_diff_analyses ON diff_analyses;
+    CREATE POLICY tenant_isolation_diff_analyses ON diff_analyses
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '046_estimate_view_expiry_and_acceptance': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_token_expires_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_by_name TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_by_ip TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_user_agent TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_signature_data TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS rejected_reason TEXT;
+  `,
+
+  '047_invoice_view_expiry': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_token_expires_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+  `,
+
+  '050_invoice_stripe_payment_link': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

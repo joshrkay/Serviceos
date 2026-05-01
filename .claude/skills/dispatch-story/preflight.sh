@@ -71,9 +71,12 @@ DEPS=$(awk -v id="$STORY_ID" '
 ' "$ADDENDUM_PATH")
 
 if [[ -n "$DEPS" ]]; then
-  # Extract every PNNN-NNN token from the line
+  # Pre-read the full log into a variable so `grep -q`'s early-exit doesn't
+  # trip pipefail+SIGPIPE on git log (which reports the dep as missing
+  # even when it's present in the log).
+  LOG=$(git log origin/main --oneline)
   for dep in $(echo "$DEPS" | grep -oE 'P[0-9]+-[0-9]+'); do
-    if ! git log origin/main --oneline | grep -q "$dep"; then
+    if ! echo "$LOG" | grep -F -q "$dep"; then
       fail "dependency story ${dep} not yet merged on origin/main"
     fi
     ok "dependency ${dep} merged"

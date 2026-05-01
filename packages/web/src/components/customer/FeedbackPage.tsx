@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router';
 import { Star, CheckCircle2 } from 'lucide-react';
 
-type Status = 'loading' | 'rating' | 'submitting' | 'submitted' | 'already_submitted' | 'expired' | 'error';
+type Status = 'loading' | 'rating' | 'submitting' | 'submitted' | 'already_submitted' | 'expired' | 'invalid_link' | 'error';
 
 type ReviewUrls = { google?: string; yelp?: string };
 
@@ -28,7 +28,10 @@ export function FeedbackPage() {
   const [errorMessage, setErrorMessage] = useState<string>('');
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      setStatus('invalid_link');
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -120,6 +123,17 @@ export function FeedbackPage() {
         <div className="max-w-md w-full rounded-2xl bg-white border border-slate-200 px-6 py-8 text-center">
           <h2 className="text-lg text-slate-900 mb-1">Something went wrong</h2>
           <p className="text-sm text-slate-500">We couldn't load this feedback request. Check the link and try again.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'invalid_link') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
+        <div className="max-w-md w-full rounded-2xl bg-white border border-slate-200 px-6 py-8 text-center">
+          <h2 className="text-lg text-slate-900 mb-1">Invalid feedback link</h2>
+          <p className="text-sm text-slate-500">This link is missing required information or is malformed. Please request a new feedback link.</p>
         </div>
       </div>
     );

@@ -26,7 +26,337 @@ export interface AuthenticatedRequest extends Request {
   clerkUser?: ClerkUser;
 }
 
-export function verifyClerkSession(clerkSecretKey: string) {
+// ─────────────────────────────────────────────────────────────────────────────
+// P0-033 — RS256 + JWKS verification
+//
+// Real Clerk session tokens are signed RS256 with a per-instance keypair
+// published at https://{frontend_api_host}/.well-known/jwks.json. The legacy
+// HMAC-SHA256 path can no longer verify a real production token; it remains
+// available behind the explicit CLERK_DEV_HMAC_TOKENS=true flag (refused in
+// production by validateEnvSchema in shared/config.ts) so existing
+// synthetic dev tokens keep working during the transition.
+//
+// IMPORTANT — return shape contract: every middleware downstream depends on
+// `{ userId, tenantId, role }` (with the additional `sessionId` we set on
+// req.auth). Do NOT rename or add fields without auditing every consumer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A JWKS key the resolver returns. We accept Node's `KeyObject` (created via
+ * `crypto.createPublicKey`) for in-process tests and a `{ kid, publicKey }`
+ * shape for fetched JWKS entries.
+ */
+export interface JwksKey {
+  kid?: string;
+  /** A Node `KeyObject` for an RSA public key. */
+  publicKey: crypto.KeyObject;
+  alg?: string;
+}
+
+/**
+ * Resolves a JWKS for a given issuer host. The default resolver fetches
+ * `https://{host}/.well-known/jwks.json` over HTTPS and caches the result for
+ * `JWKS_TTL_MS`. Tests inject a synthetic resolver to avoid network I/O.
+ *
+ * `forceRefresh = true` instructs the resolver to bypass any cached entry and
+ * re-fetch — used once on a `kid` miss.
+ */
+export interface JwksResolver {
+  getKeys(host: string, forceRefresh?: boolean): Promise<JwksKey[]>;
+}
+
+const JWKS_TTL_MS = 10 * 60 * 1000; // 10 minutes per the story spec
+const JWKS_FETCH_TIMEOUT_MS = 5_000; // 5 second hard cap on every JWKS fetch
+
+interface JwksCacheEntry {
+  keys: JwksKey[];
+  expiresAt: number;
+}
+
+/**
+ * The default resolver fetches and caches JWKS over HTTPS. Cache entries are
+ * keyed by host so multiple Clerk instances (multi-tenant) can co-exist.
+ *
+ * Concurrent-fetch protection: when the cache is cold or expired, we cache
+ * the in-flight fetch *promise* in `inflight` so concurrent requests for
+ * the same host await a single network round-trip instead of stampeding
+ * the JWKS endpoint (Gemini PR #197 review).
+ */
+class HttpsJwksResolver implements JwksResolver {
+  private readonly cache = new Map<string, JwksCacheEntry>();
+  private readonly inflight = new Map<string, Promise<JwksKey[]>>();
+
+  async getKeys(host: string, forceRefresh = false): Promise<JwksKey[]> {
+    const now = Date.now();
+    if (!forceRefresh) {
+      const cached = this.cache.get(host);
+      if (cached && cached.expiresAt > now) return cached.keys;
+    }
+    // Coalesce concurrent fetches for the same host. A `forceRefresh` still
+    // joins an in-flight fetch — we don't double-fire on a kid miss.
+    const existing = this.inflight.get(host);
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        const keys = await this.fetchJwks(host);
+        this.cache.set(host, { keys, expiresAt: Date.now() + JWKS_TTL_MS });
+        return keys;
+      } finally {
+        this.inflight.delete(host);
+      }
+    })();
+    this.inflight.set(host, promise);
+    return promise;
+  }
+
+  /**
+   * Fetch the JWKS JSON document from `https://{host}/.well-known/jwks.json`
+   * and convert each entry into a Node `KeyObject`. Uses the global `fetch`
+   * available since Node 18.
+   *
+   * Hard 5-second timeout via AbortController so a Clerk network stall can't
+   * become an auth-latency amplifier (Codex PR #197 review).
+   */
+  private async fetchJwks(host: string): Promise<JwksKey[]> {
+    const url = `https://${host}/.well-known/jwks.json`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { method: 'GET', signal: controller.signal });
+      if (!res.ok) {
+        throw new Error(`JWKS fetch failed: ${res.status} ${res.statusText}`);
+      }
+      const body = (await res.json()) as { keys?: Array<Record<string, unknown>> };
+      if (!Array.isArray(body.keys)) {
+        throw new Error('JWKS response missing "keys" array');
+      }
+      return body.keys.map((jwk) => jwkToJwksKey(jwk));
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`JWKS fetch timed out after ${JWKS_FETCH_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function jwkToJwksKey(jwk: Record<string, unknown>): JwksKey {
+  if (typeof jwk.kty !== 'string') {
+    throw new Error('JWK missing kty');
+  }
+  // Node's createPublicKey accepts the JWK directly when format: 'jwk'.
+  const publicKey = crypto.createPublicKey({
+    key: jwk as crypto.JsonWebKey,
+    format: 'jwk',
+  });
+  return {
+    kid: typeof jwk.kid === 'string' ? jwk.kid : undefined,
+    alg: typeof jwk.alg === 'string' ? jwk.alg : undefined,
+    publicKey,
+  };
+}
+
+// Singleton resolver used by the default verifier. Tests can construct their
+// own verifier with an injected resolver instead.
+const defaultResolver: JwksResolver = new HttpsJwksResolver();
+
+/**
+ * Decodes a Clerk publishable key (`pk_live_...` or `pk_test_...`) to the
+ * frontend API host (e.g. `clerk.example.com`). Clerk encodes the host as a
+ * base64-encoded string with a trailing `$` sentinel.
+ */
+export function clerkFrontendApiFromPubKey(pubKey: string): string {
+  const stripped = pubKey.replace(/^pk_(live|test)_/, '');
+  if (stripped === pubKey) {
+    throw new Error('CLERK_PUBLISHABLE_KEY is not a Clerk publishable key (missing pk_live_/pk_test_ prefix)');
+  }
+  const decoded = Buffer.from(stripped, 'base64').toString('utf-8');
+  // Clerk includes a trailing '$' sentinel in the base64-encoded host.
+  return decoded.replace(/\$+$/, '').trim();
+}
+
+export interface ClerkTokenPayload {
+  sub: string;
+  sid: string;
+  tenant_id: string;
+  role: string;
+  exp: number;
+}
+
+const VALID_ROLES = ['owner', 'dispatcher', 'technician'];
+
+/**
+ * Internal helper. Decodes a JWT into header/payload/signature fragments.
+ * Does NOT verify the signature.
+ */
+interface JwtParts {
+  header: Record<string, unknown>;
+  payloadJson: Record<string, unknown>;
+  signingInput: string;
+  signature: Buffer;
+}
+
+function parseJwt(token: string): JwtParts {
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Invalid token format');
+  }
+  let header: Record<string, unknown>;
+  let payloadJson: Record<string, unknown>;
+  try {
+    header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf-8'));
+  } catch {
+    throw new Error('Invalid token header');
+  }
+  try {
+    payloadJson = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+  } catch {
+    throw new Error('Invalid token payload');
+  }
+  return {
+    header,
+    payloadJson,
+    signingInput: `${parts[0]}.${parts[1]}`,
+    signature: Buffer.from(parts[2], 'base64url'),
+  };
+}
+
+/**
+ * Validates Clerk-specific claim shape and returns the typed payload. Shared
+ * by both the RS256 and HMAC paths so both produce the same return contract.
+ */
+function validateClerkClaims(
+  payload: Record<string, unknown>,
+  options: { issuer?: string; clockToleranceSeconds?: number } = {}
+): ClerkTokenPayload {
+  const tolerance = options.clockToleranceSeconds ?? 0;
+  const now = Math.floor(Date.now() / 1000);
+
+  if (typeof payload.sub !== 'string' || !payload.sub) {
+    throw new Error("Missing or invalid 'sub' (subject) claim");
+  }
+  if (typeof payload.sid !== 'string' || !payload.sid) {
+    throw new Error("Missing or invalid 'sid' (session ID) claim");
+  }
+  if (typeof payload.exp !== 'number') {
+    throw new Error('Token missing expiration claim');
+  }
+  if (payload.exp < now - tolerance) {
+    throw new Error('Token expired');
+  }
+  if (typeof payload.nbf === 'number' && payload.nbf > now + tolerance) {
+    throw new Error('Token not yet valid');
+  }
+  if (options.issuer && payload.iss !== options.issuer) {
+    throw new Error('Wrong issuer');
+  }
+  if (typeof payload.role !== 'string' || !VALID_ROLES.includes(payload.role)) {
+    throw new Error('Token missing or invalid role claim');
+  }
+  return {
+    sub: payload.sub,
+    sid: payload.sid,
+    tenant_id: typeof payload.tenant_id === 'string' ? payload.tenant_id : '',
+    role: payload.role,
+    exp: payload.exp,
+  };
+}
+
+/**
+ * Verifies an RS256-signed Clerk session token against the JWKS for the
+ * configured frontend API host.
+ *
+ * Behaviour:
+ *  - Looks up the signing key by `kid`.
+ *  - On `kid` miss, refreshes the JWKS once and tries again.
+ *  - Validates `iss`, `exp`, `nbf`, `role`.
+ *  - Authorized-party (`azp`) is intentionally NOT enforced here — Clerk's
+ *    audience model uses a list of permitted `azp` values that is per-app and
+ *    out of scope for this story. Add when we know the canonical list.
+ *
+ * @throws Error with one of the canonical messages used in the dev path so
+ *   callers don't have to special-case which path produced the rejection.
+ */
+export async function verifyRs256Token(
+  token: string,
+  options: {
+    pubKey: string;
+    resolver?: JwksResolver;
+    /** Override the resolver-derived issuer host. Used by tests. */
+    host?: string;
+    clockToleranceSeconds?: number;
+  }
+): Promise<ClerkTokenPayload> {
+  const resolver = options.resolver ?? defaultResolver;
+  const host = options.host ?? clerkFrontendApiFromPubKey(options.pubKey);
+  const issuer = `https://${host}`;
+
+  const parts = parseJwt(token);
+  const alg = parts.header.alg;
+  if (alg !== 'RS256') {
+    throw new Error(`Unsupported token algorithm: ${typeof alg === 'string' ? alg : 'unknown'}`);
+  }
+  const kid = typeof parts.header.kid === 'string' ? parts.header.kid : undefined;
+  if (!kid) {
+    throw new Error('Token header missing kid');
+  }
+
+  // Find signing key — refresh JWKS once on miss.
+  let keys = await resolver.getKeys(host, false);
+  let signingKey = keys.find((k) => k.kid === kid);
+  if (!signingKey) {
+    keys = await resolver.getKeys(host, true);
+    signingKey = keys.find((k) => k.kid === kid);
+    if (!signingKey) {
+      throw new Error('No matching signing key for token kid');
+    }
+  }
+
+  // Verify the RS256 signature.
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(parts.signingInput);
+  verifier.end();
+  const ok = verifier.verify(signingKey.publicKey, parts.signature);
+  if (!ok) {
+    throw new Error('Invalid token signature');
+  }
+
+  return validateClerkClaims(parts.payloadJson, {
+    issuer,
+    clockToleranceSeconds: options.clockToleranceSeconds,
+  });
+}
+
+export interface VerifyClerkSessionDeps {
+  /** Custom JWKS resolver (used by tests). */
+  jwksResolver?: JwksResolver;
+  /**
+   * Override the publishable key used to derive the JWKS host. Defaults to
+   * `process.env.CLERK_PUBLISHABLE_KEY`.
+   */
+  publishableKey?: string;
+  /**
+   * Override the env snapshot used to read CLERK_DEV_HMAC_TOKENS / NODE_ENV.
+   * Defaults to `process.env`.
+   */
+  env?: NodeJS.ProcessEnv;
+}
+
+function isHmacDevModeEnabled(env: NodeJS.ProcessEnv): boolean {
+  if (env.CLERK_DEV_HMAC_TOKENS !== 'true') return false;
+  // Defense in depth: even if validateEnvSchema misses (e.g. someone
+  // bypasses it on boot), we refuse the HMAC path in production at runtime.
+  const nodeEnv = env.NODE_ENV;
+  if (nodeEnv === 'production' || nodeEnv === 'prod') return false;
+  return true;
+}
+
+export function verifyClerkSession(
+  clerkSecretKey: string,
+  deps: VerifyClerkSessionDeps = {}
+) {
   return async (req: AuthenticatedRequest, _res: Response, next: NextFunction): Promise<void> => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -40,8 +370,24 @@ export function verifyClerkSession(clerkSecretKey: string) {
       return;
     }
 
+    const env = deps.env ?? process.env;
+
     try {
-      const payload = decodeClerkToken(token, clerkSecretKey);
+      let payload: ClerkTokenPayload;
+      if (isHmacDevModeEnabled(env)) {
+        // Legacy dev path — only active with explicit CLERK_DEV_HMAC_TOKENS=true
+        // and never in production.
+        payload = decodeClerkToken(token, clerkSecretKey);
+      } else {
+        const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
+        if (!pubKey) {
+          throw new Error('CLERK_PUBLISHABLE_KEY is required for RS256 verification');
+        }
+        payload = await verifyRs256Token(token, {
+          pubKey,
+          resolver: deps.jwksResolver,
+        });
+      }
       req.auth = {
         userId: payload.sub,
         sessionId: payload.sid,
@@ -66,16 +412,10 @@ export function verifyClerkSession(clerkSecretKey: string) {
   };
 }
 
-export interface ClerkTokenPayload {
-  sub: string;
-  sid: string;
-  tenant_id: string;
-  role: string;
-  exp: number;
-}
-
-const VALID_ROLES = ['owner', 'dispatcher', 'technician'];
-
+/**
+ * Legacy HMAC-SHA256 token decoder. Retained for the dev path and the existing
+ * unit-test suite (P0-002). New code should rely on `verifyRs256Token`.
+ */
 export function decodeClerkToken(token: string, secretKey: string): ClerkTokenPayload {
   const parts = token.split('.');
   if (parts.length !== 3) {

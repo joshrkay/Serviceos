@@ -375,10 +375,11 @@ describe('D4 — Agent posture: reactive, stay in lane', () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe('D5 — Dedicated Twilio business line', () => {
-  it.fails('Twilio integration exists somewhere in packages/api/src', async () => {
+  it('Twilio integration exists somewhere in packages/api/src', async () => {
     const hits = await grepApiSrc(/twilio|Twilio/);
-    // Currently zero matches. When Twilio is integrated this test will
-    // start passing and must be flipped to it().
+    // Twilio Programmable Messaging (SMS) + Twilio SendGrid (email) wired
+    // in packages/api/src/notifications/. Tenant-level provisioning is
+    // still TODO (see it.todo cases below).
     expect(hits.length).toBeGreaterThan(0);
   });
 

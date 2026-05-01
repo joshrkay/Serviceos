@@ -28,10 +28,10 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 **Re-scoped scope:**
 1. Verify each existing `pg-*.ts` (Customer, Location, Job, JobTimeline, Appointment, Note) satisfies its interface contract from `repository-conventions.md`. If yes, no work needed for that entity — record the verification in the PR description.
 2. Add `PgAssignmentRepository` in `packages/api/src/appointments/pg-assignment.ts`.
-3. Add migration `042_create_assignments` to `db/schema.ts`.
+3. Add migration `048_create_assignments` to `db/schema.ts`.
 
 **Wave:** 1A
-**Migration number reserved:** `042_*`
+**Migration number reserved:** `048_*`
 **Forbidden files:**
 - `packages/api/src/app.ts` (Wave 1C only)
 - any `pg-*.ts` outside the entities listed above
@@ -41,8 +41,9 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 
 **Verification gate (single command):**
 ```bash
+cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-019|PgAssignment" && \
+  npm test --workspace=packages/api -- --run -t "P0-019|PgAssignment" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/appointments/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -57,10 +58,10 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 **Re-scoped scope:**
 1. Verify Pg impls for Estimate, EstimateApproval, EstimateEditDelta, Invoice, Payment satisfy contract.
 2. Add `PgWebhookEventRepository` (idempotency tracking by `event_id`) in `packages/api/src/webhooks/pg-webhook-event.ts`.
-3. Add migration `043_create_webhook_events` with `UNIQUE (event_id)` constraint.
+3. Add migration `049_create_webhook_events` with `UNIQUE (event_id)` constraint.
 
 **Wave:** 1A
-**Migration number reserved:** `043_*`
+**Migration number reserved:** `049_*`
 **Forbidden files:**
 - `packages/api/src/app.ts`
 - any `pg-*.ts` outside the entities listed above
@@ -71,11 +72,11 @@ Sprint 1 originally appeared sequential. With the wave plan and the contract fre
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-020|PgWebhookEvent" && \
+  npm test --workspace=packages/api -- --run -t "P0-020|PgWebhookEvent" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/webhooks/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
-**Pre-flight:** none. (P0-019 in story body listed as dependency; in practice the two stories are independent — both touch different files. Coordinator may launch in parallel.)
+**Pre-flight:** none. (Story body lists a dep on the core-entities story; in practice the two stories are independent — both touch different files. Coordinator may launch in parallel.)
 
 ---
 
@@ -103,7 +104,7 @@ These store immutable AI artifacts (revisions of generated content + their diff 
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-021|PgDocumentRevision|PgDiffAnalysis" && \
+  npm test --workspace=packages/api -- --run -t "P0-021|PgDocumentRevision|PgDiffAnalysis" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/ai/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -131,7 +132,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-022|PgDispatchAnalytics|PgDelayNoticeState" && \
+  npm test --workspace=packages/api -- --run -t "P0-022|PgDispatchAnalytics|PgDelayNoticeState" && \
   git diff --name-only origin/main... | grep -vE "^(packages/api/src/(dispatch|notifications)/pg-|packages/api/src/db/schema\.ts|packages/api/test/)" | (! grep . )
 ```
 
@@ -228,8 +229,8 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-026|validateProductionConfig" && \
-  ! grep -n "'dev-secret-key'" packages/api/src/**/*.ts
+  npm test --workspace=packages/api -- --run -t "P0-026|validateProductionConfig|validateEnvSchema" && \
+  ! grep -rn "'dev-secret-key'" packages/api/src/
 ```
 
 ---
@@ -252,7 +253,7 @@ cd /home/user/Serviceos && \
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run --grep "P0-027|Whisper"
+  npm test --workspace=packages/api -- --run -t "P0-027|Whisper"
 ```
 
 ---
@@ -396,6 +397,49 @@ cd /home/user/Serviceos && \
 **Pre-flight:** none.
 
 **Risk note:** Switching the gate from `requireRole('owner')` to `requirePlatformAdmin` will lock out anyone currently using the admin endpoints until at least one platform-admin row is seeded. The dispatch script must seed at least one `platform_admins` entry (via the new CLI) **before** the new check goes live in any environment. Order: (1) deploy migration + middleware; (2) seed; (3) flip routes.
+
+---
+
+## P0-035 — Slot-conflict pre-check for AI-drafted `create_appointment` proposals
+
+**Status discovery (2026-04-29):** The `create_appointment` proposal contract, AI task handler (`create-appointment-task.ts`), execution handler (`CreateAppointmentExecutionHandler`), and repo wiring all already exist. The audit's "create_appointment proposal contract is missing" framing was wrong — what's actually missing is a **slot-conflict pre-check** so the AI doesn't draft proposals against busy slots. This story is re-scoped accordingly.
+
+**Wave:** B (Wave B in the wave-b plan doc)
+**Migration number reserved:** none (logic only)
+**Forbidden files:**
+- `packages/api/src/proposals/contracts.ts` (the schema is already correct)
+- `packages/api/src/proposals/execution/handlers.ts` (the execution handler is already correct)
+- `packages/api/src/appointments/**` (repos are already shipped via P0-019)
+- `packages/shared/**`
+- `packages/api/src/db/**`
+- `packages/api/src/app.ts` (no app-wiring changes — the new checker is constructed inside the task)
+
+**Allowed files (concrete list):**
+- `packages/api/src/ai/tasks/slot-conflict-checker.ts` (new)
+- `packages/api/src/ai/tasks/slot-conflict-checker.test.ts` (new)
+- `packages/api/src/ai/tasks/create-appointment-task.ts` (modify — call the checker before producing a proposal)
+- `packages/api/src/ai/tasks/create-appointment-task.test.ts` (modify or new — add the conflict-path tests)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P0-035|SlotConflictChecker|create_appointment"
+```
+
+**Pre-flight:** none. (PR #184 / P0-019 unblocks the assignment-overlap query but the existing `AppointmentRepository` is already enough for the technician/customer overlap check; the assignment angle is a refinement.)
+
+**Risk note:**
+- **The conflict check must be tenant-scoped** — `slot-conflict-checker.ts` runs inside the AI task pipeline, which already has the tenant id in scope. Pass it explicitly to the checker; do NOT attempt to read it from request context (the task runs in a worker, not a request).
+- **Boundary semantics matter.** A 10:00–11:00 appointment must NOT conflict with an 11:00–12:00 appointment. Use `start_a < end_b AND end_a > start_b` (strict on both sides). Document this in the test names.
+- **Failure-closed vs failure-open** when the repo throws: prefer **failure-open** here — surface a `voice_clarification` proposal that flags "could not verify availability" rather than blocking the user. The dispatcher's review step is the ultimate gate; we don't want a transient DB blip to silently lose appointment intents.
+
+**Implementation hints:**
+1. Read `create-appointment-task.ts` first. The task already builds a `create_appointment` proposal — your job is to insert a `checker.check(window, technicianId, customerId)` call BEFORE the proposal is produced and switch to `voice_clarification` on conflict.
+2. Use `appointmentRepo.findByDateRange(tenantId, from, to)` (already exists per P0-019's audit of existing Pg repos) to fetch overlap candidates. Filter in code by tech / customer id.
+3. The `voice_clarification` proposal type already exists in the `ProposalType` enum and has its own contract — use it; do NOT invent a new proposal type for this case.
+4. If the AI's proposed window has no technician (unassigned slot), skip the technician overlap check but still run the customer overlap check.
+5. **Don't change** the `CreateAppointmentExecutionHandler` — the post-approval execution path stays as-is. The conflict check is purely a pre-draft optimization.
 
 ---
 
