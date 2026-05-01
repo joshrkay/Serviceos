@@ -15,10 +15,23 @@ import {
   DEFAULT_LIST_LIMIT,
 } from '../customers/customer';
 import { AuditRepository } from '../audit/audit';
+import {
+  getCustomerTimeline,
+  type CustomerTimelineDeps,
+} from '../customers/timeline-service';
+import { timelineQuerySchema } from '../customers/timeline';
+
+/**
+ * P9-002 — Optional dependencies for the customer timeline endpoint.
+ * When omitted the timeline route is omitted from the router (leaving the
+ * mount point quietly 404 so existing callers and tests are unaffected).
+ */
+export type CustomerRouterTimelineDeps = CustomerTimelineDeps;
 
 export function createCustomerRouter(
   customerRepo: CustomerRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  timelineDeps?: CustomerRouterTimelineDeps
 ): Router {
   const router = Router();
 
@@ -184,6 +197,47 @@ export function createCustomerRouter(
       }
     }
   );
+
+  // P9-002 — Unified communication timeline. Read-only aggregator across
+  // notes, jobs, estimates, invoices, payments, conversations, and
+  // appointments. Tenant scoping is enforced inside `getCustomerTimeline`
+  // via each source repo's existing tenant-scoped methods.
+  if (timelineDeps) {
+    router.get(
+      '/:id/timeline',
+      requireAuth,
+      requireTenant,
+      requirePermission('customers:view'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          const customer = await getCustomer(
+            req.auth!.tenantId,
+            req.params.id,
+            customerRepo
+          );
+          if (!customer) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+            return;
+          }
+          const parsed = timelineQuerySchema.parse(req.query);
+          const result = await getCustomerTimeline(
+            req.auth!.tenantId,
+            req.params.id,
+            timelineDeps,
+            {
+              before: parsed.before,
+              limit: parsed.limit,
+              kinds: parsed.kinds,
+            }
+          );
+          res.json(result);
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      }
+    );
+  }
 
   return router;
 }
