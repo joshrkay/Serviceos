@@ -44,6 +44,14 @@ export interface TelephonyRouterDeps {
    * TODO(P8-014): replace with a real lookup keyed by the `To` field.
    */
   resolveTenantId: (opts: { to: string; from: string }) => string | undefined;
+  /**
+   * P8-012 — when true, /voice returns a `<Connect><Stream/></Connect>`
+   * TwiML instead of `<Gather>`. Default false (Gather path remains the
+   * rollback target). Read once at router-creation time so callers
+   * control the flag flip via app.ts (rather than each per-request
+   * env read flapping mid-call).
+   */
+  mediaStreamsEnabled?: boolean;
 }
 
 export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
@@ -88,12 +96,9 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     try {
-      const twiml = await deps.adapter.handleInbound({
-        callSid,
-        from,
-        to,
-        tenantId,
-      });
+      const twiml = deps.mediaStreamsEnabled
+        ? await deps.adapter.handleInboundForStream({ callSid, tenantId })
+        : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
       logger.error('telephony/voice: handleInbound failed', {
