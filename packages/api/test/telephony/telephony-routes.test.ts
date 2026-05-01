@@ -13,6 +13,13 @@ import { createTelephonyRouter } from '../../src/routes/telephony';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
+import {
+  InMemoryOnCallRepository,
+  type OnCallEntry,
+} from '../../src/oncall/rotation';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 
 const AUTH_TOKEN = 'test-tw-token-xyz';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -191,5 +198,265 @@ describe('POST /api/telephony/gather', () => {
       .send(params);
 
     expect(res.status).toBe(400);
+  });
+});
+
+// ─── P8-013 — POST /api/telephony/dial-result ────────────────────────────────
+
+interface DialHarness {
+  app: express.Application;
+  store: VoiceSessionStore;
+  adapter: TwilioGatherAdapter;
+  onCallRepo: InMemoryOnCallRepository;
+  auditRepo: InMemoryAuditRepository;
+  proposalRepo: InMemoryProposalRepository;
+  resolver: ReturnType<typeof vi.fn>;
+}
+
+function makeRotation(entries: OnCallEntry[]): InMemoryOnCallRepository {
+  return new InMemoryOnCallRepository(new Map([[TENANT_ID, entries]]));
+}
+
+function buildDialHarness(opts: {
+  rotation: OnCallEntry[];
+  phones: Record<string, string | null>;
+}): DialHarness {
+  const store = new VoiceSessionStore({ startInterval: false });
+  const gateway = makeGateway('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+  const onCallRepo = makeRotation(opts.rotation);
+  const auditRepo = new InMemoryAuditRepository();
+  const proposalRepo = new InMemoryProposalRepository();
+  const callControl = new DefaultTwilioCallControl();
+  const resolver = vi.fn(async (_t: string, userId: string) => opts.phones[userId] ?? null);
+
+  const adapter = new TwilioGatherAdapter({
+    store,
+    gateway,
+    businessName: 'Acme Plumbing',
+    publicBaseUrl: PUBLIC_BASE_URL,
+    callControl,
+    dispatcherPhoneResolver: resolver,
+    onCallRepo,
+    auditRepo,
+    proposalRepo,
+  });
+
+  const app = express();
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter,
+      authTokenGetter: () => AUTH_TOKEN,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      resolveTenantId: () => TENANT_ID,
+      businessName: 'Acme Plumbing',
+    }),
+  );
+  return { app, store, adapter, onCallRepo, auditRepo, proposalRepo, resolver };
+}
+
+function signDialResult(
+  app: express.Application,
+  sessionId: string,
+  params: Record<string, string>,
+) {
+  const path = `/api/telephony/dial-result?sid=${sessionId}`;
+  const url = `${PUBLIC_BASE_URL}${path}`;
+  const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
+  return request(app)
+    .post(path)
+    .set('X-Twilio-Signature', sig)
+    .type('form')
+    .send(params);
+}
+
+describe('P8-013 POST /api/telephony/dial-result', () => {
+  it('rejects unsigned dial-result requests with 403', async () => {
+    const { app, store } = buildDialHarness({
+      rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
+      phones: { u1: '+15125550101' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-x' });
+    const res = await request(app)
+      .post(`/api/telephony/dial-result?sid=${session.id}`)
+      .type('form')
+      .send({ CallSid: 'CA-x', DialCallStatus: 'no-answer' });
+    expect(res.status).toBe(403);
+  });
+
+  it('400s when sid query param is missing', async () => {
+    const { app } = buildDialHarness({
+      rotation: [],
+      phones: {},
+    });
+    const path = '/api/telephony/dial-result';
+    const url = `${PUBLIC_BASE_URL}${path}`;
+    const params = { CallSid: 'CA-x', DialCallStatus: 'no-answer' };
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, params);
+    const res = await request(app)
+      .post(path)
+      .set('X-Twilio-Signature', sig)
+      .type('form')
+      .send(params);
+    expect(res.status).toBe(400);
+  });
+
+  it('on no-answer, advances to next rotation entry and returns <Dial> for them', async () => {
+    const { app, store, resolver } = buildDialHarness({
+      rotation: [
+        { id: 'r1', userId: 'u1', orderIndex: 0 },
+        { id: 'r2', userId: 'u2', orderIndex: 1 },
+      ],
+      phones: { u1: '+15125550101', u2: '+15125550102' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-cascade' });
+    // Drive FSM into escalating so any dispatched proposal_queued lands cleanly.
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-cascade',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+
+    const res = await signDialResult(app, session.id, {
+      CallSid: 'CA-cascade',
+      DialCallStatus: 'no-answer',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/xml/);
+    expect(res.text).toContain('<Dial');
+    // Next entry's phone (u2) should appear; first entry's must NOT be the only one.
+    expect(res.text).toContain('+15125550102');
+    // The resolver must have been queried for u2 specifically.
+    const calledUsers = resolver.mock.calls.map((c) => c[1]);
+    expect(calledUsers).toContain('u2');
+  });
+
+  it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays "we will call you back"', async () => {
+    const { app, store, auditRepo, proposalRepo } = buildDialHarness({
+      rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
+      phones: { u1: '+15125550101' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-exh' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-exh',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+
+    const res = await signDialResult(app, session.id, {
+      CallSid: 'CA-exh',
+      DialCallStatus: 'no-answer',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/Acme Plumbing/);
+    expect(res.text).toMatch(/call you back/i);
+    expect(res.text).toContain('<Hangup');
+
+    // Proposal queued.
+    const proposals = await proposalRepo.findByTenant(TENANT_ID);
+    const callback = proposals.find((p) =>
+      typeof (p.payload as Record<string, unknown>).intent === 'string' &&
+      (p.payload as Record<string, unknown>).intent === 'customer_callback_required'
+    );
+    expect(callback).toBeDefined();
+    expect(callback?.proposalType).toBe('voice_clarification');
+
+    // Audit event for the callback.
+    const audits = auditRepo.getAll();
+    expect(audits.some((e) => e.eventType === 'customer_callback_required')).toBe(true);
+  });
+
+  it('on completed dial, hangs up our IVR leg without queueing a callback', async () => {
+    const { app, store, proposalRepo } = buildDialHarness({
+      rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
+      phones: { u1: '+15125550101' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-ok' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-ok',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+
+    const res = await signDialResult(app, session.id, {
+      CallSid: 'CA-ok',
+      DialCallStatus: 'completed',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toMatch(/call you back/i);
+    expect(res.text).not.toContain('<Dial');
+
+    const proposals = await proposalRepo.findByTenant(TENANT_ID);
+    expect(proposals).toHaveLength(0);
+  });
+
+  it('cascade: dispatcher 1 no-answer → dispatcher 2 dialed → dispatcher 2 no-answer → callback', async () => {
+    const { app, store, proposalRepo, auditRepo } = buildDialHarness({
+      rotation: [
+        { id: 'r1', userId: 'u1', orderIndex: 0 },
+        { id: 'r2', userId: 'u2', orderIndex: 1 },
+      ],
+      phones: { u1: '+15125550101', u2: '+15125550102' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-full' });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-full',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+
+    // First no-answer → cascade to u2.
+    const res1 = await signDialResult(app, session.id, {
+      CallSid: 'CA-full',
+      DialCallStatus: 'no-answer',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+    expect(res1.text).toContain('<Dial');
+    expect(res1.text).toContain('+15125550102');
+
+    // Second no-answer (u2) → exhausted; queue callback.
+    const res2 = await signDialResult(app, session.id, {
+      CallSid: 'CA-full',
+      DialCallStatus: 'no-answer',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+    expect(res2.text).toMatch(/call you back/i);
+    expect(res2.text).toContain('Acme Plumbing');
+    expect(res2.text).toContain('<Hangup');
+
+    const proposals = await proposalRepo.findByTenant(TENANT_ID);
+    const cb = proposals.find(
+      (p) =>
+        typeof (p.payload as Record<string, unknown>).intent === 'string' &&
+        (p.payload as Record<string, unknown>).intent === 'customer_callback_required'
+    );
+    expect(cb).toBeDefined();
+    expect(auditRepo.getAll().some((e) => e.eventType === 'customer_callback_required')).toBe(
+      true,
+    );
   });
 });

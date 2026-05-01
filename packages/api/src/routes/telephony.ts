@@ -19,9 +19,11 @@
 
 import { Router, Request, Response } from 'express';
 import express from 'express';
-import { TwilioGatherAdapter } from '../telephony/twilio-adapter';
+import { TwilioGatherAdapter, xmlEscape } from '../telephony/twilio-adapter';
 import { requireTwilioSignature } from '../telephony/twilio-signature';
 import { createLogger } from '../logging/logger';
+import { escalateToHuman } from '../ai/skills/escalate-to-human';
+import { maskPhone } from '../telephony/twilio-call-control';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -44,6 +46,14 @@ export interface TelephonyRouterDeps {
    * TODO(P8-014): replace with a real lookup keyed by the `To` field.
    */
   resolveTenantId: (opts: { to: string; from: string }) => string | undefined;
+  /**
+   * Business name used in the "we'll call you back" copy when the
+   * rotation cascade is exhausted. Defaults to a generic phrasing
+   * if unset; the adapter constructor already requires a business
+   * name for greeting copy, so most production wiring will pass it
+   * through.
+   */
+  businessName?: string;
 }
 
 export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
@@ -166,6 +176,186 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
   });
 
+  /**
+   * POST /api/telephony/dial-result
+   *
+   * Twilio fires this when a `<Dial>` verb completes (success or
+   * failure). Body fields we consume:
+   *   CallSid, DialCallStatus
+   *
+   * Status values:
+   *   completed / answered → dispatcher picked up; transition FSM to
+   *                          closing and respond with empty TwiML so
+   *                          Twilio hangs up our IVR leg.
+   *   no-answer / busy / failed / canceled → advance the rotation
+   *                          cursor and dial the next dispatcher; if
+   *                          the rotation is exhausted, queue a
+   *                          customer_callback_required proposal and
+   *                          play the polite "we'll call you back"
+   *                          message including the business name.
+   *
+   * Query: ?sid=<sessionId>  (set by the adapter when emitting the
+   *                           initial `<Dial action="...">` verb)
+   */
+  router.post('/dial-result', async (req: Request, res: Response) => {
+    const body = req.body as Record<string, string | undefined>;
+    const callSid = body.CallSid ?? '';
+    const dialStatus = body.DialCallStatus ?? '';
+
+    const sessionId = (req.query.sid as string | undefined) ?? '';
+    if (!sessionId) {
+      logger.warn('telephony/dial-result: missing sid', { callSid });
+      res.status(400).type('text/plain').send('Missing sid');
+      return;
+    }
+
+    const tenantId = deps.resolveTenantId({
+      to: body.To ?? '',
+      from: body.From ?? '',
+    });
+    if (!tenantId) {
+      logger.error('telephony/dial-result: no tenant resolved', { sessionId });
+      res.status(500).type('text/plain').send('Tenant resolution failed');
+      return;
+    }
+
+    const adapter = deps.adapter;
+    const adapterDeps = adapter.getDeps();
+    const session = adapterDeps.store.get(sessionId);
+    if (!session) {
+      logger.warn('telephony/dial-result: unknown session', { sessionId, callSid });
+      // Hangup gracefully — Twilio's leg is going away anyway.
+      res
+        .status(200)
+        .type('text/xml')
+        .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+      return;
+    }
+
+    // Successful bridge: dispatcher answered. Transition FSM to
+    // closing (escalating + proposal_queued is the only direct path),
+    // mark the session ended, and return an empty Response so Twilio
+    // hangs up the original caller leg cleanly.
+    const successStatuses = new Set(['completed', 'answered']);
+    if (successStatuses.has(dialStatus)) {
+      try {
+        // Synthetic proposal_queued event so the FSM follows its
+        // documented escalating → closing transition. We don't emit
+        // a real proposal — the dispatcher answering IS the
+        // resolution.
+        session.machine.dispatch({
+          type: 'proposal_queued',
+          proposalId: `transfer:${callSid || 'unknown'}`,
+        });
+      } catch (err) {
+        logger.warn('telephony/dial-result: FSM dispatch failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      adapterDeps.callControl?.clearCursor(sessionId);
+      session.ended = true;
+      res
+        .status(200)
+        .type('text/xml')
+        .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+      return;
+    }
+
+    // Cascade: dispatcher didn't pick up. Advance the cursor and
+    // try the next rotation entry.
+    if (
+      adapterDeps.callControl &&
+      adapterDeps.dispatcherPhoneResolver &&
+      adapterDeps.onCallRepo
+    ) {
+      adapterDeps.callControl.advanceCursor(sessionId);
+
+      try {
+        const result = await escalateToHuman({
+          tenantId,
+          sessionId,
+          reason: 'low_confidence',
+          channel: 'telephony',
+          onCallRepo: adapterDeps.onCallRepo,
+          ...(adapterDeps.auditRepo ? { auditRepo: adapterDeps.auditRepo } : {}),
+          callControl: adapterDeps.callControl,
+          dispatcherPhoneResolver: adapterDeps.dispatcherPhoneResolver,
+          callSid: session.callSid ?? callSid,
+          dialActionUrl: buildDialResultUrl(deps.publicBaseUrl, sessionId),
+        });
+
+        if (result.transfer) {
+          logger.info('telephony/dial-result: cascading to next dispatcher', {
+            sessionId,
+            rotationIndex: result.transfer.rotationIndex,
+            dispatcherPhone: maskPhone(result.transfer.dispatcherPhone),
+            previousStatus: dialStatus,
+          });
+          res.status(200).type('text/xml').send(result.transfer.fallbackTwiml);
+          return;
+        }
+      } catch (err) {
+        logger.warn('telephony/dial-result: escalateToHuman failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      logger.warn('telephony/dial-result: callControl/resolver not wired', {
+        sessionId,
+      });
+    }
+
+    // Rotation exhausted (or wiring missing). Queue the callback
+    // proposal and play the polite "we'll call you back" message.
+    try {
+      await adapter.queueCallbackProposal(
+        session,
+        tenantId,
+        'rotation_exhausted',
+        'rotation_exhausted',
+      );
+    } catch (err) {
+      logger.warn('telephony/dial-result: queueCallbackProposal failed', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const businessName = deps.businessName ?? 'our team';
+    const safeName = xmlEscape(businessName);
+    const message =
+      `I'm sorry, no one is available right now. ` +
+      `${safeName} will call you back as soon as possible. ` +
+      `Thank you for calling.`;
+
+    session.ended = true;
+    res
+      .status(200)
+      .type('text/xml')
+      .send(
+        `<?xml version="1.0" encoding="UTF-8"?>` +
+          `<Response>` +
+          `<Say voice="Polly.Joanna">${message}</Say>` +
+          `<Hangup/>` +
+          `</Response>`,
+      );
+  });
+
   return router;
+}
+
+/**
+ * Build the absolute /dial-result URL Twilio will POST. Mirrored from
+ * the adapter's private helper so the route layer can hand a stable
+ * URL to escalateToHuman during a rotation cascade.
+ */
+function buildDialResultUrl(publicBaseUrl: string | undefined, sessionId: string): string {
+  const path = `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`;
+  if (publicBaseUrl) {
+    return `${publicBaseUrl.replace(/\/+$/, '')}${path}`;
+  }
+  return path;
 }
 

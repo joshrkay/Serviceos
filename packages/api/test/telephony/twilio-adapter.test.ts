@@ -6,6 +6,13 @@ import {
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
+import {
+  InMemoryOnCallRepository,
+  type OnCallEntry,
+} from '../../src/oncall/rotation';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -152,6 +159,177 @@ describe('TwilioGatherAdapter.handleInbound', () => {
 
 // ─── handleGather ────────────────────────────────────────────────────────────
 
+// ─── P8-013 escalate-to-human telephony branch ───────────────────────────────
+
+describe('P8-013 escalateToHuman telephony branch', () => {
+  it('returns a transfer descriptor for the first dispatcher when callControl + resolver are wired', async () => {
+    const { escalateToHuman } = await import(
+      '../../src/ai/skills/escalate-to-human'
+    );
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([
+        [
+          'tenant-abc',
+          [
+            { id: 'r1', userId: 'u1', orderIndex: 0 },
+            { id: 'r2', userId: 'u2', orderIndex: 1 },
+          ] as OnCallEntry[],
+        ],
+      ]),
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const callControl = new DefaultTwilioCallControl();
+    const resolver = vi.fn(async (_t: string, userId: string) => {
+      if (userId === 'u1') return '+15125550101';
+      return '+15125550102';
+    });
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-abc',
+      sessionId: 's-x',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo,
+      auditRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+      callSid: 'CA-1',
+      dialActionUrl: 'https://api.test/api/telephony/dial-result?sid=s-x',
+    });
+
+    expect(result.escalated).toBe(true);
+    expect(result.assignedUserId).toBe('u1');
+    expect(result.transfer).toBeDefined();
+    expect(result.transfer?.dispatcherPhone).toBe('+15125550101');
+    expect(result.transfer?.rotationIndex).toBe(0);
+    expect(result.transfer?.fallbackTwiml).toContain('<Dial');
+    expect(result.transfer?.fallbackTwiml).toContain('+15125550101');
+    expect(result.transfer?.fallbackTwiml).toContain('dial-result?sid=s-x');
+
+    // Audit emitted with transfer_initiated outcome.
+    const events = auditRepo.getAll();
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata?.outcome).toBe('transfer_initiated');
+    expect(events[0].metadata?.assignedUserId).toBe('u1');
+  });
+
+  it('walks the cursor: subsequent calls dial the next entry', async () => {
+    const { escalateToHuman } = await import(
+      '../../src/ai/skills/escalate-to-human'
+    );
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([
+        [
+          'tenant-abc',
+          [
+            { id: 'r1', userId: 'u1', orderIndex: 0 },
+            { id: 'r2', userId: 'u2', orderIndex: 1 },
+          ] as OnCallEntry[],
+        ],
+      ]),
+    );
+    const callControl = new DefaultTwilioCallControl();
+    const resolver = async (_t: string, userId: string) =>
+      userId === 'u1' ? '+15125550101' : '+15125550102';
+
+    // First dial: u1.
+    const r1 = await escalateToHuman({
+      tenantId: 'tenant-abc',
+      sessionId: 's-y',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+      callSid: 'CA-y',
+      dialActionUrl: '/dr',
+    });
+    expect(r1.transfer?.dispatcherUserId).toBe('u1');
+
+    // Cursor advance + second call: u2.
+    callControl.advanceCursor('s-y');
+    const r2 = await escalateToHuman({
+      tenantId: 'tenant-abc',
+      sessionId: 's-y',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+      callSid: 'CA-y',
+      dialActionUrl: '/dr',
+    });
+    expect(r2.transfer?.dispatcherUserId).toBe('u2');
+    expect(r2.transfer?.rotationIndex).toBe(1);
+  });
+
+  it('returns escalated:false when rotation cursor is past the end', async () => {
+    const { escalateToHuman } = await import(
+      '../../src/ai/skills/escalate-to-human'
+    );
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([
+        ['tenant-abc', [{ id: 'r1', userId: 'u1', orderIndex: 0 }] as OnCallEntry[]],
+      ]),
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const callControl = new DefaultTwilioCallControl();
+    callControl.advanceCursor('s-z'); // index = 1, past the only entry
+    const resolver = async () => '+15125550101';
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-abc',
+      sessionId: 's-z',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo,
+      auditRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+      callSid: 'CA-z',
+      dialActionUrl: '/dr',
+    });
+
+    expect(result.escalated).toBe(false);
+    expect(result.transfer).toBeUndefined();
+    expect(auditRepo.getAll()[0]?.metadata?.outcome).toBe('no_dispatcher_available');
+  });
+
+  it('skips entries whose phone resolver returns null', async () => {
+    const { escalateToHuman } = await import(
+      '../../src/ai/skills/escalate-to-human'
+    );
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([
+        [
+          'tenant-abc',
+          [
+            { id: 'r1', userId: 'u1', orderIndex: 0 },
+            { id: 'r2', userId: 'u2', orderIndex: 1 },
+          ] as OnCallEntry[],
+        ],
+      ]),
+    );
+    const callControl = new DefaultTwilioCallControl();
+    const resolver = async (_t: string, userId: string) =>
+      userId === 'u1' ? null : '+15125550102';
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-abc',
+      sessionId: 's-skip',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      onCallRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+      callSid: 'CA-skip',
+      dialActionUrl: '/dr',
+    });
+
+    expect(result.transfer?.dispatcherUserId).toBe('u2');
+  });
+});
+
 describe('TwilioGatherAdapter.handleGather', () => {
   let gateway: LLMGateway;
   let adapter: TwilioGatherAdapter;
@@ -285,6 +463,156 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(snap?.state).toBe('escalating');
     expect(xml).toMatch(/emergency|on-call/i);
     // FSM does NOT call confirm_intent on emergency fast-path.
+  });
+
+  it('P8-013: notify_oncall produces a <Dial> when callControl + resolver are wired', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const onCallRepo = new InMemoryOnCallRepository(
+      new Map([[
+        'tenant-abc',
+        [{ id: 'r1', userId: 'u1', orderIndex: 0 }] as OnCallEntry[],
+      ]]),
+    );
+    const auditRepo = new InMemoryAuditRepository();
+    const proposalRepo = new InMemoryProposalRepository();
+    const callControl = new DefaultTwilioCallControl();
+    const resolver = vi.fn(async (_t: string, _u: string) => '+15125550101');
+    const gw = makeGatewayReturning('{}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: gw,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      onCallRepo,
+      auditRepo,
+      proposalRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+    });
+
+    // Drive an inbound call where identifyCaller has no Pool — caller
+    // is unknown and we'll simulate a caller_identification_failed
+    // dispatch by hand to force notify_oncall.
+    await adapter.handleInbound({
+      callSid: 'CA-noc',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys(),
+    );
+    const sid = ids[0] as string;
+    const session = store.get(sid)!;
+    // Force escalation path (notify_oncall is emitted).
+    const fx = session.machine.dispatch({
+      type: 'caller_identification_failed',
+      reason: 'manual',
+    });
+    // Manually drive executeSideEffects via the adapter's public seam:
+    // a follow-up Gather emulates the next webhook; the simplest test
+    // path is to call handleGather with a "speech" that re-dispatches
+    // notify_oncall via system_failure. Easier: poke the private
+    // executeSideEffects by going through a fresh handleGather turn
+    // that does not classify (silence path).
+    void fx;
+
+    // Trigger handleGather with empty speech → confidence_low path
+    // (does not produce notify_oncall on its own). Instead, dispatch
+    // a notify_oncall side-effect directly through executeSideEffects
+    // by simulating a system_failure → escalating route.
+    const sideEffects = session.machine.dispatch({
+      type: 'system_failure',
+      reason: 'manual',
+    });
+    // executeSideEffects is private; access via cast for the test.
+    const adapterAny = adapter as unknown as {
+      executeSideEffects: (
+        s: typeof session,
+        fx: unknown,
+        t: string,
+      ) => Promise<void>;
+    };
+    await adapterAny.executeSideEffects(session, sideEffects, 'tenant-abc');
+
+    // The transfer TwiML was queued.
+    const twiml = adapter.takePendingTransferTwiml(sid);
+    expect(twiml).toBeDefined();
+    expect(twiml).toContain('<Dial');
+    expect(twiml).toContain('+15125550101');
+    expect(twiml).toContain('action="https://example.com/api/telephony/dial-result?sid=');
+
+    // Audit row written.
+    const audits = auditRepo.getAll();
+    expect(audits.some((e) => e.eventType === 'escalation.requested')).toBe(true);
+
+    // No callback proposal yet — only "dialing dispatcher" path ran.
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    expect(proposals).toHaveLength(0);
+  });
+
+  it('P8-013: notify_oncall with empty rotation queues callback proposal + plays "we will call you back"', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const onCallRepo = new InMemoryOnCallRepository(); // empty
+    const auditRepo = new InMemoryAuditRepository();
+    const proposalRepo = new InMemoryProposalRepository();
+    const callControl = new DefaultTwilioCallControl();
+    const resolver = vi.fn(async () => null);
+    const gw = makeGatewayReturning('{}');
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: gw,
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      onCallRepo,
+      auditRepo,
+      proposalRepo,
+      callControl,
+      dispatcherPhoneResolver: resolver,
+    });
+
+    await adapter.handleInbound({
+      callSid: 'CA-empty',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys(),
+    );
+    const sid = ids[0] as string;
+    const session = store.get(sid)!;
+
+    const sideEffects = session.machine.dispatch({
+      type: 'system_failure',
+      reason: 'manual',
+    });
+    const adapterAny = adapter as unknown as {
+      executeSideEffects: (
+        s: typeof session,
+        fx: unknown,
+        t: string,
+      ) => Promise<void>;
+    };
+    await adapterAny.executeSideEffects(session, sideEffects, 'tenant-abc');
+
+    const twiml = adapter.takePendingTransferTwiml(sid);
+    expect(twiml).toBeDefined();
+    expect(twiml).toMatch(/call you back/i);
+    expect(twiml).toMatch(/Acme Plumbing/);
+    expect(twiml).toContain('<Hangup');
+
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    const callback = proposals.find(
+      (p) =>
+        typeof (p.payload as Record<string, unknown>).intent === 'string' &&
+        (p.payload as Record<string, unknown>).intent === 'customer_callback_required',
+    );
+    expect(callback).toBeDefined();
+
+    expect(
+      auditRepo.getAll().some((e) => e.eventType === 'customer_callback_required'),
+    ).toBe(true);
   });
 
   it('returns a hangup TwiML when session is unknown', async () => {
