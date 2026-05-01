@@ -154,7 +154,7 @@ cd /home/user/Serviceos && \
 
 **Pre-flight:**
 - `git fetch origin && git rev-parse origin/main` succeeds.
-- P8-013 + P8-014 merged to main (8C-1 baseline).
+- Wave 8C-1 baseline is merged into the current integration branch (verified by tsc clean + full test pass before this story is dispatched). Wave 8C-1 stories may not yet be on `origin/main`.
 - `DEEPGRAM_API_KEY` available in dev/staging/prod env (already required by P8-009 streaming path).
 
 **Risk note:**
