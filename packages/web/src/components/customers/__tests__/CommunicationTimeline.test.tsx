@@ -8,7 +8,7 @@
 import React from 'react';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { CommunicationTimeline } from '../CommunicationTimeline';
 import type {
   CustomerTimelineResponse,
