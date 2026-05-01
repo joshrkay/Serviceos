@@ -15,14 +15,14 @@ For every story, the agent prompt should include:
 | 9B | P9-002 | parallel-eligible after 9A merges | none |
 | 9C | P9-003 | parallel-eligible after 9A merges | none |
 
-P9-001 ships first because it establishes the migration cadence at 051 and edits `app.ts` for new repo wiring. P9-002 (timeline) and P9-003 (recurring services) both extend `app.ts` and `db/schema.ts` (003 only) but in append-only regions; running them after 9A merges keeps the merge surface clean.
+P9-001 ships first because it establishes the migration cadence at 055 and edits `app.ts` for new repo wiring. P9-002 (timeline) and P9-003 (recurring services) both extend `app.ts` and `db/schema.ts` (003 only) but in append-only regions; running them after 9A merges keeps the merge surface clean.
 
 ---
 
 ## P9-001 — Lead pipeline with source attribution and customer conversion
 
 **Wave:** 9A
-**Migration number reserved:** 051_create_leads
+**Migration number reserved:** 055_create_leads
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts` (frozen)
 - `packages/shared/src/enums.ts` (Tier-1 — adding LeadStage / LeadSource enums OK ONLY if you put them in a NEW file `packages/api/src/leads/enums.ts`; do NOT touch shared/enums.ts in this story)
@@ -40,7 +40,7 @@ P9-001 ships first because it establishes the migration cadence at 051 and edits
 - `packages/api/src/leads/__tests__/lead-service.test.ts` (new)
 - `packages/api/src/leads/__tests__/pg-lead.test.ts` (new — gated on DATABASE_URL)
 - `packages/api/src/routes/leads.ts` (new — Express router)
-- `packages/api/src/db/schema.ts` (modify — add migration `051_create_leads` only; do NOT touch any other migration string)
+- `packages/api/src/db/schema.ts` (modify — add migration `055_create_leads` only; do NOT touch any other migration string)
 - `packages/api/src/app.ts` (modify — wire LeadRepository ternary + mount `/api/leads` router; copy the pattern from existing entries; do NOT refactor unrelated wiring)
 - `packages/web/src/pages/leads/LeadList.tsx` (new — kanban view)
 - `packages/web/src/pages/leads/LeadDetail.tsx` (new)
@@ -61,7 +61,7 @@ cd /home/user/Serviceos && \
 
 **Pre-flight:**
 - `git fetch origin && git rev-parse origin/main` succeeds.
-- Migration number `051_create_leads` is not yet present in `packages/api/src/db/schema.ts` (the preflight script verifies this automatically).
+- Migration number `055_create_leads` is not yet present in `packages/api/src/db/schema.ts` (the preflight script verifies this automatically).
 
 **Risk note:**
 - **Atomicity of conversion.** `convertToCustomer` MUST be a single transaction: insert customer row, set `lead.converted_customer_id`, transition `lead.stage='won'`, write two audit events (one per side). If any step fails, the whole transaction rolls back. Use `withTenantTransaction()` from `pg-base.ts` (read it; do NOT modify it).
@@ -72,7 +72,7 @@ cd /home/user/Serviceos && \
 **Implementation hints:**
 1. Read `packages/api/src/customers/customer.ts` first — it's the closest existing pattern (interface + InMemory + types). Mirror the shape exactly (tenantId-first methods, async, `T | null`).
 2. Read `packages/api/src/customers/pg-customer.ts` for the `withTenant()` usage. Do NOT invent a new persistence pattern.
-3. Read `packages/api/src/db/schema.ts` to see where migrations are declared (look for the `'050_invoice_stripe_payment_link'` string — your `'051_create_leads'` goes after it). Look at `'042_create_feedback_requests'` for a recent example of a CREATE TABLE migration with RLS policies.
+3. Read `packages/api/src/db/schema.ts` to see where migrations are declared (look for the `'054_p8_telephony_tables'` string — your `'055_create_leads'` goes after it). Look at `'042_create_feedback_requests'` for a recent example of a CREATE TABLE migration with RLS policies.
 4. Read `packages/api/src/app.ts` lines 251-280 for the repository ternary pattern. Copy that exact shape for `LeadRepository`. Mount the `/api/leads` router next to `/api/customers`.
 5. For the kanban UI, drag-between-columns triggers `PATCH /api/leads/:id { stage: '<new>' }`. Use the same `useMutation` pattern as the dispatch board (P6-025 reference). Convert button is a separate explicit CTA on `LeadDetail`, NOT triggered by drag.
 6. `convertToCustomer` returns the new customer object so the UI can navigate to `/customers/<id>` immediately.
@@ -112,7 +112,7 @@ cd /home/user/Serviceos && \
 
 **Pre-flight:**
 - `git fetch origin && git rev-parse origin/main` succeeds.
-- P9-001 (`051_create_leads`) merged on origin/main (so `app.ts` and `db/schema.ts` editing surface is clean).
+- P9-001 (`055_create_leads`) merged on origin/main (so `app.ts` and `db/schema.ts` editing surface is clean).
 
 **Risk note:**
 - **No N+1.** Each source repo gets exactly one query per timeline request. Use `Promise.all` to fan out, NOT a `for await` loop. Test with a customer that has 100 jobs and assert total query count is ≤ 8 (one per source).
@@ -132,7 +132,7 @@ cd /home/user/Serviceos && \
 ## P9-003 — Service agreements with recurring job/invoice generation
 
 **Wave:** 9C (after 9A merges)
-**Migration number reserved:** 052_create_service_agreements
+**Migration number reserved:** 056_create_service_agreements
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts` (frozen)
 - `packages/shared/src/enums.ts` (put new enums in `packages/api/src/agreements/enums.ts`)
@@ -156,7 +156,7 @@ cd /home/user/Serviceos && \
 - `packages/api/src/routes/agreements.ts` (new — Express router)
 - `packages/api/src/workers/recurring-agreements-worker.ts` (new — follows P0-009 pattern)
 - `packages/api/src/workers/__tests__/recurring-agreements-worker.test.ts` (new)
-- `packages/api/src/db/schema.ts` (modify — add migration `052_create_service_agreements` only)
+- `packages/api/src/db/schema.ts` (modify — add migration `056_create_service_agreements` only)
 - `packages/api/src/app.ts` (modify — wire AgreementRepository, AgreementRunRepository, mount `/api/agreements`, register the worker)
 - `packages/web/src/pages/agreements/AgreementList.tsx` (new)
 - `packages/web/src/pages/agreements/AgreementCreate.tsx` (new)
@@ -178,7 +178,7 @@ cd /home/user/Serviceos && \
 
 **Pre-flight:**
 - `git fetch origin && git rev-parse origin/main` succeeds.
-- P9-001 (`051_create_leads`) merged on origin/main.
+- P9-001 (`055_create_leads`) merged on origin/main.
 - P0-009 (async worker pattern) on origin/main — verify by `git log origin/main --oneline | grep -F P0-009`.
 
 **Risk note:**
