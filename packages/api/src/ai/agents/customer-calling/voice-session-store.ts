@@ -55,6 +55,14 @@ export interface VoiceSession {
   /** Accumulated turns ("agent: ..." / "caller: ..."). Used by summarizeSession. */
   transcript: string[];
   proposalIds: string[];
+  /**
+   * CRM lead this call is currently attached to. Set by the inbound
+   * adapter after `findOrCreateLeadByPhone` so subsequent gather turns
+   * can attach intent/notes to the right kanban card.
+   */
+  leadId?: string;
+  /** Set when `identifyCaller` matched an existing customer. */
+  customerId?: string;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   createdAt: Date;
@@ -72,6 +80,8 @@ export interface VoiceSessionSnapshot {
   context: Readonly<CallingAgentContext>;
   transcript: string[];
   proposalIds: string[];
+  leadId?: string;
+  customerId?: string;
   ended: boolean;
   createdAt: Date;
 }
@@ -236,6 +246,8 @@ export class VoiceSessionStore {
       context: session.machine.currentContext,
       transcript: [...session.transcript],
       proposalIds: [...session.proposalIds],
+      leadId: session.leadId,
+      customerId: session.customerId,
       ended: session.ended,
       createdAt: session.createdAt,
     };

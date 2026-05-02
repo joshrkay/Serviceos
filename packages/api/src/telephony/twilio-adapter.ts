@@ -24,6 +24,7 @@ import { classifyIntent } from '../ai/orchestration/intent-classifier';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
 import { identifyCaller } from '../ai/skills/identify-caller';
+import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import { escalateToHuman } from '../ai/skills/escalate-to-human';
@@ -33,6 +34,7 @@ import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-callin
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
+import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { OnCallRepository } from '../oncall/rotation';
@@ -57,6 +59,12 @@ export interface TwilioAdapterDeps {
   proposalRepo?: ProposalRepository;
   auditRepo?: AuditRepository;
   onCallRepo?: OnCallRepository;
+  /**
+   * When wired, unknown callers are auto-created as `phone_call` leads
+   * during `handleInbound` so they show up in the CRM kanban. Returning
+   * unknown callers are deduped by normalized phone.
+   */
+  leadRepo?: LeadRepository;
   /** Used as actorId on proposal/audit rows when none is in scope. */
   systemActorId?: string;
   /** Business name used in recording disclosure copy. */
@@ -559,6 +567,7 @@ export class TwilioGatherAdapter {
     expanded.push(...session.machine.dispatch({ type: 'greeted_ok' }));
 
     if (callerKnown) {
+      session.customerId = callerKnown.customerId;
       expanded.push(
         ...session.machine.dispatch({
           type: 'caller_known',
@@ -573,6 +582,31 @@ export class TwilioGatherAdapter {
         })
       );
     } else {
+      // Unknown caller: best-effort find-or-create a CRM lead so the call
+      // lands in the kanban. Failure here must NOT fail the call — we log
+      // and fall through to the FSM's unknown_caller path either way.
+      if (this.deps.leadRepo) {
+        try {
+          const result = await findOrCreateLeadByPhone({
+            tenantId: opts.tenantId,
+            fromPhone: opts.from,
+            leadRepo: this.deps.leadRepo,
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.leadId = result.leadId;
+          logger.info('inbound call lead resolved', {
+            callSid: opts.callSid,
+            sessionId: session.id,
+            leadStatus: result.status,
+          });
+        } catch (err) {
+          logger.error('findOrCreateLeadByPhone failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       expanded.push(...session.machine.dispatch({ type: 'unknown_caller' }));
     }
 
