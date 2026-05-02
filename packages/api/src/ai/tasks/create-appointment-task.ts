@@ -234,11 +234,20 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       });
 
       if (!result.ok) {
+        // Per-tech filter is only safe when the conflict is the tech
+        // being busy. For `customer_busy`, the conflicting appointment
+        // is with a DIFFERENT tech — passing `technicianId` would let
+        // the finder filter that appointment out and re-suggest the
+        // very slot the customer is double-booked on. For
+        // `could_not_verify`, drop the tech filter defensively (we
+        // don't know what the underlying problem was).
+        const altTechId =
+          result.conflict === 'technician_busy' ? technicianId : undefined;
         const alternatives = await this.findAlternatives(
           context.tenantId,
           new Date(scheduledStart),
           new Date(scheduledEnd),
-          technicianId
+          altTechId
         );
         const proposal = buildClarificationProposal(context, result, payload, alternatives);
         return { proposal, taskType: 'voice_clarification' };

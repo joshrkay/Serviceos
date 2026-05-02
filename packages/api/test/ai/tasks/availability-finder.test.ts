@@ -285,6 +285,24 @@ describe('DefaultAvailabilityFinder', () => {
     expect(result.ok).toBe(false);
   });
 
+  it('rejects non-positive granularityMs', async () => {
+    const finder = new DefaultAvailabilityFinder(buildDeps());
+
+    for (const bad of [0, -1, -1000]) {
+      const result = await finder.find({
+        tenantId,
+        searchFrom: new Date('2026-04-21T09:00:00Z'),
+        searchTo: new Date('2026-04-21T17:00:00Z'),
+        durationMs: HOUR,
+        granularityMs: bad,
+      });
+
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.reason.toLowerCase()).toContain('granularityms');
+    }
+  });
+
   it('returns empty slots when window is shorter than duration', async () => {
     const finder = new DefaultAvailabilityFinder(buildDeps());
 

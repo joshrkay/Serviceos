@@ -139,6 +139,12 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
     if (input.durationMs <= 0) {
       return { ok: false, reason: 'durationMs must be positive' };
     }
+    if (granularityMs <= 0) {
+      // snapUp() reduces to NaN on a non-positive granularity, which
+      // would silently return zero slots OR loop indefinitely depending
+      // on which arithmetic happens first. Fail loudly instead.
+      return { ok: false, reason: 'granularityMs must be positive' };
+    }
     if (input.searchFrom.getTime() >= input.searchTo.getTime()) {
       return { ok: false, reason: 'searchFrom must precede searchTo' };
     }
@@ -173,17 +179,18 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
         };
       }
       try {
-        const filtered: Appointment[] = [];
-        for (const appt of blocking) {
-          const assignments = await assignmentRepo.findByAppointment(
-            input.tenantId,
-            appt.id,
-          );
-          if (assignments.some((a) => a.technicianId === techId)) {
-            filtered.push(appt);
-          }
-        }
-        blocking = filtered;
+        // Parallelize the per-appointment assignment lookup. A 36h
+        // window in a busy tenant can yield dozens of candidates;
+        // sequential awaits multiplied the repo round-trip latency
+        // for what is independent work (gemini HIGH on PR #224).
+        const assignmentLists = await Promise.all(
+          blocking.map((appt) =>
+            assignmentRepo.findByAppointment(input.tenantId, appt.id),
+          ),
+        );
+        blocking = blocking.filter((_, i) =>
+          assignmentLists[i].some((a) => a.technicianId === techId),
+        );
       } catch (err) {
         return { ok: false, reason: err instanceof Error ? err.message : String(err) };
       }

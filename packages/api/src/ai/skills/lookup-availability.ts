@@ -40,31 +40,20 @@ export type LookupAvailabilityResult =
   | { status: 'no_slots'; message: string }
   | { status: 'unavailable'; reason: string };
 
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
 /**
- * Render a slot as "Tuesday at 1 PM" using the supplied IANA tz.
- * Two formatters keep the weekday and time alignment locale-stable.
+ * Render a slot as "Tuesday at 1 PM" using the supplied formatters.
+ * Formatters are passed in so `describeSlots` can construct them once
+ * and reuse across all slots.
  */
-function describeSlot(slot: OpenSlot, timezone: string | undefined): string {
-  // `Intl.DateTimeFormat` accepts undefined timezone (uses runtime default).
-  // We hand-pick parts so the surface stays compact for TTS.
-  const weekday = new Intl.DateTimeFormat('en-US', {
-    weekday: 'long',
-    timeZone: timezone,
-  }).format(slot.start);
-
-  const time = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: true,
-    timeZone: timezone,
-  }).format(slot.start);
-
+function describeSlot(
+  slot: OpenSlot,
+  weekdayFormatter: Intl.DateTimeFormat,
+  timeFormatter: Intl.DateTimeFormat,
+): string {
+  const weekday = weekdayFormatter.format(slot.start);
+  const time = timeFormatter.format(slot.start);
   // Drop ":00" so "1:00 PM" reads as "1 PM" — sounds more natural in TTS.
-  const cleanedTime = time.replace(':00', '');
-
-  return `${weekday} at ${cleanedTime}`;
+  return `${weekday} at ${time.replace(':00', '')}`;
 }
 
 /**
@@ -78,7 +67,22 @@ function describeSlot(slot: OpenSlot, timezone: string | undefined): string {
  */
 export function describeSlots(slots: OpenSlot[], timezone?: string): string {
   if (slots.length === 0) return '';
-  const labels = slots.map((s) => describeSlot(s, timezone));
+
+  // `Intl.DateTimeFormat` accepts undefined timezone (uses runtime
+  // default). Construct once per call so we don't pay the formatter
+  // setup cost per-slot.
+  const weekdayFormatter = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    timeZone: timezone,
+  });
+  const timeFormatter = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: true,
+    timeZone: timezone,
+  });
+
+  const labels = slots.map((s) => describeSlot(s, weekdayFormatter, timeFormatter));
   if (labels.length === 1) return labels[0];
   if (labels.length === 2) return `${labels[0]} or ${labels[1]}`;
   const head = labels.slice(0, -1).join(', ');
