@@ -113,15 +113,14 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
 
 function hashMigration(value: string): string {
   // Normalize line endings to LF before hashing so the snapshot is
-  // stable across platforms (Windows checkouts with `core.autocrlf=true`
-  // would otherwise produce CRLF strings that hash differently).
-function hashMigration(value: string): string {
-  // Normalize line endings to LF to ensure consistent hashes across platforms
+  // stable across platforms — a Windows checkout with
+  // `core.autocrlf=true` would otherwise read template-literal values
+  // with `\r\n` and produce hashes that disagree with the snapshot
+  // generated on Linux/macOS.
   const normalized = value.replace(/\r\n/g, '\n');
   return createHash('sha256').update(normalized).digest('hex');
 }
 
-const REGEN_HINT =
 const REGEN_HINT =
   "To regenerate the snapshot for an INTENTIONAL pre-deploy edit, run:\n" +
   "  npx tsx -e \"import { MIGRATIONS } from './packages/api/src/db/schema'; " +
