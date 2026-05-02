@@ -1,3 +1,4 @@
+import { normalizePhone } from '../shared/phone';
 import { LeadSource, LeadStage } from './enums';
 
 /**
@@ -84,6 +85,14 @@ export interface LeadRepository {
   findByTenant(tenantId: string, options?: LeadListOptions): Promise<Lead[]>;
   listWithMeta(tenantId: string, options?: LeadListOptions): Promise<LeadListResult>;
   update(tenantId: string, id: string, updates: Partial<Lead>): Promise<Lead | null>;
+  /**
+   * Find the most recently created open lead matching this normalized phone.
+   * Used by the inbound-call skill to dedupe unknown callers without scanning
+   * the full tenant. Returns null when no match. The Pg implementation queries
+   * the indexed `phone_normalized` generated column; the in-memory fallback
+   * normalizes `primaryPhone` on the fly.
+   */
+  findByPhoneNormalized(tenantId: string, phoneNormalized: string): Promise<Lead | null>;
 }
 
 export const DEFAULT_LIST_LIMIT = 50;
@@ -143,6 +152,22 @@ export class InMemoryLeadRepository implements LeadRepository {
     const merged = { ...l, ...updates };
     this.leads.set(id, merged);
     return { ...merged };
+  }
+
+  async findByPhoneNormalized(
+    tenantId: string,
+    phoneNormalized: string
+  ): Promise<Lead | null> {
+    if (!phoneNormalized) return null;
+    const matches = Array.from(this.leads.values())
+      .filter(
+        (l) =>
+          l.tenantId === tenantId &&
+          l.primaryPhone &&
+          normalizePhone(l.primaryPhone) === phoneNormalized
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return matches.length > 0 ? { ...matches[0] } : null;
   }
 
   /** Test helper. */

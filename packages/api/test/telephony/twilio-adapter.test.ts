@@ -13,6 +13,7 @@ import {
 } from '../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryLeadRepository } from '../../src/leads/lead';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -33,18 +34,24 @@ function makeGatewayReturning(content: string): LLMGateway {
 function makeAdapter(opts: {
   gateway?: LLMGateway;
   store?: VoiceSessionStore;
+  leadRepo?: InMemoryLeadRepository;
+  auditRepo?: InMemoryAuditRepository;
 } = {}) {
   const store = opts.store ?? new VoiceSessionStore();
   const gateway =
     opts.gateway ??
     makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}');
+  const leadRepo = opts.leadRepo;
+  const auditRepo = opts.auditRepo;
   const adapter = new TwilioGatherAdapter({
     store,
     gateway,
     businessName: 'Acme Plumbing',
     publicBaseUrl: 'https://example.com',
+    ...(leadRepo ? { leadRepo } : {}),
+    ...(auditRepo ? { auditRepo } : {}),
   });
-  return { adapter, store, gateway };
+  return { adapter, store, gateway, leadRepo, auditRepo };
 }
 
 // ─── xmlEscape ───────────────────────────────────────────────────────────────
@@ -232,6 +239,106 @@ describe('TwilioGatherAdapter.handleInbound', () => {
     const snap = await store.snapshot(ids[0] as string);
     // Without a Pool, the caller is unknown → ask_caller.
     expect(['ask_caller', 'intent_capture']).toContain(snap?.state);
+  });
+
+  // ─── P9 inbound-call → CRM lead ────────────────────────────────────────────
+  // The receptionist must auto-create a `phone_call` lead for unknown
+  // callers and stash the leadId on the session so subsequent gather
+  // turns can attach intent / notes to the right kanban card.
+
+  it('creates a phone_call lead for an unknown caller and stashes leadId on the session', async () => {
+    const leadRepo = new InMemoryLeadRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { adapter, store } = makeAdapter({ leadRepo, auditRepo });
+
+    await adapter.handleInbound({
+      callSid: 'CA-lead-1',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    expect(leadRepo.getAll()).toHaveLength(1);
+    const [created] = leadRepo.getAll();
+    expect(created.source).toBe('phone_call');
+    expect(created.primaryPhone).toBe('+15125550100');
+    expect(created.createdBy).toBe('system:inbound-call');
+    expect(created.stage).toBe('new');
+
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const snap = store.snapshot(ids[0] as string);
+    expect(snap?.leadId).toBe(created.id);
+
+    // Audit event was emitted.
+    const audits = auditRepo.getAll();
+    expect(audits.find((a) => a.eventType === 'lead.created')).toBeTruthy();
+  });
+
+  it('does NOT create a duplicate lead on Twilio CallSid retry', async () => {
+    const leadRepo = new InMemoryLeadRepository();
+    const { adapter } = makeAdapter({ leadRepo });
+
+    await adapter.handleInbound({
+      callSid: 'CA-retry',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    await adapter.handleInbound({
+      callSid: 'CA-retry',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    expect(leadRepo.getAll()).toHaveLength(1);
+  });
+
+  it('reuses an existing lead on a second call from the same number', async () => {
+    const leadRepo = new InMemoryLeadRepository();
+    const { adapter, store } = makeAdapter({ leadRepo });
+
+    await adapter.handleInbound({
+      callSid: 'CA-first',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const firstLeadId = leadRepo.getAll()[0].id;
+
+    await adapter.handleInbound({
+      callSid: 'CA-second',
+      from: '+1 (512) 555-0100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    expect(leadRepo.getAll()).toHaveLength(1);
+    const sessionIds = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    // Latest session reuses the same lead.
+    const latest = store.snapshot(sessionIds[sessionIds.length - 1] as string);
+    expect(latest?.leadId).toBe(firstLeadId);
+  });
+
+  it('answers the call without throwing when leadRepo is not wired', async () => {
+    const { adapter, store } = makeAdapter(); // no leadRepo
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-no-repo',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+
+    expect(xml).toContain('<Gather input="speech"');
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const snap = store.snapshot(ids[0] as string);
+    expect(snap?.leadId).toBeUndefined();
   });
 });
 
