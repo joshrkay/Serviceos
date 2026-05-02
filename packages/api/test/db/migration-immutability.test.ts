@@ -115,6 +115,8 @@ function hashMigration(value: string): string {
   // Normalize line endings to LF before hashing so the snapshot is
   // stable across platforms (Windows checkouts with `core.autocrlf=true`
   // would otherwise produce CRLF strings that hash differently).
+function hashMigration(value: string): string {
+  // Normalize line endings to LF to ensure consistent hashes across platforms
   const normalized = value.replace(/\r\n/g, '\n');
   return createHash('sha256').update(normalized).digest('hex');
 }
