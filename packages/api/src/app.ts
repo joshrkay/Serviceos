@@ -162,6 +162,7 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
+import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
 import { createTtsProvider } from './ai/tts/tts-provider';
@@ -680,10 +681,19 @@ export function createApp() {
     assignmentRepo,
     jobRepo,
   });
+  // Surface up to 3 alternative open slots in the voice_clarification
+  // proposal whenever the conflict checker rejects the AI's pick. The
+  // dispatcher gets concrete next-available windows instead of a
+  // "please pick another time" prompt.
+  const availabilityFinder = new DefaultAvailabilityFinder({
+    appointmentRepo,
+    assignmentRepo,
+  });
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
     slotConflictChecker,
+    availabilityFinder,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
