@@ -93,6 +93,23 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
     });
   }
 
+  async findByPhoneNormalized(
+    tenantId: string,
+    phoneNormalized: string
+  ): Promise<Lead | null> {
+    if (!phoneNormalized) return null;
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM leads
+         WHERE tenant_id = $1 AND phone_normalized = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [tenantId, phoneNormalized]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   private buildListWhere(
     tenantId: string,
     options?: LeadListOptions

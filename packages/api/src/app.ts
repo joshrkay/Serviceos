@@ -808,6 +808,8 @@ export function createApp() {
     proposalRepo,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
+    leadRepo,
+    systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
     // P8-014: when set, the initial inbound TwiML emits a

@@ -1,4 +1,7 @@
 import type { Pool } from 'pg';
+import { normalizePhone } from '../../shared/phone';
+
+export { normalizePhone };
 
 export interface IdentifyCallerInput {
   tenantId: string;
@@ -11,16 +14,6 @@ export type IdentifyCallerResult =
   | { status: 'matched'; customerId: string; customerName: string; displayName: string }
   | { status: 'multiple'; candidates: Array<{ customerId: string; customerName: string }> }
   | { status: 'unknown' };
-
-/** Strip all non-digit characters. Used for index lookup. */
-export function normalizePhone(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
-  // Strip leading 1 from 11-digit numbers (North American +1 country code)
-  if (digits.length === 11 && digits.startsWith('1')) {
-    return digits.slice(1);
-  }
-  return digits;
-}
 
 export async function identifyCaller(input: IdentifyCallerInput): Promise<IdentifyCallerResult> {
   const { tenantId, fromPhone, pool } = input;
