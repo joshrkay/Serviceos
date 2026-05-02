@@ -120,13 +120,13 @@ function hashMigration(value: string): string {
 }
 
 const REGEN_HINT =
-  'To regenerate the snapshot for an INTENTIONAL pre-deploy edit, run:\n' +
-  '  npx tsx -e "import { MIGRATIONS } from \'./packages/api/src/db/schema\'; ' +
+const REGEN_HINT =
+  "To regenerate the snapshot for an INTENTIONAL pre-deploy edit, run:\n" +
+  "  npx tsx -e \"import { MIGRATIONS } from './packages/api/src/db/schema'; " +
   "import { createHash } from 'crypto'; " +
-  'for (const [k, v] of Object.entries(MIGRATIONS)) ' +
-  "console.log('  [\\'' + k + '\\', \\'' + createHash('sha256')" +
-  ".update(v.replace(/\\r\\n/g, '\\n')).digest('hex') + '\\'],');\"\n" +
-  'and paste the output into test/db/migration-immutability.test.ts.';
+  "for (const [k, v] of Object.entries(MIGRATIONS)) " +
+  "console.log('  [\"' + k + '\", \"' + createHash('sha256').update(v.replace(/\\r\\n/g, '\\n')).digest('hex') + '\"],');\"\n" +
+  "and paste the output into test/db/migration-immutability.test.ts.";
 
 describe('migrations are immutable once shipped', () => {
   it('every snapshotted migration matches the live MIGRATIONS value (no in-place mutation)', () => {
