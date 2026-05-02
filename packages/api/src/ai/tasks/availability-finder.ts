@@ -140,6 +140,9 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
       return { ok: false, reason: 'durationMs must be positive' };
     }
     if (granularityMs <= 0) {
+      return { ok: false, reason: 'granularityMs must be positive' };
+    }
+    if (granularityMs <= 0) {
       // snapUp() reduces to NaN on a non-positive granularity, which
       // would silently return zero slots OR loop indefinitely depending
       // on which arithmetic happens first. Fail loudly instead.
