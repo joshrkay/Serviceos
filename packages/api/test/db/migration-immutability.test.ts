@@ -39,7 +39,11 @@ import { MIGRATIONS } from '../../src/db/schema';
  *     import { MIGRATIONS } from './packages/api/src/db/schema';
  *     import { createHash } from 'crypto';
  *     for (const [k, v] of Object.entries(MIGRATIONS)) {
- *       const h = createHash('sha256').update(v).digest('hex');
+ *       // Normalize line endings to match hashMigration() below; otherwise
+ *       // a Windows checkout with core.autocrlf=true would emit CRLF and
+ *       // produce hashes that disagree with the test runner.
+ *       const normalized = v.replace(/\r\n/g, '\n');
+ *       const h = createHash('sha256').update(normalized).digest('hex');
  *       console.log(\`  ['\${k}', '\${h}'],\`);
  *     }
  *   "
@@ -108,15 +112,20 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
 ];
 
 function hashMigration(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+  // Normalize line endings to LF before hashing so the snapshot is
+  // stable across platforms (Windows checkouts with `core.autocrlf=true`
+  // would otherwise produce CRLF strings that hash differently).
+  const normalized = value.replace(/\r\n/g, '\n');
+  return createHash('sha256').update(normalized).digest('hex');
 }
 
 const REGEN_HINT =
   'To regenerate the snapshot for an INTENTIONAL pre-deploy edit, run:\n' +
   '  npx tsx -e "import { MIGRATIONS } from \'./packages/api/src/db/schema\'; ' +
-  'import { createHash } from \'crypto\'; ' +
+  "import { createHash } from 'crypto'; " +
   'for (const [k, v] of Object.entries(MIGRATIONS)) ' +
-  'console.log(\\`  [\'\\${k}\', \'\\${createHash(\'sha256\').update(v).digest(\'hex\')}\'],\\`);"\n' +
+  "console.log('  [\\'' + k + '\\', \\'' + createHash('sha256')" +
+  ".update(v.replace(/\\r\\n/g, '\\n')).digest('hex') + '\\'],');\"\n" +
   'and paste the output into test/db/migration-immutability.test.ts.';
 
 describe('migrations are immutable once shipped', () => {
@@ -158,14 +167,13 @@ describe('migrations are immutable once shipped', () => {
     const live = Object.keys(MIGRATIONS);
     const missing = live.filter((k) => !snapshotKeys.has(k));
 
-    if (missing.length > 0) {
-      throw new Error(
-        `Migrations added without a snapshot entry: ${missing.join(', ')}.\n` +
-          'New migrations must be locked into the immutability snapshot before merge so ' +
-          'subsequent in-place mutations get caught.\n' +
-          REGEN_HINT,
-      );
-    }
+    expect(
+      missing,
+      `Migrations added without a snapshot entry: ${missing.join(', ')}.\n` +
+        'New migrations must be locked into the immutability snapshot before merge so ' +
+        'subsequent in-place mutations get caught.\n' +
+        REGEN_HINT,
+    ).toEqual([]);
   });
 
   it('snapshot has no duplicate keys', () => {
