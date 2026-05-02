@@ -27,6 +27,40 @@ describe('Leads — LeadCard (P9-001)', () => {
     expect(screen.getByText('Acme Co.')).toBeInTheDocument();
   });
 
+  it('renders "Unknown caller" for phone_call leads with no name', () => {
+    render(
+      <LeadCard
+        lead={{
+          ...lead,
+          firstName: undefined,
+          lastName: undefined,
+          companyName: undefined,
+          source: 'phone_call',
+          primaryPhone: '+15125550100',
+          email: undefined,
+        }}
+      />
+    );
+    expect(screen.getByText('Unknown caller')).toBeInTheDocument();
+    expect(screen.getByText('+15125550100')).toBeInTheDocument();
+  });
+
+  it('renders "Unnamed lead" for non-phone-call leads with no name', () => {
+    render(
+      <LeadCard
+        lead={{
+          ...lead,
+          firstName: undefined,
+          lastName: undefined,
+          companyName: undefined,
+          source: 'web_form',
+          email: undefined,
+        }}
+      />
+    );
+    expect(screen.getByText('Unnamed lead')).toBeInTheDocument();
+  });
+
   it('invokes onClick when the card is clicked', () => {
     const onClick = vi.fn();
     render(<LeadCard lead={lead} onClick={onClick} />);

@@ -22,7 +22,13 @@ export interface LeadCardProps {
 
 function fullName(lead: LeadCardData): string {
   const name = `${lead.firstName ?? ''} ${lead.lastName ?? ''}`.trim();
-  return name || lead.companyName || 'Unnamed lead';
+  if (name) return name;
+  if (lead.companyName) return lead.companyName;
+  // Phone-call leads start out with no name (the AI receptionist creates
+  // them on the fly). Show "Unknown caller" instead of a generic blank
+  // label so the kanban row is recognizable until a human edits it.
+  if (lead.source === 'phone_call') return 'Unknown caller';
+  return 'Unnamed lead';
 }
 
 function formatCents(cents?: number): string | null {

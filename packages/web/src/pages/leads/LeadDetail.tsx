@@ -101,7 +101,11 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
   );
   if (!lead) return null;
 
-  const displayName = `${lead.firstName} ${lead.lastName}`.trim() || lead.companyName || 'Unnamed lead';
+  const trimmedName = `${lead.firstName} ${lead.lastName}`.trim();
+  const displayName =
+    trimmedName ||
+    lead.companyName ||
+    (lead.source === 'phone_call' ? 'Unknown caller' : 'Unnamed lead');
   const alreadyConverted = Boolean(lead.convertedCustomerId);
 
   return (
