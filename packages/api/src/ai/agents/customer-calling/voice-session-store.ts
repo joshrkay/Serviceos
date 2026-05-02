@@ -63,6 +63,12 @@ export interface VoiceSession {
   leadId?: string;
   /** Set when `identifyCaller` matched an existing customer. */
   customerId?: string;
+  /**
+   * Whether the per-call intent note has already been appended to the
+   * lead. The adapter only writes the FIRST classified intent per call
+   * so the lead's notes don't accumulate one line per gather turn.
+   */
+  leadNoteAppended?: boolean;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
   createdAt: Date;

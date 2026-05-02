@@ -849,3 +849,153 @@ describe('TwilioGatherAdapter.handleGather', () => {
     expect(['proposal_draft', 'closing']).toContain(snap?.state);
   });
 });
+
+// ─── P9 inbound-call → lead intent-note appender ──────────────────────────────
+
+describe('TwilioGatherAdapter.handleGather → lead intent-note appender', () => {
+  it("stamps the call's first classified intent onto the linked lead", async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.91,
+        reasoning: 'clear ask',
+        extractedEntities: {},
+      })
+    );
+    const leadRepo = new InMemoryLeadRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { adapter, store } = makeAdapter({ gateway, leadRepo, auditRepo });
+
+    await adapter.handleInbound({
+      callSid: 'CA-note-1',
+      from: '+15125551234',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const sessionId = ids[0] as string;
+    const session = store.get(sessionId)!;
+    expect(session.leadId).toBeTruthy();
+
+    // Force the FSM into intent_capture (test stand-in for caller_known path).
+    if (session.machine.currentState === 'ask_caller') {
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-note-1',
+      speechResult: 'I need to schedule a service appointment for tomorrow morning',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const lead = leadRepo.getAll().find((l) => l.id === session.leadId);
+    expect(lead?.notes).toBeTruthy();
+    expect(lead?.notes).toContain('intent=create_appointment');
+    expect(lead?.notes).toContain('schedule a service appointment');
+
+    expect(session.leadNoteAppended).toBe(true);
+    expect(
+      auditRepo
+        .getAll()
+        .filter(
+          (a) => a.eventType === 'lead.updated' && a.entityId === session.leadId
+        )
+    ).toHaveLength(1);
+  });
+
+  it('only appends the intent note once even across multiple gather turns', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.95,
+        reasoning: 'clear',
+        extractedEntities: {},
+      })
+    );
+    const leadRepo = new InMemoryLeadRepository();
+    const { adapter, store } = makeAdapter({ gateway, leadRepo });
+
+    await adapter.handleInbound({
+      callSid: 'CA-note-2',
+      from: '+15125555678',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const sessionId = ids[0] as string;
+    const session = store.get(sessionId)!;
+    if (session.machine.currentState === 'ask_caller') {
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    // Run two gather turns; both classify into a high-confidence intent.
+    await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-note-2',
+      speechResult: 'I want to book an appointment',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+    // Reset FSM to intent_capture for a second classification cycle.
+    const sess = store.get(sessionId)!;
+    sess.machine.dispatch({
+      type: 'correction',
+      newTranscript: 'actually different',
+    });
+    await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-note-2',
+      speechResult: 'never mind, schedule a different appointment instead',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const lead = leadRepo.getAll().find((l) => l.id === session.leadId);
+    const occurrences = (lead?.notes ?? '').match(/intent=create_appointment/g) ?? [];
+    expect(occurrences.length).toBe(1);
+  });
+
+  it('skips the note append when leadRepo is not wired', async () => {
+    const gateway = makeGatewayReturning(
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.9,
+        reasoning: 'x',
+        extractedEntities: {},
+      })
+    );
+    const { adapter, store } = makeAdapter({ gateway }); // no leadRepo
+
+    await adapter.handleInbound({
+      callSid: 'CA-note-3',
+      from: '+15125559999',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    const ids = Array.from(
+      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys()
+    );
+    const sessionId = ids[0] as string;
+    const session = store.get(sessionId)!;
+    if (session.machine.currentState === 'ask_caller') {
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+    }
+
+    // Should not throw and should leave session.leadNoteAppended unset.
+    await adapter.handleGather({
+      sessionId,
+      callSid: 'CA-note-3',
+      speechResult: 'book me a slot',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    expect(session.leadNoteAppended).toBeFalsy();
+  });
+});

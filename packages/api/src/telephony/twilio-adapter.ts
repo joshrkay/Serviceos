@@ -781,6 +781,24 @@ export class TwilioGatherAdapter {
 
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
 
+      // Stamp the call's first classified intent onto the linked lead so
+      // the kanban shows what the caller wanted without a human listening
+      // back to the recording. Best-effort: never fails the call; only
+      // appends once per session so multi-turn corrections don't flood
+      // the notes column.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        session.leadId &&
+        !session.leadNoteAppended &&
+        this.deps.leadRepo
+      ) {
+        await this.appendIntentNoteToLead(session, opts.tenantId, {
+          intentType: classifierEvent.intentType,
+          confidence: classifierEvent.confidence,
+          utterance: opts.speechResult,
+        });
+      }
+
       // After intent_classified, the FSM is in 'entity_resolution' (unless
       // emergency_dispatch fast-path took us to 'escalating'). For Gather
       // mode we don't run a separate entity-resolver — auto-advance with
@@ -871,6 +889,64 @@ export class TwilioGatherAdapter {
       });
     }
     return twiml;
+  }
+
+  /**
+   * Append the call's first classified intent to the linked lead's
+   * `notes` column so a CRM viewer can see, at a glance, why the caller
+   * called. Idempotent: marks `leadNoteAppended` after the first write
+   * so subsequent gather turns / corrections don't flood the field.
+   * Best-effort: any failure is logged and swallowed.
+   */
+  private async appendIntentNoteToLead(
+    session: VoiceSession,
+    tenantId: string,
+    detail: { intentType: string; confidence: number; utterance: string },
+  ): Promise<void> {
+    const leadRepo = this.deps.leadRepo;
+    const leadId = session.leadId;
+    if (!leadRepo || !leadId) return;
+    try {
+      const existing = await leadRepo.findById(tenantId, leadId);
+      if (!existing) return;
+      const truncatedUtterance =
+        detail.utterance.length > 200
+          ? `${detail.utterance.slice(0, 197)}...`
+          : detail.utterance;
+      const stamped = new Date().toISOString();
+      const line =
+        `[${stamped}] Inbound call · intent=${detail.intentType} ` +
+        `(confidence ${detail.confidence.toFixed(2)}) · "${truncatedUtterance}"`;
+      const merged = existing.notes ? `${existing.notes}\n${line}` : line;
+      // Cap at the zod 5000-char schema limit so manual edits via PATCH
+      // /api/leads/:id won't bounce on validation later.
+      const capped = merged.length > 5000 ? merged.slice(merged.length - 5000) : merged;
+      await leadRepo.update(tenantId, leadId, {
+        notes: capped,
+        updatedAt: new Date(),
+      });
+      session.leadNoteAppended = true;
+
+      if (this.deps.auditRepo) {
+        await this.deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: this.deps.systemActorId ?? 'system:inbound-call',
+            actorRole: 'system',
+            eventType: 'lead.updated',
+            entityType: 'lead',
+            entityId: leadId,
+            metadata: { changes: ['notes'], via: 'inbound_call_skill' },
+          }),
+        );
+      }
+    } catch (err) {
+      logger.error('appendIntentNoteToLead failed', {
+        error: err instanceof Error ? err.message : String(err),
+        leadId,
+        sessionId: session.id,
+      });
+    }
   }
 
   /**
