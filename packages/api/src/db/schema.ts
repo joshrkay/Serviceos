@@ -1322,14 +1322,16 @@ export const MIGRATIONS = {
   `,
 
   // P9-001: Lead pipeline table. PgLeadRepository writes to this; previously
-  // the table was created out-of-band (tests run against InMemory). The
-  // generated `phone_normalized` column matches the JS `normalizePhone`
-  // helper (digits-only + strip leading "1" on 11-digit NA numbers) so the
-  // inbound-call dedupe skill can index-lookup unknown callers in O(1).
-  // The partial unique index on (tenant_id, phone_normalized) only applies
-  // while the lead is still open (converted_customer_id IS NULL) so a
-  // contact can become a fresh lead again after they were previously
-  // converted to a customer.
+  // the table was created out-of-band (tests run against InMemory).
+  //
+  // The original P9-001 migration shipped without the `phone_normalized`
+  // generated column; the column + matching indexes are added in
+  // `058_leads_phone_normalized` so existing production databases (which
+  // already ran a CREATE TABLE that didn't include the generated column)
+  // still converge. Do NOT add `phone_normalized` back to this CREATE
+  // TABLE — `CREATE TABLE IF NOT EXISTS` is a no-op on existing tables,
+  // so any column added here would be silently skipped on the first DB
+  // that ran `055_create_leads` / the original `057_create_leads`.
   '057_create_leads': `
     CREATE TABLE IF NOT EXISTS leads (
       id UUID PRIMARY KEY,
@@ -1349,28 +1351,47 @@ export const MIGRATIONS = {
       lost_reason TEXT,
       created_by TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      phone_normalized TEXT GENERATED ALWAYS AS (
-        regexp_replace(
-          regexp_replace(COALESCE(primary_phone, ''), '[^0-9]', '', 'g'),
-          '^1([0-9]{10})$', '\\1'
-        )
-      ) STORED
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_leads_tenant_stage ON leads(tenant_id, stage);
     CREATE INDEX IF NOT EXISTS idx_leads_tenant_source ON leads(tenant_id, source);
+    ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE leads FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
+    CREATE POLICY tenant_isolation_leads ON leads
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Add `phone_normalized` to leads as a generated column so the
+  // inbound-receptionist dedupe skill can index-lookup unknown callers
+  // in O(1). Split out from `057_create_leads` because that migration
+  // had already shipped to production without this column; the in-place
+  // mutation that added the column to the CREATE TABLE was a no-op
+  // there (`CREATE TABLE IF NOT EXISTS` skips when the table exists),
+  // and the indexes that followed crashed startup with
+  // `column "phone_normalized" does not exist`. ALTER TABLE … ADD
+  // COLUMN IF NOT EXISTS converges fresh and existing DBs on the same
+  // shape.
+  //
+  // The partial unique index keeps a (tenant_id, phone_normalized) pair
+  // unique only while the lead is still open (converted_customer_id IS
+  // NULL) so a contact can become a fresh lead again after they were
+  // previously converted to a customer.
+  '058_leads_phone_normalized': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS phone_normalized TEXT GENERATED ALWAYS AS (
+        regexp_replace(
+          regexp_replace(COALESCE(primary_phone, ''), '[^0-9]', '', 'g'),
+          '^1([0-9]{10})$', '\\1'
+        )
+      ) STORED;
     CREATE INDEX IF NOT EXISTS idx_leads_phone_normalized
       ON leads (tenant_id, phone_normalized)
       WHERE phone_normalized <> '';
     CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_phone_unique_open
       ON leads (tenant_id, phone_normalized)
       WHERE phone_normalized <> '' AND converted_customer_id IS NULL;
-    ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE leads FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
-    CREATE POLICY tenant_isolation_leads ON leads
-      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 
