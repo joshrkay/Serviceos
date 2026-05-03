@@ -92,15 +92,49 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     deps.middlewareOptions,
   );
 
-  // Apply the token resolver to every nested route.
-  router.use('/:token', tokenMw, (req, _res, next: NextFunction) => next());
+  // Active-customer guard: a valid token alone isn't enough — the customer
+  // it points at must still be reachable. Archiving the customer (or
+  // deleting them outright) is the canonical access cutoff for the portal,
+  // so we re-check on EVERY token-gated request, not just `/customer`.
+  // Otherwise a previously-issued token could keep pulling
+  // estimates/invoices/jobs/etc. after archive.
+  const ensureActiveCustomer = async (
+    req: PortalRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> => {
+    if (!req.portal) {
+      res.status(500).json({
+        error: 'INTERNAL_ERROR',
+        message: 'Portal context missing — middleware misconfigured',
+      });
+      return;
+    }
+    try {
+      const customer = await deps.customerRepo.findById(
+        req.portal.tenantId,
+        req.portal.customerId,
+      );
+      if (!customer || customer.isArchived) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
+      next();
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  };
+
+  // Apply the token resolver + active-customer guard to every nested route.
+  router.use('/:token', tokenMw, ensureActiveCustomer);
 
   router.get('/:token/customer', async (req: PortalRequest, res: Response) => {
     if (!ensurePortal(req, res)) return;
     try {
       const { tenantId, customerId } = req.portal!;
       const customer = await deps.customerRepo.findById(tenantId, customerId);
-      if (!customer || customer.isArchived) {
+      if (!customer) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
         return;
       }
@@ -174,7 +208,9 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       const currency = deps.paymentCurrency ?? 'usd';
 
       const enriched = await Promise.all(
-        allInvoices.map(async (inv) => buildInvoicePayload(inv, tenantId, provider, currency)),
+        allInvoices.map(async (inv) =>
+          buildInvoicePayload(inv, tenantId, provider, currency, deps.invoiceRepo),
+        ),
       );
       res.json({ invoices: enriched });
     } catch (err) {
@@ -343,12 +379,15 @@ async function buildInvoicePayload(
   tenantId: string,
   provider: PaymentLinkProvider | undefined,
   currency: string,
+  invoiceRepo: InvoiceRepository,
 ): Promise<InvoicePayload> {
   let payNowUrl: string | null = inv.stripePaymentLinkUrl ?? null;
 
   // Generate a payment link only when one is missing AND the invoice is
-  // actually open for payment. We never deactivate or refresh an existing
-  // link from this read path — that's owner-side workflow.
+  // actually open for payment. Persist the generated link so subsequent
+  // reads are idempotent — without this, every refresh of the portal
+  // invoices page would mint a fresh provider link and the prior ones
+  // would orphan as live charge URLs the customer never sees.
   if (!payNowUrl && provider && inv.amountDueCents > 0 && isPayable(inv.status)) {
     const link = await safeGenerateLink(provider, {
       tenantId,
@@ -357,7 +396,19 @@ async function buildInvoicePayload(
       currency,
       description: `Invoice ${inv.invoiceNumber}`,
     });
-    payNowUrl = link?.linkUrl ?? null;
+    if (link) {
+      payNowUrl = link.linkUrl;
+      try {
+        await invoiceRepo.update(tenantId, inv.id, {
+          stripePaymentLinkId: link.linkId,
+          stripePaymentLinkUrl: link.linkUrl,
+          updatedAt: new Date(),
+        });
+      } catch {
+        // Best effort: a persist failure leaves the link unanchored, but
+        // the read still succeeds. Owner-side workflow can clean up.
+      }
+    }
   }
 
   return {

@@ -335,7 +335,7 @@ class InMemoryWebhookEventRepository {
   }
 }
 
-export function createApp() {
+export function createApp(): express.Express {
   const app = express();
 
   // Stripe webhook needs the raw body for signature verification.
