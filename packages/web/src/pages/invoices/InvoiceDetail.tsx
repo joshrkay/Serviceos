@@ -5,6 +5,12 @@ import {
   PaymentRecordForm,
   PaymentFormData,
 } from '../../components/payments/PaymentRecordForm';
+import {
+  LineItemEditor,
+  LineItemDraft,
+  toLineItemPayload,
+} from '../../components/forms/LineItemEditor';
+import { apiFetch } from '../../utils/api-fetch';
 
 interface LineItem {
   id: string;
@@ -82,6 +88,55 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
   const [showPaymentForm, setShowPaymentForm] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
+  // P11-007 — line-item edit toggle.
+  const [editingLineItems, setEditingLineItems] = React.useState(false);
+  const [draft, setDraft] = React.useState<LineItemDraft[]>([]);
+  const [lineItemSaving, setLineItemSaving] = React.useState(false);
+  const [lineItemError, setLineItemError] = React.useState<string | null>(null);
+
+  const startEditLineItems = React.useCallback(() => {
+    if (!data) return;
+    setDraft(
+      (data.lineItems ?? []).map((li) => ({
+        id: li.id,
+        description: li.description,
+        quantity: String(li.quantity),
+        unitPriceDollars: (li.unitPriceCents / 100).toFixed(2),
+        taxable: li.taxable,
+      }))
+    );
+    setLineItemError(null);
+    setEditingLineItems(true);
+  }, [data]);
+
+  const cancelEditLineItems = React.useCallback(() => {
+    setEditingLineItems(false);
+    setLineItemError(null);
+  }, []);
+
+  const saveLineItems = React.useCallback(async () => {
+    if (!data) return;
+    setLineItemSaving(true);
+    setLineItemError(null);
+    try {
+      const payload = draft.map((d, i) => toLineItemPayload(d, i));
+      const res = await apiFetch(`/api/invoices/${data.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ lineItems: payload }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json?.message ?? `HTTP ${res.status}`);
+      }
+      setEditingLineItems(false);
+      refetch();
+    } catch (err) {
+      setLineItemError(err instanceof Error ? err.message : 'Failed to save line items');
+    } finally {
+      setLineItemSaving(false);
+    }
+  }, [data, draft, refetch]);
+
   const submitPayment = React.useCallback(
     async (form: PaymentFormData) => {
       setSubmitError(null);
@@ -158,29 +213,69 @@ export function InvoiceDetail({ invoiceId, onBack }: InvoiceDetailProps) {
         },
         {
           title: 'Line Items',
-          content: (
-            <table className="list-table">
-              <thead>
-                <tr>
-                  <th>Description</th>
-                  <th>Qty</th>
-                  <th>Unit Price</th>
-                  <th>Total</th>
-                  <th>Taxable</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(data.lineItems ?? []).map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.description}</td>
-                    <td>{item.quantity}</td>
-                    <td>{formatCents(item.unitPriceCents)}</td>
-                    <td>{formatCents(item.totalCents)}</td>
-                    <td>{item.taxable ? 'Yes' : 'No'}</td>
+          content: editingLineItems ? (
+            <div data-testid="invoice-line-items-edit">
+              {lineItemError && (
+                <div role="alert" className="error" data-testid="line-items-error">
+                  {lineItemError}
+                </div>
+              )}
+              <LineItemEditor items={draft} onChange={setDraft} />
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  data-testid="line-items-save"
+                  onClick={saveLineItems}
+                  disabled={lineItemSaving}
+                  className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {lineItemSaving ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  type="button"
+                  data-testid="line-items-cancel"
+                  onClick={cancelEditLineItems}
+                  className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div className="mb-2 flex justify-end">
+                <button
+                  type="button"
+                  data-testid="line-items-edit-toggle"
+                  onClick={startEditLineItems}
+                  className="rounded-md border border-slate-200 text-xs px-2 py-1 hover:bg-slate-50"
+                >
+                  Edit
+                </button>
+              </div>
+              <table className="list-table">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th>Qty</th>
+                    <th>Unit Price</th>
+                    <th>Total</th>
+                    <th>Taxable</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {(data.lineItems ?? []).map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.description}</td>
+                      <td>{item.quantity}</td>
+                      <td>{formatCents(item.unitPriceCents)}</td>
+                      <td>{formatCents(item.totalCents)}</td>
+                      <td>{item.taxable ? 'Yes' : 'No'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ),
         },
         {
