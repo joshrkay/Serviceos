@@ -1444,6 +1444,102 @@ export const MIGRATIONS = {
       notes TEXT,
       taken_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  // Phase 2 of the inbound-CSR training-data architecture (RAG corpus). Adds
+  // the four capture surfaces the downstream ingestion workers and quality
+  // dashboards need:
+  //
+  //   1. call_transcript_turns      — per-turn rows so the in-memory FSM
+  //                                   transcript survives a process restart
+  //                                   and the transcript-ingestion-worker
+  //                                   (Phase 4a) has stable input.
+  //   2. proposal_executions        — captures the as-executed payload
+  //                                   alongside the immutable proposals.payload
+  //                                   so the proposal-correction-worker
+  //                                   (Phase 4a) can diff the two and emit a
+  //                                   training chunk. Multiple rows allowed
+  //                                   per proposal (retry, undo + redo).
+  //   3. voice_recordings.outcome   — terminal-state enum stamped by the FSM
+  //                                   at hangup so analytics can correlate
+  //                                   recording rows with what actually
+  //                                   happened on the call.
+  //   4. retrieval_eval_runs        — quality measurement table built in from
+  //                                   day one so we can prove RAG retrieval
+  //                                   helps before flipping the default. Each
+  //                                   row links a query → retrieved chunks →
+  //                                   downstream proposal → downstream outcome.
+  //
+  // Originally merged via PR #233 but silently dropped in the merge that
+  // landed PR #229 onto main. Restored verbatim here; the immutability
+  // snapshot's hash matches PR #233's original block.
+  '060_capture_schema': `
+    CREATE TABLE IF NOT EXISTS call_transcript_turns (
+      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      voice_recording_id UUID NOT NULL REFERENCES voice_recordings(id) ON DELETE CASCADE,
+      turn_index         INTEGER NOT NULL,
+      speaker            TEXT NOT NULL CHECK (speaker IN ('agent', 'caller')),
+      text               TEXT NOT NULL,
+      started_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at       TIMESTAMPTZ,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (turn_index >= 0)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_recording
+      ON call_transcript_turns (voice_recording_id, turn_index);
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant
+      ON call_transcript_turns (tenant_id, created_at DESC);
+    ALTER TABLE call_transcript_turns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_transcript_turns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_transcript_turns ON call_transcript_turns;
+    CREATE POLICY tenant_isolation_call_transcript_turns ON call_transcript_turns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_executions (
+      id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      proposal_id      UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+      executed_payload JSONB NOT NULL,
+      executed_by      TEXT NOT NULL,
+      executed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status           TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'undone')),
+      error_message    TEXT,
+      idempotency_key  TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_proposal
+      ON proposal_executions (proposal_id, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_tenant
+      ON proposal_executions (tenant_id, executed_at DESC);
+    -- Idempotency: same (tenant, proposal, key) collides cleanly. Partial so
+    -- rows without an idempotency_key (legacy or undo paths) coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposal_executions_idempotency
+      ON proposal_executions (tenant_id, proposal_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE proposal_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_executions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_executions ON proposal_executions;
+    CREATE POLICY tenant_isolation_proposal_executions ON proposal_executions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Terminal-state enum on voice_recordings. NULL until the FSM stamps it
+    -- at hangup; backfillable from call_summaries.quality_score + escalation
+    -- audit signals (separate ops job).
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS outcome TEXT
+        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_outcome
+      ON voice_recordings (tenant_id, outcome) WHERE outcome IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS retrieval_eval_runs (
+      id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      ai_run_id              UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      query_text             TEXT NOT NULL,
+      retrieved_chunk_ids    UUID[] NOT NULL DEFAULT '{}',
+      retrieved_scores       REAL[] NOT NULL DEFAULT '{}',
+      downstream_proposal_id UUID REFERENCES proposals(id) ON DELETE SET NULL,
+      downstream_outcome     TEXT,
+      created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_job_photos_tenant_job ON job_photos(tenant_id, job_id);
     ALTER TABLE job_photos ENABLE ROW LEVEL SECURITY;
@@ -1451,6 +1547,103 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_job_photos ON job_photos;
     CREATE POLICY tenant_isolation_job_photos ON job_photos
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P11-001: voice lookup-skill audit log. Every invocation of a
+  // `lookup_*` voice skill writes one row — high-volume but tiny
+  // payload (no nested data). Tenant-scoped via RLS just like
+  // audit_events; session_id is the voice session that hosted the
+  // lookup, customer_id is nullable because the caller may be
+  // unidentified at lookup time.
+  '061_create_lookup_events': `
+    CREATE TABLE IF NOT EXISTS lookup_events (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id UUID NOT NULL,
+      customer_id UUID,
+      intent TEXT NOT NULL,
+      result_status TEXT NOT NULL CHECK (result_status IN ('found','none','error')),
+      result_count INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      latency_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant ON lookup_events(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_session
+      ON lookup_events(tenant_id, session_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_customer
+      ON lookup_events(tenant_id, customer_id)
+      WHERE customer_id IS NOT NULL;
+    ALTER TABLE lookup_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lookup_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lookup_events ON lookup_events;
+    CREATE POLICY tenant_isolation_lookup_events ON lookup_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Phase 1 of the inbound-AI-CSR RAG corpus. One unified table holds
+  // both per-tenant chunks (tenant_id NOT NULL, RLS-scoped) and the
+  // global non-PII tier (tenant_id IS NULL — vertical-pack terminology
+  // and category patterns shared across tenants). The CHECK constraint
+  // forces (scope='tenant' ⇔ tenant_id IS NOT NULL) so the two tiers
+  // can't accidentally cross.
+  //
+  // Embedding model is locked to text-embedding-3-small (1536 dims) for
+  // v1: cosine distances aren't comparable across embedding models, so
+  // mixed-model rows in the same ivfflat index would silently degrade
+  // retrieval quality. Future model upgrades go through a separate
+  // re-embedding job that rebuilds the index.
+  //
+  // Phase 1 is purely additive — no caller in main reads or writes this
+  // table yet. Workers + retrieval wiring land in Phases 3b and 4a.
+  //
+  // Originally landed as 059_create_knowledge_chunks; bumped to 061 when
+  // 059_lead_attribution + 060_capture_schema landed on main first, then
+  // bumped again to 062 when 061_create_lookup_events claimed 061.
+  '062_create_knowledge_chunks': `
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+      id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id            UUID NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      scope                TEXT NOT NULL CHECK (scope IN ('tenant', 'global')),
+      source_type          TEXT NOT NULL,
+      source_id            TEXT NOT NULL,
+      source_version       INTEGER NOT NULL DEFAULT 1,
+      content              TEXT NOT NULL,
+      content_scrubbed     TEXT NOT NULL,
+      embedding            vector(1536) NOT NULL,
+      embedding_model      TEXT NOT NULL CHECK (embedding_model = 'text-embedding-3-small'),
+      chunk_schema_version INTEGER NOT NULL DEFAULT 1,
+      metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (
+        (scope = 'tenant' AND tenant_id IS NOT NULL)
+        OR (scope = 'global' AND tenant_id IS NULL)
+      )
+    );
+
+    -- Approximate-nearest-neighbour index for cosine similarity. Defaults to
+    -- 100 lists, suitable for tens of thousands to ~1M rows; revisit when a
+    -- single tenant crosses ~10M chunks.
+    CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_ivfflat
+      ON knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
+      WITH (lists = 100);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_source
+      ON knowledge_chunks (tenant_id, source_type, source_id);
+
+    -- Idempotent ingestion: same (scope, source_type, source_id, version)
+    -- collides cleanly so re-ingestion with ON CONFLICT works.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_chunks_dedupe
+      ON knowledge_chunks (scope, source_type, source_id, source_version);
+
+    ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE knowledge_chunks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_knowledge_chunks ON knowledge_chunks;
+    CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
+      USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 

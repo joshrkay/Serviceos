@@ -69,6 +69,9 @@ import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
+import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
+import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
+import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
@@ -170,6 +173,22 @@ import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
+import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import {
+  PgKnowledgeChunkRepository,
+  InMemoryKnowledgeChunkRepository,
+} from './ai/training/knowledge-chunks';
+import { InMemoryRetrievalEvalRunRepository } from './ai/training/retrieval-eval-run';
+import { PgRetrievalEvalRunRepository } from './ai/training/pg-retrieval-eval-run';
+import { InMemoryProposalExecutionRepository } from './proposals/proposal-execution';
+import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
+import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
+import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
+import {
+  OpenAICompatibleProvider,
+  type EmbeddingProvider,
+} from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
@@ -433,6 +452,16 @@ export function createApp() {
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
   const auditRepo          = pool ? new PgAuditRepository(pool)          : new InMemoryAuditRepository();
+  // P11-001: voice lookup-skill audit log. The skills write one row
+  // per invocation through `LookupEventService` and the Twilio adapter
+  // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
+  const lookupEventRepo    = pool ? new PgLookupEventRepository(pool)    : new InMemoryLookupEventRepository();
+  const lookupEventService = new LookupEventService(lookupEventRepo);
+  // P11-001: hoisted so the Twilio lookup-skill family can read agreements.
+  // The richer agreement-service wiring (agreementRunRepo, generators,
+  // etc.) still happens further below — this declaration is purely so
+  // the read-only lookup branch has access.
+  const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
@@ -480,6 +509,35 @@ export function createApp() {
   const llmGateway = config.AI_PROVIDER_API_KEY
     ? createLLMGateway(config)
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
+
+  // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
+  // gateway routes chat completions through shadow/router logic that
+  // doesn't apply to embeddings (`text-embedding-3-small` only). When
+  // AI_PROVIDER_API_KEY is unset, embeddings are unavailable and the
+  // ingestion workers stay un-registered — the rest of the app boots.
+  const embeddingProvider: EmbeddingProvider | null = config.AI_PROVIDER_API_KEY
+    ? new OpenAICompatibleProvider({
+        apiKey: config.AI_PROVIDER_API_KEY,
+        baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
+      })
+    : null;
+
+  // Phase 4a-1 repositories — used by transcript-ingestion-worker and
+  // proposal-correction-worker. All Pg-backed in production with
+  // tenant-scoped RLS via PgBaseRepository.withTenant; InMemory in
+  // dev/test so the app boots without DATABASE_URL.
+  const knowledgeChunkRepo = pool
+    ? new PgKnowledgeChunkRepository(pool)
+    : new InMemoryKnowledgeChunkRepository();
+  const proposalExecutionRepo = pool
+    ? new PgProposalExecutionRepository(pool)
+    : new InMemoryProposalExecutionRepository();
+  const retrievalEvalRunRepo = pool
+    ? new PgRetrievalEvalRunRepository(pool)
+    : new InMemoryRetrievalEvalRunRepository();
+  const callTranscriptTurnRepo = pool
+    ? new PgCallTranscriptTurnRepository(pool)
+    : new InMemoryCallTranscriptTurnRepository();
 
   const feedbackDispatcher =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
@@ -578,6 +636,22 @@ export function createApp() {
     transcriptionWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // Phase 4a-1 transcript-ingestion-worker only (proposal-correction-worker
+  // needs proposalRepo which is declared further down — registered after
+  // that). Without AI_PROVIDER_API_KEY the worker stays un-registered.
+  if (embeddingProvider) {
+    const transcriptIngestionWorker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: embeddingProvider,
+    });
+    workerRegistry.set(
+      transcriptIngestionWorker.type,
+      transcriptIngestionWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // ── Diff-analysis worker (P0-018): compares two revision snapshots and
   // persists a structured field-level delta. P0-023 graduates the revision
   // store and the analysis store onto Postgres when DATABASE_URL is set —
@@ -641,7 +715,58 @@ export function createApp() {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
   });
-  const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  // Phase 4a-1: persist a proposal_executions row on success + fire the
+  // proposal-correction-worker. The onExecuted callback is failure-soft
+  // inside the executor itself (logs via console, never rethrows), so
+  // queue-send errors here can't break the executor's invariants.
+  const proposalExecutor = new ProposalExecutor(
+    executionHandlers,
+    proposalRepo,
+    undefined,
+    {
+      executionRepo: proposalExecutionRepo,
+      onExecuted: async (event) => {
+        if (event.status !== 'succeeded') return;
+        try {
+          await queue.send(
+            'proposal_correction',
+            {
+              tenantId: event.tenantId,
+              proposalId: event.proposalId,
+              ...(event.executionId ? { executionId: event.executionId } : {}),
+            },
+            `correction:${event.executionId ?? event.proposalId}:v1`,
+          );
+        } catch (err) {
+          // Logged inside the executor too; double-log is fine — this
+          // path is a real production failure (queue is down) worth
+          // noticing in both places.
+          // eslint-disable-next-line no-console
+          console.error('app: failed to enqueue proposal_correction', {
+            proposalId: event.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    },
+  );
+
+  // Phase 4a-1: register the proposal-correction-worker now that
+  // proposalRepo is in scope. Skipped silently when no embedder.
+  if (embeddingProvider) {
+    const proposalCorrectionWorker = createProposalCorrectionWorker({
+      proposalRepo,
+      proposalExecutionRepo,
+      knowledgeChunkRepo,
+      embeddings: embeddingProvider,
+      retrievalEvalRunRepo,
+    });
+    workerRegistry.set(
+      proposalCorrectionWorker.type,
+      proposalCorrectionWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   const delayNoticeStateRepo = pool
     ? new PgDelayNoticeStateRepository(pool)
     : new InMemoryDelayNoticeStateRepository();
@@ -850,6 +975,15 @@ export function createApp() {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     leadRepo,
+    // P11-001: lookup-skill family wiring. Without these the adapter
+    // falls back to a "let me get a person to help" line on lookup_*
+    // intents — the call doesn't crash, but the read-only path is
+    // unavailable. agreementRepo lives a few hundred lines down.
+    jobRepo,
+    appointmentRepo,
+    invoiceRepo,
+    agreementRepo,
+    lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
@@ -889,6 +1023,49 @@ export function createApp() {
           : {}),
         ...(process.env.TWILIO_AUTH_TOKEN
           ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
+          : {}),
+        // Phase 4a-1: enqueue transcript-ingestion when the recording row
+        // first lands. Skipped on Twilio retries (`inserted=false`) so
+        // we don't double-process the same call. Skipped silently when
+        // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
+        ...(embeddingProvider
+          ? {
+              options: {
+                onPersisted: async (event) => {
+                  if (!event.inserted) return;
+                  const session = voiceSessionStore.findByCallSid(event.callSid);
+                  if (!session) {
+                    // Session was reaped (>30 min idle) before the
+                    // recording webhook fired. Known data-loss edge
+                    // case from the in-memory session store; not
+                    // something Phase 4a-1 fixes. Phase 4 architecture
+                    // doc covers persistent FSM state as a follow-up.
+                    return;
+                  }
+                  try {
+                    await queue.send(
+                      'transcript_ingestion',
+                      {
+                        tenantId: event.tenantId,
+                        voiceRecordingId: event.voiceRecordingId,
+                        transcript: [...session.transcript],
+                        ...(session.machine.currentContext.currentIntent
+                          ? { intent: session.machine.currentContext.currentIntent }
+                          : {}),
+                        durationMs: Date.now() - session.createdAt.getTime(),
+                      },
+                      `transcript:${event.voiceRecordingId}:v1`,
+                    );
+                  } catch (err) {
+                    // eslint-disable-next-line no-console
+                    console.error('app: failed to enqueue transcript_ingestion', {
+                      voiceRecordingId: event.voiceRecordingId,
+                      error: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                },
+              },
+            }
           : {}),
       },
     }),
@@ -1058,9 +1235,8 @@ export function createApp() {
   // Recurring service contracts auto-generate a job + draft invoice on
   // their cadence. Bypasses the proposals layer because the customer-
   // signing-up step is the approval; subsequent runs execute it.
-  const agreementRepo = pool
-    ? new PgAgreementRepository(pool)
-    : new InMemoryAgreementRepository();
+  // (P11-001 hoisted `agreementRepo` to the main repo block above so the
+  // Twilio adapter's lookup-skill family can share it.)
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
