@@ -7,7 +7,7 @@
  * this page is reachable directly when a tech links to it.
  */
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams } from 'react-router';
 import { useAuth } from '@clerk/clerk-react';
 import { ClockInOutButton } from '../../components/jobs/ClockInOutButton';
 import { TimeEntry, timeEntriesApi } from '../../api/time-entries';
