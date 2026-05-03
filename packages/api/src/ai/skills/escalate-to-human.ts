@@ -3,6 +3,7 @@ import { createAuditEvent } from '../../audit/audit';
 import type { AuditRepository } from '../../audit/audit';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { TwilioCallControl } from '../../telephony/twilio-call-control';
+import { t, type Language } from '../i18n/i18n';
 
 export type EscalationReason =
   | 'caller_requested'
@@ -64,6 +65,8 @@ export interface EscalateToHumanInput {
    * completes. Required when `callControl` is set.
    */
   dialActionUrl?: string;
+  /** P11-002: spoken-message language. Defaults to 'en'. */
+  language?: Language;
 }
 
 /**
@@ -149,6 +152,8 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     callSid,
     dialActionUrl,
   } = input;
+  const lang: Language = input.language ?? 'en';
+  const transferringText = t('escalate.transferring', lang);
 
   // Telephony branch with `<Dial>` support.
   // ────────────────────────────────────────
@@ -252,10 +257,13 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
       );
     }
 
-    let message = 'Connecting you with a dispatcher...';
+    let message = transferringText;
     if (reason === 'emergency_dispatch') {
       const desc = emergencyDescription ? ` regarding: ${emergencyDescription}` : '';
-      message = `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
+      message =
+        lang === 'es'
+          ? `Escalamiento de emergencia en curso${desc}. Le voy a conectar con un despachador de inmediato.`
+          : `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
     }
 
     return {
@@ -311,12 +319,15 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   }
 
   // Build the result message
-  let message = 'Connecting you with a dispatcher...';
+  let message = transferringText;
   if (reason === 'emergency_dispatch') {
     const desc = emergencyDescription
       ? ` regarding: ${emergencyDescription}`
       : '';
-    message = `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
+    message =
+      lang === 'es'
+        ? `Escalamiento de emergencia en curso${desc}. Le voy a conectar con un despachador de inmediato.`
+        : `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
   }
 
   const result: EscalationResult = {

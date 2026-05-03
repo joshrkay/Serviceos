@@ -1632,6 +1632,27 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
       USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P11-002: Spanish multilingual support — adds tenant default language,
+  // per-language TTS voice overrides, optional Spanish dispatcher routing,
+  // and per-customer/lead preferred-language columns.
+  '063_create_language_settings': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_language TEXT NOT NULL DEFAULT 'en'
+        CHECK (default_language IN ('en','es')),
+      ADD COLUMN IF NOT EXISTS tts_voice_en TEXT,
+      ADD COLUMN IF NOT EXISTS tts_voice_es TEXT,
+      ADD COLUMN IF NOT EXISTS auto_detect_language BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS spanish_dispatcher_user_ids UUID[];
+
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT
+        CHECK (preferred_language IN ('en','es'));
+
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT
+        CHECK (preferred_language IN ('en','es'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -12,12 +12,15 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { t, type Language } from '../i18n/i18n';
 
 export interface LookupBalanceInput {
   tenantId: string;
   customerId: string;
   timezone?: string;
   sessionId?: string;
+  /** P11-002: spoken-summary language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export type LookupBalanceResult =
@@ -44,9 +47,10 @@ function formatCents(cents: number): string {
   return `$${dollars}`;
 }
 
-function formatDueDate(d: Date | undefined, timezone?: string): string | null {
+function formatDueDate(d: Date | undefined, timezone?: string, language: Language = 'en'): string | null {
   if (!d) return null;
-  return new Intl.DateTimeFormat('en-US', {
+  const locale = language === 'es' ? 'es-US' : 'en-US';
+  return new Intl.DateTimeFormat(locale, {
     month: 'long',
     day: 'numeric',
     timeZone: timezone,
@@ -58,6 +62,7 @@ export async function lookupBalance(
   deps: LookupBalanceDeps,
 ): Promise<LookupBalanceResult> {
   const start = Date.now();
+  const lang: Language = input.language ?? 'en';
   const recordEvent = async (
     payload: Omit<RecordLookupEventInput, 'tenantId' | 'sessionId' | 'customerId' | 'intent' | 'latencyMs'>,
   ): Promise<void> => {
@@ -77,7 +82,7 @@ export async function lookupBalance(
   };
 
   if (!deps.jobRepo.findByCustomer) {
-    const message = "I'm having trouble checking your balance right now.";
+    const message = t('lookup.balance.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -92,7 +97,7 @@ export async function lookupBalance(
       includeArchived: true,
     });
   } catch (err) {
-    const message = "I'm having trouble checking your balance right now.";
+    const message = t('lookup.balance.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -107,7 +112,7 @@ export async function lookupBalance(
   const invoices = invoiceLists.flat().filter((i) => i.amountDueCents > 0);
 
   if (invoices.length === 0) {
-    const message = 'Your account is paid in full — nothing currently owed.';
+    const message = t('lookup.balance.none', lang);
     await recordEvent({ resultStatus: 'none', resultCount: 0, summary: message });
     return {
       status: 'none',
@@ -122,13 +127,24 @@ export async function lookupBalance(
     ? withDue.reduce((oldest, i) => (i.dueDate! < oldest ? i.dueDate! : oldest), withDue[0].dueDate!)
     : undefined;
 
-  const dueText = formatDueDate(oldestDueDate, input.timezone);
-  const summary =
-    invoices.length === 1
-      ? `Your current balance is ${formatCents(balanceCents)}` +
-        (dueText ? `, due ${dueText}.` : '.')
-      : `Your current balance is ${formatCents(balanceCents)} across ${invoices.length} open invoices` +
-        (dueText ? `, with the earliest due ${dueText}.` : '.');
+  const dueText = formatDueDate(oldestDueDate, input.timezone, lang);
+  let summary: string;
+  if (lang === 'es') {
+    // Spanish — interpolated via the i18n catalog. Due-date suffix is
+    // appended inline because the catalog template kept simple.
+    summary = t('lookup.balance.summary', 'es', {
+      amount: formatCents(balanceCents),
+      count: invoices.length,
+    });
+    if (dueText) summary += ` La fecha de vencimiento más antigua es ${dueText}.`;
+  } else {
+    summary =
+      invoices.length === 1
+        ? `Your current balance is ${formatCents(balanceCents)}` +
+          (dueText ? `, due ${dueText}.` : '.')
+        : `Your current balance is ${formatCents(balanceCents)} across ${invoices.length} open invoices` +
+          (dueText ? `, with the earliest due ${dueText}.` : '.');
+  }
 
   await recordEvent({
     resultStatus: 'found',

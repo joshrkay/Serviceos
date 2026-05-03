@@ -23,6 +23,7 @@
  */
 
 import { TtsProvider } from '../tts/tts-provider';
+import { t, type Language } from '../i18n/i18n';
 
 // ---------------------------------------------------------------------------
 // Two-party consent state list
@@ -58,29 +59,33 @@ interface DisclosureTextPair {
 
 function buildDisclosureText(
   callerState: string | null | undefined,
-  businessName: string
+  businessName: string,
+  language: Language = 'en'
 ): DisclosureTextPair {
   const state = callerState?.toUpperCase().trim();
   const requiresTwoPartyConsent = !state || TWO_PARTY_CONSENT_STATES.has(state);
 
   if (requiresTwoPartyConsent) {
     return {
-      spoken:
-        'This call may be recorded for quality and training purposes. ' +
-        'By continuing, you consent to this recording.',
+      spoken: t('disclose.two_party', language),
       written:
-        `${businessName} wishes to inform you that this call may be recorded ` +
-        'for quality assurance and training purposes. By remaining on the line, ' +
-        'you acknowledge and consent to the recording of this call.',
+        language === 'es'
+          ? `${businessName} le informa que esta llamada puede ser grabada con fines de calidad ` +
+            'y entrenamiento. Al permanecer en la línea, usted reconoce y consiente la grabación de esta llamada.'
+          : `${businessName} wishes to inform you that this call may be recorded ` +
+            'for quality assurance and training purposes. By remaining on the line, ' +
+            'you acknowledge and consent to the recording of this call.',
       requiresTwoPartyConsent: true,
     };
   }
 
   return {
-    spoken: 'This call may be recorded for quality and training purposes.',
+    spoken: t('disclose.one_party', language),
     written:
-      `${businessName} wishes to inform you that this call may be recorded ` +
-      'for quality assurance and training purposes.',
+      language === 'es'
+        ? `${businessName} le informa que esta llamada puede ser grabada con fines de calidad y entrenamiento.`
+        : `${businessName} wishes to inform you that this call may be recorded ` +
+          'for quality assurance and training purposes.',
     requiresTwoPartyConsent: false,
   };
 }
@@ -102,6 +107,8 @@ export interface DisclosureInput {
   ttsProvider?: TtsProvider;
   /** Business name used in the written disclosure for audit clarity. */
   businessName: string;
+  /** P11-002: spoken-disclosure language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export interface DisclosureResult {
@@ -137,7 +144,8 @@ export async function discloseRecording(
   }
 
   // ── Telephony: generate state-appropriate disclosure text ─────────────────
-  const disclosure = buildDisclosureText(callerState, businessName);
+  const lang: Language = input.language ?? 'en';
+  const disclosure = buildDisclosureText(callerState, businessName, lang);
 
   let audioBuffer: Buffer | undefined;
 
@@ -146,6 +154,7 @@ export async function discloseRecording(
       const result = await ttsProvider.synthesize({
         text: disclosure.spoken,
         tenantId: input.tenantId,
+        language: lang,
       });
       audioBuffer = result.audio;
     } catch {

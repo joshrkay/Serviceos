@@ -173,6 +173,10 @@ import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
+// P11-002: language detector re-exported so the Twilio adapter (and any
+// future channel adapters) can resolve a session's language from the
+// customer override + tenant default + STT hint.
+export { detectLanguage } from './ai/orchestration/language-detector';
 import {
   PgKnowledgeChunkRepository,
   InMemoryKnowledgeChunkRepository,

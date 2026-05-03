@@ -37,6 +37,13 @@ export interface Customer {
    * back to the originating campaign with a single join.
    */
   originatingLeadId?: string;
+  /**
+   * P11-002: optional preferred language for spoken interactions.
+   * Tier-2 stable-with-extensions field — adding it does not change
+   * any existing method signature. When set, it overrides the
+   * tenant's default_language for this customer's voice sessions.
+   */
+  preferredLanguage?: 'en' | 'es';
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
