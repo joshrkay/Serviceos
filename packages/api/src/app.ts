@@ -32,6 +32,10 @@ import {
   type UserModeService,
 } from './routes/me';
 import { setUserModeLoader } from './middleware/auth';
+import {
+  setSupervisorPresenceLoader,
+  pgSupervisorPresenceLoader,
+} from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createVerticalRouter } from './routes/verticals';
@@ -1298,6 +1302,14 @@ export function createApp() {
       return null;
     }
   });
+
+  // Phase 12 — wire the tenant-wide supervisor-presence loader. The
+  // proposal auto-approve threshold and the emergency-immediate-Dial
+  // helper both consult this. Keep wired in dev only when a Pool is
+  // available; otherwise the in-memory permissive default applies.
+  if (pool) {
+    setSupervisorPresenceLoader(pgSupervisorPresenceLoader(pool));
+  }
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
