@@ -109,6 +109,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['056_create_service_agreements', '72fd99cd703625a935934946bcccb70a89fc29a94893cff6e439273e7ac49a05'],
   ['057_create_leads', '48fa6c5ea5ea2cac7098677433f6728772828da4419fa35eb4b244cba1bbfa78'],
   ['058_leads_phone_normalized', '38240cce920efcd577fdb8f48e86361933173e38c4d5df05d59e55c071cde6a4'],
+  ['059_lead_attribution', 'aceb4349cb3e8bfd076c89fb1df2febd6e868ad136700cd710a5cb2bc359e8bf'],
 ];
 
 function hashMigration(value: string): string {
