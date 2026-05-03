@@ -1427,43 +1427,145 @@ export const MIGRATIONS = {
       ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
   `,
 
-  // P10-001: Customer self-service portal sessions. A single signed token
-  // grants a customer read access to all of their estimates, invoices,
-  // jobs, agreements, and appointments. The plaintext token is returned
-  // ONCE at create time and stored only as `token_hash = sha256(token)`.
-  // Lookup is hash-only (system-level / no tenant context) — RLS still
-  // applies for tenant-scoped reads/writes via `tenant_isolation_portal_sessions`.
-  '060_create_portal_sessions': `
-    CREATE TABLE IF NOT EXISTS portal_sessions (
+  // Phase 2 of the inbound-CSR training-data architecture (RAG corpus). Adds
+  // the four capture surfaces the downstream ingestion workers and quality
+  // dashboards need:
+  //
+  //   1. call_transcript_turns      — per-turn rows so the in-memory FSM
+  //                                   transcript survives a process restart
+  //                                   and the transcript-ingestion-worker
+  //                                   (Phase 4a) has stable input.
+  //   2. proposal_executions        — captures the as-executed payload
+  //                                   alongside the immutable proposals.payload
+  //                                   so the proposal-correction-worker
+  //                                   (Phase 4a) can diff the two and emit a
+  //                                   training chunk. Multiple rows allowed
+  //                                   per proposal (retry, undo + redo).
+  //   3. voice_recordings.outcome   — terminal-state enum stamped by the FSM
+  //                                   at hangup so analytics can correlate
+  //                                   recording rows with what actually
+  //                                   happened on the call.
+  //   4. retrieval_eval_runs        — quality measurement table built in from
+  //                                   day one so we can prove RAG retrieval
+  //                                   helps before flipping the default. Each
+  //                                   row links a query → retrieved chunks →
+  //                                   downstream proposal → downstream outcome.
+  //
+  // Originally merged via PR #233 but silently dropped in the merge that
+  // landed PR #229 onto main. Restored verbatim here; the immutability
+  // snapshot's hash matches PR #233's original block.
+  '060_capture_schema': `
+    CREATE TABLE IF NOT EXISTS call_transcript_turns (
+      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      voice_recording_id UUID NOT NULL REFERENCES voice_recordings(id) ON DELETE CASCADE,
+      turn_index         INTEGER NOT NULL,
+      speaker            TEXT NOT NULL CHECK (speaker IN ('agent', 'caller')),
+      text               TEXT NOT NULL,
+      started_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at       TIMESTAMPTZ,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (turn_index >= 0)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_recording
+      ON call_transcript_turns (voice_recording_id, turn_index);
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant
+      ON call_transcript_turns (tenant_id, created_at DESC);
+    ALTER TABLE call_transcript_turns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_transcript_turns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_transcript_turns ON call_transcript_turns;
+    CREATE POLICY tenant_isolation_call_transcript_turns ON call_transcript_turns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_executions (
+      id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      proposal_id      UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+      executed_payload JSONB NOT NULL,
+      executed_by      TEXT NOT NULL,
+      executed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status           TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'undone')),
+      error_message    TEXT,
+      idempotency_key  TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_proposal
+      ON proposal_executions (proposal_id, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_tenant
+      ON proposal_executions (tenant_id, executed_at DESC);
+    -- Idempotency: same (tenant, proposal, key) collides cleanly. Partial so
+    -- rows without an idempotency_key (legacy or undo paths) coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposal_executions_idempotency
+      ON proposal_executions (tenant_id, proposal_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE proposal_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_executions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_executions ON proposal_executions;
+    CREATE POLICY tenant_isolation_proposal_executions ON proposal_executions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Terminal-state enum on voice_recordings. NULL until the FSM stamps it
+    -- at hangup; backfillable from call_summaries.quality_score + escalation
+    -- audit signals (separate ops job).
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS outcome TEXT
+        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_outcome
+      ON voice_recordings (tenant_id, outcome) WHERE outcome IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS retrieval_eval_runs (
+      id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      ai_run_id              UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      query_text             TEXT NOT NULL,
+      retrieved_chunk_ids    UUID[] NOT NULL DEFAULT '{}',
+      retrieved_scores       REAL[] NOT NULL DEFAULT '{}',
+      downstream_proposal_id UUID REFERENCES proposals(id) ON DELETE SET NULL,
+      downstream_outcome     TEXT,
+      created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_tenant_time
+      ON retrieval_eval_runs (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_proposal
+      ON retrieval_eval_runs (downstream_proposal_id)
+      WHERE downstream_proposal_id IS NOT NULL;
+    ALTER TABLE retrieval_eval_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE retrieval_eval_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_retrieval_eval_runs ON retrieval_eval_runs;
+    CREATE POLICY tenant_isolation_retrieval_eval_runs ON retrieval_eval_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P11-001: voice lookup-skill audit log. Every invocation of a
+  // `lookup_*` voice skill writes one row — high-volume but tiny
+  // payload (no nested data). Tenant-scoped via RLS just like
+  // audit_events; session_id is the voice session that hosted the
+  // lookup, customer_id is nullable because the caller may be
+  // unidentified at lookup time.
+  '061_create_lookup_events': `
+    CREATE TABLE IF NOT EXISTS lookup_events (
       id UUID PRIMARY KEY,
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      customer_id UUID NOT NULL,
-      token_hash TEXT NOT NULL,
-      expires_at TIMESTAMPTZ NOT NULL,
-      revoked_at TIMESTAMPTZ,
-      last_accessed_at TIMESTAMPTZ,
-      created_by TEXT NOT NULL,
+      session_id UUID NOT NULL,
+      customer_id UUID,
+      intent TEXT NOT NULL,
+      result_status TEXT NOT NULL CHECK (result_status IN ('found','none','error')),
+      result_count INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      latency_ms INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_token_hash
-      ON portal_sessions (token_hash);
-    CREATE INDEX IF NOT EXISTS idx_portal_sessions_tenant
-      ON portal_sessions (tenant_id);
-    CREATE INDEX IF NOT EXISTS idx_portal_sessions_customer
-      ON portal_sessions (tenant_id, customer_id);
-    ALTER TABLE portal_sessions ENABLE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
-    -- Tenant-scoped reads/writes (most paths) match the active GUC. The
-    -- system-level token-hash lookup (resolvePortalToken) runs without
-    -- a tenant context — that's literally what it returns — so the
-    -- policy permits the read when the GUC is unset. The lookup is
-    -- still safe because the candidate row is selected by sha256 hash.
-    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
-      USING (
-        current_setting('app.current_tenant_id', true) IS NULL
-        OR current_setting('app.current_tenant_id', true) = ''
-        OR tenant_id::text = current_setting('app.current_tenant_id', true)
-      );
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant ON lookup_events(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_session
+      ON lookup_events(tenant_id, session_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_customer
+      ON lookup_events(tenant_id, customer_id)
+      WHERE customer_id IS NOT NULL;
+    ALTER TABLE lookup_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lookup_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lookup_events ON lookup_events;
+    CREATE POLICY tenant_isolation_lookup_events ON lookup_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
   // Phase 1 of the inbound-AI-CSR RAG corpus. One unified table holds
@@ -1557,6 +1659,49 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_lang
       ON retrieval_eval_runs (tenant_id, detected_language, created_at DESC)
       WHERE detected_language IS NOT NULL;
+  `,
+
+  // P10-001: Customer self-service portal sessions. A single signed token
+  // grants a customer read access to all of their estimates, invoices,
+  // jobs, agreements, and appointments. The plaintext token is returned
+  // ONCE at create time and stored only as `token_hash = sha256(token)`.
+  // Lookup is hash-only (system-level / no tenant context) — RLS still
+  // applies for tenant-scoped reads/writes via `tenant_isolation_portal_sessions`.
+  //
+  // Originally landed as 060_create_portal_sessions; bumped to 064 because
+  // 060_capture_schema and 061_create_lookup_events claimed 060/061 on main
+  // before this branch merged.
+  '064_create_portal_sessions': `
+    CREATE TABLE IF NOT EXISTS portal_sessions (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      last_accessed_at TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_token_hash
+      ON portal_sessions (token_hash);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_tenant
+      ON portal_sessions (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_customer
+      ON portal_sessions (tenant_id, customer_id);
+    ALTER TABLE portal_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
+    -- Tenant-scoped reads/writes (most paths) match the active GUC. The
+    -- system-level token-hash lookup (resolvePortalToken) runs without
+    -- a tenant context — that's literally what it returns — so the
+    -- policy permits the read when the GUC is unset. The lookup is
+    -- still safe because the candidate row is selected by sha256 hash.
+    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
+      USING (
+        current_setting('app.current_tenant_id', true) IS NULL
+        OR current_setting('app.current_tenant_id', true) = ''
+        OR tenant_id::text = current_setting('app.current_tenant_id', true)
+      );
   `,
 };
 
