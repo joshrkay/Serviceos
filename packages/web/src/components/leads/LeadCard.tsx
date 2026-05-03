@@ -1,5 +1,26 @@
 import React from 'react';
 
+/**
+ * Icon glyph per lead source. P12-005 introduces `customer_portal` as a
+ * first-class source — represented with a globe glyph since portal leads
+ * arrive over the web from authenticated customer sessions. Falls back to
+ * a generic dot for unknown sources so the UI never breaks if the backend
+ * ships a new value before the web build catches up.
+ */
+const SOURCE_ICONS: Record<string, string> = {
+  web_form: 'F',
+  phone_call: '☎', // telephone glyph
+  referral: '☆', // star
+  walk_in: '➜', // arrow
+  marketplace: '⌂', // house
+  other: '…', // ellipsis
+  customer_portal: '\u{1F310}', // globe — portal-over-web
+};
+
+function sourceIcon(source: string): string {
+  return SOURCE_ICONS[source] ?? '•'; // bullet fallback
+}
+
 export interface LeadCardData {
   id: string;
   firstName?: string;
@@ -61,7 +82,13 @@ export function LeadCard({ lead, onClick, onDragStart }: LeadCardProps) {
         )}
       </div>
       <div className="flex items-center gap-1.5 flex-wrap text-xs text-slate-500">
-        <span className="bg-slate-100 rounded-full px-2 py-0.5">{lead.source}</span>
+        <span
+          className="bg-slate-100 rounded-full px-2 py-0.5"
+          data-testid={`lead-source-${lead.source}`}
+        >
+          <span aria-hidden="true" className="mr-1">{sourceIcon(lead.source)}</span>
+          {lead.source}
+        </span>
         {lead.sourceDetail && <span className="truncate">{lead.sourceDetail}</span>}
       </div>
       {(lead.primaryPhone || lead.email) && (
