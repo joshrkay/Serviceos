@@ -27,6 +27,9 @@ import { MaintenanceContractsPage } from './components/contracts/MaintenanceCont
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { PortalShell } from './pages/portal/PortalShell';
+import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
+import { EstimateCreate } from './pages/estimates/EstimateCreate';
+import { JobCreate } from './pages/jobs/JobCreate';
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
@@ -52,6 +55,7 @@ export const router = createBrowserRouter([
       { index: true,            Component: HomePage        },
       { path: 'assistant',      Component: AssistantPage   },
       { path: 'jobs',           Component: JobsPage        },
+      { path: 'jobs/new',       Component: JobCreate       },
       { path: 'jobs/:id',       Component: JobsPage        },
       { path: 'schedule',       Component: SchedulePage    },
       { path: 'customers',      Component: CustomersPage   },
@@ -59,7 +63,9 @@ export const router = createBrowserRouter([
       { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'leads',          Component: LeadsPage       },
       { path: 'estimates',      Component: EstimatesPage   },
+      { path: 'estimates/new',  Component: EstimateCreate  },
       { path: 'invoices',       Component: InvoicesPage    },
+      { path: 'invoices/new',   Component: InvoiceCreate   },
       { path: 'contracts',      Component: MaintenanceContractsPage },
       { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'interactions',   Component: InteractionsPage },

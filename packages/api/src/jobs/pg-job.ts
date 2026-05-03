@@ -2,6 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   Job,
+  JobFindByCustomerOptions,
   JobListOptions,
   JobListResult,
   JobRepository,
@@ -119,6 +120,32 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {
     return this.withTenant(tenantId, async (client) => {
       return this.queryListRows(client, tenantId, options);
+    });
+  }
+
+  /**
+   * P11-001: tenant-scoped read of every job belonging to a customer.
+   * Drives the voice lookup-skill family. tenant_id is the FIRST WHERE
+   * predicate (defense-in-depth alongside RLS) and customer_id rides as
+   * a parameterized placeholder. Default ordering matches `findByTenant`
+   * (created_at DESC) so callers see most-recent first.
+   */
+  async findByCustomer(
+    tenantId: string,
+    customerId: string,
+    opts?: JobFindByCustomerOptions,
+  ): Promise<Job[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const params: unknown[] = [tenantId, customerId];
+      let where = 'WHERE tenant_id = $1 AND customer_id = $2';
+      if (!opts?.includeArchived) {
+        where += " AND status <> 'canceled'";
+      }
+      const limit = Math.min(opts?.limit ?? MAX_JOB_LIMIT, MAX_JOB_LIMIT);
+      params.push(limit);
+      const sql = `SELECT * FROM jobs ${where} ORDER BY created_at DESC LIMIT $${params.length}`;
+      const result = await client.query(sql, params);
+      return result.rows.map(mapRow);
     });
   }
 
