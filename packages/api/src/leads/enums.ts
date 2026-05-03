@@ -13,6 +13,10 @@ export const LEAD_SOURCES = [
   'walk_in',
   'marketplace',
   'other',
+  // P12-005 — first-class source for leads originating in the customer
+  // self-serve portal. Previously these were stamped as 'web_form' with
+  // sourceDetail='Customer Portal' as a workaround.
+  'customer_portal',
 ] as const;
 export type LeadSource = (typeof LEAD_SOURCES)[number];
 
