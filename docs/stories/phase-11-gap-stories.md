@@ -85,11 +85,11 @@ cd packages/web && npm test -- --run -t "Lookup|LookupEvent|P11-001"
 
 **Dependencies:** P11-001
 
-**Allowed files:** `packages/api/src/ai/i18n/**, packages/api/src/ai/orchestration/intent-classifier.ts, packages/api/src/ai/orchestration/language-detector.ts, packages/api/src/ai/skills/**, packages/api/src/ai/tts/tts-provider.ts, packages/api/src/voice/transcription-providers.ts, packages/api/src/telephony/twilio-adapter.ts, packages/api/src/db/schema.ts (migration 062 only), packages/api/src/app.ts (wiring only), packages/api/test/ai/i18n/**, packages/api/test/ai/orchestration/**, packages/api/test/ai/skills/**, packages/web/src/pages/settings/LanguageSettings.tsx, packages/web/src/components/settings/__tests__/LanguageSettings.test.tsx, packages/web/src/components/customers/LanguageBadge.tsx, packages/web/src/components/customers/__tests__/LanguageBadge.test.tsx, packages/web/src/api/settings.ts, packages/web/src/pages/customers/CustomerDetail.tsx (add language badge + edit only), packages/web/src/pages/leads/LeadDetail.tsx (add language badge + edit only)`
+**Allowed files:** `packages/api/src/ai/i18n/**, packages/api/src/ai/orchestration/intent-classifier.ts, packages/api/src/ai/orchestration/language-detector.ts, packages/api/src/ai/skills/**, packages/api/src/ai/tts/tts-provider.ts, packages/api/src/voice/transcription-providers.ts, packages/api/src/telephony/twilio-adapter.ts, packages/api/src/db/schema.ts (migration 063 only), packages/api/src/app.ts (wiring only), packages/api/test/ai/i18n/**, packages/api/test/ai/orchestration/**, packages/api/test/ai/skills/**, packages/web/src/pages/settings/LanguageSettings.tsx, packages/web/src/components/settings/__tests__/LanguageSettings.test.tsx, packages/web/src/components/customers/LanguageBadge.tsx, packages/web/src/components/customers/__tests__/LanguageBadge.test.tsx, packages/web/src/api/settings.ts, packages/web/src/pages/customers/CustomerDetail.tsx (add language badge + edit only), packages/web/src/pages/leads/LeadDetail.tsx (add language badge + edit only)`
 
 **Build prompt:** Add Spanish language support across the voice stack and UI metadata.
 
-(1) **Migration `062_create_language_settings`** — additive ALTERs:
+(1) **Migration `063_create_language_settings`** — additive ALTERs:
    - `tenant_settings`: add `default_language TEXT NOT NULL DEFAULT 'en' CHECK (default_language IN ('en','es'))`, `tts_voice_en TEXT`, `tts_voice_es TEXT`, `auto_detect_language BOOLEAN NOT NULL DEFAULT true`, `spanish_dispatcher_user_ids UUID[]` (Postgres array)
    - `customers`: add `preferred_language TEXT CHECK (preferred_language IN ('en','es'))`
    - `leads`: add `preferred_language TEXT CHECK (preferred_language IN ('en','es'))`

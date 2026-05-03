@@ -38,6 +38,10 @@ import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
+import { createJobPhotosRouter } from './routes/job-photos';
+import { JobPhotoService } from './jobs/job-photo-service';
+import { InMemoryJobPhotoRepository } from './jobs/job-photo';
+import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
@@ -163,6 +167,13 @@ import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
+import {
+  InMemoryPortalSessionRepository,
+  PortalSessionRepository,
+} from './portal/portal-session';
+import { PgPortalSessionRepository } from './portal/pg-portal-session';
+import { createPortalRouter } from './routes/portal';
+import { createPublicPortalRouter } from './routes/public-portal';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -172,6 +183,7 @@ import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
+import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 // P11-002: language detector re-exported so the Twilio adapter (and any
 // future channel adapters) can resolve a session's language from the
@@ -327,7 +339,7 @@ class InMemoryWebhookEventRepository {
   }
 }
 
-export function createApp() {
+export function createApp(): express.Express {
   const app = express();
 
   // Stripe webhook needs the raw body for signature verification.
@@ -480,9 +492,23 @@ export function createApp() {
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
+  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
+  // P10-001: portal session repo (single signed token per customer for the
+  // self-service portal). Wired here so both the authed creation route and
+  // the public token-resolver router share one instance.
+  const portalSessionRepo: PortalSessionRepository = pool
+    ? new PgPortalSessionRepository(pool)
+    : new InMemoryPortalSessionRepository();
+  // Agreement-runs are also surfaced on the public portal (read-only).
+  // Hoisted here so the public portal router (mounted before Clerk auth)
+  // can reference it. `agreementRepo` is already declared above (hoisted
+  // for the P11-001 voice lookup-skill family).
+  const agreementRunRepo = pool
+    ? new PgAgreementRunRepository(pool)
+    : new InMemoryAgreementRunRepository();
   // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
   // is wired here so a future webhook handler can pull it from app-level
   // wiring without re-instantiating. The webhooks/routes.ts router still
@@ -640,12 +666,19 @@ export function createApp() {
   // Phase 4a-1 transcript-ingestion-worker only (proposal-correction-worker
   // needs proposalRepo which is declared further down — registered after
   // that). Without AI_PROVIDER_API_KEY the worker stays un-registered.
+  // Phase 4c: shared language detector (offline, microsecond-fast).
+  // Constructed once and threaded into every consumer that wants
+  // language telemetry — currently the transcript-ingestion-worker
+  // (per-call stamp) and the retrieve adapter (per-query log).
+  const languageDetector = new FrancLanguageDetector();
+
   if (embeddingProvider) {
     const transcriptIngestionWorker = createTranscriptIngestionWorker({
       callTranscriptTurnRepo,
       voiceRepo,
       knowledgeChunkRepo,
       embeddings: embeddingProvider,
+      languageDetector,
     });
     workerRegistry.set(
       transcriptIngestionWorker.type,
@@ -783,6 +816,7 @@ export function createApp() {
           embeddings: embeddingProvider,
           knowledgeChunkRepo,
           retrievalEvalRunRepo,
+          languageDetector,
         })
       : undefined;
   // The variable is wired into future `buildSourceContext` call sites
@@ -961,6 +995,27 @@ export function createApp() {
       : undefined,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
+
+  // P10-001: Public, token-gated customer portal. Mounted BEFORE the
+  // global `/api` Clerk auth middleware because the portal token IS
+  // the auth — no Clerk session is involved. Routes resolve the
+  // `:token` URL param, set `req.portal = { tenantId, customerId,
+  // sessionId }`, and downstream queries scope to that tenant id.
+  app.use(
+    '/api/public/portal',
+    createPublicPortalRouter({
+      portalRepo: portalSessionRepo,
+      customerRepo,
+      estimateRepo,
+      invoiceRepo,
+      jobRepo,
+      agreementRepo,
+      appointmentRepo,
+      leadRepo,
+      auditRepo,
+      paymentLinkProvider,
+    }),
+  );
 
   // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
   // Returns a `client_secret` so the customer's browser can confirm the
@@ -1190,6 +1245,15 @@ export function createApp() {
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  // P10-001: portal session creation/revocation. Mounted at
+  // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
+  // because routes/customers.ts is on the freeze list — the body
+  // carries the customerId. URL composition uses request host so
+  // the link points at this same deployment.
+  app.use(
+    '/api/portal-sessions',
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+  );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
@@ -1197,6 +1261,16 @@ export function createApp() {
     '/api/jobs',
     createJobFilesRouter({
       jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/jobs',
+    createJobPhotosRouter({
+      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
+      fileRepo,
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,
@@ -1248,11 +1322,8 @@ export function createApp() {
   // Recurring service contracts auto-generate a job + draft invoice on
   // their cadence. Bypasses the proposals layer because the customer-
   // signing-up step is the approval; subsequent runs execute it.
-  // (P11-001 hoisted `agreementRepo` to the main repo block above so the
-  // Twilio adapter's lookup-skill family can share it.)
-  const agreementRunRepo = pool
-    ? new PgAgreementRunRepository(pool)
-    : new InMemoryAgreementRunRepository();
+  // (`agreementRepo` and `agreementRunRepo` are declared earlier so the
+  // public portal router can reference the same instance.)
   const agreementsJobsService = {
     async createJob(input: {
       tenantId: string;

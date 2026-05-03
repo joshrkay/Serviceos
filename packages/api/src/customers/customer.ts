@@ -44,6 +44,15 @@ export interface Customer {
    * tenant's default_language for this customer's voice sessions.
    */
   preferredLanguage?: 'en' | 'es';
+   * Phase 4c: BCP-47 short code (e.g. 'en', 'es', 'vi') the operator or
+   * caller-ID-resolution layer recorded as this customer's preferred
+   * language. Read-only on the customer record today (Phase 4c writes
+   * only the column + type; the FSM hint that consumes it is Phase 4d
+   * once we have ASR-provider language-bias plumbing). Optional —
+   * unset means "no preference recorded" and the FSM falls back to
+   * detect-from-first-utterance.
+   */
+  preferredLanguage?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

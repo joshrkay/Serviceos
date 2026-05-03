@@ -3,6 +3,10 @@ import type { KnowledgeChunkRepository } from '../training/knowledge-chunks';
 import type { RetrievalEvalRunRepository } from '../training/retrieval-eval-run';
 import { scrubPii } from '../training/scrub';
 import {
+  FrancLanguageDetector,
+  type LanguageDetector,
+} from '../../voice/language-detector';
+import {
   retrieveContext,
   type RetrieveContextResult,
 } from '../skills/retrieve-context';
@@ -35,12 +39,22 @@ export interface CreateRetrieveAdapterOptions {
    * row with the dispatcher outcome to close the eval loop.
    */
   retrievalEvalRunRepo?: RetrievalEvalRunRepository;
+  /**
+   * Phase 4c language detector. Runs on the raw `queryText` before
+   * scrubbing — phone numbers and addresses don't change language
+   * detection meaningfully but customer names sometimes do, so we want
+   * the freshest signal. Default: `FrancLanguageDetector`. Tests can
+   * inject a stub.
+   */
+  languageDetector?: LanguageDetector;
 }
 
 export function createRetrieveAdapter(
   opts: CreateRetrieveAdapterOptions,
 ): RetrieveAdapter {
   const { embeddings, knowledgeChunkRepo, retrievalEvalRunRepo } = opts;
+  const languageDetector =
+    opts.languageDetector ?? new FrancLanguageDetector();
   return async (input) => {
     const result: RetrieveContextResult = await retrieveContext(
       {
@@ -94,12 +108,21 @@ export function createRetrieveAdapter(
       // RetrieveAdapter signature, which Phase 4b can introduce when
       // it has the customer-id context to source them.
       const scrubbedQueryText = scrubPii(input.queryText).scrubbed;
+      // Phase 4c language telemetry. Detect from RAW queryText (PII
+      // patterns don't shift the language signal). 'und' for inputs too
+      // short or undeterminable; the column accepts NULL when undefined,
+      // so we only set the field when detection is meaningful — keeps
+      // the dashboard's "unknown" bucket smaller.
+      const detection = languageDetector.detect(input.queryText);
+      const detectedLanguage =
+        detection.language === 'und' ? undefined : detection.language;
       try {
         await retrievalEvalRunRepo.recordRun({
           tenantId: input.tenantId,
           queryText: scrubbedQueryText,
           retrievedChunkIds,
           retrievedScores,
+          detectedLanguage,
         });
       } catch (err) {
         // eslint-disable-next-line no-console
