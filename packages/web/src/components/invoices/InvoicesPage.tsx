@@ -61,6 +61,15 @@ interface ApiInvoice {
   createdAt?: string;
   customer?: ApiCustomer;
   customerId?: string;
+  originatingLeadId?: string;
+}
+
+interface ApiLead {
+  id: string;
+  source: string;
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
 }
 
 /** Convert ApiLineItem to UI LineItem */
@@ -563,6 +572,33 @@ function MarkPaidSheet({ inv, total, onClose, onPaid }: {
   );
 }
 
+// ─── Origin / Attribution badge ───────────────────────────────────────────
+function formatLeadSource(source: string): string {
+  const labels: Record<string, string> = {
+    web_form: 'Web form',
+    phone_call: 'Phone call',
+    referral: 'Referral',
+    walk_in: 'Walk-in',
+    marketplace: 'Marketplace',
+    other: 'Other',
+  };
+  return labels[source] ?? source;
+}
+
+function OriginAttributionLine({ leadId }: { leadId: string }) {
+  const { data: lead, isLoading } = useDetailQuery<ApiLead>('/api/leads', leadId);
+  if (isLoading || !lead) return null;
+  const parts: string[] = [formatLeadSource(lead.source)];
+  if (lead.utmCampaign) parts.push(`Campaign: ${lead.utmCampaign}`);
+  else if (lead.utmSource) parts.push(`Source: ${lead.utmSource}`);
+  if (lead.utmMedium && !lead.utmCampaign) parts.push(`Medium: ${lead.utmMedium}`);
+  return (
+    <p className="text-xs text-slate-400 mt-1">
+      Originated from <span className="text-slate-600">{parts.join(' · ')}</span>
+    </p>
+  );
+}
+
 // ─── Invoice Detail ───────────────────────────────────────────────────────
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const { data: inv, isLoading, error } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
@@ -620,6 +656,9 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                 <p className={`text-xs mt-1 flex items-center gap-1 ${status === 'Overdue' ? 'text-red-500' : 'text-slate-400'}`}>
                   <Clock size={10} /> Due {inv.dueDate}
                 </p>
+              )}
+              {inv.originatingLeadId && (
+                <OriginAttributionLine leadId={inv.originatingLeadId} />
               )}
             </div>
             <div className="flex items-center gap-2 shrink-0">

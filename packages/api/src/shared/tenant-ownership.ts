@@ -33,6 +33,7 @@ import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository } from '../invoices/invoice';
 import { AppointmentRepository } from '../appointments/appointment';
+import { LeadRepository } from '../leads/lead';
 
 export type OwnedEntityType =
   | 'customer'
@@ -40,7 +41,8 @@ export type OwnedEntityType =
   | 'job'
   | 'estimate'
   | 'invoice'
-  | 'appointment';
+  | 'appointment'
+  | 'lead';
 
 export interface TenantOwnership {
   /**
@@ -62,6 +64,12 @@ export interface TenantOwnershipDeps {
   estimateRepo: EstimateRepository;
   invoiceRepo: InvoiceRepository;
   appointmentRepo: AppointmentRepository;
+  /**
+   * Optional — only required when a route validates an `originatingLeadId`
+   * override (currently jobs.ts). Older callers built before P9 attribution
+   * landed don't need to pass it.
+   */
+  leadRepo?: LeadRepository;
 }
 
 /**
@@ -110,6 +118,14 @@ export function createTenantOwnership(deps: TenantOwnershipDeps): TenantOwnershi
           break;
         case 'appointment':
           found = await deps.appointmentRepo.findById(tenantId, entityId);
+          break;
+        case 'lead':
+          if (!deps.leadRepo) {
+            throw new Error(
+              "TenantOwnership.requireExists('lead', …) requires deps.leadRepo to be wired"
+            );
+          }
+          found = await deps.leadRepo.findById(tenantId, entityId);
           break;
       }
       if (!found) {

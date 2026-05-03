@@ -22,6 +22,7 @@ import { AuditRepository } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { SendService } from '../notifications/send-service';
+import { JobRepository } from '../jobs/job';
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -36,7 +37,8 @@ export function createInvoiceRouter(
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
   paymentRepo?: PaymentRepository,
-  sendService?: SendService
+  sendService?: SendService,
+  jobRepo?: JobRepository,
 ): Router {
   const router = Router();
 
@@ -55,9 +57,20 @@ export function createInvoiceRouter(
         if (parsed.estimateId) {
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
         }
+
+        // Inherit source attribution from the parent job (set on job
+        // create from customer.originatingLeadId). Skipped when jobRepo
+        // wasn't provided — older test wirings can opt out.
+        let originatingLeadId: string | undefined;
+        if (jobRepo) {
+          const job = await jobRepo.findById(req.auth!.tenantId, parsed.jobId);
+          originatingLeadId = job?.originatingLeadId;
+        }
+
         const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
+            originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
           },

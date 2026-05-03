@@ -16,6 +16,8 @@ export interface Job {
   status: JobStatus;
   priority: JobPriority;
   assignedTechnicianId?: string;
+  /** Inherits from `customer.originatingLeadId` at creation; preserves source attribution. */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -28,6 +30,8 @@ export interface CreateJobInput {
   summary: string;
   problemDescription?: string;
   priority?: JobPriority;
+  /** Optional explicit override; routes auto-populate from customer when omitted. */
+  originatingLeadId?: string;
   createdBy: string;
   actorRole?: string;
 }
@@ -106,6 +110,7 @@ export async function createJob(
     problemDescription: input.problemDescription,
     status: 'new',
     priority: input.priority || 'normal',
+    originatingLeadId: input.originatingLeadId,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -121,6 +126,9 @@ export async function createJob(
       eventType: 'job.created',
       entityType: 'job',
       entityId: created.id,
+      metadata: created.originatingLeadId
+        ? { originatingLeadId: created.originatingLeadId }
+        : undefined,
     });
     await auditRepo.create(event);
   }

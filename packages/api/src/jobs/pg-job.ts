@@ -21,6 +21,7 @@ function mapRow(row: Record<string, unknown>): Job {
     status: row.status as Job['status'],
     priority: row.priority as Job['priority'],
     assignedTechnicianId: (row.assigned_technician_id as string) ?? undefined,
+    originatingLeadId: (row.originating_lead_id as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -38,8 +39,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         `INSERT INTO jobs (
           id, tenant_id, customer_id, location_id, job_number, summary,
           problem_description, status, priority, assigned_technician_id,
-          created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          originating_lead_id, created_by, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING *`,
         [
           job.id,
@@ -52,6 +53,7 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
           job.status,
           job.priority,
           job.assignedTechnicianId ?? null,
+          job.originatingLeadId ?? null,
           job.createdBy,
           job.createdAt,
           job.updatedAt,
@@ -166,6 +168,7 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         status: 'status',
         priority: 'priority',
         assignedTechnicianId: 'assigned_technician_id',
+        originatingLeadId: 'originating_lead_id',
         updatedAt: 'updated_at',
       };
 

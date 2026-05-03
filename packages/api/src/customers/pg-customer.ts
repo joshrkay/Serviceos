@@ -26,6 +26,7 @@ function mapRow(row: Record<string, unknown>): Customer {
     communicationNotes: (row.communication_notes as string) ?? undefined,
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
+    originatingLeadId: (row.originating_lead_id as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -43,8 +44,10 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         `INSERT INTO customers (
           id, tenant_id, first_name, last_name, display_name, company_name,
           primary_phone, secondary_phone, email, preferred_channel, sms_consent,
-          communication_notes, is_archived, archived_at, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          communication_notes, is_archived, archived_at, originating_lead_id,
+          created_by, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                  $15, $16, $17, $18)
         RETURNING *`,
         [
           customer.id,
@@ -61,6 +64,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
           customer.communicationNotes ?? null,
           customer.isArchived,
           customer.archivedAt ?? null,
+          customer.originatingLeadId ?? null,
           customer.createdBy,
           customer.createdAt,
           customer.updatedAt,
@@ -168,6 +172,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         communicationNotes: 'communication_notes',
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
+        originatingLeadId: 'originating_lead_id',
         updatedAt: 'updated_at',
       };
 

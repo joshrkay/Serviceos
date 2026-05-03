@@ -36,6 +36,8 @@ export interface Invoice {
   stripePaymentLinkId?: string;
   /** Stripe-hosted checkout URL returned with the payment link. */
   stripePaymentLinkUrl?: string;
+  /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -50,6 +52,8 @@ export interface CreateInvoiceInput {
   discountCents?: number;
   taxRateBps?: number;
   customerMessage?: string;
+  /** Optional override; routes auto-populate from job when omitted. */
+  originatingLeadId?: string;
   createdBy: string;
 }
 
@@ -168,6 +172,7 @@ export async function createInvoice(
     amountPaidCents: 0,
     amountDueCents: totals.totalCents,
     customerMessage: input.customerMessage,
+    originatingLeadId: input.originatingLeadId,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -183,6 +188,9 @@ export async function createInvoice(
       eventType: 'invoice.created',
       entityType: 'invoice',
       entityId: created.id,
+      metadata: created.originatingLeadId
+        ? { originatingLeadId: created.originatingLeadId }
+        : undefined,
     });
     await auditRepo.create(event);
   }

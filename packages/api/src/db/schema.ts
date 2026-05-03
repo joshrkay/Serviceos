@@ -1393,6 +1393,39 @@ export const MIGRATIONS = {
       ON leads (tenant_id, phone_normalized)
       WHERE phone_normalized <> '' AND converted_customer_id IS NULL;
   `,
+
+  // Lead source attribution + originating-lead FK chain.
+  //   - Adds richer marketing attribution to leads (UTM cols + JSONB blob).
+  //   - Adds nullable originating_lead_id FK to customers/jobs/invoices so
+  //     we can answer "which lead/source generated this revenue?" via a
+  //     single join. Estimates and payments deliberately omit the column;
+  //     they reach attribution via estimate.job_id / payment.invoice_id.
+  '059_lead_attribution': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS utm_source   TEXT,
+      ADD COLUMN IF NOT EXISTS utm_medium   TEXT,
+      ADD COLUMN IF NOT EXISTS utm_campaign TEXT,
+      ADD COLUMN IF NOT EXISTS attribution  JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+    CREATE INDEX IF NOT EXISTS idx_leads_utm_campaign
+      ON leads (tenant_id, utm_campaign) WHERE utm_campaign IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_leads_utm_source_medium
+      ON leads (tenant_id, utm_source, utm_medium) WHERE utm_source IS NOT NULL;
+
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS originating_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL;
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS originating_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL;
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS originating_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_customers_originating_lead
+      ON customers (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_originating_lead
+      ON jobs (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_invoices_originating_lead
+      ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

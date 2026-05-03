@@ -54,6 +54,10 @@ export async function createLead(
     email: input.email,
     source: input.source,
     sourceDetail: input.sourceDetail,
+    utmSource: input.utmSource,
+    utmMedium: input.utmMedium,
+    utmCampaign: input.utmCampaign,
+    attribution: input.attribution,
     stage: 'new',
     estimatedValueCents: input.estimatedValueCents,
     notes: input.notes,
@@ -68,6 +72,10 @@ export async function createLead(
   const created = await leadRepo.create(lead);
 
   if (auditRepo) {
+    const metadata: Record<string, unknown> = { source: created.source };
+    if (created.utmSource) metadata.utmSource = created.utmSource;
+    if (created.utmMedium) metadata.utmMedium = created.utmMedium;
+    if (created.utmCampaign) metadata.utmCampaign = created.utmCampaign;
     await auditRepo.create(
       createAuditEvent({
         tenantId: input.tenantId,
@@ -76,7 +84,7 @@ export async function createLead(
         eventType: 'lead.created',
         entityType: 'lead',
         entityId: created.id,
-        metadata: { source: created.source },
+        metadata,
       })
     );
   }
@@ -121,6 +129,10 @@ export async function updateLead(
     ...(input.email !== undefined ? { email: input.email } : {}),
     ...(input.source !== undefined ? { source: input.source } : {}),
     ...(input.sourceDetail !== undefined ? { sourceDetail: input.sourceDetail } : {}),
+    ...(input.utmSource !== undefined ? { utmSource: input.utmSource ?? undefined } : {}),
+    ...(input.utmMedium !== undefined ? { utmMedium: input.utmMedium ?? undefined } : {}),
+    ...(input.utmCampaign !== undefined ? { utmCampaign: input.utmCampaign ?? undefined } : {}),
+    ...(input.attribution !== undefined ? { attribution: input.attribution } : {}),
     ...(input.stage !== undefined ? { stage: input.stage } : {}),
     ...(input.estimatedValueCents !== undefined
       ? { estimatedValueCents: input.estimatedValueCents ?? undefined }
@@ -277,6 +289,9 @@ export async function convertToCustomer(
       communicationNotes: undefined,
       isArchived: false,
       archivedAt: undefined,
+      // Thread source attribution forward — the originating lead id is
+      // how downstream jobs/invoices later resolve it (one join away).
+      originatingLeadId: existing.id,
       createdBy: actorId,
       createdAt: now,
       updatedAt: now,
@@ -309,6 +324,10 @@ export async function convertToCustomer(
         throw new Error('Lead disappeared mid-conversion');
       }
       if (auditRepo) {
+        const attributionMeta: Record<string, unknown> = {};
+        if (existing.utmSource) attributionMeta.utmSource = existing.utmSource;
+        if (existing.utmMedium) attributionMeta.utmMedium = existing.utmMedium;
+        if (existing.utmCampaign) attributionMeta.utmCampaign = existing.utmCampaign;
         await auditRepo.create(
           createAuditEvent({
             tenantId,
@@ -318,7 +337,11 @@ export async function convertToCustomer(
             entityType: 'lead',
             entityId: leadId,
             correlationId,
-            metadata: { customerId: createdCustomer.id, fromStage: existing.stage },
+            metadata: {
+              customerId: createdCustomer.id,
+              fromStage: existing.stage,
+              ...attributionMeta,
+            },
           })
         );
         await auditRepo.create(
@@ -330,7 +353,7 @@ export async function convertToCustomer(
             entityType: 'customer',
             entityId: createdCustomer.id,
             correlationId,
-            metadata: { leadId },
+            metadata: { leadId, ...attributionMeta },
           })
         );
       }
@@ -363,6 +386,10 @@ export async function convertToCustomer(
   }
 
   if (auditRepo) {
+    const attributionMeta: Record<string, unknown> = {};
+    if (existing.utmSource) attributionMeta.utmSource = existing.utmSource;
+    if (existing.utmMedium) attributionMeta.utmMedium = existing.utmMedium;
+    if (existing.utmCampaign) attributionMeta.utmCampaign = existing.utmCampaign;
     await auditRepo.create(
       createAuditEvent({
         tenantId,
@@ -372,7 +399,11 @@ export async function convertToCustomer(
         entityType: 'lead',
         entityId: leadId,
         correlationId,
-        metadata: { customerId: createdCustomer.id, fromStage: existing.stage },
+        metadata: {
+          customerId: createdCustomer.id,
+          fromStage: existing.stage,
+          ...attributionMeta,
+        },
       })
     );
     await auditRepo.create(
@@ -384,7 +415,7 @@ export async function convertToCustomer(
         entityType: 'customer',
         entityId: createdCustomer.id,
         correlationId,
-        metadata: { leadId },
+        metadata: { leadId, ...attributionMeta },
       })
     );
   }
