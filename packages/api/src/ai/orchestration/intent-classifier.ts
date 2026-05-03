@@ -207,18 +207,38 @@ Supported intents (return exactly ONE):
                            "how much do I owe") now have dedicated
                            lookup_* intents below — only fall through to
                            "unknown" when no lookup intent matches.
-- "create_customer"     — user wants to create a NEW customer record in the CRM.
-                           Trigger phrasings include "create/add/new customer".
+- "create_customer"     — user wants to create a NEW customer record in the CRM,
+                           OR an inbound CALLER is signing up as a new customer
+                           themselves ("I'd like to sign up", "I'm a new
+                           customer", "first time calling, please add me").
+                           This is the highest-leak intent on inbound calls —
+                           if the caller is not already in the system and
+                           wants to become a customer, classify as
+                           create_customer with high confidence.
+                           Trigger phrasings include "create/add/new customer",
+                           "sign up", "set up an account", "become a customer",
+                           "first time calling", "add me to your system",
+                           and any natural caller-side phrasing for
+                           establishing a new account.
                            Extract the customer's displayName plus any stated
-                           email or phone. When only the name is given, still
-                           classify as create_customer so the downstream flow
-                           can ask a clarifying question — do NOT fall back
-                           to "unknown" just because email/phone are missing.
+                           email or phone. When only the name is given (or even
+                           no name at all — the caller-id phone is captured
+                           upstream), still classify as create_customer so the
+                           downstream flow can ask a clarifying question — do
+                           NOT fall back to "unknown" just because email/phone
+                           or even displayName are missing.
                            Examples: "Create a new customer named Alex"
                                      "Add customer Acme Corp, email alex@acme.com"
                                      "New customer: Sarah, phone 555-0100"
                                      "Add a customer called Jordan Lee"
                                      "Create customer Maria Gomez at maria@gomez.co"
+                                     "I'd like to sign up as a new customer"
+                                     "I'm a new customer"
+                                     "Can you set up an account for me?"
+                                     "I want to become a customer"
+                                     "First time calling, please add me"
+                                     "Quisiera registrarme como nuevo cliente"
+                                     "Soy un cliente nuevo"
 - "create_job"          — user wants to open a NEW job record (distinct from
                            scheduling an appointment). Extract customerName
                            and jobTitle.
@@ -538,6 +558,44 @@ function unknownResult(
   };
 }
 
+/**
+ * P18-001: deterministic short-circuit for caller-side sign-up
+ * phrasings. The voice-call flow has been losing every inbound
+ * non-customer because the LLM was returning 'unknown' for "I'd like
+ * to sign up as a new customer" — phrases that are unambiguously a
+ * `create_customer` intent. We detect those phrasings up-front with a
+ * cheap regex pass; the LLM is still consulted to extract entities
+ * (displayName / email / phone) but the intent decision is locked in
+ * by the regex so a model regression cannot silently re-introduce the
+ * leak. Returns the canonical phrase set the regex matched so the
+ * caller can override the LLM's intentType when (and only when) the
+ * regex fired.
+ *
+ * Keeps the bar tight: matches are anchored to whole-word phrasings
+ * to avoid false positives (e.g. "I'd like to set up an appointment"
+ * must NOT collapse to create_customer).
+ *
+ * Includes lightweight Spanish phrasings to keep parity with the
+ * P11-002 multilingual path — same intent, same confidence.
+ */
+const CREATE_CUSTOMER_SIGNUP_PATTERNS: ReadonlyArray<RegExp> = [
+  /\bsign(?:ing)?\s*up\b(?!.*\bappointment\b)/i,
+  /\bnew\s+customer\b/i,
+  /\bbecome\s+a\s+customer\b/i,
+  /\bset\s+up\s+(?:an?\s+)?account\b/i,
+  /\bopen\s+(?:an?\s+)?account\b/i,
+  /\bfirst[-\s]time\s+calling\b/i,
+  /\b(?:add|register)\s+me\b/i,
+  /\bregistrarme\b/i,
+  /\bcliente\s+nuevo\b/i,
+  /\bnuevo\s+cliente\b/i,
+];
+
+export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
+  if (!transcript) return false;
+  return CREATE_CUSTOMER_SIGNUP_PATTERNS.some((rx) => rx.test(transcript));
+}
+
 export async function classifyIntent(
   transcript: string,
   context: ClassifyContext,
@@ -567,12 +625,44 @@ export async function classifyIntent(
     : undefined;
 
   const parsed = parseClassifierJson(response.content);
+  // P18-001: deterministic create_customer fallback. When the
+  // transcript carries a clear sign-up phrasing but the LLM returned
+  // 'unknown' (or low confidence), force the intent to create_customer
+  // so the voice agent never silently drops a non-customer caller.
+  // We keep any extracted entities the LLM did manage to pull, and
+  // pin confidence to 0.85 — comfortably above CLASSIFIER_CONFIDENCE_THRESHOLD
+  // and the FSM's TAU_INT (0.75 in the calling-agent transitions).
+  const signupOverride = isCreateCustomerSignupPhrasing(transcript);
   if (!parsed) {
+    if (signupOverride) {
+      const result: IntentClassification = {
+        intentType: 'create_customer',
+        confidence: 0.85,
+        reasoning: 'sign-up phrasing matched deterministic pattern',
+      };
+      if (tokenUsage) result.tokenUsage = tokenUsage;
+      return result;
+    }
     const result = unknownResult('could not parse classifier output', 'parse_failed');
     if (tokenUsage) result.tokenUsage = tokenUsage;
     return result;
   }
   if (tokenUsage) parsed.tokenUsage = tokenUsage;
+  if (
+    signupOverride &&
+    (parsed.intentType === 'unknown' ||
+      parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD ||
+      parsed.intentType !== 'create_customer')
+  ) {
+    const overridden: IntentClassification = {
+      intentType: 'create_customer',
+      confidence: Math.max(0.85, parsed.confidence),
+      reasoning: 'sign-up phrasing matched deterministic pattern',
+      extractedEntities: parsed.extractedEntities,
+    };
+    if (tokenUsage) overridden.tokenUsage = tokenUsage;
+    return overridden;
+  }
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
   // We keep the original intent and confidence in the result so the router
