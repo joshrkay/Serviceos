@@ -1633,17 +1633,7 @@ export const MIGRATIONS = {
       USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // Phase 4c: language detection telemetry for the inbound AI CSR. Adds
-  // detected_language to voice_recordings + retrieval_eval_runs, plus a
-  // per-customer preferred_language hint that the FSM can use to bias
-  // ASR on caller-ID match. All three columns are nullable / no backfill
-  // — pre-Phase-4c rows simply have NULL detected_language and the
-  // dashboards group them as 'unknown'. The BCP-47 short codes ('en',
-  // 'es', 'vi', 'zh', 'tl', etc.) are stored as plain TEXT — a CHECK
-  // constraint here would require migration churn every time a new
-  // language enters the corpus, and the detector library (franc-min)
-  // already returns a normalised code, so application-level validation
-  // is the right layer.
+  // Phase 4c: language detection telemetry for the inbound AI CSR.
   '063_language_detection': `
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS detected_language TEXT;
@@ -1661,12 +1651,7 @@ export const MIGRATIONS = {
       WHERE detected_language IS NOT NULL;
   `,
 
-  // P12-001: per-job photo storage. job_photos rows reference rows in
-  // the existing `files` table (the upload pipeline still creates a
-  // file row + S3 object); the join row carries photo-specific
-  // metadata (category/notes/taken_at/uploader). Deleting a job
-  // cascades photo rows; deleting a photo row leaves the underlying
-  // file/S3 object intact so existing download URLs still resolve.
+  // P12-001: per-job photo storage.
   '064_create_job_photos': `
     CREATE TABLE IF NOT EXISTS job_photos (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1685,6 +1670,26 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_job_photos ON job_photos;
     CREATE POLICY tenant_isolation_job_photos ON job_photos
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P11-002: Spanish multilingual support — tenant default language,
+  // per-language TTS voice overrides, optional Spanish dispatcher routing,
+  // and per-lead preferred-language column.
+  // (customers.preferred_language already added by migration 063 above;
+  // we don't re-add to avoid the CHECK constraint conflict — app-layer
+  // validation enforces 'en'|'es' for the customer column.)
+  '065_create_language_settings': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_language TEXT NOT NULL DEFAULT 'en'
+        CHECK (default_language IN ('en','es')),
+      ADD COLUMN IF NOT EXISTS tts_voice_en TEXT,
+      ADD COLUMN IF NOT EXISTS tts_voice_es TEXT,
+      ADD COLUMN IF NOT EXISTS auto_detect_language BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS spanish_dispatcher_user_ids UUID[];
+
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT
+        CHECK (preferred_language IN ('en','es'));
   `,
 };
 

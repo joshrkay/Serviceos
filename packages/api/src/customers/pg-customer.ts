@@ -174,6 +174,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         originatingLeadId: 'originating_lead_id',
+        preferredLanguage: 'preferred_language',
         updatedAt: 'updated_at',
       };
 

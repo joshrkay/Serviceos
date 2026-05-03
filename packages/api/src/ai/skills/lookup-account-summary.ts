@@ -16,12 +16,15 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { t, type Language } from '../i18n/i18n';
 
 export interface LookupAccountSummaryInput {
   tenantId: string;
   customerId: string;
   timezone?: string;
   sessionId?: string;
+  /** P11-002: spoken-summary language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export interface LookupAccountSummaryDeps {
@@ -58,6 +61,7 @@ export async function lookupAccountSummary(
   deps: LookupAccountSummaryDeps,
 ): Promise<LookupAccountSummaryResult> {
   const start = Date.now();
+  const lang: Language = input.language ?? 'en';
   const recordEvent = async (
     payload: Omit<RecordLookupEventInput, 'tenantId' | 'sessionId' | 'customerId' | 'intent' | 'latencyMs'>,
   ): Promise<void> => {
@@ -85,6 +89,7 @@ export async function lookupAccountSummary(
       {
         tenantId: input.tenantId,
         customerId: input.customerId,
+        language: lang,
         ...(input.timezone ? { timezone: input.timezone } : {}),
       },
       { jobRepo: deps.jobRepo, appointmentRepo: deps.appointmentRepo },
@@ -93,6 +98,7 @@ export async function lookupAccountSummary(
       {
         tenantId: input.tenantId,
         customerId: input.customerId,
+        language: lang,
         ...(input.timezone ? { timezone: input.timezone } : {}),
       },
       { jobRepo: deps.jobRepo, invoiceRepo: deps.invoiceRepo },
@@ -101,6 +107,7 @@ export async function lookupAccountSummary(
       {
         tenantId: input.tenantId,
         customerId: input.customerId,
+        language: lang,
         ...(input.timezone ? { timezone: input.timezone } : {}),
       },
       { agreementRepo: deps.agreementRepo },
@@ -112,7 +119,7 @@ export async function lookupAccountSummary(
     balanceResult.status === 'error' ||
     agreementResult.status === 'error'
   ) {
-    const message = "I'm having trouble pulling up your account summary right now.";
+    const message = t('lookup.account.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',

@@ -9,12 +9,15 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { t, type Language } from '../i18n/i18n';
 
 export interface LookupAgreementsInput {
   tenantId: string;
   customerId: string;
   timezone?: string;
   sessionId?: string;
+  /** P11-002: spoken-summary language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export interface LookupAgreementsItem {
@@ -52,6 +55,7 @@ export async function lookupAgreements(
   deps: LookupAgreementsDeps,
 ): Promise<LookupAgreementsResult> {
   const start = Date.now();
+  const lang: Language = input.language ?? 'en';
   const recordEvent = async (
     payload: Omit<RecordLookupEventInput, 'tenantId' | 'sessionId' | 'customerId' | 'intent' | 'latencyMs'>,
   ): Promise<void> => {
@@ -77,7 +81,7 @@ export async function lookupAgreements(
       status: 'active',
     });
   } catch (err) {
-    const message = "I'm having trouble checking your service plans right now.";
+    const message = t('lookup.agreements.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -87,7 +91,7 @@ export async function lookupAgreements(
   }
 
   if (rows.length === 0) {
-    const message = "You don't have any active service plans on file right now.";
+    const message = t('lookup.agreements.none', lang);
     await recordEvent({ resultStatus: 'none', resultCount: 0, summary: message });
     return { status: 'none', summary: message, data: { agreements: [] } };
   }
