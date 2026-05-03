@@ -20,7 +20,18 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
-import { classifyIntent } from '../ai/orchestration/intent-classifier';
+import { classifyIntent, isLookupIntent } from '../ai/orchestration/intent-classifier';
+import { lookupAppointments } from '../ai/skills/lookup-appointments';
+import { lookupInvoices } from '../ai/skills/lookup-invoices';
+import { lookupBalance } from '../ai/skills/lookup-balance';
+import { lookupJobs } from '../ai/skills/lookup-jobs';
+import { lookupAgreements } from '../ai/skills/lookup-agreements';
+import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
+import type { JobRepository } from '../jobs/job';
+import type { AppointmentRepository } from '../appointments/appointment';
+import type { InvoiceRepository } from '../invoices/invoice';
+import type { AgreementRepository } from '../agreements/agreement';
+import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
 import { identifyCaller } from '../ai/skills/identify-caller';
@@ -99,6 +110,23 @@ export interface TwilioAdapterDeps {
    * dev environments without a recording sink.
    */
   recordingCallbackPath?: string;
+  /**
+   * P11-001: voice lookup-skill family wiring. When set, classifier
+   * results whose intentType starts with `lookup_` are dispatched to
+   * the corresponding skill — the skill's TTS-ready `summary` becomes
+   * the next utterance and the FSM stays in `intent_capture` so the
+   * caller is re-prompted ("Anything else I can help you with?").
+   *
+   * When ANY of the four entity repos are missing, the lookup branch
+   * silently degrades to a generic "let me get someone to help" line
+   * so a partial wiring never crashes a live call.
+   */
+  jobRepo?: JobRepository;
+  appointmentRepo?: AppointmentRepository;
+  invoiceRepo?: InvoiceRepository;
+  agreementRepo?: AgreementRepository;
+  /** P11-001: when wired, every lookup invocation writes a row. */
+  lookupEvents?: LookupEventService;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -748,6 +776,7 @@ export class TwilioGatherAdapter {
       //    reprompt path triggers instead of bubbling 5xx out to Twilio
       //    (which would hang the caller mid-call).
       let classifierEvent: CallingAgentEvent | null = null;
+      let classifiedIntentType: string | undefined;
       try {
         const classification = await classifyIntent(
           opts.speechResult,
@@ -758,6 +787,7 @@ export class TwilioGatherAdapter {
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };
         } else if (classification.confidence >= TAU_INT && classification.intentType !== 'unknown') {
+          classifiedIntentType = classification.intentType;
           classifierEvent = {
             type: 'intent_classified',
             intentType: classification.intentType,
@@ -777,6 +807,32 @@ export class TwilioGatherAdapter {
           sessionId: opts.sessionId,
         });
         classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      // P11-001: lookup intents bypass the proposal-draft path. Route
+      // to the corresponding skill, push its `summary` into the
+      // tts_play stream, and DO NOT dispatch `intent_classified` —
+      // the FSM stays in `intent_capture` so the next <Gather> turn
+      // re-enters with "Anything else I can help you with?".
+      if (
+        classifiedIntentType &&
+        isLookupIntent(classifiedIntentType as Parameters<typeof isLookupIntent>[0])
+      ) {
+        const lookupSummary = await this.runLookupSkill(
+          session,
+          classifiedIntentType,
+          opts.tenantId,
+        );
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: lookupSummary, source: 'lookup_skill' },
+        });
+        sideEffectsAll.push({
+          type: 'tts_play',
+          payload: { text: 'Anything else I can help you with?' },
+        });
+        await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
@@ -909,6 +965,124 @@ export class TwilioGatherAdapter {
       return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
     }
     return path;
+  }
+
+  /**
+   * P11-001: dispatch a `lookup_*` intent to the corresponding read-only
+   * skill and return its TTS-ready `summary`. Always returns a string —
+   * a missing wiring or error degrades to a generic "let me get someone"
+   * line so the live call never bubbles a 5xx.
+   *
+   * Caller must guarantee `intentType` starts with `lookup_` (the gate
+   * lives at the call site so the routing branch can stay tight).
+   */
+  private async runLookupSkill(
+    session: VoiceSession,
+    intentType: string,
+    tenantId: string,
+  ): Promise<string> {
+    const customerId = session.customerId;
+    if (!customerId) {
+      // Lookups are customer-scoped. An anonymous caller doesn't have
+      // an account to read from; we never want to leak a different
+      // tenant's summary. Degrade gracefully.
+      return "I can't pull up your account without identifying you first. Let me get a person to help.";
+    }
+
+    const sharedInput = {
+      tenantId,
+      customerId,
+      sessionId: session.id,
+    };
+
+    try {
+      switch (intentType) {
+        case 'lookup_appointments': {
+          if (!this.deps.jobRepo || !this.deps.appointmentRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupAppointments(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            appointmentRepo: this.deps.appointmentRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          return result.summary;
+        }
+        case 'lookup_invoices': {
+          if (!this.deps.jobRepo || !this.deps.invoiceRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupInvoices(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            invoiceRepo: this.deps.invoiceRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          return result.summary;
+        }
+        case 'lookup_balance': {
+          if (!this.deps.jobRepo || !this.deps.invoiceRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupBalance(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            invoiceRepo: this.deps.invoiceRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          return result.summary;
+        }
+        case 'lookup_jobs': {
+          if (!this.deps.jobRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupJobs(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          return result.summary;
+        }
+        case 'lookup_agreements': {
+          if (!this.deps.agreementRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupAgreements(sharedInput, {
+            agreementRepo: this.deps.agreementRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          return result.summary;
+        }
+        case 'lookup_account_summary': {
+          if (
+            !this.deps.jobRepo ||
+            !this.deps.appointmentRepo ||
+            !this.deps.invoiceRepo ||
+            !this.deps.agreementRepo
+          ) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupAccountSummary(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            appointmentRepo: this.deps.appointmentRepo,
+            invoiceRepo: this.deps.invoiceRepo,
+            agreementRepo: this.deps.agreementRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          return result.summary;
+        }
+        default:
+          return this.lookupNotWiredFallback();
+      }
+    } catch (err) {
+      logger.warn('runLookupSkill failed', {
+        sessionId: session.id,
+        intentType,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return this.lookupNotWiredFallback();
+    }
+  }
+
+  private lookupNotWiredFallback(): string {
+    return "I'm having trouble pulling that up right now. Let me get a person to help.";
   }
 
   /**

@@ -65,6 +65,9 @@ import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
+import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
+import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
+import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
@@ -429,6 +432,16 @@ export function createApp() {
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
   const auditRepo          = pool ? new PgAuditRepository(pool)          : new InMemoryAuditRepository();
+  // P11-001: voice lookup-skill audit log. The skills write one row
+  // per invocation through `LookupEventService` and the Twilio adapter
+  // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
+  const lookupEventRepo    = pool ? new PgLookupEventRepository(pool)    : new InMemoryLookupEventRepository();
+  const lookupEventService = new LookupEventService(lookupEventRepo);
+  // P11-001: hoisted so the Twilio lookup-skill family can read agreements.
+  // The richer agreement-service wiring (agreementRunRepo, generators,
+  // etc.) still happens further below — this declaration is purely so
+  // the read-only lookup branch has access.
+  const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
@@ -845,6 +858,15 @@ export function createApp() {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     leadRepo,
+    // P11-001: lookup-skill family wiring. Without these the adapter
+    // falls back to a "let me get a person to help" line on lookup_*
+    // intents — the call doesn't crash, but the read-only path is
+    // unavailable. agreementRepo lives a few hundred lines down.
+    jobRepo,
+    appointmentRepo,
+    invoiceRepo,
+    agreementRepo,
+    lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
@@ -1043,9 +1065,8 @@ export function createApp() {
   // Recurring service contracts auto-generate a job + draft invoice on
   // their cadence. Bypasses the proposals layer because the customer-
   // signing-up step is the approval; subsequent runs execute it.
-  const agreementRepo = pool
-    ? new PgAgreementRepository(pool)
-    : new InMemoryAgreementRepository();
+  // (P11-001 hoisted `agreementRepo` to the main repo block above so the
+  // Twilio adapter's lookup-skill family can share it.)
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
