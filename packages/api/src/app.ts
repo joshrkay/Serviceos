@@ -769,13 +769,21 @@ export function createApp() {
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
 
   // Public lead intake — embedded marketing-page form posts here.
-  // Tenant identified by UUID in the URL; rate-limited + honeypot in
-  // the route. Mounted before auth middleware (no JWT required).
+  // Tenant identified by UUID in the URL. The outer `/public` limiter
+  // (30/min/IP, mounted above) catches abuse; the intake-specific
+  // limiter below adds a tighter per-IP bucket because intake writes
+  // to the database (vs the read-only token-gated public flows).
   // Uses an in-memory dev tenant repo when running without a pool so
   // local dev / tests still work.
   const intakeTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
   app.use(
     '/public/intake',
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 10,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
     createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo)
   );
 
@@ -979,7 +987,7 @@ export function createApp() {
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
   app.use(
     '/api/jobs',
     createJobFilesRouter({
@@ -997,7 +1005,7 @@ export function createApp() {
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).
   const revenueBySourceRepo = pool

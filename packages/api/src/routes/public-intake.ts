@@ -10,12 +10,11 @@
  *   - Honeypot field `_company_url`: bots fill all fields, humans don't
  *     touch the visually-hidden one. Requests with the field set return
  *     200 OK but never write a row, so the bot thinks it succeeded.
- *   - Rate limit: in-memory token bucket, 10 req/min/IP and 50 req/hr/IP
- *     per tenant. Process-local — fine for one node behind the LB; if we
- *     scale out we move this to a shared store (Redis), but that's out
- *     of scope for the lead-to-cash work.
- *   - Server stamps `source = 'web_form'` and `createdBy = 'public_intake'`
- *     so the API caller can never spoof either.
+ *   - Rate limit: applied at the mount point in app.ts via
+ *     express-rate-limit (the existing `/public` limiter wraps this
+ *     route too; the mount adds a tighter intake-specific bucket).
+ *   - Server stamps `source` and `createdBy` so the API caller cannot
+ *     forge attribution or impersonate an internal user.
  */
 import { Request, Router, Response } from 'express';
 import { z } from 'zod';
@@ -24,7 +23,11 @@ import { LeadRepository } from '../leads/lead';
 import { createLead } from '../leads/lead-service';
 import { AuditRepository } from '../audit/audit';
 import { TenantRepository } from '../auth/clerk';
-import { attributionSchema } from '../leads/enums';
+import { attributionSchema, LeadSource } from '../leads/enums';
+
+const PUBLIC_INTAKE_SOURCE: LeadSource = 'web_form';
+const PUBLIC_INTAKE_ACTOR_ID = 'public_intake';
+const PUBLIC_INTAKE_ACTOR_ROLE = 'public';
 
 const intakeSchema = z.object({
   // Name + at least one contact channel are required by the lead model.
@@ -53,42 +56,6 @@ const intakeSchema = z.object({
 
 const TENANT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-interface RateLimitBucket {
-  minute: { resetAt: number; count: number };
-  hour: { resetAt: number; count: number };
-}
-
-const RATE_PER_MINUTE = 10;
-const RATE_PER_HOUR = 50;
-
-class IpRateLimiter {
-  private buckets = new Map<string, RateLimitBucket>();
-
-  /** Returns true if the request is allowed; false if rate-limited. */
-  consume(key: string, now: number = Date.now()): boolean {
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      bucket = {
-        minute: { resetAt: now + 60_000, count: 0 },
-        hour: { resetAt: now + 3_600_000, count: 0 },
-      };
-      this.buckets.set(key, bucket);
-    }
-    if (now >= bucket.minute.resetAt) {
-      bucket.minute = { resetAt: now + 60_000, count: 0 };
-    }
-    if (now >= bucket.hour.resetAt) {
-      bucket.hour = { resetAt: now + 3_600_000, count: 0 };
-    }
-    if (bucket.minute.count >= RATE_PER_MINUTE || bucket.hour.count >= RATE_PER_HOUR) {
-      return false;
-    }
-    bucket.minute.count++;
-    bucket.hour.count++;
-    return true;
-  }
-}
-
 function buildSourceDetail(p: z.infer<typeof intakeSchema>): string | undefined {
   const parts: string[] = [];
   if (p.serviceType) parts.push(`Service: ${p.serviceType}`);
@@ -102,19 +69,10 @@ function buildSourceDetail(p: z.infer<typeof intakeSchema>): string | undefined 
   return joined.length > 500 ? joined.slice(0, 497) + '...' : joined;
 }
 
-function extractIp(req: Request): string {
-  const forwarded = req.get('x-forwarded-for');
-  if (forwarded) {
-    return forwarded.split(',')[0]?.trim() ?? 'unknown';
-  }
-  return req.ip ?? 'unknown';
-}
-
 export function createPublicIntakeRouter(
   leadRepo: LeadRepository,
   tenantRepo: TenantRepository,
   auditRepo: AuditRepository,
-  rateLimiter: IpRateLimiter = new IpRateLimiter(),
 ): Router {
   const router = Router();
 
@@ -123,15 +81,6 @@ export function createPublicIntakeRouter(
       const tenantId = req.params.tenantId;
       if (!TENANT_UUID.test(tenantId)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
-        return;
-      }
-
-      const ip = extractIp(req);
-      if (!rateLimiter.consume(`${tenantId}:${ip}`)) {
-        res.status(429).json({
-          error: 'RATE_LIMITED',
-          message: 'Too many requests, please try again later',
-        });
         return;
       }
 
@@ -146,7 +95,7 @@ export function createPublicIntakeRouter(
       const parsed = intakeSchema.parse(req.body ?? {});
 
       // Honeypot tripped — return 200 so bots think it worked, but never
-      // write the row. We intentionally do NOT log this as an error.
+      // write the row.
       if (parsed._company_url && parsed._company_url.trim().length > 0) {
         res.status(200).json({ ok: true });
         return;
@@ -160,14 +109,14 @@ export function createPublicIntakeRouter(
           companyName: undefined,
           primaryPhone: parsed.primaryPhone,
           email: parsed.email,
-          source: 'web_form',
+          source: PUBLIC_INTAKE_SOURCE,
           sourceDetail: buildSourceDetail(parsed),
           utmSource: parsed.utmSource,
           utmMedium: parsed.utmMedium,
           utmCampaign: parsed.utmCampaign,
           attribution: parsed.attribution,
-          createdBy: 'public_intake',
-          actorRole: 'public',
+          createdBy: PUBLIC_INTAKE_ACTOR_ID,
+          actorRole: PUBLIC_INTAKE_ACTOR_ROLE,
         },
         leadRepo,
         auditRepo
@@ -183,5 +132,3 @@ export function createPublicIntakeRouter(
 
   return router;
 }
-
-export { IpRateLimiter };

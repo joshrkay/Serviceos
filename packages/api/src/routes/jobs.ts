@@ -4,7 +4,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { createJobSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
-import { CustomerRepository } from '../customers/customer';
+import { Customer } from '../customers/customer';
 import {
   createJob,
   getJob,
@@ -30,7 +30,6 @@ export function createJobRouter(
   ownership: TenantOwnership,
   queue: Queue,
   feedbackDispatcher: FeedbackDispatcher,
-  customerRepo: CustomerRepository,
 ): Router {
   const router = Router();
   // Dispatcher is intentionally passed through router wiring so this API
@@ -45,16 +44,21 @@ export function createJobRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createJobSchema.parse(req.body);
-        await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
+        // requireExistsAndLoad returns the row so we don't refetch it
+        // below to read originatingLeadId for attribution propagation.
+        const customer = (await ownership.requireExistsAndLoad(
+          req.auth!.tenantId,
+          'customer',
+          parsed.customerId
+        )) as Customer | undefined;
         await ownership.requireExists(req.auth!.tenantId, 'location', parsed.locationId);
 
-        // Resolve source attribution: explicit body wins; otherwise inherit
-        // from the customer (set on lead → customer conversion).
+        // Resolve source attribution: explicit body override wins;
+        // otherwise inherit from the customer.
         let originatingLeadId = parsed.originatingLeadId;
         if (originatingLeadId) {
           await ownership.requireExists(req.auth!.tenantId, 'lead', originatingLeadId);
         } else {
-          const customer = await customerRepo.findById(req.auth!.tenantId, parsed.customerId);
           originatingLeadId = customer?.originatingLeadId;
         }
 

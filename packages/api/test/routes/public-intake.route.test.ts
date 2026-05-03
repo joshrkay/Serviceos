@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import express, { Express } from 'express';
 import request from 'supertest';
-import { createPublicIntakeRouter, IpRateLimiter } from '../../src/routes/public-intake';
+import rateLimit from 'express-rate-limit';
+import { createPublicIntakeRouter } from '../../src/routes/public-intake';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { DevInMemoryTenantRepository } from '../../src/auth/dev-auth-bypass';
@@ -24,11 +25,20 @@ describe('public-intake route', () => {
     });
     tenantId = tenant.id;
 
-    // Fresh limiter per test so the suite isn't order-dependent.
-    const limiter = new IpRateLimiter();
+    // Mirror the production app.ts wiring: same intake-specific
+    // rate-limit ceiling (10/min/IP) layered on the route.
     app = express();
     app.use(express.json());
-    app.use('/public/intake', createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo, limiter));
+    app.use(
+      '/public/intake',
+      rateLimit({
+        windowMs: 60_000,
+        max: 10,
+        standardHeaders: false,
+        legacyHeaders: false,
+      }),
+      createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo),
+    );
   });
 
   it('creates a lead with source=web_form and captured UTM', async () => {

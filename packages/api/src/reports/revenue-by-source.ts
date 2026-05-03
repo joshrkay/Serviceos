@@ -70,10 +70,29 @@ export class PgRevenueBySourceRepository
       }
       const dateWhere = dateClauses.length > 0 ? `AND ${dateClauses.join(' AND ')}` : '';
 
-      // LEFT JOIN to leads so invoices without an originating_lead_id are
-      // still surfaced under an 'unknown' bucket. COALESCE the source so
-      // GROUP BY collapses null rows together.
+      // Pre-aggregate at the invoice level so the lead/customer JOIN can't
+      // multiply rows. Without this CTE, joining payments would inflate
+      // invoiced_cents (one row per payment) and joining customers (where
+      // a converted-from-lead customer exists) would inflate it again.
+      // Using SUM(DISTINCT total_cents) was the previous attempt at a
+      // workaround but it sums distinct VALUES — two $100 invoices count
+      // once. The CTE makes the math correct without DISTINCT tricks.
       const sql = `
+        WITH invoice_totals AS (
+          SELECT
+            i.id,
+            i.originating_lead_id,
+            i.total_cents,
+            COALESCE(
+              SUM(p.amount_cents) FILTER (WHERE p.status = 'completed'),
+              0
+            ) AS paid_cents
+          FROM invoices i
+          LEFT JOIN payments p
+            ON p.invoice_id = i.id ${dateWhere}
+          WHERE i.tenant_id = $1
+          GROUP BY i.id
+        )
         SELECT
           COALESCE(l.source, 'unknown') AS source,
           l.utm_source AS utm_source,
@@ -81,16 +100,14 @@ export class PgRevenueBySourceRepository
           l.utm_campaign AS utm_campaign,
           COUNT(DISTINCT l.id)::int AS lead_count,
           COUNT(DISTINCT c.id)::int AS customer_count,
-          COALESCE(SUM(DISTINCT i.total_cents), 0)::bigint AS invoiced_cents,
-          COALESCE(SUM(p.amount_cents) FILTER (WHERE p.status = 'completed'), 0)::bigint AS paid_cents
-        FROM invoices i
-        LEFT JOIN leads l ON l.id = i.originating_lead_id
+          COALESCE(SUM(it.total_cents), 0)::bigint AS invoiced_cents,
+          COALESCE(SUM(it.paid_cents), 0)::bigint AS paid_cents
+        FROM invoice_totals it
+        LEFT JOIN leads l ON l.id = it.originating_lead_id
         LEFT JOIN customers c ON c.originating_lead_id = l.id
-        LEFT JOIN payments p ON p.invoice_id = i.id ${dateWhere}
-        WHERE i.tenant_id = $1
         GROUP BY COALESCE(l.source, 'unknown'), l.utm_source, l.utm_medium, l.utm_campaign
-        HAVING COALESCE(SUM(p.amount_cents) FILTER (WHERE p.status = 'completed'), 0) > 0
-            OR COALESCE(SUM(DISTINCT i.total_cents), 0) > 0
+        HAVING COALESCE(SUM(it.paid_cents), 0) > 0
+            OR COALESCE(SUM(it.total_cents), 0) > 0
         ORDER BY paid_cents DESC, invoiced_cents DESC
       `;
 

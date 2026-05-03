@@ -13,7 +13,6 @@ import { createAppointmentRouter } from '../../src/routes/appointments';
 import { createJobRouter } from '../../src/routes/jobs';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
 import { InMemoryJobRepository } from '../../src/jobs/job';
-import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -159,9 +158,8 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     const jobRepo = new InMemoryJobRepository();
     const timelineRepo = new InMemoryJobTimelineRepository();
     const auditRepo = new InMemoryAuditRepository();
-    const customerRepo = new InMemoryCustomerRepository();
     const ownership = permissiveTenantOwnership();
-    app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher(), customerRepo));
+    app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
     app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, options));
     return app;
   }

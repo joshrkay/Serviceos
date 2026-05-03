@@ -3,6 +3,7 @@ import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/bil
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
+import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -188,9 +189,7 @@ export async function createInvoice(
       eventType: 'invoice.created',
       entityType: 'invoice',
       entityId: created.id,
-      metadata: created.originatingLeadId
-        ? { originatingLeadId: created.originatingLeadId }
-        : undefined,
+      metadata: buildOriginationMetadata(created.originatingLeadId),
     });
     await auditRepo.create(event);
   }

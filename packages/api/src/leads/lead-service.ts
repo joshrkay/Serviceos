@@ -15,6 +15,7 @@ import {
 import { ValidationError } from '../shared/errors';
 import { CreateLeadInput, Lead, LeadRepository, UpdateLeadInput } from './lead';
 import { LeadStage } from './enums';
+import { buildAttributionMetadata } from './attribution-metadata';
 
 /**
  * Subset of `PgLeadRepository` capabilities the service needs for the
@@ -72,10 +73,6 @@ export async function createLead(
   const created = await leadRepo.create(lead);
 
   if (auditRepo) {
-    const metadata: Record<string, unknown> = { source: created.source };
-    if (created.utmSource) metadata.utmSource = created.utmSource;
-    if (created.utmMedium) metadata.utmMedium = created.utmMedium;
-    if (created.utmCampaign) metadata.utmCampaign = created.utmCampaign;
     await auditRepo.create(
       createAuditEvent({
         tenantId: input.tenantId,
@@ -84,7 +81,7 @@ export async function createLead(
         eventType: 'lead.created',
         entityType: 'lead',
         entityId: created.id,
-        metadata,
+        metadata: { source: created.source, ...buildAttributionMetadata(created) },
       })
     );
   }
@@ -324,10 +321,7 @@ export async function convertToCustomer(
         throw new Error('Lead disappeared mid-conversion');
       }
       if (auditRepo) {
-        const attributionMeta: Record<string, unknown> = {};
-        if (existing.utmSource) attributionMeta.utmSource = existing.utmSource;
-        if (existing.utmMedium) attributionMeta.utmMedium = existing.utmMedium;
-        if (existing.utmCampaign) attributionMeta.utmCampaign = existing.utmCampaign;
+        const attributionMeta = buildAttributionMetadata(existing);
         await auditRepo.create(
           createAuditEvent({
             tenantId,
@@ -386,10 +380,7 @@ export async function convertToCustomer(
   }
 
   if (auditRepo) {
-    const attributionMeta: Record<string, unknown> = {};
-    if (existing.utmSource) attributionMeta.utmSource = existing.utmSource;
-    if (existing.utmMedium) attributionMeta.utmMedium = existing.utmMedium;
-    if (existing.utmCampaign) attributionMeta.utmCampaign = existing.utmCampaign;
+    const attributionMeta = buildAttributionMetadata(existing);
     await auditRepo.create(
       createAuditEvent({
         tenantId,

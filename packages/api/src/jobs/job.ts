@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
 export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
@@ -126,9 +127,7 @@ export async function createJob(
       eventType: 'job.created',
       entityType: 'job',
       entityId: created.id,
-      metadata: created.originatingLeadId
-        ? { originatingLeadId: created.originatingLeadId }
-        : undefined,
+      metadata: buildOriginationMetadata(created.originatingLeadId),
     });
     await auditRepo.create(event);
   }
