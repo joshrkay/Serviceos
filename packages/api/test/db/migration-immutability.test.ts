@@ -111,6 +111,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['058_leads_phone_normalized', '38240cce920efcd577fdb8f48e86361933173e38c4d5df05d59e55c071cde6a4'],
   ['059_lead_attribution', 'aceb4349cb3e8bfd076c89fb1df2febd6e868ad136700cd710a5cb2bc359e8bf'],
   ['060_capture_schema', 'a38ff66341f8e24c68432c2a6a442d3181e1ee8e630d72357c9298b0815ae690'],
+  ['061_create_knowledge_chunks', '047b45413e633e21dacadbb400c6830b556377829b761107d24da6bf080bd13d'],
 ];
 
 function hashMigration(value: string): string {
