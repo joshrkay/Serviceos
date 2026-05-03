@@ -4,8 +4,9 @@ import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
   Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
-  AlertCircle, Volume2,
+  AlertCircle, Volume2, PhoneCall,
 } from 'lucide-react';
+import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
 import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
@@ -683,6 +684,7 @@ export function AssistantPage() {
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
   const [voiceMode, setVoiceMode]     = useState(false);
+  const [liveSessionOpen, setLiveSessionOpen] = useState(false);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -843,9 +845,22 @@ export function AssistantPage() {
             </div>
           </div>
 
-          <button className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
-            <ChevronDown size={12} /> Context
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setLiveSessionOpen(v => !v)}
+              title="Live voice session"
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                liveSessionOpen
+                  ? 'border-blue-300 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <PhoneCall size={12} /> Live session
+            </button>
+            <button className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
+              <ChevronDown size={12} /> Context
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1018,6 +1033,13 @@ export function AssistantPage() {
               <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-500">↵ Enter</kbd> to send &nbsp;·&nbsp; <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-500">⇧ Shift+Enter</kbd> for new line
             </p>
           </div>
+        </div>
+      )}
+
+      {/* ── Live voice session panel (P8-009) ───────────────── */}
+      {liveSessionOpen && (
+        <div className="fixed bottom-24 right-6 z-50 w-96">
+          <VoiceSessionPanel />
         </div>
       )}
 

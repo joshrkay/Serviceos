@@ -92,7 +92,7 @@ cd /home/user/Serviceos && \
 ## P11-002 — Multilingual (Spanish)
 
 **Wave:** 11B (after 11A merges)
-**Migration number reserved:** 062_create_language_settings
+**Migration number reserved:** 063_create_language_settings
 **Forbidden files:**
 - `packages/api/src/db/pg-base.ts` (frozen)
 - `packages/shared/src/enums.ts`
@@ -115,7 +115,7 @@ cd /home/user/Serviceos && \
 - `packages/api/src/ai/tts/tts-provider.ts` (modify — add `language` to `TtsSynthesizeInput`, wire OpenAI + ElevenLabs)
 - `packages/api/src/voice/transcription-providers.ts` (modify — add language to Deepgram constructor + openSession; thread Whisper hint)
 - `packages/api/src/telephony/twilio-adapter.ts` (modify — thread language; emit Spanish TwiML when applicable)
-- `packages/api/src/db/schema.ts` (modify — `062_create_language_settings` ONLY)
+- `packages/api/src/db/schema.ts` (modify — `063_create_language_settings` ONLY)
 - `packages/api/src/app.ts` (modify — wire detector + pass tenant settings to adapter)
 - `packages/api/src/customers/customer.ts` (modify — add optional `preferredLanguage?: 'en'|'es'` to Customer interface — DO NOT change method signatures)
 - `packages/api/src/customers/pg-customer.ts` (modify — read/write the new column)
