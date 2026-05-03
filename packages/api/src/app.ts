@@ -21,6 +21,7 @@ import { createLocationRouter } from './routes/locations';
 import { createJobRouter } from './routes/jobs';
 import { createAppointmentRouter } from './routes/appointments';
 import { createEstimateRouter } from './routes/estimates';
+import { createEstimateConversionRouter } from './routes/estimate-conversion';
 import { createInvoiceRouter } from './routes/invoices';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
@@ -154,6 +155,7 @@ import { PublicInvoiceService } from './invoices/public-invoice-service';
 import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
+import { createInvoiceFromCompletedJobWorker } from './workers/invoice-from-completed-job';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
@@ -381,19 +383,11 @@ export function createApp() {
   const webhookSettingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
-  // Constructed early so the Stripe webhook handler can record payments.
-  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
-  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
-  app.use(
-    '/webhooks',
-    createWebhookRouter(config, {
-      tenantRepo,
-      settingsRepo: webhookSettingsRepo,
-      invoiceRepo: webhookInvoiceRepo,
-      paymentRepo: webhookPaymentRepo,
-      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-    })
-  );
+  // Webhook router is mounted later (after audit + send service are
+  // constructed) so the Stripe handler can emit invoice.paid audit
+  // events and dispatch payment-receipt notifications. Mounting after
+  // express.raw() / express.json() body parsers is fine — the raw
+  // body parser is path-scoped to /webhooks/stripe.
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
@@ -526,6 +520,21 @@ export function createApp() {
         publicBaseUrl,
       })
     : undefined;
+
+  // Webhook router — mounted now that audit + send service are
+  // available. See note above about ordering.
+  app.use(
+    '/webhooks',
+    createWebhookRouter(config, {
+      tenantRepo,
+      settingsRepo: webhookSettingsRepo,
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      sendService,
+      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    })
+  );
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -719,6 +728,18 @@ export function createApp() {
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  const invoiceFromCompletedJobWorker = createInvoiceFromCompletedJobWorker({
+    jobRepo,
+    estimateRepo,
+    invoiceRepo,
+    settingsRepo,
+    auditRepo,
+  });
+  workerRegistry.set(
+    invoiceFromCompletedJobWorker.type,
+    invoiceFromCompletedJobWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
@@ -793,6 +814,7 @@ export function createApp() {
     jobRepo,
     customerRepo,
     settingsRepo,
+    auditRepo,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -1005,6 +1027,10 @@ export function createApp() {
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
+  app.use(
+    '/api/estimates',
+    createEstimateConversionRouter(estimateRepo, jobRepo, invoiceRepo, settingsRepo, auditRepo),
+  );
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).

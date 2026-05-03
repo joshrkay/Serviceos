@@ -12,10 +12,13 @@ const VIEW_TOKEN = 'a'.repeat(32);
 
 function makeInvoice(overrides: Partial<Invoice> = {}): Invoice {
   const lineItems = [{
+    id: 'li-1',
     description: 'Service call',
     quantity: 1,
     unitPriceCents: 12500,
     totalCents: 12500,
+    sortOrder: 0,
+    taxable: false,
   }];
   const totals = calculateDocumentTotals(lineItems, 0, 0);
   return {
@@ -101,7 +104,7 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
 
   it('forwards invoice amountDueCents to Stripe', async () => {
     const seenBodies: string[] = [];
-    const fetcher: StripeFetch = (async (_url, init) => {
+    const fetcher: StripeFetch = (async (_url: string, init: { body: string }) => {
       seenBodies.push(init.body);
       return {
         ok: true,

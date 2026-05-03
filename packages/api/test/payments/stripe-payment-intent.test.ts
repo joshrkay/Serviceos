@@ -6,7 +6,7 @@ import {
 
 function makeFetcher(
   response: { ok: boolean; status: number; bodyText?: string; bodyJson?: unknown },
-  spy?: vi.MockedFunction<StripeFetch>,
+  spy?: ReturnType<typeof vi.fn<Parameters<StripeFetch>, ReturnType<StripeFetch>>>,
 ): StripeFetch {
   const fn: StripeFetch = async (_url, _init) => ({
     ok: response.ok,
@@ -41,7 +41,7 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
   });
 
   it('sends amount, currency, automatic_payment_methods, and metadata in body', async () => {
-    const spy = vi.fn() as vi.MockedFunction<StripeFetch>;
+    const spy = vi.fn() as ReturnType<typeof vi.fn<Parameters<StripeFetch>, ReturnType<StripeFetch>>>;
     spy.mockResolvedValue({
       ok: true,
       status: 200,
@@ -61,7 +61,7 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
   });
 
   it('uses an idempotency key derived from invoiceId+amount', async () => {
-    const spy = vi.fn() as vi.MockedFunction<StripeFetch>;
+    const spy = vi.fn() as ReturnType<typeof vi.fn<Parameters<StripeFetch>, ReturnType<StripeFetch>>>;
     spy.mockResolvedValue({
       ok: true,
       status: 200,

@@ -1,6 +1,8 @@
 import { recordPayment, RecordPaymentInput, PaymentRepository, Payment } from '../invoices/payment';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { AuditRepository } from '../audit/audit';
+import type { SendService } from '../notifications/send-service';
+import { notifyPaymentRecorded } from './payment-notifications';
 
 export interface ReconciliationResult {
   success: boolean;
@@ -13,7 +15,13 @@ export async function reconcilePayment(
   input: RecordPaymentInput,
   invoiceRepo: InvoiceRepository,
   paymentRepo: PaymentRepository,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  /**
+   * Optional send service. When wired, a customer-facing payment
+   * receipt is dispatched after the financial side effect is durable.
+   * Receipt failures never roll back the recorded payment.
+   */
+  sendService?: SendService,
 ): Promise<ReconciliationResult> {
   // Validate invoice exists
   const invoice = await invoiceRepo.findById(input.tenantId, input.invoiceId);
@@ -31,43 +39,14 @@ export async function reconcilePayment(
 
   try {
     const { payment, invoice: updatedInvoice } = await recordPayment(input, invoiceRepo, paymentRepo);
-
-    // Emit audit event if repo provided
-    if (auditRepo) {
-      const event = createAuditEvent({
-        tenantId: input.tenantId,
-        actorId: input.processedBy,
-        actorRole: 'system',
-        eventType: 'payment.recorded',
-        entityType: 'invoice',
-        entityId: input.invoiceId,
-        metadata: {
-          paymentId: payment.id,
-          amountCents: payment.amountCents,
-          method: payment.method,
-          newInvoiceStatus: updatedInvoice.status,
-        },
-      });
-      await auditRepo.create(event);
-
-      if (updatedInvoice.status !== invoice.status) {
-        const statusEvent = createAuditEvent({
-          tenantId: input.tenantId,
-          actorId: input.processedBy,
-          actorRole: 'system',
-          eventType: 'invoice.status_changed',
-          entityType: 'invoice',
-          entityId: input.invoiceId,
-          metadata: {
-            oldStatus: invoice.status,
-            newStatus: updatedInvoice.status,
-            paymentId: payment.id,
-          },
-        });
-        await auditRepo.create(statusEvent);
-      }
-    }
-
+    await notifyPaymentRecorded({
+      tenantId: input.tenantId,
+      payment,
+      invoiceBefore: invoice,
+      invoiceAfter: updatedInvoice,
+      actorId: input.processedBy,
+      deps: { auditRepo, sendService },
+    });
     return { success: true, payment, invoice: updatedInvoice };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';

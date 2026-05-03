@@ -205,7 +205,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
     ]);
     expect(result.proposal.explanation ?? '').toContain('Suggested alternative slot');
     // Finder was called with the conflicted slot's duration.
-    const findCall = finder.find.mock.calls[0][0];
+    const findCall = (finder.find.mock.calls[0] as unknown as [{ durationMs: number; searchFrom: Date; technicianId: string }])[0];
     expect(findCall.durationMs).toBe(60 * 60 * 1000);
     expect(findCall.searchFrom.toISOString()).toBe('2026-04-21T11:00:00.000Z');
     expect(findCall.technicianId).toBe(technicianId);
@@ -280,7 +280,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       message: 'Schedule a follow-up at 11am',
     });
 
-    const call = finder.find.mock.calls[0][0];
+    const call = (finder.find.mock.calls[0] as unknown as [{ technicianId?: string }])[0];
     expect(call.technicianId).toBeUndefined();
   });
 
@@ -305,7 +305,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       message: 'Schedule a follow-up at 11am',
     });
 
-    const call = finder.find.mock.calls[0][0];
+    const call = (finder.find.mock.calls[0] as unknown as [{ technicianId?: string }])[0];
     expect(call.technicianId).toBeUndefined();
   });
 
@@ -334,7 +334,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       message: 'Schedule a follow-up at 11am',
     });
 
-    const call = finder.find.mock.calls[0][0];
+    const call = (finder.find.mock.calls[0] as unknown as [{ technicianId?: string }])[0];
     expect(call.technicianId).toBe(technicianId);
   });
 

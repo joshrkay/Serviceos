@@ -12,9 +12,9 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
       await client.query(
         `INSERT INTO payments (
           id, tenant_id, invoice_id, amount_cents, status,
-          payment_method, reference_number, notes,
+          payment_method, reference_number, notes, refunds_payment_id,
           paid_at, created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           payment.id,
           payment.tenantId,
@@ -24,6 +24,7 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
           payment.method,
           payment.providerReference ?? null,
           payment.note ?? null,
+          payment.refundsPaymentId ?? null,
           payment.receivedAt,
           payment.processedBy,
           payment.createdAt,
@@ -120,6 +121,7 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
       status: row.status as PaymentStatus,
       providerReference: row.reference_number ?? undefined,
       note: row.notes ?? undefined,
+      refundsPaymentId: row.refunds_payment_id ?? undefined,
       receivedAt: new Date(row.paid_at),
       processedBy: row.created_by,
       createdAt: new Date(row.created_at),

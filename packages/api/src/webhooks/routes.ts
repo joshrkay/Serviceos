@@ -7,6 +7,9 @@ import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { ValidationError } from '../shared/errors';
+import { AuditRepository } from '../audit/audit';
+import { notifyPaymentRecorded } from '../payments/payment-notifications';
+import type { SendService } from '../notifications/send-service';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -19,6 +22,10 @@ export interface WebhookRouterDeps {
   invoiceRepo?: InvoiceRepository;
   paymentRepo?: PaymentRepository;
   stripeWebhookSecret?: string;
+  /** Optional. When wired, invoice.paid + payment.recorded audit events
+   *  are emitted and a customer-facing receipt is dispatched. */
+  auditRepo?: AuditRepository;
+  sendService?: SendService;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -250,8 +257,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           return res.status(500).json({ error: 'Payment processing not configured' });
         }
 
+        const invoiceBefore = await deps.invoiceRepo.findById(tenantId, invoiceId);
         try {
-          await recordPayment(
+          const recorded = await recordPayment(
             {
               tenantId,
               invoiceId,
@@ -264,6 +272,16 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentRepo,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
+          if (invoiceBefore) {
+            await notifyPaymentRecorded({
+              tenantId,
+              payment: recorded.payment,
+              invoiceBefore,
+              invoiceAfter: recorded.invoice,
+              actorId: 'stripe_webhook',
+              deps: { auditRepo: deps.auditRepo, sendService: deps.sendService },
+            });
+          }
         } catch (payErr) {
           if (payErr instanceof ValidationError) {
             if (payErr.message.includes('exceeds amount due')) {
@@ -272,7 +290,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               if (!invoice || invoice.amountDueCents <= 0) {
                 logger.info('Invoice already fully paid (overpayment scenario)', { tenantId, invoiceId });
               } else {
-                await recordPayment(
+                const recorded = await recordPayment(
                   {
                     tenantId,
                     invoiceId,
@@ -286,6 +304,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
+                });
+                await notifyPaymentRecorded({
+                  tenantId,
+                  payment: recorded.payment,
+                  invoiceBefore: invoice,
+                  invoiceAfter: recorded.invoice,
+                  actorId: 'stripe_webhook',
+                  deps: { auditRepo: deps.auditRepo, sendService: deps.sendService },
                 });
               }
             } else if (payErr.message.includes('status')) {

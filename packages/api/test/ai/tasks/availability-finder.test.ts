@@ -46,7 +46,7 @@ function buildDeps(opts: StubOpts = {}): {
   assignmentRepo: AssignmentRepository;
 } {
   const appointments = opts.appointments ?? [];
-  const assignments = opts.assignments ?? new Map();
+  const assignments = opts.assignments ?? new Map<string, AppointmentAssignment[]>();
 
   const appointmentRepo: AppointmentRepository = {
     create: vi.fn(),

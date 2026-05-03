@@ -1426,6 +1426,19 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_originating_lead
       ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
   `,
+
+  // Refunds: model a refund as a NEW payment row with negative
+  // amount_cents that points back to the original via
+  // refunds_payment_id. The invoice balance math (amount_paid_cents =
+  // SUM of payment.amount_cents) automatically flips status back to
+  // partially_paid / open without a parallel refunds table.
+  '060_payment_refunds': `
+    ALTER TABLE payments
+      ADD COLUMN IF NOT EXISTS refunds_payment_id UUID REFERENCES payments(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_payments_refunds_original
+      ON payments (tenant_id, refunds_payment_id)
+      WHERE refunds_payment_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

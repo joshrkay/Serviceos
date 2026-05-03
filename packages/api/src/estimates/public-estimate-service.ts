@@ -2,6 +2,7 @@ import { Estimate, EstimateRepository } from './estimate';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 
 /**
@@ -69,6 +70,9 @@ export interface PublicEstimateServiceDeps {
   jobRepo: JobRepository;
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
+  /** Optional. Provides estimate.accepted / estimate.rejected events
+   *  on the public approval flow so the audit chain doesn't gap. */
+  auditRepo?: AuditRepository;
 }
 
 const TERMINAL_STATUSES = new Set(['accepted', 'rejected', 'expired']);
@@ -131,6 +135,31 @@ export class PublicEstimateService {
     if (!updated) {
       throw new NotFoundError('Estimate', estimate.id);
     }
+    if (this.deps.auditRepo) {
+      await this.deps.auditRepo
+        .create(
+          createAuditEvent({
+            tenantId: estimate.tenantId,
+            // The customer is the actor here — they hit the public approval
+            // page. Use the captured name + IP so the audit row is non-
+            // repudiable. actorId stays as the public marker; metadata
+            // carries the real identity.
+            actorId: 'public_customer',
+            actorRole: 'customer',
+            eventType: 'estimate.accepted',
+            entityType: 'estimate',
+            entityId: estimate.id,
+            metadata: {
+              acceptedByName: trimmed,
+              acceptedByIp: input.ip,
+              jobId: estimate.jobId,
+            },
+          })
+        )
+        .catch(() => {
+          // Audit failure must not roll back the customer's acceptance.
+        });
+    }
     return this.toView(updated);
   }
 
@@ -162,6 +191,24 @@ export class PublicEstimateService {
     );
     if (!updated) {
       throw new NotFoundError('Estimate', estimate.id);
+    }
+    if (this.deps.auditRepo) {
+      await this.deps.auditRepo
+        .create(
+          createAuditEvent({
+            tenantId: estimate.tenantId,
+            actorId: 'public_customer',
+            actorRole: 'customer',
+            eventType: 'estimate.rejected',
+            entityType: 'estimate',
+            entityId: estimate.id,
+            metadata: {
+              reason: reason ?? null,
+              jobId: estimate.jobId,
+            },
+          })
+        )
+        .catch(() => {});
     }
     return this.toView(updated);
   }

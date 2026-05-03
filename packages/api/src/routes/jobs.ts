@@ -214,6 +214,13 @@ export function createJobRouter(
         );
 
         if (status === 'completed') {
+          // Draft an invoice from the latest accepted estimate for the
+          // job (worker is idempotent — re-enqueues won't dupe).
+          await queue.send(
+            'invoice_from_completed_job',
+            { tenantId: req.auth!.tenantId, jobId: req.params.id },
+            `${req.auth!.tenantId}:${req.params.id}:invoice_from_completed_job`,
+          );
           await queue.send(
             'feedback_send',
             { tenantId: req.auth!.tenantId, jobId: req.params.id },

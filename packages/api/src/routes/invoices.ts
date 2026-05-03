@@ -18,9 +18,10 @@ import {
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
-import { AuditRepository } from '../audit/audit';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
-import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { PaymentRepository, refundPayment } from '../invoices/payment';
+import { reconcilePayment } from '../payments/invoice-payment-reconciler';
 import { SendService } from '../notifications/send-service';
 import { Job } from '../jobs/job';
 
@@ -29,6 +30,12 @@ const nestedPaymentSchema = z.object({
   method: z.enum(['cash', 'check', 'credit_card', 'bank_transfer', 'other']),
   providerReference: z.string().optional(),
   note: z.string().optional(),
+});
+
+const refundSchema = z.object({
+  paymentId: z.string().uuid(),
+  amountCents: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(500),
 });
 
 export function createInvoiceRouter(
@@ -245,7 +252,7 @@ export function createInvoiceRouter(
           return;
         }
         const parsed = nestedPaymentSchema.parse(req.body);
-        const result = await recordPayment(
+        const result = await reconcilePayment(
           {
             ...parsed,
             tenantId: req.auth!.tenantId,
@@ -253,9 +260,70 @@ export function createInvoiceRouter(
             processedBy: req.auth!.userId,
           },
           invoiceRepo,
-          paymentRepo
+          paymentRepo,
+          auditRepo,
+          sendService,
         );
-        res.status(201).json(result);
+        if (!result.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: result.error });
+          return;
+        }
+        res.status(201).json({ payment: result.payment, invoice: result.invoice });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
+    '/:id/refund',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!paymentRepo) {
+          res.status(501).json({
+            error: 'NOT_IMPLEMENTED',
+            message: 'Refunds are not configured on this router',
+          });
+          return;
+        }
+        const parsed = refundSchema.parse(req.body);
+        await ownership.requireExists(req.auth!.tenantId, 'invoice', req.params.id);
+
+        const result = await refundPayment(
+          {
+            tenantId: req.auth!.tenantId,
+            paymentId: parsed.paymentId,
+            amountCents: parsed.amountCents,
+            reason: parsed.reason,
+            processedBy: req.auth!.userId,
+          },
+          invoiceRepo,
+          paymentRepo,
+        );
+
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId: req.auth!.tenantId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role,
+            eventType: 'payment.refunded',
+            entityType: 'invoice',
+            entityId: req.params.id,
+            metadata: {
+              originalPaymentId: parsed.paymentId,
+              refundPaymentId: result.refund.id,
+              amountCents: parsed.amountCents,
+              reason: parsed.reason,
+              newInvoiceStatus: result.invoice.status,
+            },
+          })
+        );
+
+        res.status(201).json({ refund: result.refund, invoice: result.invoice });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

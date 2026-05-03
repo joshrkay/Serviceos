@@ -9,11 +9,19 @@ export interface Payment {
   id: string;
   tenantId: string;
   invoiceId: string;
+  /**
+   * Positive for incoming payments, NEGATIVE for refunds. The invoice
+   * balance math (amount_paid_cents = sum of payments) treats a refund
+   * as a negative payment so we don't need a parallel `refunds` table
+   * or a separate column on the invoice.
+   */
   amountCents: number;
   method: PaymentMethod;
   status: PaymentStatus;
   providerReference?: string;
   note?: string;
+  /** Set on refund payments — points back to the original payment that's being refunded. */
+  refundsPaymentId?: string;
   receivedAt: Date;
   processedBy: string;
   createdAt: Date;
@@ -115,6 +123,117 @@ export async function getPaymentsByInvoice(
   repository: PaymentRepository
 ): Promise<Payment[]> {
   return repository.findByInvoice(tenantId, invoiceId);
+}
+
+export interface RefundPaymentInput {
+  tenantId: string;
+  /** ID of the original (positive) payment being refunded. */
+  paymentId: string;
+  /** Refund amount in positive cents — the function negates it for storage. */
+  amountCents: number;
+  /** Free-form reason; required so refunds always have an audit trail. */
+  reason: string;
+  processedBy: string;
+}
+
+/**
+ * Refund all or part of a previously-recorded payment. Stores the
+ * refund as a NEW payment row with negative `amountCents` and
+ * `refundsPaymentId` pointing at the original. The invoice balance
+ * is recomputed from `amount_paid_cents -= refund` so the invoice
+ * status flips back to `partially_paid` (or `open` on a full refund)
+ * automatically.
+ *
+ * Constraints:
+ *   - The refund cannot exceed the net amount currently paid on the
+ *     invoice (sum of completed payments minus prior refunds).
+ *   - Original payment must be `completed`.
+ */
+export async function refundPayment(
+  input: RefundPaymentInput,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository
+): Promise<{ refund: Payment; invoice: Invoice }> {
+  if (!input.tenantId) throw new ValidationError('tenantId is required');
+  if (!input.paymentId) throw new ValidationError('paymentId is required');
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
+    throw new ValidationError('Refund amountCents must be a positive integer');
+  }
+  if (!input.reason || input.reason.trim().length === 0) {
+    throw new ValidationError('Refund reason is required');
+  }
+  if (!input.processedBy) throw new ValidationError('processedBy is required');
+
+  const original = await paymentRepo.findById(input.tenantId, input.paymentId);
+  if (!original) throw new ValidationError('Payment not found');
+  if (original.status !== 'completed') {
+    throw new ValidationError(`Cannot refund payment with status '${original.status}'`);
+  }
+  if (original.amountCents <= 0) {
+    throw new ValidationError('Cannot refund a refund');
+  }
+
+  const invoice = await invoiceRepo.findById(input.tenantId, original.invoiceId);
+  if (!invoice) throw new ValidationError('Invoice not found');
+
+  if (input.amountCents > invoice.amountPaidCents) {
+    throw new ValidationError('Refund amount exceeds amount paid on invoice');
+  }
+
+  const refund: Payment = {
+    id: uuidv4(),
+    tenantId: input.tenantId,
+    invoiceId: original.invoiceId,
+    amountCents: -input.amountCents,
+    method: original.method,
+    status: 'completed',
+    providerReference: original.providerReference,
+    note: input.reason.trim(),
+    refundsPaymentId: original.id,
+    receivedAt: new Date(),
+    processedBy: input.processedBy,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  await paymentRepo.create(refund);
+
+  // Mark the original as refunded once cumulative refunds equal it.
+  // Stored separately on the original row so the UI can show "Refunded"
+  // without scanning every related payment.
+  const allPayments = await paymentRepo.findByInvoice(input.tenantId, original.invoiceId);
+  const totalRefundedAgainstOriginal = allPayments
+    .filter((p) => p.refundsPaymentId === original.id)
+    .reduce((sum, p) => sum + Math.abs(p.amountCents), 0);
+  if (totalRefundedAgainstOriginal >= original.amountCents) {
+    await paymentRepo.update(input.tenantId, original.id, {
+      status: 'refunded',
+      updatedAt: new Date(),
+    });
+  }
+
+  // Recompute invoice balance and status. amount_paid_cents shrinks;
+  // amount_due grows back. Status reverts: paid → partially_paid; or
+  // partially_paid → open if every payment was undone.
+  const newAmountPaid = invoice.amountPaidCents - input.amountCents;
+  const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
+  let newStatus = invoice.status;
+  if (newAmountPaid <= 0 && invoice.status !== 'canceled' && invoice.status !== 'void') {
+    newStatus = 'open';
+  } else if (newAmountDue > 0 && invoice.status === 'paid') {
+    newStatus = 'partially_paid';
+  }
+
+  const updatedInvoice = await invoiceRepo.update(input.tenantId, invoice.id, {
+    amountPaidCents: newAmountPaid,
+    amountDueCents: newAmountDue,
+    status: newStatus,
+    updatedAt: new Date(),
+  });
+
+  if (!updatedInvoice) throw new Error('Failed to update invoice after refund');
+
+  return { refund, invoice: updatedInvoice };
 }
 
 export class InMemoryPaymentRepository implements PaymentRepository {

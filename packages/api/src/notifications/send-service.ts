@@ -16,7 +16,10 @@ import {
   renderEstimateSms,
   renderInvoiceEmail,
   renderInvoiceSms,
+  renderPaymentReceiptEmail,
+  renderPaymentReceiptSms,
 } from './templates';
+import type { Payment } from '../invoices/payment';
 
 export type SendChannel = 'sms' | 'email' | 'both';
 
@@ -37,6 +40,18 @@ export interface SendInvoiceInput {
   recipientPhone?: string;
   recipientEmail?: string;
   customMessage?: string;
+}
+
+export interface SendPaymentReceiptInput {
+  tenantId: string;
+  payment: Payment;
+  channel?: SendChannel;
+}
+
+export interface SendPaymentReceiptResult {
+  channelsSent: SendResult['channelsSent'];
+  /** Channels we attempted but failed (recorded as failed dispatch rows). */
+  errors: string[];
 }
 
 export interface SendResult {
@@ -329,6 +344,91 @@ export class SendService {
     };
   }
 
+  /**
+   * Send a customer-facing payment receipt after a payment is recorded.
+   *
+   * Best-effort: errors on a single channel become failed dispatch rows
+   * but never throw — payment receipt failures must NOT block the
+   * payment-recorded path that calls this. Returns a summary so the
+   * caller can log without re-fetching dispatch rows.
+   */
+  async sendPaymentReceipt(
+    input: SendPaymentReceiptInput
+  ): Promise<SendPaymentReceiptResult> {
+    const invoice = await this.deps.invoiceRepo.findById(
+      input.tenantId,
+      input.payment.invoiceId
+    );
+    if (!invoice) {
+      return { channelsSent: [], errors: [`Invoice ${input.payment.invoiceId} not found`] };
+    }
+    const job = await this.deps.jobRepo.findById(input.tenantId, invoice.jobId);
+    if (!job) {
+      return { channelsSent: [], errors: [`Job ${invoice.jobId} not found`] };
+    }
+    const customer = await this.deps.customerRepo.findById(input.tenantId, job.customerId);
+    if (!customer) {
+      return { channelsSent: [], errors: [`Customer ${job.customerId} not found`] };
+    }
+
+    const businessName = await this.resolveBusinessName(input.tenantId);
+    const invoiceUrl = invoice.viewToken
+      ? this.buildViewUrl('pay', invoice.viewToken)
+      : undefined;
+    const channels = resolveChannels({
+      channel: input.channel ?? 'both',
+      customer,
+    });
+
+    const ctx = {
+      customerName: customer.displayName,
+      invoiceNumber: invoice.invoiceNumber,
+      amountPaidCents: input.payment.amountCents,
+      amountDueCents: invoice.amountDueCents,
+      invoiceTotalCents: invoice.totals.totalCents,
+      paymentMethodLabel: paymentMethodLabel(input.payment.method),
+      paidAtIso: input.payment.receivedAt.toISOString(),
+      businessName,
+      invoiceUrl,
+    };
+
+    const sendStartedAt = Date.now();
+    const results = await Promise.allSettled(
+      channels.map((target) =>
+        this.dispatchOne({
+          tenantId: input.tenantId,
+          entityType: 'invoice',
+          entityId: invoice.id,
+          target,
+          idempotencyKey: `receipt:${input.payment.id}:${target.channel}:${Math.floor(sendStartedAt / 60_000)}`,
+          render: () =>
+            target.channel === 'sms'
+              ? { to: target.recipient, ...renderPaymentReceiptSms(ctx) }
+              : {
+                  to: target.recipient,
+                  ...renderPaymentReceiptEmail(ctx),
+                },
+        })
+      )
+    );
+
+    const sent: SendResult['channelsSent'] = [];
+    const errors: string[] = [];
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        sent.push(r.value);
+      } else {
+        const target = channels[i];
+        errors.push(
+          `${target.channel} to ${target.recipient}: ${
+            r.reason instanceof Error ? r.reason.message : 'unknown error'
+          }`
+        );
+      }
+    });
+    return { channelsSent: sent, errors };
+  }
+
   private async resolveBusinessName(tenantId: string): Promise<string> {
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     return settings?.businessName ?? 'Your service team';
@@ -510,3 +610,15 @@ function generateViewToken(): string {
 const ESTIMATE_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 /** 60 days for invoice payment links — covers Net-30 plus dunning. */
 const INVOICE_TOKEN_TTL_MS = 60 * 24 * 60 * 60 * 1000;
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: 'Cash',
+  check: 'Check',
+  credit_card: 'Credit card',
+  bank_transfer: 'Bank transfer',
+  other: 'Other',
+};
+
+function paymentMethodLabel(method: string): string {
+  return PAYMENT_METHOD_LABELS[method] ?? 'Payment';
+}
