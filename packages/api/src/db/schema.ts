@@ -1426,6 +1426,32 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_originating_lead
       ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
   `,
+
+  // P12-001: per-job photo storage. job_photos rows reference rows in
+  // the existing `files` table (the upload pipeline still creates a
+  // file row + S3 object); the join row carries photo-specific
+  // metadata (category/notes/taken_at/uploader). Deleting a job
+  // cascades photo rows; deleting a photo row leaves the underlying
+  // file/S3 object intact so existing download URLs still resolve.
+  '064_create_job_photos': `
+    CREATE TABLE IF NOT EXISTS job_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      uploaded_by_user_id TEXT NOT NULL,
+      file_id UUID NOT NULL REFERENCES files(id),
+      category TEXT NOT NULL CHECK (category IN ('before','after','problem','completion','other')),
+      notes TEXT,
+      taken_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_photos_tenant_job ON job_photos(tenant_id, job_id);
+    ALTER TABLE job_photos ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_photos FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_photos ON job_photos;
+    CREATE POLICY tenant_isolation_job_photos ON job_photos
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
