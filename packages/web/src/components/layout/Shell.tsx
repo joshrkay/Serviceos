@@ -1,36 +1,104 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
+  Wrench,
 } from 'lucide-react';
 import { useUser, useClerk } from '@clerk/clerk-react';
-import { Toaster } from 'sonner';
+import { Toaster, toast } from 'sonner';
 import { VoiceBar } from '../shared/VoiceBar';
 import { CameraCapture, CameraButton } from '../shared/CameraCapture';
 import { ErrorBoundary } from './ErrorBoundary';
+import { useMe, type Mode } from '../../hooks/useMe';
 
-const NAV = [
-  { to: '/',              label: 'Home',        icon: Home          },
-  { to: '/assistant',     label: 'Assistant',   icon: MessageSquare },
-  { to: '/jobs',          label: 'Jobs',        icon: Briefcase     },
-  { to: '/schedule',      label: 'Schedule',    icon: Calendar      },
-  { to: '/customers',     label: 'Customers',   icon: Users         },
-  { to: '/leads',         label: 'Leads',       icon: TrendingUp    },
-  { to: '/estimates',     label: 'Estimates',   icon: FileText      },
-  { to: '/invoices',      label: 'Invoices',    icon: Receipt       },
-  { to: '/interactions',  label: 'Interactions',icon: Layers        },
-  { to: '/settings',      label: 'Settings',    icon: Settings      },
-];
+interface NavItem {
+  to: string;
+  label: string;
+  icon: typeof Home;
+}
 
-const BOTTOM_NAV = [
-  { to: '/',           label: 'Home',      icon: Home          },
-  { to: '/assistant',  label: 'AI',        icon: MessageSquare },
-  { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
-  { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
-  { to: '/customers',  label: 'Customers', icon: Users         },
-  { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
-];
+/**
+ * P12-002 — mode-aware navigation.
+ *
+ * "Reuse existing routes where they roughly fit" (per the dispatch
+ * decision): the labels reflect the mode-specific framing while the
+ * underlying routes remain the existing ones (e.g. `/assistant` is
+ * "Sessions" in supervisor mode, `/technician/day` is "Today" in tech).
+ *
+ * Routes that don't yet exist (e.g. `/dispatch`) are deliberately
+ * omitted — the supervisor wall + DispatchBoard wiring lands in a
+ * separate story. Adding them here would 404 and we'd rather hide
+ * them until they're real.
+ */
+function getNav(mode: Mode): NavItem[] {
+  switch (mode) {
+    case 'tech':
+      return [
+        { to: '/technician/day', label: 'Today',     icon: Wrench   },
+        { to: '/jobs',           label: 'My jobs',   icon: Briefcase },
+        { to: '/customers',      label: 'Customers', icon: Users    },
+        { to: '/estimates',      label: 'Estimates', icon: FileText },
+        { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+        { to: '/settings',       label: 'Settings',  icon: Settings },
+      ];
+    case 'both':
+      return [
+        { to: '/assistant',      label: 'Sessions',     icon: MessageSquare },
+        { to: '/technician/day', label: 'Today',        icon: Wrench        },
+        { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
+        { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
+        { to: '/customers',      label: 'Customers',    icon: Users         },
+        { to: '/estimates',      label: 'Estimates',    icon: FileText      },
+        { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
+        { to: '/settings',       label: 'Settings',     icon: Settings      },
+      ];
+    case 'supervisor':
+    default:
+      return [
+        { to: '/',              label: 'Home',         icon: Home          },
+        { to: '/assistant',     label: 'Sessions',     icon: MessageSquare },
+        { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
+        { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
+        { to: '/customers',     label: 'Customers',    icon: Users         },
+        { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
+        { to: '/estimates',     label: 'Estimates',    icon: FileText      },
+        { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
+        { to: '/interactions',  label: 'Interactions', icon: Layers        },
+        { to: '/settings',      label: 'Settings',     icon: Settings      },
+      ];
+  }
+}
+
+function getBottomNav(mode: Mode): NavItem[] {
+  switch (mode) {
+    case 'tech':
+      return [
+        { to: '/technician/day', label: 'Today',     icon: Wrench   },
+        { to: '/jobs',           label: 'Jobs',      icon: Briefcase },
+        { to: '/customers',      label: 'Customers', icon: Users    },
+        { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+      ];
+    case 'both':
+      return [
+        { to: '/assistant',      label: 'Sessions',  icon: MessageSquare },
+        { to: '/technician/day', label: 'Today',     icon: Wrench        },
+        { to: '/jobs',           label: 'Jobs',      icon: Briefcase     },
+        { to: '/customers',      label: 'Customers', icon: Users         },
+        { to: '/invoices',       label: 'Invoices',  icon: Receipt       },
+      ];
+    case 'supervisor':
+    default:
+      return [
+        { to: '/',           label: 'Home',      icon: Home          },
+        { to: '/assistant',  label: 'AI',        icon: MessageSquare },
+        { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
+        { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
+        { to: '/customers',  label: 'Customers', icon: Users         },
+        { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
+      ];
+  }
+}
 
 function getInitials(fullName: string | null, email: string | null | undefined): string {
   if (fullName) {
@@ -42,18 +110,123 @@ function getInitials(fullName: string | null, email: string | null | undefined):
   return '?';
 }
 
+function formatRoleLabel(role: string | undefined): string {
+  if (!role) return '';
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+interface ModeToggleProps {
+  current: Mode;
+  canFieldServe: boolean;
+  onSwitch: (next: Mode) => Promise<void>;
+  variant: 'sidebar' | 'topbar';
+}
+
+/**
+ * Three-way segmented control: Supervisor / Tech / Both.
+ *
+ * Visible only when `canFieldServe || role === 'owner'`. When the user
+ * is locked to a single mode (e.g. a dispatcher with can_field_serve=false)
+ * the parent omits the toggle entirely — we don't render a disabled
+ * single-option control. The mode flip is async and may throw; we
+ * surface server errors via `toast.error` so the user knows why the
+ * UI didn't change.
+ */
+function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
+  const [pending, setPending] = useState<Mode | null>(null);
+  const options: ReadonlyArray<{ mode: Mode; label: string }> = [
+    { mode: 'supervisor', label: 'Supervisor' },
+    { mode: 'both',       label: 'Both' },
+    { mode: 'tech',       label: 'Tech' },
+  ];
+
+  const handleClick = async (target: Mode) => {
+    if (target === current || pending !== null) return;
+    setPending(target);
+    try {
+      await onSwitch(target);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Mode switch failed';
+      toast.error(message);
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const sizeClass = variant === 'sidebar'
+    ? 'text-xs px-2 py-1'
+    : 'text-xs px-2 py-1';
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Operator mode"
+      data-testid="mode-toggle"
+      className="flex rounded-md border border-slate-200 bg-slate-50 overflow-hidden"
+    >
+      {options.map(({ mode, label }) => {
+        const active = current === mode;
+        const isPending = pending === mode;
+        return (
+          <button
+            key={mode}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            data-mode-option={mode}
+            disabled={pending !== null}
+            onClick={() => handleClick(mode)}
+            className={`${sizeClass} flex-1 transition-colors ${
+              active
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            } ${isPending ? 'opacity-60' : ''}`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Shell() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
   const { isLoaded, user } = useUser();
   const { signOut } = useClerk();
+  const { me, switchMode } = useMe();
+
   const isExact = (to: string) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
+
+  // Phase 12 — reflect the active mode on document.body so global CSS,
+  // analytics, and outer overlays can target it without prop drilling.
+  useEffect(() => {
+    if (!me) {
+      document.body.removeAttribute('data-mode');
+      return;
+    }
+    document.body.setAttribute('data-mode', me.current_mode);
+    return () => {
+      document.body.removeAttribute('data-mode');
+    };
+  }, [me?.current_mode]);
 
   if (!isLoaded) return null;
 
   const displayName = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? '';
   const initials = getInitials(user?.fullName ?? null, user?.primaryEmailAddress?.emailAddress);
+
+  const currentMode: Mode = me?.current_mode ?? 'supervisor';
+  const canFieldServe = me?.can_field_serve ?? false;
+  const role = me?.role;
+  const isOwner = role === 'owner';
+  const showModeToggle = isOwner || canFieldServe;
+  const roleLabel = formatRoleLabel(role) || 'Owner';
+
+  const nav = getNav(currentMode);
+  const bottomNav = getBottomNav(currentMode);
 
   return (
     <ErrorBoundary>
@@ -80,7 +253,7 @@ export function Shell() {
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto py-2 px-2">
-          {NAV.map(({ to, label, icon: Icon }) => {
+          {nav.map(({ to, label, icon: Icon }) => {
             const active = isExact(to);
             return (
               <NavLink
@@ -116,13 +289,27 @@ export function Shell() {
           <CameraButton variant="sidebar" onOpen={() => setCameraOpen(true)} />
         </div>
 
+        {/* Mode toggle — only for users who can switch (owner or
+            dispatcher w/ can_field_serve). Hidden entirely otherwise so
+            tech-only / CSR-only users never see a non-actionable control. */}
+        {showModeToggle && (
+          <div className="px-3 pb-2">
+            <ModeToggle
+              current={currentMode}
+              canFieldServe={canFieldServe}
+              onSwitch={switchMode}
+              variant="sidebar"
+            />
+          </div>
+        )}
+
         {/* User */}
         <div className="border-t border-slate-100 px-4 py-3">
           <div className="flex items-center gap-2.5">
             <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-slate-800 text-white text-xs">{initials}</span>
             <div className="min-w-0">
               <p className="text-xs text-slate-800 truncate">{displayName}</p>
-              <p className="text-xs text-slate-400 truncate">Owner</p>
+              <p className="text-xs text-slate-400 truncate">{roleLabel}</p>
             </div>
             <button
               onClick={() => signOut({ redirectUrl: '/login' })}
@@ -147,6 +334,16 @@ export function Shell() {
             <span className="text-sm text-slate-900">Fieldly</span>
           </div>
           <div className="flex items-center gap-3">
+            {showModeToggle && (
+              <div className="hidden sm:block w-44">
+                <ModeToggle
+                  current={currentMode}
+                  canFieldServe={canFieldServe}
+                  onSwitch={switchMode}
+                  variant="topbar"
+                />
+              </div>
+            )}
             <CameraButton variant="topbar" onOpen={() => setCameraOpen(true)} />
             <Bell size={18} className="text-slate-500" />
             <NavLink to="/settings" className="relative flex items-center justify-center">
@@ -177,7 +374,7 @@ export function Shell() {
         {/* ── Mobile bottom tab bar (in flow, not fixed) ── */}
         <div className="md:hidden shrink-0 bg-white border-t border-slate-200">
           <div className="flex">
-            {BOTTOM_NAV.map(({ to, label, icon: Icon }) => {
+            {bottomNav.map(({ to, label, icon: Icon }) => {
               const active = isExact(to);
               return (
                 <NavLink
