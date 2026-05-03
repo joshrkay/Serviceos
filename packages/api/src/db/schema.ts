@@ -1632,6 +1632,54 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
       USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P12-001 — Persistent FSM state for AI operator instances + per-user
+  // current_mode + tenant-level backup-supervisor / unsupervised routing.
+  //
+  // Idempotent: every CREATE / ALTER uses IF NOT EXISTS, the policy is
+  // dropped before recreate. The migration-immutability snapshot will
+  // hash this entry; do NOT mutate after merge — use a follow-up
+  // migration (064+) for any change.
+  '063_create_voice_sessions_and_modes': `
+    -- voice_sessions: persistent FSM state per AI operator instance
+    CREATE TABLE IF NOT EXISTS voice_sessions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      customer_id UUID REFERENCES customers(id),
+      channel TEXT NOT NULL CHECK (channel IN ('voice_inbound','voice_outbound','sms','mms','inapp_voice','webchat')),
+      external_id TEXT,
+      state TEXT NOT NULL,
+      context JSONB NOT NULL DEFAULT '{}'::jsonb,
+      cost_cents INTEGER NOT NULL DEFAULT 0,
+      supervisor_user_id UUID REFERENCES users(id),
+      supervisor_mode_at_start TEXT CHECK (supervisor_mode_at_start IN ('supervisor','tech','both','unsupervised')),
+      started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      ended_at TIMESTAMPTZ,
+      ended_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS voice_sessions_tenant_started ON voice_sessions(tenant_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS voice_sessions_active ON voice_sessions(tenant_id) WHERE ended_at IS NULL;
+    ALTER TABLE voice_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation ON voice_sessions;
+    CREATE POLICY tenant_isolation ON voice_sessions
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+    -- users: field-capable + current mode
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS can_field_serve BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS current_mode TEXT NOT NULL DEFAULT 'supervisor'
+        CHECK (current_mode IN ('supervisor','tech','both')),
+      ADD COLUMN IF NOT EXISTS mode_changed_at TIMESTAMPTZ;
+    UPDATE users SET can_field_serve = true WHERE role = 'owner' AND can_field_serve = false;
+
+    -- tenant_settings: backup supervisor + unsupervised routing
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS backup_supervisor_user_id UUID REFERENCES users(id),
+      ADD COLUMN IF NOT EXISTS unsupervised_proposal_routing TEXT NOT NULL DEFAULT 'queue_and_sms'
+        CHECK (unsupervised_proposal_routing IN ('queue_and_sms','queue_only','escalate_to_oncall'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
