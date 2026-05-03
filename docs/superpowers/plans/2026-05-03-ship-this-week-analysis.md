@@ -287,3 +287,95 @@ If all eight check, we ship.
 | `packages/api/src/app.ts:343-344` | Strict CORS allowlist; throw if unset in prod | B5 |
 
 That's it. ~6-8 hours of focused work; the verification gate is the existing `tsc --project tsconfig.build.json --noEmit` plus the test suite.
+
+---
+
+## Appendix B — Multi-session supervisor model (architecture refinement)
+
+The original plan implied a single-rail "AI handles a call, human reviews after" loop. Per founder direction, the actual model is:
+
+- **AI operator = per-conversation, ephemeral.** Customer connects (voice / SMS / MMS) → spin up a dedicated AI operator instance for that conversation. Customer disconnects → instance ends. **No queue. No hold.** If 10 customers arrive simultaneously, 10 AI operators run concurrently.
+- **Human supervisor = one watcher over N.** A single human (founder or CSR) watches all concurrent AI sessions on one screen and approves across all of them. The human is *not* per-conversation.
+- **Capacity target this week: 4 concurrent AI sessions** supervised by 1 human. Test for that, design for it, alert if we exceed it.
+
+### Supervisor UI — the wall of sessions
+
+Not a co-pilot view; a multi-panel session wall. Each panel shows live transcript + live draft proposal + confidence + approve/edit/reject controls. The human can focus a panel (click) and direct voice commands at the focused session ("approve", "change to 3pm").
+
+### Three new product requirements that fall out of this model
+
+1. **Auto-approve threshold per tenant.** A human can't realistically eyeball 4 simultaneous proposals every 20 seconds. High-confidence proposals (e.g. ≥ 0.9) auto-approve after a 10-second visible countdown unless cancelled. Low/medium always wait for click. **New:** add `tenant_settings.auto_approve_threshold` (numeric 0–1, default `null` meaning "always require click") and a per-proposal-type override map.
+
+2. **Voice approval with session targeting.** Operator says "approve session 2" or "Jane, approve" — not just "approve". Disambiguation: focused session is the implicit target; voice utterance routes there. Falls back to button if session is ambiguous. **New skill:** `classify_operator_intent` (mirror of customer-side `confirm_intent`, P8-007). Recognized intents: `approve_current_proposal`, `edit_proposal_field`, `reject_current_proposal`, `human_takeover`, `pause_session`.
+
+3. **Operator presence detection.** If the human looks away (no clicks for 30s, tab not visible), AI behavior shifts: lower the auto-approve threshold, escalate fresh emergencies to the on-call human via existing Twilio Dial path, and surface a "Supervisor away — N proposals pending" alert. Prevents a runaway AI booking emergencies at 2am when no one is watching.
+
+### Schema reprioritization
+
+`voice_sessions` table moves from "deferred" to **P1 this week**. Reason: each AI operator instance must persist its FSM state so a process restart mid-call can resume the conversation rather than orphan a customer mid-sentence. Without persistent session state, our single-dyno restart kills any in-flight call.
+
+Proposed migration **063_create_voice_sessions**:
+
+```sql
+CREATE TABLE voice_sessions (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  customer_id   UUID REFERENCES customers(id),
+  channel       TEXT NOT NULL CHECK (channel IN ('voice_inbound','voice_outbound','sms','mms','inapp_voice','webchat')),
+  external_id   TEXT,             -- Twilio CallSid / SMS thread id / etc
+  state         TEXT NOT NULL,    -- FSM state name
+  context       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  cost_cents    INTEGER NOT NULL DEFAULT 0,
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at      TIMESTAMPTZ,
+  ended_reason  TEXT,             -- completed | escalated | callback_required | dropped | restart_orphan
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX voice_sessions_tenant_started ON voice_sessions(tenant_id, started_at DESC);
+CREATE INDEX voice_sessions_active ON voice_sessions(tenant_id) WHERE ended_at IS NULL;
+ALTER TABLE voice_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON voice_sessions
+  USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+```
+
+`tenant_session_budget` cap — extend `tenant_settings` with `session_budget_cents_per_hour` (default e.g. 2000 = $20/hr) and `session_budget_cents_per_day`. The existing `SessionCostTracker` already enforces per-session caps; add a tenant-wide cap that triggers a hard fail (no new sessions accepted) plus an alert when tripped.
+
+### Where 4 concurrent could break — concurrency test surface
+
+| Layer | Risk | Verify |
+|---|---|---|
+| Twilio account | Per-account concurrent-call limit | Confirm number's settings; place 4 simulated inbound webhooks within 5s |
+| Node event loop | Long-running LLM calls block other handlers | Audit for sync `JSON.parse` on large bodies, sync crypto, sync file I/O — all should be async/streamed |
+| LLM provider rate limits | 4 sessions × continuous classification could hit per-minute caps | Check Anthropic + OpenAI org rate-limit headers; budget for sustained ~60 RPM per provider |
+| Postgres pool | Default `pg` pool = 10. Proposal writes briefly hold connections | Set pool to 20+ in prod; load-test with 4 sessions writing concurrently |
+| Twilio Media Streams WS | One WS per call; 4 concurrent receiving μ-law at 50 frames/s | Stress test with 4 concurrent media streams; watch CPU + dropped frames |
+| Operator UI WS fan-out | One browser subscribes to N channels; reconnect logic | Open 4 sessions, force network blip, verify all 4 reconnect cleanly |
+| Voice scrubber | Runs before transcript persistence; 4× CPU spike could starve | Benchmark on 60s transcript; verify p95 < 200ms |
+| `SessionCostTracker` | Must be per-session-id keyed, no shared mutable map without lock | Audit for shared state |
+| **Cross-session bleed** | The single bug that would kill us | Test below — non-negotiable pass criteria |
+| Tenant cost runaway | 4 concurrent at $0.05–0.15/min → hundreds/hr if stuck | New tenant-wide hard cap, alarm wired |
+
+### Concrete test harness — `qa-runner/scenarios/concurrent-supervisor.ts`
+
+1. Fire 4 simulated Twilio inbound webhooks within a 5-second window, distinct `CallSid` + `From`.
+2. Each script drives a different intent: emergency plumbing / non-urgent estimate / payment question / agreement question.
+3. Assert each session writes its own `voice_recording`, `voice_session`, `ai_run`, and proposal — **zero foreign session_id cross-references**.
+4. Assert a single supervisor websocket sees 4 distinct session channels with live transcript + live proposal updates.
+5. Assert approving session 2 only executes session 2's proposal (idempotency keys distinct).
+6. Record p50/p95 latency per turn and total cost per session.
+7. **Pass criteria:** zero cross-session writes, p95 turn latency < 3s, total cost < $0.50 across all 4 sessions for a 2-minute scripted call each.
+
+### Day-by-day adjustments
+
+- **Wednesday (U1–U4) is now bigger.** The "live oversight UI" needs websocket transport for transcript + proposal updates *plus* multi-panel layout *plus* focus/voice-target logic. Buttons-only (no operator voice approval) for week-one is the cut. Voice approval ships week-two as a focused follow-up.
+- **Thursday adds voice_sessions migration + tenant budget cap** (pulled from "next week" into this week).
+- **Friday's soak replaces the single-call e2e with the 4-concurrent harness above** as the launch gate.
+
+### What this changes about ship-readiness
+
+The Definition of Ship-Ready (Section 8) gains two clauses:
+
+9. **Four concurrent AI sessions can run with one human supervisor without cross-session bleed, without breaching tenant cost cap, with p95 turn latency < 3s.**
+10. **A process restart mid-session resumes the AI operator from `voice_sessions.context` rather than dropping the customer mid-sentence** (or, if resume is infeasible for live audio, drops cleanly with an SMS apology + callback invitation rather than going silent).
+
