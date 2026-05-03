@@ -179,6 +179,7 @@ import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
+import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 import {
   PgKnowledgeChunkRepository,
@@ -656,12 +657,19 @@ export function createApp() {
   // Phase 4a-1 transcript-ingestion-worker only (proposal-correction-worker
   // needs proposalRepo which is declared further down — registered after
   // that). Without AI_PROVIDER_API_KEY the worker stays un-registered.
+  // Phase 4c: shared language detector (offline, microsecond-fast).
+  // Constructed once and threaded into every consumer that wants
+  // language telemetry — currently the transcript-ingestion-worker
+  // (per-call stamp) and the retrieve adapter (per-query log).
+  const languageDetector = new FrancLanguageDetector();
+
   if (embeddingProvider) {
     const transcriptIngestionWorker = createTranscriptIngestionWorker({
       callTranscriptTurnRepo,
       voiceRepo,
       knowledgeChunkRepo,
       embeddings: embeddingProvider,
+      languageDetector,
     });
     workerRegistry.set(
       transcriptIngestionWorker.type,
@@ -799,6 +807,7 @@ export function createApp() {
           embeddings: embeddingProvider,
           knowledgeChunkRepo,
           retrievalEvalRunRepo,
+          languageDetector,
         })
       : undefined;
   // The variable is wired into future `buildSourceContext` call sites

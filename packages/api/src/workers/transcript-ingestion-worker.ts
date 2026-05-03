@@ -2,6 +2,7 @@ import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { CallTranscriptTurnRepository, CallTurnSpeaker } from '../voice/call-transcript-turn';
 import { CallOutcome, VoiceRepository } from '../voice/voice-service';
+import type { LanguageDetector } from '../voice/language-detector';
 import {
   EMBEDDING_MODEL,
   KnowledgeChunkRepository,
@@ -77,6 +78,12 @@ export interface TranscriptIngestionDeps {
   voiceRepo: VoiceRepository;
   knowledgeChunkRepo: KnowledgeChunkRepository;
   embeddings: EmbeddingProvider;
+  /**
+   * Phase 4c language detector. Optional — when omitted the worker
+   * skips the `voice_recordings.detected_language` stamp and the
+   * column stays NULL (treated as "unknown" by dashboards).
+   */
+  languageDetector?: LanguageDetector;
 }
 
 // Rough token estimation: 4 chars ≈ 1 token. 200-token window ≈ 800
@@ -219,6 +226,32 @@ export function createTranscriptIngestionWorker(
         }
       }
 
+      // ── Step 2b (Phase 4c): detect language and stamp the recording ──
+      // We run detection on the joined transcript (highest-signal input
+      // available — the per-window text is the same join, just sliced).
+      // Stamp NULL when detection returns 'und' or no detector is wired;
+      // the column already defaults to NULL so a no-op is safe.
+      const joinedTranscript = turns.map((t) => `${t.speaker}: ${t.text}`).join('\n');
+      if (deps.languageDetector && deps.voiceRepo.stampDetectedLanguage) {
+        const detection = deps.languageDetector.detect(joinedTranscript);
+        if (detection.language !== 'und') {
+          try {
+            await deps.voiceRepo.stampDetectedLanguage(
+              tenantId,
+              voiceRecordingId,
+              detection.language,
+            );
+          } catch (err) {
+            const error = err instanceof Error ? err : new Error(String(err));
+            logger.warn('stampDetectedLanguage failed', {
+              voiceRecordingId,
+              language: detection.language,
+              error: error.message,
+            });
+          }
+        }
+      }
+
       // ── Step 3: per-call-summary chunk ─────────────────────────────────
       const summaryText = buildSummaryChunkText(summary, intent, outcome);
       if (summaryText.length > 0) {
@@ -235,8 +268,7 @@ export function createTranscriptIngestionWorker(
       }
 
       // ── Step 4: rolling-window chunks ──────────────────────────────────
-      const joined = turns.map((t) => `${t.speaker}: ${t.text}`).join('\n');
-      const windows = buildWindows(joined);
+      const windows = buildWindows(joinedTranscript);
       for (let i = 0; i < windows.length; i++) {
         await emitChunk({
           tenantId,

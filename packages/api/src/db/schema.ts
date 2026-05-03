@@ -1530,6 +1530,34 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
       USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // Phase 4c: language detection telemetry for the inbound AI CSR. Adds
+  // detected_language to voice_recordings + retrieval_eval_runs, plus a
+  // per-customer preferred_language hint that the FSM can use to bias
+  // ASR on caller-ID match. All three columns are nullable / no backfill
+  // — pre-Phase-4c rows simply have NULL detected_language and the
+  // dashboards group them as 'unknown'. The BCP-47 short codes ('en',
+  // 'es', 'vi', 'zh', 'tl', etc.) are stored as plain TEXT — a CHECK
+  // constraint here would require migration churn every time a new
+  // language enters the corpus, and the detector library (franc-min)
+  // already returns a normalised code, so application-level validation
+  // is the right layer.
+  '063_language_detection': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS detected_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_lang
+      ON voice_recordings (tenant_id, detected_language)
+      WHERE detected_language IS NOT NULL;
+
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT;
+
+    ALTER TABLE retrieval_eval_runs
+      ADD COLUMN IF NOT EXISTS detected_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_lang
+      ON retrieval_eval_runs (tenant_id, detected_language, created_at DESC)
+      WHERE detected_language IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
