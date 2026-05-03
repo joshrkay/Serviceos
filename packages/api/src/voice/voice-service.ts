@@ -4,6 +4,28 @@ import { setTenantContext } from '../db/schema';
 
 export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
+/**
+ * Terminal-state outcome stamped at FSM hangup so analytics can correlate
+ * a recording with what actually happened on the call. Distinct from
+ * `TranscriptionStatus` (which tracks the audio-file lifecycle):
+ *
+ *   - completed             — call resolved with at least one queued proposal
+ *   - escalated_to_human    — escalate-to-human skill emitted a transfer
+ *   - callback_required     — no dispatcher available; callback proposal queued
+ *   - dropped               — caller hung up before any intent was captured
+ *   - no_intent             — caller stayed on but classifier never crossed TAU_INT
+ *   - failed                — system_failure event landed the FSM in escalating
+ *
+ * NULL until stamped (Phase 2 ships the column; FSM stamping lands in 4a).
+ */
+export type CallOutcome =
+  | 'completed'
+  | 'escalated_to_human'
+  | 'callback_required'
+  | 'dropped'
+  | 'no_intent'
+  | 'failed';
+
 export interface VoiceRecording {
   id: string;
   tenantId: string;
@@ -14,6 +36,7 @@ export interface VoiceRecording {
   transcriptMetadata?: Record<string, unknown>;
   durationSeconds?: number;
   errorMessage?: string;
+  outcome?: CallOutcome;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -34,6 +57,17 @@ export interface VoiceRepository {
     id: string,
     status: TranscriptionStatus,
     result?: { transcript?: string; metadata?: Record<string, unknown>; error?: string }
+  ): Promise<VoiceRecording | null>;
+  /**
+   * Stamp the terminal call outcome. Optional on the interface so older
+   * repos still satisfy the type — callers should treat a `null` return
+   * as "not supported." Phase 2 of the RAG plan: the column exists on
+   * voice_recordings but stamping is wired in Phase 4a.
+   */
+  stampOutcome?(
+    tenantId: string,
+    id: string,
+    outcome: CallOutcome,
   ): Promise<VoiceRecording | null>;
 }
 
@@ -96,6 +130,19 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     if (result?.metadata) rec.transcriptMetadata = result.metadata;
     if (result?.error) rec.errorMessage = result.error;
 
+    this.recordings.set(id, rec);
+    return { ...rec };
+  }
+
+  async stampOutcome(
+    tenantId: string,
+    id: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    const rec = this.recordings.get(id);
+    if (!rec || rec.tenantId !== tenantId) return null;
+    rec.outcome = outcome;
+    rec.updatedAt = new Date();
     this.recordings.set(id, rec);
     return { ...rec };
   }

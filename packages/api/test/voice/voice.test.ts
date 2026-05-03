@@ -261,4 +261,46 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
       expect(updated!.transcriptMetadata?.glossaryTerms).toBe(1);
     });
   });
+
+  describe('Phase 2 — outcome stamping', () => {
+    it('stampOutcome sets the terminal-state enum', async () => {
+      const repo = new InMemoryVoiceRepository();
+      const recording = createVoiceRecording({
+        tenantId: 'tenant-1',
+        fileId: 'file-1',
+        createdBy: 'user-1',
+      });
+      await repo.create(recording);
+
+      const stamped = await repo.stampOutcome!('tenant-1', recording.id, 'escalated_to_human');
+      expect(stamped?.outcome).toBe('escalated_to_human');
+      const fetched = await repo.findById('tenant-1', recording.id);
+      expect(fetched?.outcome).toBe('escalated_to_human');
+    });
+
+    it('stampOutcome returns null on tenant mismatch', async () => {
+      const repo = new InMemoryVoiceRepository();
+      const recording = createVoiceRecording({
+        tenantId: 'tenant-1',
+        fileId: 'file-1',
+        createdBy: 'user-1',
+      });
+      await repo.create(recording);
+      const stamped = await repo.stampOutcome!('tenant-2', recording.id, 'completed');
+      expect(stamped).toBeNull();
+    });
+
+    it('stampOutcome can transition through outcomes (overwrite is intentional)', async () => {
+      const repo = new InMemoryVoiceRepository();
+      const recording = createVoiceRecording({
+        tenantId: 'tenant-1',
+        fileId: 'file-1',
+        createdBy: 'user-1',
+      });
+      await repo.create(recording);
+      await repo.stampOutcome!('tenant-1', recording.id, 'no_intent');
+      const after = await repo.stampOutcome!('tenant-1', recording.id, 'completed');
+      expect(after?.outcome).toBe('completed');
+    });
+  });
 });
