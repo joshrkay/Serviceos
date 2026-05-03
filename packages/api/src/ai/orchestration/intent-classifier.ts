@@ -28,6 +28,15 @@ export type IntentType =
   | 'send_invoice'
   | 'record_payment'
   | 'emergency_dispatch'
+  // P11-001: voice lookup-skill family. Read-only intents — the
+  // adapter routes these straight to the `lookup_*` skill instead
+  // of the proposal-draft path.
+  | 'lookup_appointments'
+  | 'lookup_invoices'
+  | 'lookup_balance'
+  | 'lookup_jobs'
+  | 'lookup_agreements'
+  | 'lookup_account_summary'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -46,8 +55,23 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'send_invoice',
   'record_payment',
   'emergency_dispatch',
+  'lookup_appointments',
+  'lookup_invoices',
+  'lookup_balance',
+  'lookup_jobs',
+  'lookup_agreements',
+  'lookup_account_summary',
   'unknown',
 ] as const;
+
+/**
+ * P11-001: convenience predicate the FSM adapter uses to route
+ * `lookup_*` intents to the read-only skill family instead of the
+ * proposal-draft pipeline.
+ */
+export function isLookupIntent(intent: IntentType | undefined | null): boolean {
+  return typeof intent === 'string' && intent.startsWith('lookup_');
+}
 
 export interface ExtractedEntities {
   customerName?: string;
@@ -173,9 +197,12 @@ Supported intents (return exactly ONE):
                            Examples: "Send invoice 1024 to the customer"
                                      "Issue the Acme invoice"
                                      "Send the invoice we just drafted"
-- "unknown"             — anything else: queries ("when is my next appointment"),
-                           genuinely ambiguous transcripts, or commands without
-                           a clear target.
+- "unknown"             — anything else: genuinely ambiguous transcripts,
+                           or commands without a clear target. Note that
+                           read-only queries ("when is my next appointment",
+                           "how much do I owe") now have dedicated
+                           lookup_* intents below — only fall through to
+                           "unknown" when no lookup intent matches.
 - "create_customer"     — user wants to create a NEW customer record in the CRM.
                            Trigger phrasings include "create/add/new customer".
                            Extract the customer's displayName plus any stated
@@ -246,8 +273,56 @@ Supported intents (return exactly ONE):
                                      "My pipes burst and water is everywhere"
                                      "No heat and it's 10 degrees outside"
                                      "I smell burning from my AC unit"
-- "unknown"             — anything else: queries ("when is my next
-                           appointment"), ambiguous transcripts, or edit
+- "lookup_appointments" — caller is ASKING about their upcoming
+                           appointment(s). Read-only — never moves money
+                           or creates records. Routed to the
+                           lookup_appointments skill, which speaks the
+                           next visit + technician.
+                           Examples: "When is my next appointment?"
+                                     "What time are you coming on Tuesday?"
+                                     "Do I have a service call scheduled?"
+                                     "When are y'all coming out?"
+                                     "Remind me when my appointment is"
+- "lookup_invoices"     — caller is ASKING about invoices on their
+                           account. Read-only. The skill returns count
+                           + totals + per-invoice info.
+                           Examples: "Do I have any invoices outstanding?"
+                                     "What invoices do I owe?"
+                                     "Can you read me my open invoices?"
+                                     "How many bills do I have?"
+                                     "What's the latest invoice you sent me?"
+- "lookup_balance"      — caller is ASKING for the dollar total they
+                           owe right now. Read-only.
+                           Examples: "What's my balance?"
+                                     "How much do I owe?"
+                                     "What do I still owe you guys?"
+                                     "Can you tell me my account balance?"
+                                     "Total amount due on my account?"
+- "lookup_jobs"         — caller is ASKING about their recent or current
+                           jobs. Read-only.
+                           Examples: "What jobs do I have open?"
+                                     "Tell me about my last service call"
+                                     "What's the status of my repair?"
+                                     "Did you finish the work order?"
+                                     "What jobs are on my account?"
+- "lookup_agreements"   — caller is ASKING about their service plan /
+                           agreement / membership. Read-only.
+                           Examples: "When does my service plan run next?"
+                                     "Do I still have my maintenance agreement?"
+                                     "When's my next maintenance visit?"
+                                     "What's on my service contract?"
+                                     "Am I still on the membership plan?"
+- "lookup_account_summary" — caller asks an open-ended "what's on my
+                           account" / "give me an update" question.
+                           Read-only. The skill stitches the appointment,
+                           balance, and agreement summaries into a
+                           two-sentence digest.
+                           Examples: "What's on my account?"
+                                     "Give me a quick summary"
+                                     "Catch me up on my account"
+                                     "Where do I stand?"
+                                     "Tell me about my account"
+- "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
 Distinctions that matter:
