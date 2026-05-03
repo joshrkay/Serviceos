@@ -99,10 +99,12 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           return;
         }
 
-        if (uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE) {
+        if (isNaN(uploadRequest.sizeBytes) || uploadRequest.sizeBytes <= 0 || uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE) {
           res.status(400).json({
             error: 'VALIDATION_ERROR',
-            message: `Photo exceeds maximum allowed size of ${MAX_JOB_PHOTO_SIZE} bytes`,
+            message: uploadRequest.sizeBytes > MAX_JOB_PHOTO_SIZE
+              ? 'Photo exceeds maximum allowed size of ' + MAX_JOB_PHOTO_SIZE + ' bytes'
+              : 'Photo size must be a positive number',
           });
           return;
         }
