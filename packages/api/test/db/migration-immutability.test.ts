@@ -114,6 +114,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['061_create_lookup_events', '224eb9dea34c7bfcd92e5cfcdf63c8af3b60cdc693ec1036392ae4d146a00ae7'],
   ['062_create_knowledge_chunks', '047b45413e633e21dacadbb400c6830b556377829b761107d24da6bf080bd13d'],
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
+  ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
 ];
 
 function hashMigration(value: string): string {
