@@ -50,6 +50,10 @@ import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
+import { createJobPhotosRouter } from './routes/job-photos';
+import { JobPhotoService } from './jobs/job-photo-service';
+import { InMemoryJobPhotoRepository } from './jobs/job-photo';
+import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
@@ -184,6 +188,7 @@ import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
+import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 import {
   PgKnowledgeChunkRepository,
@@ -488,6 +493,7 @@ export function createApp() {
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
+  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
@@ -648,12 +654,19 @@ export function createApp() {
   // Phase 4a-1 transcript-ingestion-worker only (proposal-correction-worker
   // needs proposalRepo which is declared further down — registered after
   // that). Without AI_PROVIDER_API_KEY the worker stays un-registered.
+  // Phase 4c: shared language detector (offline, microsecond-fast).
+  // Constructed once and threaded into every consumer that wants
+  // language telemetry — currently the transcript-ingestion-worker
+  // (per-call stamp) and the retrieve adapter (per-query log).
+  const languageDetector = new FrancLanguageDetector();
+
   if (embeddingProvider) {
     const transcriptIngestionWorker = createTranscriptIngestionWorker({
       callTranscriptTurnRepo,
       voiceRepo,
       knowledgeChunkRepo,
       embeddings: embeddingProvider,
+      languageDetector,
     });
     workerRegistry.set(
       transcriptIngestionWorker.type,
@@ -791,6 +804,7 @@ export function createApp() {
           embeddings: embeddingProvider,
           knowledgeChunkRepo,
           retrievalEvalRunRepo,
+          languageDetector,
         })
       : undefined;
   // The variable is wired into future `buildSourceContext` call sites
@@ -1205,6 +1219,16 @@ export function createApp() {
     '/api/jobs',
     createJobFilesRouter({
       jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/jobs',
+    createJobPhotosRouter({
+      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
+      fileRepo,
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,

@@ -38,6 +38,13 @@ export interface RetrievalEvalRun {
   downstreamProposalId?: string;
   /** Free-form for now; expected values mirror proposal_analytics.outcome. */
   downstreamOutcome?: string;
+  /**
+   * Phase 4c: BCP-47 short code (or 'und') of the language the
+   * retrieve-adapter detected on `queryText`. Lets dashboards answer
+   * "is our Spanish edit rate higher than English?" Pre-Phase-4c rows
+   * have `undefined`; aggregations should treat them as 'unknown'.
+   */
+  detectedLanguage?: string;
   createdAt: Date;
 }
 
@@ -49,6 +56,7 @@ export interface RecordEvalRunInput {
   aiRunId?: string;
   downstreamProposalId?: string;
   downstreamOutcome?: string;
+  detectedLanguage?: string;
 }
 
 export interface AttachOutcomeInput {
@@ -99,6 +107,7 @@ export class InMemoryRetrievalEvalRunRepository implements RetrievalEvalRunRepos
       retrievedScores: [...input.retrievedScores],
       downstreamProposalId: input.downstreamProposalId,
       downstreamOutcome: input.downstreamOutcome,
+      detectedLanguage: input.detectedLanguage,
       createdAt: new Date(),
     };
     this.rows.push(row);

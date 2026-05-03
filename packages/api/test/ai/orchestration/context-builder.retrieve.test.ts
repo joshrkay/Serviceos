@@ -84,6 +84,58 @@ describe('buildSourceContext — Phase 4a-2 retrieval', () => {
     expect(await evalRepo.findById(TENANT, 'never-written')).toBeNull();
   });
 
+  it('logs detected_language on eval-run rows (Phase 4c telemetry)', async () => {
+    const knowledgeRepo = new InMemoryKnowledgeChunkRepository();
+    const evalRepo = new InMemoryRetrievalEvalRunRepository();
+    const recordRunSpy = vi.spyOn(evalRepo, 'recordRun');
+
+    const retrieve = createRetrieveAdapter({
+      embeddings: stubEmbedder(),
+      knowledgeChunkRepo: knowledgeRepo,
+      retrievalEvalRunRepo: evalRepo,
+    });
+    const repos: ContextRepositories = {
+      getConversationMessages: async () => [
+        makeMessage({
+          index: 1,
+          role: 'customer',
+          content:
+            'Mi aire acondicionado no funciona puede enviar alguien mañana por la mañana',
+        }),
+      ],
+      retrieve,
+    };
+
+    await buildSourceContext(TENANT, 'conv-1', {}, repos);
+
+    expect(recordRunSpy).toHaveBeenCalledTimes(1);
+    expect(recordRunSpy.mock.calls[0][0].detectedLanguage).toBe('es');
+  });
+
+  it('omits detected_language when language is undeterminable (und)', async () => {
+    const knowledgeRepo = new InMemoryKnowledgeChunkRepository();
+    const evalRepo = new InMemoryRetrievalEvalRunRepository();
+    const recordRunSpy = vi.spyOn(evalRepo, 'recordRun');
+
+    const retrieve = createRetrieveAdapter({
+      embeddings: stubEmbedder(),
+      knowledgeChunkRepo: knowledgeRepo,
+      retrievalEvalRunRepo: evalRepo,
+    });
+    const repos: ContextRepositories = {
+      getConversationMessages: async () => [
+        // Too short to detect — falls below MIN_DETECTION_BYTES.
+        makeMessage({ index: 1, role: 'customer', content: 'hi help' }),
+      ],
+      retrieve,
+    };
+
+    await buildSourceContext(TENANT, 'conv-1', {}, repos);
+
+    expect(recordRunSpy).toHaveBeenCalledTimes(1);
+    expect(recordRunSpy.mock.calls[0][0].detectedLanguage).toBeUndefined();
+  });
+
   it('flag-on, hits returned: populates retrievedChunks + logs eval-run', async () => {
     const knowledgeRepo = new InMemoryKnowledgeChunkRepository();
     await knowledgeRepo.insert({
