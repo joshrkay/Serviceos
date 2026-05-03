@@ -16,6 +16,7 @@ interface RetrievalEvalRunRow {
   retrieved_scores: number[];
   downstream_proposal_id: string | null;
   downstream_outcome: string | null;
+  detected_language: string | null;
   created_at: Date;
 }
 
@@ -29,6 +30,7 @@ function rowToRun(row: RetrievalEvalRunRow): RetrievalEvalRun {
     retrievedScores: row.retrieved_scores ?? [],
     downstreamProposalId: row.downstream_proposal_id ?? undefined,
     downstreamOutcome: row.downstream_outcome ?? undefined,
+    detectedLanguage: row.detected_language ?? undefined,
     createdAt: row.created_at,
   };
 }
@@ -64,8 +66,8 @@ export class PgRetrievalEvalRunRepository
       const result = await client.query<RetrievalEvalRunRow>(
         `INSERT INTO retrieval_eval_runs (
            tenant_id, ai_run_id, query_text, retrieved_chunk_ids, retrieved_scores,
-           downstream_proposal_id, downstream_outcome
-         ) VALUES ($1, $2, $3, $4::uuid[], $5::real[], $6, $7)
+           downstream_proposal_id, downstream_outcome, detected_language
+         ) VALUES ($1, $2, $3, $4::uuid[], $5::real[], $6, $7, $8)
          RETURNING *`,
         [
           input.tenantId,
@@ -75,6 +77,7 @@ export class PgRetrievalEvalRunRepository
           input.retrievedScores,
           input.downstreamProposalId ?? null,
           input.downstreamOutcome ?? null,
+          input.detectedLanguage ?? null,
         ],
       );
       const row = result.rows[0];
