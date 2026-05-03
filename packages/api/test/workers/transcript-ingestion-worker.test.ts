@@ -107,6 +107,103 @@ describe('transcript-ingestion-worker', () => {
     ]);
   });
 
+  it('stamps voice_recordings.detected_language from the joined transcript when languageDetector is wired', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const stampSpy = vi.spyOn(voiceRepo, 'stampDetectedLanguage');
+    const { FrancLanguageDetector } = await import(
+      '../../src/voice/language-detector'
+    );
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+      languageDetector: new FrancLanguageDetector(),
+    });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        // Long enough Spanish text to clear MIN_DETECTION_BYTES.
+        transcript: [
+          'agent: Hola buenos días en qué le puedo ayudar el día de hoy señor',
+          'caller: Mi aire acondicionado no funciona puede enviar alguien para arreglarlo',
+        ],
+      }),
+      logger,
+    );
+
+    expect(stampSpy).toHaveBeenCalledTimes(1);
+    expect(stampSpy.mock.calls[0][2]).toBe('es');
+    const stamped = await voiceRepo.findById(TENANT_A, recordingId);
+    expect(stamped?.detectedLanguage).toBe('es');
+  });
+
+  it('skips language stamp when detector returns "und" (input too short)', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const stampSpy = vi.spyOn(voiceRepo, 'stampDetectedLanguage');
+    const { FrancLanguageDetector } = await import(
+      '../../src/voice/language-detector'
+    );
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+      languageDetector: new FrancLanguageDetector(),
+    });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        transcript: ['agent: hi', 'caller: bye'],
+      }),
+      logger,
+    );
+
+    expect(stampSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips language stamp when no detector is wired (Phase 4c off)', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const stampSpy = vi.spyOn(voiceRepo, 'stampDetectedLanguage');
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+      // languageDetector intentionally omitted
+    });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        transcript: [
+          'agent: how can I help today',
+          'caller: my air conditioner stopped working last night',
+        ],
+      }),
+      logger,
+    );
+
+    expect(stampSpy).not.toHaveBeenCalled();
+  });
+
   it('stamps voice_recordings.outcome when provided', async () => {
     const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
     const voiceRepo = new InMemoryVoiceRepository();
