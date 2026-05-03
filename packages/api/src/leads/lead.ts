@@ -18,6 +18,16 @@ export interface Lead {
   email?: string;
   source: LeadSource;
   sourceDetail?: string;
+  /** Indexed for reporting (`SELECT … GROUP BY utm_campaign`). */
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  /**
+   * Open-shape attribution bag — gclid, fbclid, utm_content, utm_term,
+   * referrer, landing_page, user_agent, etc. Stored as JSONB; capped to
+   * 20 entries, 500 chars each by the Zod layer.
+   */
+  attribution?: Record<string, string>;
   stage: LeadStage;
   /** integer cents — never float */
   estimatedValueCents?: number;
@@ -41,6 +51,10 @@ export interface CreateLeadInput {
   email?: string;
   source: LeadSource;
   sourceDetail?: string;
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  attribution?: Record<string, string>;
   estimatedValueCents?: number;
   notes?: string;
   assignedUserId?: string;
@@ -56,6 +70,10 @@ export interface UpdateLeadInput {
   email?: string;
   source?: LeadSource;
   sourceDetail?: string;
+  utmSource?: string | null;
+  utmMedium?: string | null;
+  utmCampaign?: string | null;
+  attribution?: Record<string, string>;
   stage?: LeadStage;
   estimatedValueCents?: number | null;
   notes?: string;

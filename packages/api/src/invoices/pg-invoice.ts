@@ -23,8 +23,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           id, tenant_id, job_id, estimate_id, invoice_number, status,
           discount_cents, tax_rate_bps, subtotal_cents, taxable_subtotal_cents,
           tax_cents, total_cents, amount_paid_cents, amount_due_cents,
-          issued_at, due_date, customer_message, created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+          issued_at, due_date, customer_message, originating_lead_id,
+          created_by, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
         [
           invoice.id,
           invoice.tenantId,
@@ -43,6 +44,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
           invoice.issuedAt ?? null,
           invoice.dueDate ?? null,
           invoice.customerMessage ?? null,
+          invoice.originatingLeadId ?? null,
           invoice.createdBy,
           invoice.createdAt,
           invoice.updatedAt,
@@ -417,6 +419,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
       stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
       stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
+      originatingLeadId: row.originating_lead_id ?? undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

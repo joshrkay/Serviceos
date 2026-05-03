@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
 export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
@@ -16,6 +17,8 @@ export interface Job {
   status: JobStatus;
   priority: JobPriority;
   assignedTechnicianId?: string;
+  /** Inherits from `customer.originatingLeadId` at creation; preserves source attribution. */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -28,6 +31,8 @@ export interface CreateJobInput {
   summary: string;
   problemDescription?: string;
   priority?: JobPriority;
+  /** Optional explicit override; routes auto-populate from customer when omitted. */
+  originatingLeadId?: string;
   createdBy: string;
   actorRole?: string;
 }
@@ -106,6 +111,7 @@ export async function createJob(
     problemDescription: input.problemDescription,
     status: 'new',
     priority: input.priority || 'normal',
+    originatingLeadId: input.originatingLeadId,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -121,6 +127,7 @@ export async function createJob(
       eventType: 'job.created',
       entityType: 'job',
       entityId: created.id,
+      metadata: buildOriginationMetadata(created.originatingLeadId),
     });
     await auditRepo.create(event);
   }

@@ -39,6 +39,15 @@ export const estimatedValueCentsSchema = z
   .nonnegative('estimatedValueCents must be >= 0')
   .finite();
 
+// Cap attribution payload size: at most 20 keys, each value <= 500 chars.
+// Open shape (any string key) so marketing can add new params without a
+// schema change; payload-size cap prevents abuse.
+export const attributionSchema = z
+  .record(z.string().max(100), z.string().max(500))
+  .refine((v) => Object.keys(v).length <= 20, {
+    message: 'attribution may have at most 20 entries',
+  });
+
 export const createLeadSchema = z.object({
   firstName: z.string().min(1).max(100).optional(),
   lastName: z.string().min(1).max(100).optional(),
@@ -47,6 +56,10 @@ export const createLeadSchema = z.object({
   email: z.string().email().optional(),
   source: leadSourceSchema,
   sourceDetail: z.string().max(500).optional(),
+  utmSource: z.string().max(200).optional(),
+  utmMedium: z.string().max(200).optional(),
+  utmCampaign: z.string().max(200).optional(),
+  attribution: attributionSchema.optional(),
   estimatedValueCents: estimatedValueCentsSchema.optional(),
   notes: z.string().max(5000).optional(),
   assignedUserId: z.string().uuid().optional(),
@@ -64,6 +77,10 @@ export const updateLeadSchema = z.object({
   email: z.string().email().optional().or(z.literal('')),
   source: leadSourceSchema.optional(),
   sourceDetail: z.string().max(500).optional(),
+  utmSource: z.string().max(200).nullable().optional(),
+  utmMedium: z.string().max(200).nullable().optional(),
+  utmCampaign: z.string().max(200).nullable().optional(),
+  attribution: attributionSchema.optional(),
   stage: leadStageSchema.optional(),
   estimatedValueCents: estimatedValueCentsSchema.nullable().optional(),
   notes: z.string().max(5000).optional(),
