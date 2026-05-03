@@ -166,7 +166,7 @@ export function createMeRouter(
 
         // Prime the in-process cache so the next requireTenant call on
         // this dyno reads the new mode without waiting for the 60s TTL.
-        setCachedMode(auth.userId, targetMode);
+        setCachedMode(auth.userId, auth.tenantId, targetMode);
 
         await auditRepo.create(
           createAuditEvent({

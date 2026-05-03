@@ -6,12 +6,14 @@
  * ad-hoc `useUser()` + localStorage('serviceos.permissions') reads
  * scattered across pages.
  *
- * Caches the response in module scope keyed on the API client identity
- * (which is stable for the Clerk session). Refetched on `switchMode`.
+ * Module-level cache (per the P12-002 review fix). The first hook
+ * instance kicks off a fetch and stores the in-flight `Promise`; any
+ * subsequent mounts during the same session reuse it instead of
+ * issuing redundant requests. `switchMode` invalidates the cache so
+ * the next read goes to the server.
  *
- * Errors fall back to a neutral default (`current_mode: 'supervisor'`,
- * `permissions: []`) so guarded UI can still render — the protected-route
- * guard handles the actual auth boundary.
+ * Errors are surfaced as state on the hook; callers can react. The
+ * cached promise is cleared on error so a retry actually re-fetches.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useApiClient } from '../lib/apiClient';
@@ -41,24 +43,54 @@ export interface UseMeResult {
   refetch: () => Promise<void>;
 }
 
+// Module-level cached promise. The first useMe call kicks off the
+// fetch and stores it; subsequent mounts in the same browser session
+// reuse the same promise so we never issue more than one request per
+// "session" of identity. `invalidateMeCache()` resets it on writes
+// (switchMode) so the next read sees the server.
+let cachedMePromise: Promise<MeResponse> | null = null;
+
+function loadOrReuse(client: AuthedFetch): Promise<MeResponse> {
+  if (!cachedMePromise) {
+    cachedMePromise = fetchMe(client).catch((err) => {
+      // Don't poison the cache on transient failures — clear so the
+      // next caller actually retries.
+      cachedMePromise = null;
+      throw err;
+    });
+  }
+  return cachedMePromise;
+}
+
+/** Test-only: drop the module cache so test cases don't bleed into each other. */
+export function _resetMeCacheForTests(): void {
+  cachedMePromise = null;
+}
+
 export function useMe(): UseMeResult {
   const client = useApiClient() as AuthedFetch;
   const [me, setMe] = useState<MeResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
 
-  const load = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const response = await fetchMe(client);
-      setMe(response);
-    } catch (err) {
-      setError(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      setIsLoading(false);
-    }
-  }, [client]);
+  const load = useCallback(
+    async (forceRefresh = false) => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        if (forceRefresh) {
+          cachedMePromise = null;
+        }
+        const response = await loadOrReuse(client);
+        setMe(response);
+      } catch (err) {
+        setError(err instanceof Error ? err : new Error(String(err)));
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [client],
+  );
 
   useEffect(() => {
     void load();
@@ -67,13 +99,15 @@ export function useMe(): UseMeResult {
   const switchMode = useCallback(
     async (next: Mode) => {
       await postModeSwitch(client, next);
-      await load();
+      // Invalidate so every consumer re-reads the new mode/state.
+      cachedMePromise = null;
+      await load(true);
     },
     [client, load],
   );
 
   const refetch = useCallback(async () => {
-    await load();
+    await load(true);
   }, [load]);
 
   return { me, isLoading, error, switchMode, refetch };

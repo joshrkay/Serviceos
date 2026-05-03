@@ -59,7 +59,12 @@ async function loadModeWithCache(
   tenantId: string,
 ): Promise<Mode> {
   const now = Date.now();
-  const cached = modeCache.get(userId);
+  // P12-001 review fix — cache key is composite (tenantId + userId). The
+  // same Clerk subject can belong to multiple tenants; keying by user
+  // alone allowed a tenant-A mode to be reused for tenant-B for up to
+  // 60s. Composite key prevents that cross-tenant bleed.
+  const cacheKey = `${tenantId}::${userId}`;
+  const cached = modeCache.get(cacheKey);
   if (cached && now - cached.fetchedAt < MODE_CACHE_TTL_MS) {
     return cached.mode;
   }
@@ -75,13 +80,20 @@ async function loadModeWithCache(
       mode = cached?.mode ?? 'supervisor';
     }
   }
-  modeCache.set(userId, { mode, fetchedAt: now });
+  modeCache.set(cacheKey, { mode, fetchedAt: now });
   return mode;
 }
 
 /** Test-only: prime the cache for a user (used by /api/me POST handler too). */
-export function setCachedMode(userId: string, mode: Mode): void {
-  modeCache.set(userId, { mode, fetchedAt: Date.now() });
+export function setCachedMode(
+  userId: string,
+  tenantId: string,
+  mode: Mode,
+): void {
+  // P12-001 review fix — mirror the composite cache key used by
+  // loadModeWithCache so a primed entry actually hits on next read.
+  const cacheKey = `${tenantId}::${userId}`;
+  modeCache.set(cacheKey, { mode, fetchedAt: Date.now() });
 }
 
 export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {

@@ -135,4 +135,58 @@ describe('P12-001 — requireTenant attaches req.auth.mode', () => {
     expect((res as any).statusCode).toBe(403);
     expect(next).not.toHaveBeenCalled();
   });
+
+  it('does NOT bleed cached mode across tenants for the same Clerk user (regression: review fix)', async () => {
+    // The same Clerk subject can be mapped to different users in
+    // different tenants. Pre-fix the cache was keyed by userId only,
+    // so a tenant-A 'tech' mode would be reused for tenant-B's
+    // request to the same Clerk sub for up to 60s.
+    const calls: Array<{ userId: string; tenantId: string }> = [];
+    setUserModeLoader(async (userId, tenantId) => {
+      calls.push({ userId, tenantId });
+      return tenantId === 'tenant-A' ? ('tech' as Mode) : ('supervisor' as Mode);
+    });
+
+    const sharedUserId = 'user-shared';
+
+    // First request: tenant-A → loader returns 'tech', cached.
+    const a = mockReqRes({
+      userId: sharedUserId,
+      sessionId: 's1',
+      tenantId: 'tenant-A',
+      role: 'owner',
+    });
+    await requireTenant(a.req, a.res, a.next);
+    expect((a.req.auth as { mode?: Mode }).mode).toBe('tech');
+
+    // Second request: same userId, DIFFERENT tenant. Must NOT serve
+    // the cached 'tech' from tenant-A; must call the loader again
+    // and resolve to 'supervisor' for tenant-B.
+    const b = mockReqRes({
+      userId: sharedUserId,
+      sessionId: 's2',
+      tenantId: 'tenant-B',
+      role: 'owner',
+    });
+    await requireTenant(b.req, b.res, b.next);
+    expect((b.req.auth as { mode?: Mode }).mode).toBe('supervisor');
+
+    // Loader called once per (tenant, user) — proves the cache is
+    // composite-keyed.
+    expect(calls).toEqual([
+      { userId: sharedUserId, tenantId: 'tenant-A' },
+      { userId: sharedUserId, tenantId: 'tenant-B' },
+    ]);
+
+    // Repeat the tenant-A request — should hit cache now (no new loader call).
+    const aAgain = mockReqRes({
+      userId: sharedUserId,
+      sessionId: 's3',
+      tenantId: 'tenant-A',
+      role: 'owner',
+    });
+    await requireTenant(aAgain.req, aAgain.res, aAgain.next);
+    expect((aAgain.req.auth as { mode?: Mode }).mode).toBe('tech');
+    expect(calls).toHaveLength(2); // unchanged: still 2 loader calls total
+  });
 });

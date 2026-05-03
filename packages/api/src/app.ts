@@ -1236,18 +1236,26 @@ export function createApp() {
   const userModeService: UserModeService = pool
     ? {
         async getUser(tenantId, userId) {
+          // P12-001 review fix — `userId` here is the Clerk subject
+          // (`req.auth.userId` = `payload.sub`), not the UUID PK on
+          // `users.id`. Lookup goes through `clerk_user_id`. The
+          // returned `user_id` continues to be the Clerk sub so
+          // downstream callers (the API surface) stay aligned with
+          // the auth-layer identity.
           const r = await pool.query(
-            `SELECT id, tenant_id, role,
+            `SELECT clerk_user_id, tenant_id, role,
                     COALESCE(can_field_serve, false) AS can_field_serve,
                     COALESCE(current_mode, 'supervisor') AS current_mode,
                     mode_changed_at
-             FROM users WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+             FROM users
+             WHERE tenant_id = $1 AND clerk_user_id = $2
+             LIMIT 1`,
             [tenantId, userId],
           );
           if (r.rowCount === 0) return null;
           const row = r.rows[0] as Record<string, unknown>;
           const rec: MeUserRecord = {
-            user_id: String(row.id),
+            user_id: String(row.clerk_user_id),
             tenant_id: String(row.tenant_id),
             role: String(row.role),
             can_field_serve: Boolean(row.can_field_serve),
@@ -1281,10 +1289,14 @@ export function createApp() {
           };
         },
         async setMode(tenantId, userId, mode) {
+          // P12-001 review fix — `userId` is the Clerk subject; match
+          // on `clerk_user_id`, not the UUID PK. Without this the
+          // UPDATE silently no-ops in production.
           const now = new Date();
           await pool.query(
-            `UPDATE users SET current_mode = $1, mode_changed_at = $2, updated_at = now()
-             WHERE tenant_id = $3 AND id = $4`,
+            `UPDATE users
+             SET current_mode = $1, mode_changed_at = $2, updated_at = now()
+             WHERE tenant_id = $3 AND clerk_user_id = $4`,
             [mode, now, tenantId, userId],
           );
           return { modeChangedAt: now };

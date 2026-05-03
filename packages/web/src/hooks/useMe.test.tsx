@@ -28,10 +28,15 @@ const sampleMe: MeResponse = {
   unsupervised_proposal_routing: 'queue_and_sms',
 };
 
+import { _resetMeCacheForTests } from './useMe';
+
 describe('P12-002 — useMe', () => {
   beforeEach(() => {
     vi.mocked(fetchMe).mockReset();
     vi.mocked(postModeSwitch).mockReset();
+    // Module-level cache must be reset per test (review fix); without
+    // this a second test would see the first's resolved Promise.
+    _resetMeCacheForTests();
   });
 
   it('fetches /api/me on mount and exposes the response', async () => {
@@ -75,6 +80,40 @@ describe('P12-002 — useMe', () => {
     expect(result.current.me).toBeNull();
     expect(result.current.error).toBeInstanceOf(Error);
     expect(result.current.error?.message).toContain('500 boom');
+  });
+
+  it('shares the module-level cache across multiple hook mounts (regression: review fix)', async () => {
+    vi.mocked(fetchMe).mockResolvedValue(sampleMe);
+
+    // Two independent useMe consumers mount concurrently. With the
+    // module cache they share a single in-flight fetch.
+    const { result: r1 } = renderHook(() => useMe());
+    const { result: r2 } = renderHook(() => useMe());
+
+    await waitFor(() => expect(r1.current.isLoading).toBe(false));
+    await waitFor(() => expect(r2.current.isLoading).toBe(false));
+
+    expect(r1.current.me).toEqual(sampleMe);
+    expect(r2.current.me).toEqual(sampleMe);
+    // Single network request despite two consumers.
+    expect(fetchMe).toHaveBeenCalledTimes(1);
+  });
+
+  it('switchMode invalidates the module cache so the next read re-fetches', async () => {
+    vi.mocked(fetchMe)
+      .mockResolvedValueOnce(sampleMe) // first load
+      .mockResolvedValueOnce({ ...sampleMe, current_mode: 'tech' }); // post-switch
+    vi.mocked(postModeSwitch).mockResolvedValue();
+
+    const { result } = renderHook(() => useMe());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.switchMode('tech');
+    });
+    expect(result.current.me?.current_mode).toBe('tech');
+    // The switch invalidated and re-fetched, so two total fetches.
+    expect(fetchMe).toHaveBeenCalledTimes(2);
   });
 
   it('throws from switchMode if the server rejects (caller surfaces toast)', async () => {
