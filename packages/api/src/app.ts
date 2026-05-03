@@ -202,6 +202,7 @@ import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
+import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
 import {
   createDiffAnalysisWorker,
@@ -720,6 +721,15 @@ export function createApp() {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
   });
+  // P18-001: replace the stub create_customer handler from the registry
+  // with the wired-up voice handler so an approved create_customer
+  // proposal actually persists a Customer row + audit trail. The base
+  // registry installs a synthetic-id stub so unit tests can run
+  // without a CustomerRepository dep; production overrides it here.
+  executionHandlers.set(
+    'create_customer',
+    new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo),
+  );
   // Phase 4a-1: persist a proposal_executions row on success + fire the
   // proposal-correction-worker. The onExecuted callback is failure-soft
   // inside the executor itself (logs via console, never rethrows), so
