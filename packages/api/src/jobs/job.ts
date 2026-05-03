@@ -65,12 +65,31 @@ export interface JobListResult {
 export const DEFAULT_JOB_LIMIT = 50;
 export const MAX_JOB_LIMIT = 200;
 
+export interface JobFindByCustomerOptions {
+  /** Cap on rows returned. Default unlimited (uses MAX_JOB_LIMIT). */
+  limit?: number;
+  /** Include canceled / completed jobs. Default false — only active. */
+  includeArchived?: boolean;
+}
+
 export interface JobRepository {
   create(job: Job): Promise<Job>;
   findById(tenantId: string, id: string): Promise<Job | null>;
   findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]>;
   /** P1-018: paginated `{ data, total }` form for list UIs. */
   listWithMeta?(tenantId: string, options?: JobListOptions): Promise<JobListResult>;
+  /**
+   * P11-001: tenant-scoped read of every job belonging to a customer.
+   * Used by the voice lookup skills (`lookup_appointments`, `lookup_jobs`,
+   * etc.) to fan out to per-job repos. Optional on the interface so older
+   * fakes continue to satisfy the type — implementations that don't
+   * provide it cause the lookup skills to error at the boundary.
+   */
+  findByCustomer?(
+    tenantId: string,
+    customerId: string,
+    opts?: JobFindByCustomerOptions,
+  ): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
 }
@@ -208,6 +227,24 @@ export class InMemoryJobRepository implements JobRepository {
     const j = this.jobs.get(id);
     if (!j || j.tenantId !== tenantId) return null;
     return { ...j };
+  }
+
+  async findByCustomer(
+    tenantId: string,
+    customerId: string,
+    opts?: JobFindByCustomerOptions,
+  ): Promise<Job[]> {
+    let results = Array.from(this.jobs.values()).filter(
+      (j) => j.tenantId === tenantId && j.customerId === customerId,
+    );
+    if (!opts?.includeArchived) {
+      // Active = anything that isn't canceled. Completed jobs are kept
+      // so the voice "what jobs do I have" lookup can mention them.
+      results = results.filter((j) => j.status !== 'canceled');
+    }
+    results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const limit = Math.min(opts?.limit ?? results.length, MAX_JOB_LIMIT);
+    return results.slice(0, limit).map((j) => ({ ...j }));
   }
 
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {
