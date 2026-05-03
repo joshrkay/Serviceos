@@ -115,6 +115,57 @@ describe('InMemoryCallTranscriptTurnRepository', () => {
       });
       expect(a.id).not.toBe(b.id);
     });
+
+    // Codex P2 on PR #233: interim→final replacement must NOT rewrite
+    // started_at when the caller doesn't supply one. Otherwise repeated
+    // writes corrupt turn timing/order metadata.
+    it('preserves the original started_at when re-emitted without an explicit startedAt', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      const explicit = new Date('2026-04-21T10:00:00.000Z');
+      const first = await repo.recordTurn({
+        tenantId: TENANT_A,
+        voiceRecordingId: RECORDING_1,
+        turnIndex: 3,
+        speaker: 'caller',
+        text: 'interim',
+        startedAt: explicit,
+      });
+      // Allow real wall time to advance so a buggy implementation that
+      // stamps NOW() on conflict would produce a different timestamp.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await repo.recordTurn({
+        tenantId: TENANT_A,
+        voiceRecordingId: RECORDING_1,
+        turnIndex: 3,
+        speaker: 'caller',
+        text: 'final',
+      });
+      expect(second.id).toBe(first.id);
+      expect(second.startedAt.toISOString()).toBe(explicit.toISOString());
+    });
+
+    it('respects an explicit startedAt on re-emission when the caller supplies one', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      const original = new Date('2026-04-21T10:00:00.000Z');
+      const corrected = new Date('2026-04-21T10:00:01.500Z');
+      await repo.recordTurn({
+        tenantId: TENANT_A,
+        voiceRecordingId: RECORDING_1,
+        turnIndex: 3,
+        speaker: 'caller',
+        text: 'interim',
+        startedAt: original,
+      });
+      const second = await repo.recordTurn({
+        tenantId: TENANT_A,
+        voiceRecordingId: RECORDING_1,
+        turnIndex: 3,
+        speaker: 'caller',
+        text: 'final',
+        startedAt: corrected,
+      });
+      expect(second.startedAt.toISOString()).toBe(corrected.toISOString());
+    });
   });
 
   describe('listByRecording', () => {

@@ -84,9 +84,13 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
       (r) => r.voiceRecordingId === input.voiceRecordingId && r.turnIndex === input.turnIndex,
     );
     const now = new Date();
-    const startedAt = input.startedAt ?? now;
+    // Mirror the Pg semantics (codex P2 on PR #233): on conflict, preserve
+    // the original started_at unless the caller explicitly supplied a new
+    // value. interim→final replacements should not corrupt timing/order.
+    const existing = existingIdx >= 0 ? this.rows[existingIdx] : null;
+    const startedAt = input.startedAt ?? existing?.startedAt ?? now;
     const turn: CallTranscriptTurn = {
-      id: existingIdx >= 0 ? this.rows[existingIdx].id : randomUUID(),
+      id: existing ? existing.id : randomUUID(),
       tenantId: input.tenantId,
       voiceRecordingId: input.voiceRecordingId,
       turnIndex: input.turnIndex,
@@ -94,9 +98,9 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
       text: input.text,
       startedAt,
       completedAt: input.completedAt,
-      createdAt: existingIdx >= 0 ? this.rows[existingIdx].createdAt : now,
+      createdAt: existing ? existing.createdAt : now,
     };
-    if (existingIdx >= 0) this.rows[existingIdx] = turn;
+    if (existing) this.rows[existingIdx] = turn;
     else this.rows.push(turn);
     return turn;
   }

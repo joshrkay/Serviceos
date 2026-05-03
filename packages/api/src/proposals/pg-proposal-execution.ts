@@ -64,11 +64,15 @@ export class PgProposalExecutionRepository
       // row — undo + redo both produce new history.
       if (input.idempotencyKey !== undefined && input.idempotencyKey !== null) {
         const result = await client.query<ProposalExecutionRow>(
+          // Postgres partial-index inference: the ON CONFLICT clause must
+          // repeat the partial-index predicate (`WHERE idempotency_key IS
+          // NOT NULL`) so the planner can match it to
+          // idx_proposal_executions_idempotency. Gemini HIGH on PR #233.
           `INSERT INTO proposal_executions (
              tenant_id, proposal_id, executed_payload, executed_by, executed_at,
              status, error_message, idempotency_key
            ) VALUES ($1, $2, $3::jsonb, $4, COALESCE($5, NOW()), $6, $7, $8)
-           ON CONFLICT (tenant_id, proposal_id, idempotency_key) DO UPDATE SET
+           ON CONFLICT (tenant_id, proposal_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET
              -- DO UPDATE re-returns the existing row without mutating its
              -- substantive fields. SET to a no-op so RETURNING fires.
              idempotency_key = EXCLUDED.idempotency_key
@@ -115,13 +119,18 @@ export class PgProposalExecutionRepository
     proposalId: string,
   ): Promise<ProposalExecution | null> {
     return this.withTenant(tenantId, async (client) => {
+      // tenant_id explicit in the WHERE clause for defense-in-depth +
+      // index utilization (idx_proposal_executions_tenant covers
+      // (tenant_id, executed_at)). RLS already filters via the GUC, but
+      // belt-and-braces matches PgVoiceRepository.findById and the rest
+      // of the codebase.
       const result = await client.query<ProposalExecutionRow>(
         `SELECT *
            FROM proposal_executions
-          WHERE proposal_id = $1
+          WHERE proposal_id = $1 AND tenant_id = $2
           ORDER BY executed_at DESC
           LIMIT 1`,
-        [proposalId],
+        [proposalId, tenantId],
       );
       const row = result.rows[0];
       return row ? rowToExecution(row) : null;
@@ -136,9 +145,9 @@ export class PgProposalExecutionRepository
       const result = await client.query<ProposalExecutionRow>(
         `SELECT *
            FROM proposal_executions
-          WHERE proposal_id = $1
+          WHERE proposal_id = $1 AND tenant_id = $2
           ORDER BY executed_at DESC`,
-        [proposalId],
+        [proposalId, tenantId],
       );
       return result.rows.map(rowToExecution);
     });

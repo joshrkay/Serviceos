@@ -107,9 +107,11 @@ export class PgRetrievalEvalRunRepository
 
   async findById(tenantId: string, id: string): Promise<RetrievalEvalRun | null> {
     return this.withTenant(tenantId, async (client) => {
+      // tenant_id explicit in the WHERE clause: defense-in-depth alongside
+      // RLS, matches PgVoiceRepository.findById convention.
       const result = await client.query<RetrievalEvalRunRow>(
-        `SELECT * FROM retrieval_eval_runs WHERE id = $1`,
-        [id],
+        `SELECT * FROM retrieval_eval_runs WHERE id = $1 AND tenant_id = $2`,
+        [id, tenantId],
       );
       const row = result.rows[0];
       return row ? rowToRun(row) : null;
