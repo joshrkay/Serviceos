@@ -190,7 +190,7 @@ cd packages/web && npm test -- --run
 ```
 
 #### Tuesday — hardening pass
-- **H1:** Add `tenant_id` + RLS to `webhook_events`. Migration 063. Backfill from payload where derivable; null where not (Stripe signing-secret-validated payloads contain customer_id → tenant_id lookup).
+- H1: Add tenant_id + RLS to webhook_events. Migration 063. Backfill from payload where derivable; null where not (Stripe signing-secret-validated payloads contain customer_id -> tenant_id lookup). Update repository queries to include tenant_id in WHERE clauses.
 - **H2:** Confirm Twilio + Stripe webhook signature verification rejects in prod when missing/invalid (no dev-bypass leaking). Add explicit test.
 - **H3:** Add per-token rate limit (in-memory token bucket, 60/min) to public portal + payment-link routes.
 - **H4:** Reverse auth guard on `/login` and `/signup` — signed-in users redirect to `/`.
