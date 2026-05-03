@@ -167,6 +167,13 @@ import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
+import {
+  InMemoryPortalSessionRepository,
+  PortalSessionRepository,
+} from './portal/portal-session';
+import { PgPortalSessionRepository } from './portal/pg-portal-session';
+import { createPortalRouter } from './routes/portal';
+import { createPublicPortalRouter } from './routes/public-portal';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -328,7 +335,7 @@ class InMemoryWebhookEventRepository {
   }
 }
 
-export function createApp() {
+export function createApp(): express.Express {
   const app = express();
 
   // Stripe webhook needs the raw body for signature verification.
@@ -485,6 +492,19 @@ export function createApp() {
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
+  // P10-001: portal session repo (single signed token per customer for the
+  // self-service portal). Wired here so both the authed creation route and
+  // the public token-resolver router share one instance.
+  const portalSessionRepo: PortalSessionRepository = pool
+    ? new PgPortalSessionRepository(pool)
+    : new InMemoryPortalSessionRepository();
+  // Agreement-runs are also surfaced on the public portal (read-only).
+  // Hoisted here so the public portal router (mounted before Clerk auth)
+  // can reference it. `agreementRepo` is already declared above (hoisted
+  // for the P11-001 voice lookup-skill family).
+  const agreementRunRepo = pool
+    ? new PgAgreementRunRepository(pool)
+    : new InMemoryAgreementRunRepository();
   // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
   // is wired here so a future webhook handler can pull it from app-level
   // wiring without re-instantiating. The webhooks/routes.ts router still
@@ -972,6 +992,27 @@ export function createApp() {
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
+  // P10-001: Public, token-gated customer portal. Mounted BEFORE the
+  // global `/api` Clerk auth middleware because the portal token IS
+  // the auth — no Clerk session is involved. Routes resolve the
+  // `:token` URL param, set `req.portal = { tenantId, customerId,
+  // sessionId }`, and downstream queries scope to that tenant id.
+  app.use(
+    '/api/public/portal',
+    createPublicPortalRouter({
+      portalRepo: portalSessionRepo,
+      customerRepo,
+      estimateRepo,
+      invoiceRepo,
+      jobRepo,
+      agreementRepo,
+      appointmentRepo,
+      leadRepo,
+      auditRepo,
+      paymentLinkProvider,
+    }),
+  );
+
   // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
   // Returns a `client_secret` so the customer's browser can confirm the
   // payment directly with Stripe — card data never touches our server.
@@ -1200,6 +1241,15 @@ export function createApp() {
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  // P10-001: portal session creation/revocation. Mounted at
+  // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
+  // because routes/customers.ts is on the freeze list — the body
+  // carries the customerId. URL composition uses request host so
+  // the link points at this same deployment.
+  app.use(
+    '/api/portal-sessions',
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+  );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
@@ -1268,11 +1318,8 @@ export function createApp() {
   // Recurring service contracts auto-generate a job + draft invoice on
   // their cadence. Bypasses the proposals layer because the customer-
   // signing-up step is the approval; subsequent runs execute it.
-  // (P11-001 hoisted `agreementRepo` to the main repo block above so the
-  // Twilio adapter's lookup-skill family can share it.)
-  const agreementRunRepo = pool
-    ? new PgAgreementRunRepository(pool)
-    : new InMemoryAgreementRunRepository();
+  // (`agreementRepo` and `agreementRunRepo` are declared earlier so the
+  // public portal router can reference the same instance.)
   const agreementsJobsService = {
     async createJob(input: {
       tenantId: string;
