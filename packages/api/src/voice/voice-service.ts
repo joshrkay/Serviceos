@@ -37,6 +37,13 @@ export interface VoiceRecording {
   durationSeconds?: number;
   errorMessage?: string;
   outcome?: CallOutcome;
+  /**
+   * Phase 4c: BCP-47 short code (or 'und') of the language detected on
+   * the joined transcript at end-of-session. NULL until stamped — older
+   * recordings keep NULL forever (no backfill in 4c). Dashboards group
+   * NULL/'und' as the "unknown" bucket.
+   */
+  detectedLanguage?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -68,6 +75,18 @@ export interface VoiceRepository {
     tenantId: string,
     id: string,
     outcome: CallOutcome,
+  ): Promise<VoiceRecording | null>;
+  /**
+   * Phase 4c: stamp the detected language (BCP-47 short code, e.g. 'en'
+   * or 'es'). Called once per call from the FSM's end-of-session hook
+   * after the joined transcript runs through `LanguageDetector`.
+   * Optional for repo-interface backwards compatibility — pre-4c repos
+   * still satisfy the type and the stamp is a soft no-op.
+   */
+  stampDetectedLanguage?(
+    tenantId: string,
+    id: string,
+    language: string,
   ): Promise<VoiceRecording | null>;
 }
 
@@ -142,6 +161,19 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     const rec = this.recordings.get(id);
     if (!rec || rec.tenantId !== tenantId) return null;
     rec.outcome = outcome;
+    rec.updatedAt = new Date();
+    this.recordings.set(id, rec);
+    return { ...rec };
+  }
+
+  async stampDetectedLanguage(
+    tenantId: string,
+    id: string,
+    language: string,
+  ): Promise<VoiceRecording | null> {
+    const rec = this.recordings.get(id);
+    if (!rec || rec.tenantId !== tenantId) return null;
+    rec.detectedLanguage = language;
     rec.updatedAt = new Date();
     this.recordings.set(id, rec);
     return { ...rec };

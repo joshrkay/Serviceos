@@ -113,6 +113,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['060_capture_schema', 'a38ff66341f8e24c68432c2a6a442d3181e1ee8e630d72357c9298b0815ae690'],
   ['061_create_lookup_events', '224eb9dea34c7bfcd92e5cfcdf63c8af3b60cdc693ec1036392ae4d146a00ae7'],
   ['062_create_knowledge_chunks', '047b45413e633e21dacadbb400c6830b556377829b761107d24da6bf080bd13d'],
+  ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
 ];
 
 function hashMigration(value: string): string {
