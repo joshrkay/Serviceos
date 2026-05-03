@@ -1426,6 +1426,114 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_originating_lead
       ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
   `,
+
+  // Phase 2 of the inbound-CSR training-data architecture (RAG corpus). Adds
+  // the four capture surfaces the downstream ingestion workers and quality
+  // dashboards need:
+  //
+  //   1. call_transcript_turns      — per-turn rows so the in-memory FSM
+  //                                   transcript survives a process restart
+  //                                   and the transcript-ingestion-worker
+  //                                   (Phase 4a) has stable input.
+  //   2. proposal_executions        — captures the as-executed payload
+  //                                   alongside the immutable proposals.payload
+  //                                   so the proposal-correction-worker
+  //                                   (Phase 4a) can diff the two and emit a
+  //                                   training chunk. Multiple rows allowed
+  //                                   per proposal (retry, undo + redo).
+  //   3. voice_recordings.outcome   — terminal-state enum stamped by the FSM
+  //                                   at hangup so analytics can correlate
+  //                                   recording rows with what actually
+  //                                   happened on the call.
+  //   4. retrieval_eval_runs        — quality measurement table built in from
+  //                                   day one so we can prove RAG retrieval
+  //                                   helps before flipping the default. Each
+  //                                   row links a query → retrieved chunks →
+  //                                   downstream proposal → downstream outcome.
+  //
+  // No caller in main reads or writes these surfaces yet; ingestion workers
+  // and FSM stamping land in Phase 3b/4a.
+  '060_capture_schema': `
+    CREATE TABLE IF NOT EXISTS call_transcript_turns (
+      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      voice_recording_id UUID NOT NULL REFERENCES voice_recordings(id) ON DELETE CASCADE,
+      turn_index         INTEGER NOT NULL,
+      speaker            TEXT NOT NULL CHECK (speaker IN ('agent', 'caller')),
+      text               TEXT NOT NULL,
+      started_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at       TIMESTAMPTZ,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (turn_index >= 0)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_recording
+      ON call_transcript_turns (voice_recording_id, turn_index);
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant
+      ON call_transcript_turns (tenant_id, created_at DESC);
+    ALTER TABLE call_transcript_turns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_transcript_turns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_transcript_turns ON call_transcript_turns;
+    CREATE POLICY tenant_isolation_call_transcript_turns ON call_transcript_turns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_executions (
+      id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      proposal_id      UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+      executed_payload JSONB NOT NULL,
+      executed_by      TEXT NOT NULL,
+      executed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status           TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'undone')),
+      error_message    TEXT,
+      idempotency_key  TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_proposal
+      ON proposal_executions (proposal_id, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_tenant
+      ON proposal_executions (tenant_id, executed_at DESC);
+    -- Idempotency: same (tenant, proposal, key) collides cleanly. Partial so
+    -- rows without an idempotency_key (legacy or undo paths) coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposal_executions_idempotency
+      ON proposal_executions (tenant_id, proposal_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE proposal_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_executions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_executions ON proposal_executions;
+    CREATE POLICY tenant_isolation_proposal_executions ON proposal_executions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Terminal-state enum on voice_recordings. NULL until the FSM stamps it
+    -- at hangup; backfillable from call_summaries.quality_score + escalation
+    -- audit signals (separate ops job).
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS outcome TEXT
+        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_outcome
+      ON voice_recordings (tenant_id, outcome) WHERE outcome IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS retrieval_eval_runs (
+      id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      ai_run_id              UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      query_text             TEXT NOT NULL,
+      retrieved_chunk_ids    UUID[] NOT NULL DEFAULT '{}',
+      retrieved_scores       REAL[] NOT NULL DEFAULT '{}',
+      downstream_proposal_id UUID REFERENCES proposals(id) ON DELETE SET NULL,
+      downstream_outcome     TEXT,
+      created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_tenant_time
+      ON retrieval_eval_runs (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_proposal
+      ON retrieval_eval_runs (downstream_proposal_id)
+      WHERE downstream_proposal_id IS NOT NULL;
+    ALTER TABLE retrieval_eval_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE retrieval_eval_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_retrieval_eval_runs ON retrieval_eval_runs;
+    CREATE POLICY tenant_isolation_retrieval_eval_runs ON retrieval_eval_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
