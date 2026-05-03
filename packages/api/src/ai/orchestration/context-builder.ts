@@ -1,5 +1,7 @@
 import { Message } from '../../conversations/conversation-service';
 import { VerticalType } from '../../shared/vertical-types';
+import type { KnowledgeChunkSourceType } from '../training/knowledge-chunks';
+import type { RetrieveContextResult } from '../skills/retrieve-context';
 
 export interface VerticalContext {
   type: VerticalType;
@@ -8,6 +10,22 @@ export interface VerticalContext {
   categories?: unknown[];
   templates?: unknown[];
   intakeConfig?: Record<string, unknown>;
+}
+
+/**
+ * A retrieved RAG chunk surfaced into the prompt context. Carries only
+ * the scrubbed content plus minimal provenance — the embedding vector
+ * and raw content stay in the repository. Phase 4a-2 wires a `retrieve`
+ * adapter into `buildSourceContext` so callers behind the
+ * `RAG_RETRIEVAL_ENABLED` flag get this populated; otherwise it stays
+ * undefined and downstream consumers fall through to the legacy
+ * recency-only path.
+ */
+export interface RetrievedChunk {
+  content: string;
+  sourceType: string;
+  sourceId: string;
+  similarity: number;
 }
 
 export interface SourceContext {
@@ -20,13 +38,34 @@ export interface SourceContext {
   location?: Record<string, unknown>;
   tenant?: { name: string; settings?: Record<string, unknown> };
   vertical?: VerticalContext;
+  retrievedChunks?: RetrievedChunk[];
 }
 
 export interface EntityRefs {
   customerId?: string;
   jobId?: string;
   locationId?: string;
+  /**
+   * Explicit query text for retrieval. When omitted, `buildSourceContext`
+   * falls back to the latest user message in `conversation.recentMessages`.
+   */
+  queryText?: string;
 }
+
+/**
+ * Adapter signature for the optional retrieval dependency. Wraps the
+ * `retrieve-context` skill so the context-builder doesn't depend
+ * directly on `EmbeddingProvider` / `KnowledgeChunkRepository`. Failure
+ * is encoded in the result (`status: 'unavailable'`) — callers must not
+ * throw.
+ */
+export type RetrieveAdapter = (input: {
+  tenantId: string;
+  queryText: string;
+  k?: number;
+  sourceTypes?: KnowledgeChunkSourceType[];
+  minSimilarity?: number;
+}) => Promise<RetrieveContextResult>;
 
 export interface VerticalConfigResult {
   type: VerticalType;
@@ -44,11 +83,21 @@ export interface ContextRepositories {
   getLocation?(tenantId: string, locationId: string): Promise<Record<string, unknown> | null>;
   getTenantInfo?(tenantId: string): Promise<{ name: string; settings?: Record<string, unknown> } | null>;
   getActiveVerticalConfig?(tenantId: string): Promise<VerticalConfigResult | null>;
+  /**
+   * Optional RAG retrieval adapter. When supplied (typically gated by
+   * `RAG_RETRIEVAL_ENABLED` in app.ts), `buildSourceContext` resolves a
+   * `queryText` from `entityRefs.queryText` or the latest user/customer
+   * message and populates `SourceContext.retrievedChunks`. Failure-soft:
+   * `status: 'unavailable'` leaves the field undefined and the rest of
+   * the context still builds normally.
+   */
+  retrieve?: RetrieveAdapter;
 }
 
 export const MAX_CONTEXT_TOKENS = 8000;
 
 const MAX_RECENT_MESSAGES = 20;
+const DEFAULT_RETRIEVAL_K = 5;
 
 export async function buildSourceContext(
   tenantId: string,
@@ -117,7 +166,54 @@ export async function buildSourceContext(
     }
   }
 
+  if (repos.retrieve) {
+    const queryText = resolveQueryText(entityRefs, context);
+    if (queryText) {
+      try {
+        const result = await repos.retrieve({
+          tenantId,
+          queryText,
+          k: DEFAULT_RETRIEVAL_K,
+        });
+        if (result.status === 'ok') {
+          context.retrievedChunks = result.hits.map((hit) => ({
+            content: hit.chunk.contentScrubbed,
+            sourceType: hit.chunk.sourceType,
+            sourceId: hit.chunk.sourceId,
+            similarity: hit.similarity,
+          }));
+        }
+        // 'no_hits' and 'unavailable' both leave retrievedChunks undefined.
+      } catch (err) {
+        // The adapter contract is failure-soft, but defend against
+        // adapters that throw synchronously (e.g., misconfigured deps).
+        // eslint-disable-next-line no-console
+        console.error('context-builder: retrieve adapter threw', tenantId, err);
+      }
+    }
+  }
+
   return context;
+}
+
+function resolveQueryText(
+  entityRefs: EntityRefs,
+  context: SourceContext,
+): string | undefined {
+  const explicit = entityRefs.queryText?.trim();
+  if (explicit && explicit.length > 0) return explicit;
+  const messages = context.conversation?.recentMessages;
+  if (!messages || messages.length === 0) return undefined;
+  // Walk from newest to oldest, picking the latest non-agent utterance
+  // — that's the actual question we're trying to answer.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== 'agent' && m.role !== 'assistant') {
+      const text = m.content?.trim();
+      if (text && text.length > 0) return text;
+    }
+  }
+  return undefined;
 }
 
 export function estimateContextSize(context: SourceContext): number {
@@ -126,6 +222,18 @@ export function estimateContextSize(context: SourceContext): number {
 
 export function trimContext(context: SourceContext, maxTokens: number = MAX_CONTEXT_TOKENS): SourceContext {
   let trimmed: SourceContext = { ...context };
+
+  if (estimateContextSize(trimmed) <= maxTokens) {
+    return trimmed;
+  }
+
+  // Drop retrieved RAG chunks first. Recency from `conversation` is the
+  // strong signal for in-flight calls; retrieval is augmentation. If we
+  // can't fit both, the conversation wins.
+  if (trimmed.retrievedChunks && trimmed.retrievedChunks.length > 0) {
+    trimmed = { ...trimmed };
+    delete trimmed.retrievedChunks;
+  }
 
   if (estimateContextSize(trimmed) <= maxTokens) {
     return trimmed;
