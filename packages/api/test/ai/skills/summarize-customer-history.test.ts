@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { summarizeCustomerHistory } from '../../../src/ai/skills/summarize-customer-history';
 import { InMemoryJobRepository, type Job } from '../../../src/jobs/job';
 import {
@@ -31,11 +31,13 @@ function makeJob(overrides: Partial<Job> & Pick<Job, 'id' | 'createdAt'>): Job {
   };
 }
 
-function makeInvoice(overrides: Partial<Invoice> & Pick<Invoice, 'id' | 'amountDueCents' | 'status'>): Invoice {
+function makeInvoice(
+  overrides: Partial<Invoice> & Pick<Invoice, 'id' | 'amountDueCents' | 'status' | 'jobId'>,
+): Invoice {
   return {
     id: overrides.id,
     tenantId: TENANT,
-    jobId: 'job-1',
+    jobId: overrides.jobId,
     invoiceNumber: 'INV-1',
     status: overrides.status,
     lineItems: [],
@@ -72,7 +74,17 @@ function makeAgreement(
 }
 
 describe('summarizeCustomerHistory', () => {
-  it('returns empty arrays + first-time-caller flag for unknown customer', async () => {
+  // Pin time so date-comparisons in hasOverdueBalance are deterministic
+  // regardless of when the test suite runs (gemini high review fix).
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-03T12:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('returns first-time-caller flag for unknown customer (jobs queryable, none found)', async () => {
     const jobRepo = new InMemoryJobRepository();
     const invoiceRepo = new InMemoryInvoiceRepository();
     const agreementRepo = new InMemoryAgreementRepository();
@@ -85,8 +97,10 @@ describe('summarizeCustomerHistory', () => {
     expect(result.recentJobs).toEqual([]);
     expect(result.openInvoices.count).toBe(0);
     expect(result.openInvoices.totalDueCents).toBe(0);
+    expect(result.openInvoices.unavailable).toBeUndefined();
     expect(result.activeAgreements).toEqual([]);
     expect(result.flags.isFirstTimeCaller).toBe(true);
+    expect(result.flags.jobHistoryUnavailable).toBe(false);
     expect(result.flags.hasOpenWorkOrders).toBe(false);
     expect(result.flags.isAgreementHolder).toBe(false);
     expect(result.flags.hasOverdueBalance).toBe(false);
@@ -118,17 +132,64 @@ describe('summarizeCustomerHistory', () => {
     expect(result.flags.isFirstTimeCaller).toBe(false);
   });
 
-  it('aggregates open balances + flags overdue when oldest dueDate is past', async () => {
+  it('hasOpenWorkOrders is computed from FULL job set, not just the recent slice', async () => {
     const jobRepo = new InMemoryJobRepository();
+    // 6 completed jobs (newest) + 1 in_progress job (oldest, beyond default limit of 5)
+    for (let i = 0; i < 6; i++) {
+      await jobRepo.create(
+        makeJob({
+          id: `recent-${i}`,
+          createdAt: new Date(2026, 3, 10 + i),
+          summary: `Recent ${i}`,
+          status: 'completed',
+        }),
+      );
+    }
+    await jobRepo.create(
+      makeJob({
+        id: 'old-active',
+        createdAt: new Date(2026, 0, 1),
+        summary: 'Old still-active job',
+        status: 'in_progress',
+      }),
+    );
     const invoiceRepo = new InMemoryInvoiceRepository();
     const agreementRepo = new InMemoryAgreementRepository();
 
+    const result = await summarizeCustomerHistory(
+      { tenantId: TENANT, customerId: CUSTOMER, recentJobLimit: 5 },
+      { jobRepo, invoiceRepo, agreementRepo },
+    );
+
+    // recentJobs slice does NOT include old-active.
+    expect(result.recentJobs.find((j) => j.id === 'old-active')).toBeUndefined();
+    // But hasOpenWorkOrders DOES detect it.
+    expect(result.flags.hasOpenWorkOrders).toBe(true);
+  });
+
+  it('aggregates open balances across customer jobs only, ignoring other customers and paid invoices', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(
+      makeJob({ id: 'job-1', createdAt: new Date('2026-04-01') }),
+    );
+    await jobRepo.create(
+      makeJob({ id: 'job-2', createdAt: new Date('2026-04-15') }),
+    );
+    // Other customer's job — must not contribute.
+    await jobRepo.create(
+      makeJob({
+        id: 'job-other',
+        customerId: OTHER_CUSTOMER,
+        createdAt: new Date('2026-04-20'),
+      }),
+    );
+    const invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(
       makeInvoice({
         id: 'inv-1',
         amountDueCents: 12000,
         status: 'open',
-        dueDate: new Date('2026-04-15'), // overdue (today is 2026-05-03)
+        dueDate: new Date('2026-04-15'),
         jobId: 'job-1',
       }),
     );
@@ -141,46 +202,40 @@ describe('summarizeCustomerHistory', () => {
         jobId: 'job-2',
       }),
     );
-    // Paid invoice — must NOT count toward open balance.
+    // Paid — must not count.
     await invoiceRepo.create(
       makeInvoice({
         id: 'inv-3',
         amountDueCents: 0,
         status: 'paid',
-        jobId: 'job-3',
+        jobId: 'job-2',
       }),
     );
+    // Other customer's open invoice — must not contribute.
+    await invoiceRepo.create(
+      makeInvoice({
+        id: 'inv-other',
+        amountDueCents: 99999,
+        status: 'open',
+        dueDate: new Date('2026-04-01'),
+        jobId: 'job-other',
+      }),
+    );
+    const agreementRepo = new InMemoryAgreementRepository();
 
-    // Filter by customerId: invoice has no customerId column, but findByTenant
-    // accepts a customerId option that filters via job lookup. The InMemory
-    // repo's filter is on `customerId` option directly; for this test we
-    // populate jobs so the customerId filter path resolves.
-    const jobRepoForFilter = new InMemoryJobRepository();
-    await jobRepoForFilter.create(
-      makeJob({ id: 'job-1', createdAt: new Date('2026-04-01') }),
-    );
-    await jobRepoForFilter.create(
-      makeJob({ id: 'job-2', createdAt: new Date('2026-04-15') }),
-    );
-    await jobRepoForFilter.create(
-      makeJob({ id: 'job-3', createdAt: new Date('2026-05-01') }),
-    );
-
-    // Use the unfiltered invoice repo so the customerId filter path runs.
     const result = await summarizeCustomerHistory(
       { tenantId: TENANT, customerId: CUSTOMER },
-      { jobRepo: jobRepoForFilter, invoiceRepo, agreementRepo },
+      { jobRepo, invoiceRepo, agreementRepo },
     );
 
-    // Only open + partially_paid; paid skipped.
     expect(result.openInvoices.count).toBe(2);
-    expect(result.openInvoices.totalDueCents).toBe(17000);
+    expect(result.openInvoices.totalDueCents).toBe(17000); // 12000 + 5000, NOT 99999
     expect(result.openInvoices.oldestDueDate).toEqual(new Date('2026-04-15'));
-    // 2026-04-15 is past today (test runs as if today is 2026-05-03 per CLAUDE.md).
+    // Today is pinned to 2026-05-03; 2026-04-15 is past.
     expect(result.flags.hasOverdueBalance).toBe(true);
   });
 
-  it('filters agreements to customer-scoped active rows', async () => {
+  it('filters agreements to customer-scoped active rows (relies on repo, no client-side re-filter)', async () => {
     const jobRepo = new InMemoryJobRepository();
     const invoiceRepo = new InMemoryInvoiceRepository();
     const agreementRepo = new InMemoryAgreementRepository();
@@ -199,14 +254,6 @@ describe('summarizeCustomerHistory', () => {
         customerId: OTHER_CUSTOMER,
       }),
     );
-    // Cancelled agreement — must NOT show.
-    await agreementRepo.create(
-      makeAgreement({
-        id: 'agr-3',
-        name: 'Cancelled Plan',
-        status: 'cancelled',
-      }),
-    );
 
     const result = await summarizeCustomerHistory(
       { tenantId: TENANT, customerId: CUSTOMER },
@@ -218,30 +265,8 @@ describe('summarizeCustomerHistory', () => {
     expect(result.flags.isAgreementHolder).toBe(true);
   });
 
-  it('flags hasOpenWorkOrders when a recent job is in non-terminal status', async () => {
-    const jobRepo = new InMemoryJobRepository();
-    await jobRepo.create(
-      makeJob({
-        id: 'job-1',
-        createdAt: new Date('2026-04-01'),
-        status: 'in_progress',
-      }),
-    );
-    const invoiceRepo = new InMemoryInvoiceRepository();
-    const agreementRepo = new InMemoryAgreementRepository();
-
-    const result = await summarizeCustomerHistory(
-      { tenantId: TENANT, customerId: CUSTOMER },
-      { jobRepo, invoiceRepo, agreementRepo },
-    );
-
-    expect(result.flags.hasOpenWorkOrders).toBe(true);
-  });
-
   it('exposes lastTechnicianId from the most-recent job that has one', async () => {
     const jobRepo = new InMemoryJobRepository();
-    // Newer job: no tech assigned. Older job: tech assigned. Should
-    // surface the older job's tech (the most-recent one we know of).
     await jobRepo.create(
       makeJob({ id: 'job-newer', createdAt: new Date('2026-05-01') }),
     );
@@ -263,13 +288,13 @@ describe('summarizeCustomerHistory', () => {
     expect(result.lastTechnicianId).toBe('tech-mike');
   });
 
-  it('failure-soft: invoice repo throws → openInvoices marked unavailable, rest of summary still builds', async () => {
+  it('failure-soft: any per-job invoice fetch failure marks balance unavailable + suppresses overdue flag', async () => {
     const jobRepo = new InMemoryJobRepository();
     await jobRepo.create(
       makeJob({ id: 'job-1', createdAt: new Date('2026-05-01') }),
     );
     const invoiceRepo = new InMemoryInvoiceRepository();
-    vi.spyOn(invoiceRepo, 'findByTenant').mockRejectedValue(
+    vi.spyOn(invoiceRepo, 'findByJob').mockRejectedValue(
       new Error('db connection lost'),
     );
     const agreementRepo = new InMemoryAgreementRepository();
@@ -282,14 +307,39 @@ describe('summarizeCustomerHistory', () => {
     expect(result.openInvoices.unavailable).toBe(true);
     expect(result.openInvoices.count).toBe(0);
     expect(result.recentJobs.length).toBe(1);
-    // hasOverdueBalance must be false when balance is unavailable
-    // (don't pretend the customer is overdue based on stale data).
+    expect(result.flags.hasOverdueBalance).toBe(false);
+    // Job history did succeed — first-time caller is false (we have 1 job).
+    expect(result.flags.isFirstTimeCaller).toBe(false);
+    expect(result.flags.jobHistoryUnavailable).toBe(false);
+  });
+
+  it('failure-soft: jobRepo.findByCustomer throws → jobHistoryUnavailable, isFirstTimeCaller false', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    vi.spyOn(jobRepo, 'findByCustomer').mockRejectedValue(
+      new Error('db down'),
+    );
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const agreementRepo = new InMemoryAgreementRepository();
+
+    const result = await summarizeCustomerHistory(
+      { tenantId: TENANT, customerId: CUSTOMER },
+      { jobRepo, invoiceRepo, agreementRepo },
+    );
+
+    expect(result.flags.jobHistoryUnavailable).toBe(true);
+    // Critical: don't mark a customer "first-time" just because we
+    // couldn't reach the DB. Could drive wrong greeting/triage path.
+    expect(result.flags.isFirstTimeCaller).toBe(false);
+    // Invoice fan-out depends on job set; mark balance unavailable too.
+    expect(result.openInvoices.unavailable).toBe(true);
     expect(result.flags.hasOverdueBalance).toBe(false);
   });
 
-  it('failure-soft: jobRepo without findByCustomer → empty job list, flags first-time caller', async () => {
-    // A repo that does NOT implement findByCustomer (the optional method).
-    const jobRepo: Pick<InMemoryJobRepository, 'create' | 'findById' | 'findByTenant' | 'update' | 'getNextJobNumber'> = {
+  it('failure-soft: jobRepo without findByCustomer method → jobHistoryUnavailable, isFirstTimeCaller false', async () => {
+    const jobRepo: Pick<
+      InMemoryJobRepository,
+      'create' | 'findById' | 'findByTenant' | 'update' | 'getNextJobNumber'
+    > = {
       create: async (j) => j,
       findById: async () => null,
       findByTenant: async () => [],
@@ -308,7 +358,8 @@ describe('summarizeCustomerHistory', () => {
       },
     );
 
-    expect(result.recentJobs).toEqual([]);
-    expect(result.flags.isFirstTimeCaller).toBe(true);
+    expect(result.flags.jobHistoryUnavailable).toBe(true);
+    expect(result.flags.isFirstTimeCaller).toBe(false);
+    expect(result.openInvoices.unavailable).toBe(true);
   });
 });
