@@ -57,20 +57,28 @@ export interface WeeklyHours {
  * Format a Date as YYYY-MM-DD in the supplied IANA tz. Uses Intl
  * because Node ships full ICU; falls back to UTC if `tz` is invalid
  * (rather than crashing the rollup).
+ *
+ * The formatter is cached per-tz: weeklyHoursByUser calls this once
+ * per entry per user, and the constructor is by far the hot cost.
  */
+const dateFormatterCache = new Map<string, Intl.DateTimeFormat | null>();
+
 function formatDateInTz(d: Date, tz: string): string {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: tz,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    // en-CA renders YYYY-MM-DD with leading zeros, no separators issue.
-    return fmt.format(d);
-  } catch {
-    return d.toISOString().slice(0, 10);
+  let fmt = dateFormatterCache.get(tz);
+  if (fmt === undefined) {
+    try {
+      fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
+    } catch {
+      fmt = null;
+    }
+    dateFormatterCache.set(tz, fmt);
   }
+  return fmt ? fmt.format(d) : d.toISOString().slice(0, 10);
 }
 
 export class TimeEntryService {

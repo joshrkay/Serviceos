@@ -147,27 +147,28 @@ export class PgTimeEntryRepository extends PgBaseRepository implements TimeEntry
     update: { clockedOutAt: Date; durationMinutes: number; notes?: string }
   ): Promise<TimeEntry | null> {
     return this.withTenant(tenantId, async (client) => {
-      // Idempotent close: only overwrite when clocked_out_at IS NULL.
-      // Calling close on an already-closed entry returns the existing row.
-      const existing = await client.query(
-        `SELECT * FROM time_entries WHERE tenant_id = $1 AND id = $2`,
-        [tenantId, id]
-      );
-      if (existing.rows.length === 0) return null;
-      if (existing.rows[0].clocked_out_at !== null) {
-        return mapRow(existing.rows[0]);
-      }
+      // Atomic, idempotent close: the WHERE-clause guard on
+      // clocked_out_at IS NULL means two concurrent closes can't both
+      // win — only the first sees a non-zero row count. The second
+      // close falls through to the SELECT and returns the already-
+      // closed row.
       const result = await client.query(
         `UPDATE time_entries
          SET clocked_out_at = $3,
              duration_minutes = $4,
              notes = COALESCE($5, notes),
              updated_at = NOW()
-         WHERE tenant_id = $1 AND id = $2
+         WHERE tenant_id = $1 AND id = $2 AND clocked_out_at IS NULL
          RETURNING *`,
         [tenantId, id, update.clockedOutAt, update.durationMinutes, update.notes ?? null]
       );
-      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      if (result.rows.length > 0) return mapRow(result.rows[0]);
+
+      const existing = await client.query(
+        `SELECT * FROM time_entries WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id]
+      );
+      return existing.rows.length > 0 ? mapRow(existing.rows[0]) : null;
     });
   }
 }
