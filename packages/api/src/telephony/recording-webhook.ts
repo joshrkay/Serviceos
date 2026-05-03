@@ -142,11 +142,42 @@ async function uploadToS3(
   }
 }
 
+/**
+ * Fired after a successful `voice_recordings` insert. Phase 4a-1 wires
+ * this to enqueue the transcript-ingestion-worker — the recording
+ * webhook is the natural integration point because it's where we have
+ * both the `voiceRecordingId` (just inserted) AND the `callSid`
+ * needed to look up the session's transcript via VoiceSessionStore.
+ *
+ * Failure-soft contract: callback errors are logged inside the
+ * webhook handler and never bubble up — the recording is already
+ * persisted by the time we get here.
+ */
+export interface RecordingPersistedEvent {
+  tenantId: string;
+  voiceRecordingId: string;
+  callSid: string;
+  durationSeconds: number;
+  /**
+   * True when `recordInboundCall` actually inserted a new row; false
+   * when it returned the existing row (Twilio retry). Phase 4a-1
+   * callers may want to skip ingestion on `inserted=false` since the
+   * prior delivery already enqueued the work.
+   */
+  inserted: boolean;
+}
+
 export interface RecordingHandlerOptions {
   /** Override the default fetcher so tests can stub Twilio. */
   fetchRecording?: typeof fetchRecordingBytes;
   /** Override the default uploader so tests can assert PUT shape. */
   uploadObject?: typeof uploadToS3;
+  /**
+   * Optional hook called after `recordInboundCall` succeeds. Phase 4a-1
+   * wires this to enqueue transcript ingestion. Errors are logged but
+   * never fail the webhook — the recording is already persisted.
+   */
+  onPersisted?: (event: RecordingPersistedEvent) => Promise<void> | void;
 }
 
 /**
@@ -281,6 +312,30 @@ export function createRecordingRouter(
         voiceRecordingId: result.voiceRecordingId,
         inserted: result.inserted,
       });
+
+      // Phase 4a-1: fire the optional onPersisted callback so the
+      // app-layer wiring can enqueue transcript-ingestion (or any
+      // future side-effect that needs the freshly-persisted recording).
+      // Failure-soft: errors are logged but never fail the webhook —
+      // the recording is already in S3 + the DB row is committed.
+      if (options.onPersisted) {
+        try {
+          await options.onPersisted({
+            tenantId,
+            voiceRecordingId: result.voiceRecordingId,
+            callSid,
+            durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0,
+            inserted: result.inserted,
+          });
+        } catch (hookErr) {
+          const error = hookErr instanceof Error ? hookErr : new Error(String(hookErr));
+          logger.warn('recording: onPersisted callback failed', {
+            callSid,
+            voiceRecordingId: result.voiceRecordingId,
+            error: error.message,
+          });
+        }
+      }
 
       res.status(200).type('text/plain').send('OK');
     } catch (err) {
