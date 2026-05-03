@@ -38,6 +38,10 @@ import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
+import { createJobPhotosRouter } from './routes/job-photos';
+import { JobPhotoService } from './jobs/job-photo-service';
+import { InMemoryJobPhotoRepository } from './jobs/job-photo';
+import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
@@ -480,6 +484,7 @@ export function createApp() {
   const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
+  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
@@ -1207,6 +1212,16 @@ export function createApp() {
     '/api/jobs',
     createJobFilesRouter({
       jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/jobs',
+    createJobPhotosRouter({
+      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
+      fileRepo,
       storage: storageProvider,
       bucket: storageBucket,
       auditRepo,

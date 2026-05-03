@@ -29,6 +29,33 @@ import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
 import { JobCreate } from './pages/jobs/JobCreate';
+import { CustomerEdit } from './pages/customers/CustomerEdit';
+import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
+import { useParams, useNavigate } from 'react-router';
+import React from 'react';
+
+// P11-007 — wrappers that pull `:id` from the route and forward it to
+// the typed edit components.
+function CustomerEditRoute() {
+  const params = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  if (!params.id) return null;
+  return React.createElement(CustomerEdit, {
+    customerId: params.id,
+    onSaved: (id: string) => navigate(`/customers/${id}`),
+    onCancel: () => navigate(-1),
+  });
+}
+
+function AppointmentEditRoute() {
+  const params = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  if (!params.id) return null;
+  return React.createElement(AppointmentEdit, {
+    appointmentId: params.id,
+    onBack: () => navigate(-1),
+  });
+}
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
@@ -58,6 +85,8 @@ export const router = createBrowserRouter([
       { path: 'schedule',       Component: SchedulePage    },
       { path: 'customers',      Component: CustomersPage   },
       { path: 'customers/:id',  Component: CustomerDetailPage },
+      { path: 'customers/:id/edit', Component: CustomerEditRoute },
+      { path: 'appointments/:id/edit', Component: AppointmentEditRoute },
       { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'leads',          Component: LeadsPage       },
       { path: 'estimates',      Component: EstimatesPage   },
