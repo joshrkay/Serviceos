@@ -1465,6 +1465,71 @@ export const MIGRATIONS = {
         OR tenant_id::text = current_setting('app.current_tenant_id', true)
       );
   `,
+
+  // Phase 1 of the inbound-AI-CSR RAG corpus. One unified table holds
+  // both per-tenant chunks (tenant_id NOT NULL, RLS-scoped) and the
+  // global non-PII tier (tenant_id IS NULL — vertical-pack terminology
+  // and category patterns shared across tenants). The CHECK constraint
+  // forces (scope='tenant' ⇔ tenant_id IS NOT NULL) so the two tiers
+  // can't accidentally cross.
+  //
+  // Embedding model is locked to text-embedding-3-small (1536 dims) for
+  // v1: cosine distances aren't comparable across embedding models, so
+  // mixed-model rows in the same ivfflat index would silently degrade
+  // retrieval quality. Future model upgrades go through a separate
+  // re-embedding job that rebuilds the index.
+  //
+  // Phase 1 is purely additive — no caller in main reads or writes this
+  // table yet. Workers + retrieval wiring land in Phases 3b and 4a.
+  //
+  // Originally landed as 059_create_knowledge_chunks; bumped to 061 when
+  // 059_lead_attribution + 060_capture_schema landed on main first, then
+  // bumped again to 062 when 061_create_lookup_events claimed 061.
+  '062_create_knowledge_chunks': `
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+      id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id            UUID NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      scope                TEXT NOT NULL CHECK (scope IN ('tenant', 'global')),
+      source_type          TEXT NOT NULL,
+      source_id            TEXT NOT NULL,
+      source_version       INTEGER NOT NULL DEFAULT 1,
+      content              TEXT NOT NULL,
+      content_scrubbed     TEXT NOT NULL,
+      embedding            vector(1536) NOT NULL,
+      embedding_model      TEXT NOT NULL CHECK (embedding_model = 'text-embedding-3-small'),
+      chunk_schema_version INTEGER NOT NULL DEFAULT 1,
+      metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (
+        (scope = 'tenant' AND tenant_id IS NOT NULL)
+        OR (scope = 'global' AND tenant_id IS NULL)
+      )
+    );
+
+    -- Approximate-nearest-neighbour index for cosine similarity. Defaults to
+    -- 100 lists, suitable for tens of thousands to ~1M rows; revisit when a
+    -- single tenant crosses ~10M chunks.
+    CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_ivfflat
+      ON knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
+      WITH (lists = 100);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_source
+      ON knowledge_chunks (tenant_id, source_type, source_id);
+
+    -- Idempotent ingestion: same (scope, source_type, source_id, version)
+    -- collides cleanly so re-ingestion with ON CONFLICT works.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_chunks_dedupe
+      ON knowledge_chunks (scope, source_type, source_id, source_version);
+
+    ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE knowledge_chunks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_knowledge_chunks ON knowledge_chunks;
+    CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
+      USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

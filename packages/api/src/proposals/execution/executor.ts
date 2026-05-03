@@ -4,6 +4,23 @@ import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers'
 import { IdempotencyGuard } from './idempotency';
 import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
+import { ProposalExecutionRepository } from '../proposal-execution';
+
+/**
+ * Fired after a proposal completes execution (success or failure).
+ * Phase 4a-1 wires this to enqueue the proposal-correction-worker so
+ * the dispatcher edit delta gets diffed and embedded into the RAG
+ * corpus. Failure-soft: callback errors are logged but never surface
+ * as execution errors — the proposal is already executed by the time
+ * we get here.
+ */
+export interface ProposalExecutionEvent {
+  tenantId: string;
+  proposalId: string;
+  /** ID of the proposal_executions row created for this run, when one was written. */
+  executionId?: string;
+  status: 'succeeded' | 'failed';
+}
 
 export class ProposalExecutor {
   /**
@@ -16,12 +33,34 @@ export class ProposalExecutor {
    */
   private readonly idempotency?: IdempotencyGuard;
 
+  /**
+   * Optional repository to persist a `proposal_executions` row for each
+   * run. When supplied, the executor records the as-executed payload
+   * alongside the immutable `proposals.payload` so the
+   * proposal-correction-worker (Phase 4a-1) can diff the two and emit
+   * a training chunk for the RAG corpus.
+   */
+  private readonly executionRepo?: ProposalExecutionRepository;
+
+  /**
+   * Optional callback fired after a successful or failed execution.
+   * Wires into the proposal-correction-worker queue. Errors are logged
+   * but never rethrown — the proposal is already executed.
+   */
+  private readonly onExecuted?: (event: ProposalExecutionEvent) => Promise<void> | void;
+
   constructor(
     private readonly handlers: Map<ProposalType, ExecutionHandler>,
     private readonly proposalRepo: ProposalRepository,
-    idempotency?: IdempotencyGuard
+    idempotency?: IdempotencyGuard,
+    options: {
+      executionRepo?: ProposalExecutionRepository;
+      onExecuted?: (event: ProposalExecutionEvent) => Promise<void> | void;
+    } = {}
   ) {
     this.idempotency = idempotency;
+    this.executionRepo = options.executionRepo;
+    this.onExecuted = options.onExecuted;
   }
 
   async execute(
@@ -138,6 +177,61 @@ export class ProposalExecutor {
           executedBy: context.executedBy,
         }
       );
+    }
+
+    // Phase 4a-1: persist a proposal_executions row + fire the
+    // onExecuted callback. We skip the row-write when the idempotency
+    // guard short-circuited because the prior run already wrote one.
+    // Both the insert and the callback are wrapped in their own try
+    // blocks: failures are logged via console (no logger threaded yet)
+    // but never rethrown — the proposal is already in 'executed' state
+    // and the user-visible side effect succeeded.
+    let executionId: string | undefined;
+    if (this.executionRepo && !alreadyExecuted) {
+      try {
+        const row = await this.executionRepo.recordExecution({
+          tenantId: updatedProposal.tenantId,
+          proposalId: updatedProposal.id,
+          // Capture the as-executed payload. v1 mirrors proposal.payload
+          // because we don't yet have a "dispatcher edit" surface that
+          // overrides the AI draft mid-flight; when dispatcher edits land
+          // they'll surface here as a different shape, and the
+          // correction-worker's diff will become non-empty.
+          executedPayload: updatedProposal.payload,
+          executedBy: context.executedBy,
+          status: result.success ? 'succeeded' : 'failed',
+          errorMessage: result.success ? undefined : result.error ?? 'execution_failed',
+          idempotencyKey: updatedProposal.idempotencyKey ?? undefined,
+        });
+        executionId = row.id;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        // eslint-disable-next-line no-console
+        console.error('proposal-executor: recordExecution failed', {
+          proposalId: updatedProposal.id,
+          tenantId: updatedProposal.tenantId,
+          error: error.message,
+        });
+      }
+    }
+
+    if (this.onExecuted) {
+      try {
+        await this.onExecuted({
+          tenantId: updatedProposal.tenantId,
+          proposalId: updatedProposal.id,
+          executionId,
+          status: result.success ? 'succeeded' : 'failed',
+        });
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        // eslint-disable-next-line no-console
+        console.error('proposal-executor: onExecuted callback failed', {
+          proposalId: updatedProposal.id,
+          tenantId: updatedProposal.tenantId,
+          error: error.message,
+        });
+      }
     }
 
     return { proposal: updatedProposal, result, alreadyExecuted };
