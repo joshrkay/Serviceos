@@ -175,6 +175,8 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
+import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 import {
   PgKnowledgeChunkRepository,
   InMemoryKnowledgeChunkRepository,
@@ -766,6 +768,28 @@ export function createApp() {
       proposalCorrectionWorker as import('./queues/queue').WorkerHandler<unknown>,
     );
   }
+
+  // Phase 4a-2: build the `retrieve` adapter consumed by
+  // `buildSourceContext` when callers want grounded RAG augmentation.
+  // Gated on `RAG_RETRIEVAL_ENABLED === 'true'` so the corpus can fill
+  // (Phase 4a-1 writers) before the reader fires in production. When
+  // the flag is off the adapter is `undefined` and `buildSourceContext`
+  // falls through to the legacy recency-only path. Phase 4b will pass
+  // this through to the FSM `intent_capture` state once we measure
+  // latency impact in 4a.
+  const ragRetrievalEnabled = process.env.RAG_RETRIEVAL_ENABLED === 'true';
+  const retrieveAdapter: RetrieveAdapter | undefined =
+    ragRetrievalEnabled && embeddingProvider
+      ? createRetrieveAdapter({
+          embeddings: embeddingProvider,
+          knowledgeChunkRepo,
+          retrievalEvalRunRepo,
+        })
+      : undefined;
+  // The variable is wired into future `buildSourceContext` call sites
+  // (Phase 4b). Reference it once so the linter doesn't flag the
+  // construction during the gap between 4a-2 and 4b landing.
+  void retrieveAdapter;
 
   const delayNoticeStateRepo = pool
     ? new PgDelayNoticeStateRepository(pool)
