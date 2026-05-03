@@ -21,6 +21,16 @@ function mapRow(row: Record<string, unknown>): Lead {
       ? Number(valueRaw)
       : (valueRaw as number);
 
+  // node-pg parses JSONB -> object automatically; default '{}' means it's
+  // never null, but we still guard for older rows that pre-date 059.
+  const attributionRaw = row.attribution;
+  const attribution =
+    attributionRaw && typeof attributionRaw === 'object'
+      ? (attributionRaw as Record<string, string>)
+      : undefined;
+  const attributionFinal =
+    attribution && Object.keys(attribution).length > 0 ? attribution : undefined;
+
   return {
     id: row.id as string,
     tenantId: row.tenant_id as string,
@@ -31,6 +41,10 @@ function mapRow(row: Record<string, unknown>): Lead {
     email: (row.email as string) ?? undefined,
     source: row.source as LeadSource,
     sourceDetail: (row.source_detail as string) ?? undefined,
+    utmSource: (row.utm_source as string) ?? undefined,
+    utmMedium: (row.utm_medium as string) ?? undefined,
+    utmCampaign: (row.utm_campaign as string) ?? undefined,
+    attribution: attributionFinal,
     stage: row.stage as LeadStage,
     estimatedValueCents,
     notes: (row.notes as string) ?? undefined,
@@ -53,9 +67,11 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
       const result = await client.query(
         `INSERT INTO leads (
           id, tenant_id, first_name, last_name, company_name, primary_phone, email,
-          source, source_detail, stage, estimated_value_cents, notes, assigned_user_id,
+          source, source_detail, utm_source, utm_medium, utm_campaign, attribution,
+          stage, estimated_value_cents, notes, assigned_user_id,
           converted_customer_id, lost_reason, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb,
+                  $14, $15, $16, $17, $18, $19, $20, $21, $22)
         RETURNING *`,
         [
           lead.id,
@@ -67,6 +83,10 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
           lead.email ?? null,
           lead.source,
           lead.sourceDetail ?? null,
+          lead.utmSource ?? null,
+          lead.utmMedium ?? null,
+          lead.utmCampaign ?? null,
+          JSON.stringify(lead.attribution ?? {}),
           lead.stage,
           lead.estimatedValueCents ?? null,
           lead.notes ?? null,
@@ -210,6 +230,10 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
       email: 'email',
       source: 'source',
       sourceDetail: 'source_detail',
+      utmSource: 'utm_source',
+      utmMedium: 'utm_medium',
+      utmCampaign: 'utm_campaign',
+      attribution: 'attribution',
       stage: 'stage',
       estimatedValueCents: 'estimated_value_cents',
       notes: 'notes',
@@ -226,8 +250,13 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
     for (const [key, value] of Object.entries(updates)) {
       const column = fieldMap[key];
       if (column) {
-        setClauses.push(`${column} = $${paramIndex}`);
-        params.push(value === undefined ? null : value);
+        if (key === 'attribution') {
+          setClauses.push(`${column} = $${paramIndex}::jsonb`);
+          params.push(JSON.stringify(value ?? {}));
+        } else {
+          setClauses.push(`${column} = $${paramIndex}`);
+          params.push(value === undefined ? null : value);
+        }
         paramIndex++;
       }
     }

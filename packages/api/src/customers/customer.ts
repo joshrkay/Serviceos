@@ -30,6 +30,13 @@ export interface Customer {
   // Archive support
   isArchived: boolean;
   archivedAt?: Date;
+  /**
+   * Set when this customer was created by converting a Lead. Threads
+   * source attribution forward — jobs/invoices created for this customer
+   * will inherit it via the route handlers, so a payment can be traced
+   * back to the originating campaign with a single join.
+   */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

@@ -22,6 +22,7 @@ import { AuditRepository } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { SendService } from '../notifications/send-service';
+import { Job } from '../jobs/job';
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -36,7 +37,7 @@ export function createInvoiceRouter(
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
   paymentRepo?: PaymentRepository,
-  sendService?: SendService
+  sendService?: SendService,
 ): Router {
   const router = Router();
 
@@ -48,16 +49,22 @@ export function createInvoiceRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createInvoiceSchema.parse(req.body);
-        // Cross-entity tenant guard: jobId must belong to the
-        // requesting tenant. estimateId is optional — guard it only
-        // when present.
-        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
+        // Cross-entity tenant guard + load: requireExistsAndLoad returns
+        // the job so we can read originatingLeadId for attribution
+        // propagation without a second findById round-trip.
+        const job = (await ownership.requireExistsAndLoad(
+          req.auth!.tenantId,
+          'job',
+          parsed.jobId
+        )) as Job | undefined;
         if (parsed.estimateId) {
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
         }
+
         const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
+            originatingLeadId: job?.originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
           },

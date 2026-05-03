@@ -1,6 +1,7 @@
 import { Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { toErrorResponse } from '../shared/errors';
+import { extractIp } from '../shared/extract-ip';
 import { PublicEstimateService } from '../estimates/public-estimate-service';
 
 const approveSchema = z.object({
@@ -84,11 +85,3 @@ export function createPublicEstimatesRouter(
   return router;
 }
 
-function extractIp(req: Request): string | undefined {
-  // Trust proxy must be configured for X-Forwarded-For to work
-  const forwarded = req.get('x-forwarded-for');
-  if (forwarded) {
-    return forwarded.split(',')[0]?.trim();
-  }
-  return req.ip;
-}

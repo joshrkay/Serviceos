@@ -40,6 +40,12 @@ import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createJobFilesRouter } from './routes/job-files';
 import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
+import { createPublicIntakeRouter } from './routes/public-intake';
+import { createReportsRouter } from './routes/reports';
+import {
+  PgRevenueBySourceRepository,
+  InMemoryRevenueBySourceRepository,
+} from './reports/revenue-by-source';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
@@ -756,10 +762,30 @@ export function createApp() {
     estimateRepo,
     invoiceRepo,
     appointmentRepo,
+    leadRepo,
   });
 
   // Public feedback routes are mounted before /api auth middleware.
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+
+  // Public lead intake — embedded marketing-page form posts here.
+  // Tenant identified by UUID in the URL. The outer `/public` limiter
+  // (30/min/IP, mounted above) catches abuse; the intake-specific
+  // limiter below adds a tighter per-IP bucket because intake writes
+  // to the database (vs the read-only token-gated public flows).
+  // Uses an in-memory dev tenant repo when running without a pool so
+  // local dev / tests still work.
+  const intakeTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
+  app.use(
+    '/public/intake',
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 10,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo)
+  );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
   const publicEstimateService = new PublicEstimateService({
@@ -980,6 +1006,12 @@ export function createApp() {
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
+
+  // Tenant-scoped reporting (revenue by lead source / UTM).
+  const revenueBySourceRepo = pool
+    ? new PgRevenueBySourceRepository(pool)
+    : new InMemoryRevenueBySourceRepository();
+  app.use('/api/reports', createReportsRouter(revenueBySourceRepo));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));

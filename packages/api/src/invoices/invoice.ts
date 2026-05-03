@@ -3,6 +3,7 @@ import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/bil
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
+import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -36,6 +37,8 @@ export interface Invoice {
   stripePaymentLinkId?: string;
   /** Stripe-hosted checkout URL returned with the payment link. */
   stripePaymentLinkUrl?: string;
+  /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -50,6 +53,8 @@ export interface CreateInvoiceInput {
   discountCents?: number;
   taxRateBps?: number;
   customerMessage?: string;
+  /** Optional override; routes auto-populate from job when omitted. */
+  originatingLeadId?: string;
   createdBy: string;
 }
 
@@ -168,6 +173,7 @@ export async function createInvoice(
     amountPaidCents: 0,
     amountDueCents: totals.totalCents,
     customerMessage: input.customerMessage,
+    originatingLeadId: input.originatingLeadId,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -183,6 +189,7 @@ export async function createInvoice(
       eventType: 'invoice.created',
       entityType: 'invoice',
       entityId: created.id,
+      metadata: buildOriginationMetadata(created.originatingLeadId),
     });
     await auditRepo.create(event);
   }

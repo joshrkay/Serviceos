@@ -25,6 +25,7 @@ import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
 import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
+import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
@@ -64,6 +65,7 @@ export const router = createBrowserRouter([
       { path: 'settings/templates', Component: TemplatesPage   },
       { path: 'settings/price-book', Component: PriceBookPage },
       { path: 'settings/feedback', Component: FeedbackDashboard },
+      { path: 'reports/revenue-by-source', Component: RevenueBySourcePage },
       { path: 'technician/day', Component: TechnicianDayPage },
     ],
     }],
