@@ -379,3 +379,75 @@ The Definition of Ship-Ready (Section 8) gains two clauses:
 9. **Four concurrent AI sessions can run with one human supervisor without cross-session bleed, without breaching tenant cost cap, with p95 turn latency < 3s.**
 10. **A process restart mid-session resumes the AI operator from `voice_sessions.context` rather than dropping the customer mid-sentence** (or, if resume is infeasible for live audio, drops cleanly with an SMS apology + callback invitation rather than going silent).
 
+---
+
+## Appendix C — Supervisor / Tech mode for the owner-operator
+
+The Appendix B model (one human supervises N AI sessions) doesn't fit the most common user: the owner-operator who switches between watching the wall and driving to a job multiple times per day. Without an explicit model, AI behavior under "the only supervisor just got in a truck" is undefined — exactly when it most needs to be safe.
+
+### Concept
+
+**Role** stays single-valued (`owner` / `dispatcher` / `technician`) and unchanged. **Mode** is a new runtime state on `users` — `supervisor` / `tech` / `both` — that drives UI affordances and AI behavior but does **not** grant permissions. A new `users.can_field_serve BOOLEAN` flag lets non-owners opt into tech mode without owner permissions.
+
+### Five user archetypes covered
+
+| Archetype | Role | `can_field_serve` | Allowed modes |
+|---|---|---|---|
+| Owner-operator | `owner` | `true` | all three |
+| Owner with CSR | `owner` | `true` | all three |
+| CSR / dispatcher only | `dispatcher` | `false` | supervisor only |
+| Tech only | `technician` | n/a | tech only |
+| Working dispatcher | `dispatcher` | `true` | all three |
+
+### AI behavior per mode (decisions locked)
+
+| | `supervisor` | `both` | `tech` | Unsupervised |
+|---|---|---|---|---|
+| Auto-approve threshold | **0.90** | **0.92** | **0.95** | hard-blocked |
+| Voice approval | full | session-targeted | **read-only** (queries only; writes need button tap) | n/a |
+| Low/med-confidence proposals | wall awaits click | compressed wall | `queue_and_sms` to owner | `queue_and_sms` to owner |
+| Emergency intent | normal escalation | normal | immediate Twilio Dial to on-call | immediate Twilio Dial to on-call |
+
+"Unsupervised" = no user in the tenant currently has `current_mode IN ('supervisor','both')`. This is the single most important guard against the owner-operator who forgets to flip modes before driving away.
+
+### Schema (folded into migration 063)
+
+```sql
+ALTER TABLE users
+  ADD COLUMN can_field_serve BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN current_mode TEXT NOT NULL DEFAULT 'supervisor'
+    CHECK (current_mode IN ('supervisor','tech','both')),
+  ADD COLUMN mode_changed_at TIMESTAMPTZ;
+UPDATE users SET can_field_serve = true WHERE role = 'owner';
+
+ALTER TABLE tenant_settings
+  ADD COLUMN backup_supervisor_user_id UUID REFERENCES users(id),
+  ADD COLUMN unsupervised_proposal_routing TEXT NOT NULL DEFAULT 'queue_and_sms'
+    CHECK (unsupervised_proposal_routing IN ('queue_and_sms','queue_only','escalate_to_oncall'));
+
+ALTER TABLE voice_sessions
+  ADD COLUMN supervisor_user_id UUID REFERENCES users(id),
+  ADD COLUMN supervisor_mode_at_start TEXT
+    CHECK (supervisor_mode_at_start IN ('supervisor','tech','both','unsupervised'));
+```
+
+### Critical files
+
+- Backend: `packages/api/src/db/schema.ts` (migration 063), `packages/api/src/middleware/auth.ts:16-32` (load `current_mode`), `packages/api/src/routes/me.ts` (new — `GET /api/me`, `POST /api/me/mode`), `packages/api/src/proposals/lifecycle.ts` (mode-aware threshold), `packages/api/src/ai/skills/escalate-to-human.ts` (unsupervised emergency Dial).
+- Frontend: `packages/web/src/hooks/useMe.ts` (new), `packages/web/src/components/layout/Shell.tsx` (mode toggle + mode-aware nav, replaces hardcoded "Owner" label at line 125), `packages/web/src/components/mode/ModeSwitchModal.tsx` (new), `packages/web/src/components/sessions/CompressedSessionStrip.tsx` (new — for `both` mode), `packages/web/src/pages/technician/TechnicianDayPage.tsx` (mobile-first + mode check), `packages/web/src/pages/settings/SettingsPage.tsx` (backup-supervisor + routing).
+
+### Verification
+
+- Unit: middleware populates `req.auth.mode`; `/api/me/mode` rejects `tech` for `can_field_serve=false`; threshold resolution per mode correct; emergency-intent unsupervised path Dials on-call.
+- E2E: `qa-runner/scenarios/mode-switch-during-sessions.ts` — flips mode 50 times against 4 concurrent sessions, asserts zero cross-session bleed and that in-flight countdowns finish at original threshold while new proposals use new threshold.
+- Manual: owner-operator script (toggle visible, mid-call flip works, mini-strip on `both`) and CSR script (toggle locked to `supervisor`).
+
+### Effort
+
+~27 engineer-hours, ~3.5 focused days. Fits Wed/Thu/Fri if interleaved with the supervisor wall (Wed) and tech-mobile pass (Thu). Full plan in `/root/.claude/plans/how-would-this-affect-sorted-clock.md`.
+
+### Definition of Ship-Ready — additional clauses
+
+11. **An owner-operator can flip from `supervisor` to `tech` and back mid-day, with active AI sessions, without losing or double-executing any proposal** (the 50-flip / 4-session harness passes).
+12. **An "unsupervised" tenant state is detectable in real time and hard-blocks new auto-approvals**, so the owner driving away with the kill-switch off still cannot have the AI commit a low-confidence booking on their behalf.
+
