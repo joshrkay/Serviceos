@@ -11,6 +11,12 @@ import { VoiceBar } from '../shared/VoiceBar';
 import { CameraCapture, CameraButton } from '../shared/CameraCapture';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useMe, type Mode } from '../../hooks/useMe';
+import {
+  ModeSwitchModal,
+  shouldShowModeSwitchModal,
+} from '../mode/ModeSwitchModal';
+import { CompressedSessionStrip } from '../sessions/CompressedSessionStrip';
+import { useActiveSessions } from '../../hooks/useActiveSessions';
 
 interface NavItem {
   to: string;
@@ -196,6 +202,12 @@ export function Shell() {
   const { isLoaded, user } = useUser();
   const { signOut } = useClerk();
   const { me, switchMode } = useMe();
+  const { sessions, pendingProposalCount } = useActiveSessions();
+  // Phase 12 — pending mode-switch confirmation. When a user clicks a
+  // destination that requires a confirmation modal (supervisor→tech /
+  // both→tech), we stash it here and render <ModeSwitchModal>. The
+  // modal's onConfirm executes the actual switchMode.
+  const [pendingMode, setPendingMode] = useState<Mode | null>(null);
 
   const isExact = (to: string) =>
     to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
@@ -227,6 +239,31 @@ export function Shell() {
 
   const nav = getNav(currentMode);
   const bottomNav = getBottomNav(currentMode);
+
+  // The mode toggle calls this; if the destination crosses out of
+  // supervisor coverage, we surface the confirmation modal instead of
+  // performing the switch immediately. Otherwise we delegate to the
+  // hook directly. Errors propagate to the toggle's local catch which
+  // surfaces a sonner toast.
+  const handleModeRequest = async (target: Mode) => {
+    if (shouldShowModeSwitchModal(currentMode, target)) {
+      setPendingMode(target);
+      return;
+    }
+    await switchMode(target);
+  };
+
+  const confirmPendingMode = async () => {
+    const target = pendingMode;
+    if (!target) return;
+    setPendingMode(null);
+    try {
+      await switchMode(target);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Mode switch failed';
+      toast.error(message);
+    }
+  };
 
   return (
     <ErrorBoundary>
@@ -297,7 +334,7 @@ export function Shell() {
             <ModeToggle
               current={currentMode}
               canFieldServe={canFieldServe}
-              onSwitch={switchMode}
+              onSwitch={handleModeRequest}
               variant="sidebar"
             />
           </div>
@@ -339,7 +376,7 @@ export function Shell() {
                 <ModeToggle
                   current={currentMode}
                   canFieldServe={canFieldServe}
-                  onSwitch={switchMode}
+                  onSwitch={handleModeRequest}
                   variant="topbar"
                 />
               </div>
@@ -360,6 +397,12 @@ export function Shell() {
             </NavLink>
           </div>
         </div>
+
+        {/* Phase 12 — compressed session strip is only visible in 'both'
+            mode. In supervisor mode the operator sees the full wall;
+            in tech mode the operator should not be distracted by the
+            wall at all. */}
+        {currentMode === 'both' && <CompressedSessionStrip />}
 
         {/* Page (fills remaining space, scrolls internally) */}
         <div className="flex-1 overflow-hidden">
@@ -397,6 +440,20 @@ export function Shell() {
       {/* Camera overlay */}
       {cameraOpen && (
         <CameraCapture onClose={() => setCameraOpen(false)} />
+      )}
+
+      {/* Phase 12 — mode-switch confirmation. Rendered at the layout
+          root so it overlays everything. The modal owns its own
+          presentation; we own the `switchMode` invocation on confirm. */}
+      {pendingMode && me && (
+        <ModeSwitchModal
+          from={currentMode}
+          to={pendingMode}
+          activeSessionCount={sessions.length}
+          pendingProposalCount={pendingProposalCount}
+          onConfirm={confirmPendingMode}
+          onCancel={() => setPendingMode(null)}
+        />
       )}
 
     </div>
