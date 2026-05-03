@@ -13,6 +13,7 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   InMemoryKnowledgeChunkRepository,
+  type KnowledgeChunkRepository,
 } from '../../../src/ai/training/knowledge-chunks';
 import { InMemoryRetrievalEvalRunRepository } from '../../../src/ai/training/retrieval-eval-run';
 import type {
@@ -258,6 +259,153 @@ describe('buildSourceContext — Phase 4a-2 retrieval', () => {
 
     expect(retrieve).toHaveBeenCalledTimes(1);
     expect(retrieve.mock.calls[0][0].queryText).toBe('follow-up question');
+  });
+
+  it('skips non-allowlisted roles (system/tool) when scanning for queryText', async () => {
+    const retrieve = vi.fn<Parameters<RetrieveAdapter>, ReturnType<RetrieveAdapter>>(
+      async () => ({ status: 'no_hits' as const }),
+    );
+    const repos: ContextRepositories = {
+      getConversationMessages: async () => [
+        makeMessage({ index: 1, role: 'customer', content: 'older caller line' }),
+        makeMessage({ index: 2, role: 'agent', content: 'agent reply' }),
+        // Latest non-agent role — but NOT in QUERY_ROLES allow-list. Must be skipped.
+        makeMessage({ index: 3, role: 'system', content: 'system housekeeping ping' }),
+        makeMessage({ index: 4, role: 'tool', content: 'tool function output' }),
+      ],
+      retrieve,
+    };
+
+    await buildSourceContext(TENANT, 'conv-1', {}, repos);
+
+    expect(retrieve).toHaveBeenCalledTimes(1);
+    // Falls back to the older customer message, not 'system' or 'tool'.
+    expect(retrieve.mock.calls[0][0].queryText).toBe('older caller line');
+  });
+
+  it('whitespace-only entityRefs.queryText falls back to message scan', async () => {
+    const retrieve = vi.fn<Parameters<RetrieveAdapter>, ReturnType<RetrieveAdapter>>(
+      async () => ({ status: 'no_hits' as const }),
+    );
+    const repos: ContextRepositories = {
+      getConversationMessages: async () => [
+        makeMessage({ index: 1, role: 'customer', content: 'fallback message' }),
+      ],
+      retrieve,
+    };
+
+    await buildSourceContext(TENANT, 'conv-1', { queryText: '   \t  ' }, repos);
+
+    expect(retrieve).toHaveBeenCalledTimes(1);
+    expect(retrieve.mock.calls[0][0].queryText).toBe('fallback message');
+  });
+
+  it('NaN similarity scores are clamped to 0 (zero-magnitude embedding safety)', async () => {
+    // A search that returns a NaN similarity. Cosine similarity of a
+    // zero-magnitude vector against anything is 0/0 = NaN; we want to
+    // recover gracefully rather than letting `validateInput` reject the
+    // eval-run row.
+    const knowledgeRepo: KnowledgeChunkRepository = {
+      insert: async () => {
+        throw new Error('not used');
+      },
+      search: async () => [
+        {
+          chunk: {
+            id: 'chunk-1',
+            tenantId: TENANT,
+            scope: 'tenant',
+            sourceType: 'call_summary',
+            sourceId: 'call-1',
+            sourceVersion: 1,
+            content: 'hit',
+            contentScrubbed: 'hit',
+            embedding: [...CONST_EMBEDDING],
+            embeddingModel: EMBEDDING_MODEL,
+            chunkSchemaVersion: 1,
+            metadata: {},
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          similarity: NaN,
+        },
+      ],
+    };
+    const evalRepo = new InMemoryRetrievalEvalRunRepository();
+    const recordRunSpy = vi.spyOn(evalRepo, 'recordRun');
+
+    const retrieve = createRetrieveAdapter({
+      embeddings: stubEmbedder(),
+      knowledgeChunkRepo: knowledgeRepo,
+      retrievalEvalRunRepo: evalRepo,
+    });
+    const repos: ContextRepositories = {
+      getConversationMessages: async () => [
+        makeMessage({ index: 1, role: 'customer', content: 'q' }),
+      ],
+      retrieve,
+    };
+
+    await buildSourceContext(TENANT, 'conv-1', {}, repos);
+
+    expect(recordRunSpy).toHaveBeenCalledTimes(1);
+    const call = recordRunSpy.mock.calls[0][0];
+    expect(call.retrievedScores).toEqual([0]);
+    // And the persisted row exists (validateInput accepted the clamped 0).
+    const persisted = await recordRunSpy.mock.results[0].value;
+    expect(persisted.retrievedScores).toEqual([0]);
+  });
+
+  it('scrubs PII from queryText before persisting to retrieval_eval_runs', async () => {
+    const knowledgeRepo = new InMemoryKnowledgeChunkRepository();
+    const evalRepo = new InMemoryRetrievalEvalRunRepository();
+    const recordRunSpy = vi.spyOn(evalRepo, 'recordRun');
+    // Track the queryText sent to the embedder so we can confirm the
+    // SEARCH ran on the raw text — only the persisted eval-run row is
+    // scrubbed.
+    const seenByEmbedder: string[] = [];
+    const trackedEmbedder: EmbeddingProvider = {
+      name: 'tracked',
+      async createEmbedding(input: string): Promise<EmbeddingResult> {
+        seenByEmbedder.push(input);
+        return {
+          embedding: [...CONST_EMBEDDING],
+          model: EMBEDDING_MODEL,
+          tokenUsage: 5,
+          latencyMs: 1,
+        };
+      },
+    };
+
+    const retrieve = createRetrieveAdapter({
+      embeddings: trackedEmbedder,
+      knowledgeChunkRepo: knowledgeRepo,
+      retrievalEvalRunRepo: evalRepo,
+    });
+    const repos: ContextRepositories = {
+      getConversationMessages: async () => [
+        makeMessage({
+          index: 1,
+          role: 'customer',
+          content: 'My number is 555-867-5309 and I need a tune-up',
+        }),
+      ],
+      retrieve,
+    };
+
+    await buildSourceContext(TENANT, 'conv-1', {}, repos);
+
+    // Embedder saw the raw text (we want phone-number context for retrieval).
+    expect(seenByEmbedder.length).toBe(1);
+    expect(seenByEmbedder[0]).toContain('5309');
+
+    // Eval-run row has scrubbed text — phone digits removed.
+    expect(recordRunSpy).toHaveBeenCalledTimes(1);
+    const persistedQuery = recordRunSpy.mock.calls[0][0].queryText;
+    expect(persistedQuery).not.toContain('5309');
+    expect(persistedQuery).not.toContain('867');
+    // Non-PII content survives.
+    expect(persistedQuery).toContain('tune-up');
   });
 
   it('skips retrieval when no queryText resolves (no messages, no override)', async () => {

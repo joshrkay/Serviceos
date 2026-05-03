@@ -196,6 +196,14 @@ export async function buildSourceContext(
   return context;
 }
 
+/**
+ * Roles whose latest message is treated as the retrieval query.
+ * Allow-list (not exclude-list of agent/assistant) so that future
+ * roles like 'system' or 'tool' don't accidentally drive retrieval.
+ * Adding a new role here is a deliberate one-line change.
+ */
+const QUERY_ROLES: ReadonlySet<string> = new Set(['customer', 'user']);
+
 function resolveQueryText(
   entityRefs: EntityRefs,
   context: SourceContext,
@@ -204,11 +212,11 @@ function resolveQueryText(
   if (explicit && explicit.length > 0) return explicit;
   const messages = context.conversation?.recentMessages;
   if (!messages || messages.length === 0) return undefined;
-  // Walk from newest to oldest, picking the latest non-agent utterance
-  // — that's the actual question we're trying to answer.
+  // Walk from newest to oldest, picking the latest message from a
+  // QUERY_ROLES sender — that's the actual question we're answering.
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role !== 'agent' && m.role !== 'assistant') {
+    if (QUERY_ROLES.has(m.role)) {
       const text = m.content?.trim();
       if (text && text.length > 0) return text;
     }
@@ -229,7 +237,11 @@ export function trimContext(context: SourceContext, maxTokens: number = MAX_CONT
 
   // Drop retrieved RAG chunks first. Recency from `conversation` is the
   // strong signal for in-flight calls; retrieval is augmentation. If we
-  // can't fit both, the conversation wins.
+  // can't fit both, the conversation wins. The `length > 0` guard is
+  // defensive: the current adapter never emits an empty array (it leaves
+  // the field undefined on no_hits/unavailable), but a future direct
+  // mutation could land an empty array here, and we don't want to
+  // delete a no-op field that was already harmless.
   if (trimmed.retrievedChunks && trimmed.retrievedChunks.length > 0) {
     trimmed = { ...trimmed };
     delete trimmed.retrievedChunks;

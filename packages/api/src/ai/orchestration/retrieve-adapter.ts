@@ -1,6 +1,7 @@
 import type { EmbeddingProvider } from '../providers/openai-compatible';
 import type { KnowledgeChunkRepository } from '../training/knowledge-chunks';
 import type { RetrievalEvalRunRepository } from '../training/retrieval-eval-run';
+import { scrubPii } from '../training/scrub';
 import {
   retrieveContext,
   type RetrieveContextResult,
@@ -69,16 +70,34 @@ export function createRetrieveAdapter(
       // Clamp to [0, 1]. Cosine of two unit vectors is mathematically in
       // that range, but floating-point arithmetic can produce
       // 1.0000000000000002 — which trips `validateInput` on the eval-run
-      // repo and turns every row into a logged failure. Defensive
-      // clamp keeps the eval-run telemetry useful in production.
+      // repo and turns every row into a logged failure. The explicit
+      // NaN→0 fallback covers the case where a zero-magnitude embedding
+      // produces a divide-by-zero similarity (treats unknown signal as
+      // "no match" rather than "perfect match").
       const retrievedScores =
         result.status === 'ok'
-          ? result.hits.map((h) => Math.max(0, Math.min(1, h.similarity)))
+          ? result.hits.map((h) =>
+              Number.isNaN(h.similarity)
+                ? 0
+                : Math.max(0, Math.min(1, h.similarity)),
+            )
           : [];
+      // Scrub PII from queryText before persisting. The search itself
+      // ran against the raw text — phone numbers and addresses carry
+      // semantic signal we want for retrieval — but the eval-run table
+      // is a long-lived audit surface that ops humans review later, so
+      // it gets the regex-scrubbed variant. Without `knownEntities`
+      // here, the layered scrubber catches phones/emails/addresses by
+      // pattern; names slip through. Acceptable for an eval-run row
+      // (we're not training on `query_text`); compliance-grade scrub
+      // requires the caller to pass `knownEntities` via a richer
+      // RetrieveAdapter signature, which Phase 4b can introduce when
+      // it has the customer-id context to source them.
+      const scrubbedQueryText = scrubPii(input.queryText).scrubbed;
       try {
         await retrievalEvalRunRepo.recordRun({
           tenantId: input.tenantId,
-          queryText: input.queryText,
+          queryText: scrubbedQueryText,
           retrievedChunkIds,
           retrievedScores,
         });
