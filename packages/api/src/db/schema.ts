@@ -1426,6 +1426,38 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_originating_lead
       ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
   `,
+
+  // P11-001: voice lookup-skill audit log. Every invocation of a
+  // `lookup_*` voice skill writes one row — high-volume but tiny
+  // payload (no nested data). Tenant-scoped via RLS just like
+  // audit_events; session_id is the voice session that hosted the
+  // lookup, customer_id is nullable because the caller may be
+  // unidentified at lookup time.
+  '061_create_lookup_events': `
+    CREATE TABLE IF NOT EXISTS lookup_events (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id UUID NOT NULL,
+      customer_id UUID,
+      intent TEXT NOT NULL,
+      result_status TEXT NOT NULL CHECK (result_status IN ('found','none','error')),
+      result_count INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      latency_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant ON lookup_events(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_session
+      ON lookup_events(tenant_id, session_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_customer
+      ON lookup_events(tenant_id, customer_id)
+      WHERE customer_id IS NOT NULL;
+    ALTER TABLE lookup_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lookup_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lookup_events ON lookup_events;
+    CREATE POLICY tenant_isolation_lookup_events ON lookup_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

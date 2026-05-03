@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { TranscriptionStatus, VoiceRecording, VoiceRepository } from './voice-service';
+import { CallOutcome, TranscriptionStatus, VoiceRecording, VoiceRepository } from './voice-service';
 
 function mapRow(row: Record<string, unknown>): VoiceRecording {
   return {
@@ -13,6 +13,7 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
     transcriptMetadata: row.transcript_metadata as Record<string, unknown> | undefined,
     durationSeconds: row.duration_seconds != null ? Number(row.duration_seconds) : undefined,
     errorMessage: row.error_message as string | undefined,
+    outcome: (row.outcome as CallOutcome | null) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -89,6 +90,25 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
       );
       if (queryResult.rows.length === 0) return null;
       return mapRow(queryResult.rows[0]);
+    });
+  }
+
+  async stampOutcome(
+    tenantId: string,
+    id: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET outcome    = $1,
+                updated_at = NOW()
+          WHERE id = $2 AND tenant_id = $3
+          RETURNING *`,
+        [outcome, id, tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
     });
   }
 }

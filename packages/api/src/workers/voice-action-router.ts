@@ -102,7 +102,11 @@ export interface VoiceActionRouterDeps {
   availabilityFinder?: AvailabilityFinder;
 }
 
-const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalType> = {
+// P11-001: lookup_* intents are READ-ONLY and never produce a
+// proposal — the Twilio adapter routes them to the lookup-skill family
+// directly. They're omitted from this map; the action router falls back
+// to `voice_clarification` for any IntentType not present here.
+const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
   draft_estimate: 'draft_estimate',
   create_appointment: 'create_appointment',
@@ -436,10 +440,15 @@ export function createVoiceActionRouterWorker(
       }
 
       const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];
-      const handler = handlers.get(proposalType);
+      const handler = proposalType ? handlers.get(proposalType) : undefined;
       if (!handler) {
-        // Defensive — every non-unknown intent maps to a handler above.
-        log.warn('voice-action-router: no handler for intent', { proposalType });
+        // P11-001: lookup_* intents have no proposal mapping (read-only,
+        // routed to skill family by the FSM adapter). They're not a
+        // worker concern — bail without warning.
+        log.warn('voice-action-router: no handler for intent', {
+          intent: classification.intentType,
+          proposalType,
+        });
         return;
       }
 
