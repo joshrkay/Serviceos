@@ -166,6 +166,22 @@ import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
+import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import {
+  PgKnowledgeChunkRepository,
+  InMemoryKnowledgeChunkRepository,
+} from './ai/training/knowledge-chunks';
+import { InMemoryRetrievalEvalRunRepository } from './ai/training/retrieval-eval-run';
+import { PgRetrievalEvalRunRepository } from './ai/training/pg-retrieval-eval-run';
+import { InMemoryProposalExecutionRepository } from './proposals/proposal-execution';
+import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
+import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
+import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
+import {
+  OpenAICompatibleProvider,
+  type EmbeddingProvider,
+} from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
@@ -476,6 +492,35 @@ export function createApp() {
     ? createLLMGateway(config)
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
 
+  // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
+  // gateway routes chat completions through shadow/router logic that
+  // doesn't apply to embeddings (`text-embedding-3-small` only). When
+  // AI_PROVIDER_API_KEY is unset, embeddings are unavailable and the
+  // ingestion workers stay un-registered — the rest of the app boots.
+  const embeddingProvider: EmbeddingProvider | null = config.AI_PROVIDER_API_KEY
+    ? new OpenAICompatibleProvider({
+        apiKey: config.AI_PROVIDER_API_KEY,
+        baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
+      })
+    : null;
+
+  // Phase 4a-1 repositories — used by transcript-ingestion-worker and
+  // proposal-correction-worker. All Pg-backed in production with
+  // tenant-scoped RLS via PgBaseRepository.withTenant; InMemory in
+  // dev/test so the app boots without DATABASE_URL.
+  const knowledgeChunkRepo = pool
+    ? new PgKnowledgeChunkRepository(pool)
+    : new InMemoryKnowledgeChunkRepository();
+  const proposalExecutionRepo = pool
+    ? new PgProposalExecutionRepository(pool)
+    : new InMemoryProposalExecutionRepository();
+  const retrievalEvalRunRepo = pool
+    ? new PgRetrievalEvalRunRepository(pool)
+    : new InMemoryRetrievalEvalRunRepository();
+  const callTranscriptTurnRepo = pool
+    ? new PgCallTranscriptTurnRepository(pool)
+    : new InMemoryCallTranscriptTurnRepository();
+
   const feedbackDispatcher =
     process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
       ? new SmsProviderFeedbackDispatcher({
@@ -573,6 +618,22 @@ export function createApp() {
     transcriptionWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // Phase 4a-1 transcript-ingestion-worker only (proposal-correction-worker
+  // needs proposalRepo which is declared further down — registered after
+  // that). Without AI_PROVIDER_API_KEY the worker stays un-registered.
+  if (embeddingProvider) {
+    const transcriptIngestionWorker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: embeddingProvider,
+    });
+    workerRegistry.set(
+      transcriptIngestionWorker.type,
+      transcriptIngestionWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // ── Diff-analysis worker (P0-018): compares two revision snapshots and
   // persists a structured field-level delta. P0-023 graduates the revision
   // store and the analysis store onto Postgres when DATABASE_URL is set —
@@ -636,7 +697,58 @@ export function createApp() {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
   });
-  const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  // Phase 4a-1: persist a proposal_executions row on success + fire the
+  // proposal-correction-worker. The onExecuted callback is failure-soft
+  // inside the executor itself (logs via console, never rethrows), so
+  // queue-send errors here can't break the executor's invariants.
+  const proposalExecutor = new ProposalExecutor(
+    executionHandlers,
+    proposalRepo,
+    undefined,
+    {
+      executionRepo: proposalExecutionRepo,
+      onExecuted: async (event) => {
+        if (event.status !== 'succeeded') return;
+        try {
+          await queue.send(
+            'proposal_correction',
+            {
+              tenantId: event.tenantId,
+              proposalId: event.proposalId,
+              ...(event.executionId ? { executionId: event.executionId } : {}),
+            },
+            `correction:${event.executionId ?? event.proposalId}:v1`,
+          );
+        } catch (err) {
+          // Logged inside the executor too; double-log is fine — this
+          // path is a real production failure (queue is down) worth
+          // noticing in both places.
+          // eslint-disable-next-line no-console
+          console.error('app: failed to enqueue proposal_correction', {
+            proposalId: event.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    },
+  );
+
+  // Phase 4a-1: register the proposal-correction-worker now that
+  // proposalRepo is in scope. Skipped silently when no embedder.
+  if (embeddingProvider) {
+    const proposalCorrectionWorker = createProposalCorrectionWorker({
+      proposalRepo,
+      proposalExecutionRepo,
+      knowledgeChunkRepo,
+      embeddings: embeddingProvider,
+      retrievalEvalRunRepo,
+    });
+    workerRegistry.set(
+      proposalCorrectionWorker.type,
+      proposalCorrectionWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   const delayNoticeStateRepo = pool
     ? new PgDelayNoticeStateRepository(pool)
     : new InMemoryDelayNoticeStateRepository();
@@ -884,6 +996,49 @@ export function createApp() {
           : {}),
         ...(process.env.TWILIO_AUTH_TOKEN
           ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
+          : {}),
+        // Phase 4a-1: enqueue transcript-ingestion when the recording row
+        // first lands. Skipped on Twilio retries (`inserted=false`) so
+        // we don't double-process the same call. Skipped silently when
+        // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
+        ...(embeddingProvider
+          ? {
+              options: {
+                onPersisted: async (event) => {
+                  if (!event.inserted) return;
+                  const session = voiceSessionStore.findByCallSid(event.callSid);
+                  if (!session) {
+                    // Session was reaped (>30 min idle) before the
+                    // recording webhook fired. Known data-loss edge
+                    // case from the in-memory session store; not
+                    // something Phase 4a-1 fixes. Phase 4 architecture
+                    // doc covers persistent FSM state as a follow-up.
+                    return;
+                  }
+                  try {
+                    await queue.send(
+                      'transcript_ingestion',
+                      {
+                        tenantId: event.tenantId,
+                        voiceRecordingId: event.voiceRecordingId,
+                        transcript: [...session.transcript],
+                        ...(session.machine.currentContext.currentIntent
+                          ? { intent: session.machine.currentContext.currentIntent }
+                          : {}),
+                        durationMs: Date.now() - session.createdAt.getTime(),
+                      },
+                      `transcript:${event.voiceRecordingId}:v1`,
+                    );
+                  } catch (err) {
+                    // eslint-disable-next-line no-console
+                    console.error('app: failed to enqueue transcript_ingestion', {
+                      voiceRecordingId: event.voiceRecordingId,
+                      error: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                },
+              },
+            }
           : {}),
       },
     }),
