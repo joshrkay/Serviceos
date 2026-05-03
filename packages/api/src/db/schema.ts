@@ -1660,6 +1660,45 @@ export const MIGRATIONS = {
       ON retrieval_eval_runs (tenant_id, detected_language, created_at DESC)
       WHERE detected_language IS NOT NULL;
   `,
+
+  // P12-002: Tech time tracking. Captures clock-in / clock-out events per
+  // user, optionally linked to a job. Schema choices:
+  //   - user_id is TEXT (Clerk subject) to mirror audit_events.actor_id —
+  //     keeps the route handler from hitting a DB lookup for the FK.
+  //   - job_id is nullable to support non-billable hours (drive/break/admin).
+  //   - clocked_out_at is nullable while a shift is running; the partial
+  //     UNIQUE index enforces "at most one open entry per user per tenant"
+  //     at the database level, which is what makes the concurrent-clock-in
+  //     race correctness story possible (the service catches 23505 and
+  //     auto-closes the prior entry).
+  //   - duration_minutes is computed in app code on close; we store it so
+  //     the weekly rollup can sum without re-deriving.
+  '065_create_time_entries': `
+    CREATE TABLE IF NOT EXISTS time_entries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id TEXT NOT NULL,
+      job_id UUID,
+      entry_type TEXT NOT NULL CHECK (entry_type IN ('job', 'drive', 'break', 'admin')),
+      clocked_in_at TIMESTAMPTZ NOT NULL,
+      clocked_out_at TIMESTAMPTZ,
+      duration_minutes INTEGER,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_user
+      ON time_entries(tenant_id, user_id, clocked_in_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_job
+      ON time_entries(tenant_id, job_id) WHERE job_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_time_entries_one_active_per_user
+      ON time_entries(tenant_id, user_id) WHERE clocked_out_at IS NULL;
+    ALTER TABLE time_entries ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE time_entries FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_time_entries ON time_entries;
+    CREATE POLICY tenant_isolation_time_entries ON time_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
