@@ -492,12 +492,10 @@ export function createApp() {
   const portalSessionRepo: PortalSessionRepository = pool
     ? new PgPortalSessionRepository(pool)
     : new InMemoryPortalSessionRepository();
-  // Agreements + agreement-runs are also surfaced on the public portal
-  // (read-only). Declared here next to the other repos so the public
-  // portal router (mounted before Clerk auth) can reference them.
-  const agreementRepo = pool
-    ? new PgAgreementRepository(pool)
-    : new InMemoryAgreementRepository();
+  // Agreement-runs are also surfaced on the public portal (read-only).
+  // Hoisted here so the public portal router (mounted before Clerk auth)
+  // can reference it. `agreementRepo` is already declared above (hoisted
+  // for the P11-001 voice lookup-skill family).
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
