@@ -17,6 +17,7 @@ import {
   renderInvoiceEmail,
   renderInvoiceSms,
 } from './templates';
+import { DeliveryError } from './notification-errors';
 
 export type SendChannel = 'sms' | 'email' | 'both';
 
@@ -176,7 +177,7 @@ export class SendService {
         const target = channels[i];
         errors.push(
           `${target.channel} to ${target.recipient}: ${
-            r.reason instanceof Error ? r.reason.message : 'unknown error'
+            mapDeliveryErrorForClient(r.reason)
           }`
         );
       }
@@ -300,7 +301,7 @@ export class SendService {
         const target = channels[i];
         errors.push(
           `${target.channel} to ${target.recipient}: ${
-            r.reason instanceof Error ? r.reason.message : 'unknown error'
+            mapDeliveryErrorForClient(r.reason)
           }`
         );
       }
@@ -500,6 +501,15 @@ function resolveChannels(args: {
     );
   }
   return targets;
+}
+
+function mapDeliveryErrorForClient(err: unknown): string {
+  if (err instanceof DeliveryError) {
+    return err.code === 'AUTH_FAILED'
+      ? 'delivery authentication failed'
+      : 'delivery provider failed';
+  }
+  return err instanceof Error ? err.message : 'unknown error';
 }
 
 function generateViewToken(): string {
