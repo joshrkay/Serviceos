@@ -439,6 +439,58 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  '019_tenant_location_and_integrations': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
+      ADD COLUMN IF NOT EXISTS region TEXT,
+      ADD COLUMN IF NOT EXISTS locale TEXT;
+
+    CREATE TABLE IF NOT EXISTS tenant_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      subaccount_sid TEXT,
+      subuser_id TEXT,
+      auth_token_primary_secret_ref TEXT,
+      auth_token_secondary_secret_ref TEXT,
+      credential_version INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'active', 'suspended', 'terminated', 'releasing', 'failed')),
+      provider_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      provisioned_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tenant_integrations_tenant ON tenant_integrations(tenant_id);
+    ALTER TABLE tenant_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_tenant_integrations ON tenant_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS tenant_provisioning_costs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      currency CHAR(3) NOT NULL DEFAULT 'USD',
+      amount_cents BIGINT NOT NULL DEFAULT 0,
+      category TEXT NOT NULL,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      external_ref TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_costs_tenant
+      ON tenant_provisioning_costs(tenant_id, occurred_at DESC);
+    ALTER TABLE tenant_provisioning_costs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_provisioning_costs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_provisioning_costs ON tenant_provisioning_costs;
+    CREATE POLICY tenant_isolation_tenant_provisioning_costs ON tenant_provisioning_costs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   '019_create_appointment_assignments': `
     CREATE TABLE IF NOT EXISTS appointment_assignments (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

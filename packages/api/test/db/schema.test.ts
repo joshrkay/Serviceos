@@ -5,6 +5,7 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     const migrationKeys = Object.keys(MIGRATIONS);
     expect(migrationKeys.length).toBeGreaterThanOrEqual(10);
     expect(migrationKeys[0]).toBe('001_create_tenants');
+    expect(migrationKeys).toContain('019_tenant_location_and_integrations');
   });
 
   it('happy path — getMigrationSQL returns all SQL', () => {
@@ -69,5 +70,15 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
   it('happy path — indexes created', () => {
     const sql = getMigrationSQL();
     expect(sql).toContain('CREATE INDEX IF NOT EXISTS');
+  });
+
+  it('phase A — tenant integration foundation schema is present', () => {
+    const sql = getMigrationSQL();
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT \'US\'');
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS region TEXT');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS tenant_integrations');
+    expect(sql).toContain("CHECK (provider IN ('twilio', 'sendgrid'))");
+    expect(sql).toContain('UNIQUE (tenant_id, provider)');
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS tenant_provisioning_costs');
   });
 });

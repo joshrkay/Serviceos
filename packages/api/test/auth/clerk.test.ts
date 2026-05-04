@@ -158,5 +158,23 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
       const t2 = await bootstrapTenant('user_2', 'b@example.com', mockRepo);
       expect(t1.tenantId).not.toBe(t2.tenantId);
     });
+
+    it('phase A — requires US region before provisioning starts', async () => {
+      await expect(
+        bootstrapTenant('user_1', 'test@example.com', mockRepo, {
+          provisioningRequested: true,
+          onboardingLocation: { country: 'US' },
+        })
+      ).rejects.toThrow('Region (US state) is required before provisioning can start');
+    });
+
+    it('phase A — keeps bootstrap backward compatible when region is provided', async () => {
+      const result = await bootstrapTenant('user_1', 'test@example.com', mockRepo, {
+        provisioningRequested: true,
+        onboardingLocation: { country: 'US', region: 'CA' },
+      });
+      expect(result.created).toBe(true);
+      expect(result.tenantId).toBeTruthy();
+    });
   });
 });
