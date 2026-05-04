@@ -1,0 +1,50 @@
+{
+  "id": "customer-just-archived-mid-call",
+  "bucket": "09-concurrency",
+  "callerId": "+15555550903",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_09_just_archived",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_09_archived_jane",
+        "tenantId": "t_09_just_archived",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550903",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": "Account archived for non-payment — see operator before re-engaging.",
+        "isArchived": true,
+        "archivedAt": "2026-05-04T17:59:50.000Z",
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-05-04T17:59:50.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. Can I get a summary of my account?",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "spokenAnswerMatches": "I can't share account details right now — let me hand you to an operator who can help.",
+        "escalates": true
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}
