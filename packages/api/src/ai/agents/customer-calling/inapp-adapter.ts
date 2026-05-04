@@ -31,6 +31,11 @@ import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
 import { estimateCostCents } from '../../skills/session-cost-tracker';
+import {
+  intentClassifiedEvent,
+  costIncurredEvent,
+  sessionTerminatedEvent,
+} from '../../voice-quality/events';
 import { TAU_INT } from './transitions';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
@@ -240,6 +245,17 @@ export class InAppVoiceAdapter {
       classifierUsage = classification.tokenUsage
         ? { input: classification.tokenUsage.input, output: classification.tokenUsage.output }
         : undefined;
+      // VQ-003: announce the classifier outcome on the session bus so
+      // the harness can grade intent-recognition independently of the
+      // FSM transition that follows.
+      session.events.emit(
+        'voice-event',
+        intentClassifiedEvent({
+          intentType: classification.intentType,
+          confidence: classification.confidence,
+          tokenUsage: classifierUsage,
+        }),
+      );
       fsmEvent = classifierToFsmEvent(
         classification.intentType,
         classification.confidence,
@@ -259,11 +275,21 @@ export class InAppVoiceAdapter {
         outputTokens: classifierUsage.output,
         costCents: cents,
       });
+      // VQ-003: emit cost_incurred for the harness's running tally.
+      // deltaCents is the just-recorded turn; totalCents is read off
+      // the tracker so it stays in lockstep.
+      session.events.emit(
+        'voice-event',
+        costIncurredEvent(cents, session.costTracker.totals.costCents),
+      );
       const exceeded = capEvents.find((e) => e.type === 'cost_cap_exceeded');
       if (exceeded) {
         // Override the classifier's event — escalation supersedes the
         // intent dispatch for the current turn.
         fsmEvent = { type: 'cost_cap_exceeded' };
+        // VQ-003: surface session_terminated so graders see WHY the
+        // session is ending without inferring it from FSM transitions.
+        session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
       }
     }
 
@@ -515,6 +541,9 @@ export class InAppVoiceAdapter {
         channel: session.channel,
         onCallRepo: this.deps.onCallRepo,
         auditRepo: this.deps.auditRepo,
+        // VQ-003: pass the session so escalateToHuman can emit
+        // `escalation_triggered` on the session bus.
+        session,
         ...(typeof effect.payload.conversationId === 'string'
           ? { conversationId: effect.payload.conversationId }
           : {}),

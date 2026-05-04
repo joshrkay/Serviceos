@@ -4,6 +4,11 @@ import type { AuditRepository } from '../../audit/audit';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { TwilioCallControl } from '../../telephony/twilio-call-control';
 import { t, type Language } from '../i18n/i18n';
+import type { VoiceSession } from '../agents/customer-calling/voice-session-store';
+import {
+  escalationTriggeredEvent,
+} from '../voice-quality/events';
+import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 
 /**
  * Phase 12 — emergency-intent immediate-Dial decision.
@@ -126,6 +131,14 @@ export interface EscalateToHumanInput {
   dialActionUrl?: string;
   /** P11-002: spoken-message language. Defaults to 'en'. */
   language?: Language;
+  /**
+   * VQ-003: optional live session reference. When supplied, the skill
+   * emits an `escalation_triggered` event on the session's emitter
+   * once the escalation is committed (telephony transfer initiated OR
+   * in-app dispatcher assigned). Left undefined for callers that
+   * don't have a session in scope; pre-VQ-003 behavior is preserved.
+   */
+  session?: VoiceSession;
 }
 
 /**
@@ -210,6 +223,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     dispatcherPhoneResolver,
     callSid,
     dialActionUrl,
+    session,
   } = input;
   const lang: Language = input.language ?? 'en';
   const transferringText = t('escalate.transferring', lang);
@@ -325,6 +339,10 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
           : `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
     }
 
+    if (session) {
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+    }
+
     return {
       escalated: true,
       assignedUserId: chosen.entry.userId,
@@ -394,6 +412,10 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     assignedUserId: entry.userId,
     message,
   };
+
+  if (session) {
+    session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+  }
 
   return result;
 }

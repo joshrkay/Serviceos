@@ -16,7 +16,6 @@ const OTHER_CUSTOMER = '33333333-3333-3333-3333-333333333333';
 
 function makeJob(overrides: Partial<Job> & Pick<Job, 'id' | 'createdAt'>): Job {
   return {
-    id: overrides.id,
     tenantId: TENANT,
     customerId: CUSTOMER,
     locationId: 'loc-1',
@@ -25,7 +24,6 @@ function makeJob(overrides: Partial<Job> & Pick<Job, 'id' | 'createdAt'>): Job {
     status: 'completed',
     priority: 'normal',
     createdBy: 'user-1',
-    createdAt: overrides.createdAt,
     updatedAt: overrides.createdAt,
     ...overrides,
   };
@@ -35,15 +33,18 @@ function makeInvoice(
   overrides: Partial<Invoice> & Pick<Invoice, 'id' | 'amountDueCents' | 'status' | 'jobId'>,
 ): Invoice {
   return {
-    id: overrides.id,
     tenantId: TENANT,
-    jobId: overrides.jobId,
     invoiceNumber: 'INV-1',
-    status: overrides.status,
     lineItems: [],
-    totals: { subtotalCents: 0, discountCents: 0, taxCents: 0, totalCents: 0 },
+    totals: {
+      subtotalCents: 0,
+      discountCents: 0,
+      taxRateBps: 0,
+      taxableSubtotalCents: 0,
+      taxCents: 0,
+      totalCents: 0,
+    },
     amountPaidCents: 0,
-    amountDueCents: overrides.amountDueCents,
     createdBy: 'user-1',
     createdAt: new Date('2026-04-01'),
     updatedAt: new Date('2026-04-01'),
@@ -55,10 +56,8 @@ function makeAgreement(
   overrides: Partial<Agreement> & Pick<Agreement, 'id' | 'name'>,
 ): Agreement {
   return {
-    id: overrides.id,
     tenantId: TENANT,
     customerId: CUSTOMER,
-    name: overrides.name,
     recurrenceRule: 'FREQ=MONTHLY',
     priceCents: 9900,
     autoGenerateInvoice: true,
