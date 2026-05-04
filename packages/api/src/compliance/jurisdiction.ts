@@ -11,29 +11,37 @@ const US_RECORDING_DISCLOSURE_STATES = new Set([
   'WA',
 ]);
 
-const US_SMS_OPT_IN_LANGUAGE =
-  'By providing your number, you agree to receive automated text messages from us. Consent is not a condition of purchase. Msg & data rates may apply. Reply STOP to unsubscribe and HELP for help.';
+const SMS_OPT_IN_LANGUAGE =
+  'By providing your phone number, you agree to receive recurring automated marketing and service-related text messages. Consent is not a condition of purchase. Message and data rates may apply. Reply STOP to unsubscribe, HELP for help.';
 
-const US_UNSUBSCRIBE_FOOTER =
-  'To stop receiving marketing emails, use the unsubscribe link in this email or reply with unsubscribe preferences.';
+const UNSUBSCRIBE_FOOTER =
+  'To stop receiving these emails, use the unsubscribe link in this message or reply with "unsubscribe". Include your mailing address in all commercial email communications.';
 
 export interface QuietHoursResult {
-  allowedNow: boolean;
-  quietHoursStart: string;
-  quietHoursEnd: string;
-  localTime: string;
+  isAllowedNow: boolean;
+  nextAllowedAt: Date;
+  localHour: number;
 }
 
-function normalizeRegion(region: string): string {
-  return region.trim().toUpperCase();
+function getLocalHour(now: Date, recipientTimezone: string): number {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: recipientTimezone,
+    hour: 'numeric',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(now);
+  const hourPart = parts.find((part) => part.type === 'hour')?.value ?? '0';
+  return parseInt(hourPart, 10) % 24;
 }
 
 export function requiresRecordingDisclosure(region: string): boolean {
-  return US_RECORDING_DISCLOSURE_STATES.has(normalizeRegion(region));
+  const normalized = region.trim().toUpperCase();
+  return US_RECORDING_DISCLOSURE_STATES.has(normalized);
 }
 
 export function smsOptInLanguage(): string {
-  return US_SMS_OPT_IN_LANGUAGE;
+  return SMS_OPT_IN_LANGUAGE;
 }
 
 export function requires10dlcRegistration(): boolean {
@@ -41,36 +49,36 @@ export function requires10dlcRegistration(): boolean {
 }
 
 export function unsubscribeFooter(): string {
-  return US_UNSUBSCRIBE_FOOTER;
+  return UNSUBSCRIBE_FOOTER;
 }
 
-export function quietHours(recipientTimezone: string, now: Date = new Date()): QuietHoursResult {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: recipientTimezone,
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+/**
+ * US quiet-hours compliance helper.
+ *
+ * Enforces 8:00–21:00 recipient-local contact window (inclusive of 8:00,
+ * exclusive of 21:00). Returns a contract callers can use for queueing logic.
+ */
+export function quietHours(
+  recipientTimezone: string,
+  now: Date = new Date()
+): QuietHoursResult {
+  const localHour = getLocalHour(now, recipientTimezone);
+  const isAllowedNow = localHour >= 8 && localHour < 21;
 
-  const parts = formatter.formatToParts(now);
-  const hourPart = parts.find((part) => part.type === 'hour')?.value ?? '00';
-  const minutePart = parts.find((part) => part.type === 'minute')?.value ?? '00';
+  if (isAllowedNow) {
+    return { isAllowedNow, nextAllowedAt: new Date(now), localHour };
+  }
 
-  const localHour = parseInt(hourPart, 10) % 24;
-  const localMinute = parseInt(minutePart, 10);
-  const minutesSinceMidnight = localHour * 60 + localMinute;
+  const nextAllowedAt = new Date(now);
+  nextAllowedAt.setUTCMinutes(0, 0, 0);
 
-  const start = 8 * 60;
-  const end = 21 * 60;
+  for (let i = 0; i < 48; i += 1) {
+    nextAllowedAt.setUTCHours(nextAllowedAt.getUTCHours() + 1);
+    const hour = getLocalHour(nextAllowedAt, recipientTimezone);
+    if (hour >= 8 && hour < 21) {
+      return { isAllowedNow, nextAllowedAt, localHour };
+    }
+  }
 
-  const allowedNow = minutesSinceMidnight >= start && minutesSinceMidnight < end;
-
-  return {
-    allowedNow,
-    quietHoursStart: '21:00',
-    quietHoursEnd: '08:00',
-    localTime: `${localHour.toString().padStart(2, '0')}:${localMinute
-      .toString()
-      .padStart(2, '0')}`,
-  };
+  return { isAllowedNow, nextAllowedAt, localHour };
 }
