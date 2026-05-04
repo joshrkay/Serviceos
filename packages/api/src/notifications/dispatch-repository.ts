@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { PgBaseRepository } from '../db/pg-base';
+import { normalizeDispatchProvider } from './provider-names';
 
 /**
  * Persistent record of every customer-facing send. Ensures we have an
@@ -70,7 +71,7 @@ export class InMemoryDispatchRepository implements DispatchRepository {
       entityId: input.entityId,
       channel: input.channel,
       recipient: input.recipient,
-      provider: input.provider,
+      provider: normalizeDispatchProvider(input.provider),
       providerMessageId: input.providerMessageId,
       status: input.status ?? 'sent',
       errorMessage: input.errorMessage,
@@ -212,7 +213,7 @@ function mapRow(row: Record<string, any>): MessageDispatch {
     entityId: row.entity_id,
     channel: row.channel,
     recipient: row.recipient,
-    provider: row.provider,
+    provider: normalizeDispatchProvider(row.provider),
     providerMessageId: row.provider_message_id ?? undefined,
     status: row.status,
     errorMessage: row.error_message ?? undefined,

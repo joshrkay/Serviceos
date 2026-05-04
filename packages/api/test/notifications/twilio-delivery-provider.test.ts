@@ -45,7 +45,7 @@ describe('TwilioDeliveryProvider — SMS', () => {
     });
 
     expect(result.providerMessageId).toBe('SM_abc');
-    expect(result.provider).toBe('twilio-sms');
+    expect(result.provider).toBe('sms-gateway');
     expect(result.channel).toBe('sms');
   });
 
@@ -107,7 +107,7 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     });
 
     expect(result.providerMessageId).toBe('sg-msg-123');
-    expect(result.provider).toBe('twilio-sendgrid');
+    expect(result.provider).toBe('email-gateway');
     expect(result.channel).toBe('email');
   });
 

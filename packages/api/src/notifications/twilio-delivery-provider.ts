@@ -131,7 +131,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     return {
       providerMessageId: data.sid,
-      provider: 'twilio-sms',
+      provider: 'sms-gateway',
       channel: 'sms',
     };
   }
@@ -188,7 +188,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     return {
       providerMessageId,
-      provider: 'twilio-sendgrid',
+      provider: 'email-gateway',
       channel: 'email',
     };
   }
