@@ -227,6 +227,8 @@ When a call fails, the report shows: bucket → script id → failed criteria �
 
 ## 7. Operational integration (Layer 1 ship gate)
 
+> See: [`docs/superpowers/runbooks/voice-quality-launch-gate.md`](../runbooks/voice-quality-launch-gate.md) for the operational gate procedure (threshold table, override procedure, decision flow, judge-validation cadence).
+
 ### 7.1 Where it runs
 
 - **Pre-merge in CI** — every PR touching `packages/api/src/ai/`, `packages/api/src/customers/`, `packages/api/src/leads/`, `packages/api/src/jobs/`, `packages/api/src/appointments/`, or the corpus
