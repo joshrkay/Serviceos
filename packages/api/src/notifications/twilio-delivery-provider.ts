@@ -4,6 +4,7 @@ import {
   MessageDeliveryProvider,
   SmsMessage,
 } from './delivery-provider';
+import { DeliveryError } from './notification-errors';
 
 /**
  * Production message delivery via Twilio.
@@ -150,13 +151,22 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     }
 
     if (!response.ok) {
-      if (response.status === 401) throw new Error('DELIVERY_AUTH_FAILED');
-      throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
+      const text = await response.text().catch(() => '');
+      const providerBody = text.slice(0, 300);
+      throw new DeliveryError(
+        response.status === 401 ? 'AUTH_FAILED' : 'PROVIDER_FAILED',
+        `Twilio SMS send failed (${response.status})`,
+        { status: response.status, providerBody }
+      );
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
     if (data.error_code) {
-      throw new Error(`Twilio SMS rejected: ${data.error_code} ${data.error_message ?? ''}`);
+      throw new DeliveryError(
+        'PROVIDER_FAILED',
+        `Twilio SMS rejected: ${data.error_code} ${data.error_message ?? ''}`.trim(),
+        { providerBody: JSON.stringify(data).slice(0, 300) }
+      );
     }
 
     return {
@@ -206,8 +216,13 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     });
 
     if (!response.ok) {
-      if (response.status === 401) throw new Error('DELIVERY_AUTH_FAILED');
-      throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
+      const text = await response.text().catch(() => '');
+      const providerBody = text.slice(0, 300);
+      throw new DeliveryError(
+        response.status === 401 ? 'AUTH_FAILED' : 'PROVIDER_FAILED',
+        `SendGrid email send failed (${response.status})`,
+        { status: response.status, providerBody }
+      );
     }
 
     // SendGrid returns 202 Accepted with the message ID in `X-Message-Id`.

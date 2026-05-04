@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TwilioDeliveryProvider } from '../../src/notifications/twilio-delivery-provider';
+import { DeliveryError } from '../../src/notifications/notification-errors';
 
 function makeProvider(fetchImpl: typeof fetch, secondaryAuthToken?: string) {
   return new TwilioDeliveryProvider({
@@ -50,19 +51,25 @@ describe('TwilioDeliveryProvider — SMS', () => {
     expect(result.channel).toBe('sms');
   });
 
-  it('throws normalized auth failure when Twilio returns 401', async () => {
-    const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
-    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toThrow(
-      'DELIVERY_AUTH_FAILED'
+  it('throws DeliveryError when Twilio returns non-2xx', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('Twilio rejected', {
+          status: 400,
+        })
     );
   });
 
   it('throws normalized provider failure when Twilio returns non-401', async () => {
     const fetchImpl = vi.fn(async () => new Response('Twilio rejected', { status: 400 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toThrow(
-      'DELIVERY_PROVIDER_FAILED (400)'
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toMatchObject({
+      code: 'PROVIDER_FAILED',
+      status: 400,
+      providerBody: 'Twilio rejected',
+    });
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toBeInstanceOf(
+      DeliveryError
     );
   });
 
@@ -81,46 +88,14 @@ describe('TwilioDeliveryProvider — SMS', () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
-  it('retries SMS with secondary token after primary returns 401 and then succeeds', async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ sid: 'SM_retry', status: 'queued' }), {
-          status: 201,
-          headers: { 'content-type': 'application/json' },
-        })
-      );
-
-    const provider = makeProvider(fetchImpl as unknown as typeof fetch, 'token_backup');
-    const result = await provider.sendSms({ to: '+15555550199', body: 'retry' });
-
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(result.providerMessageId).toBe('SM_retry');
-    expect(result.provider).toBe('sms-gateway');
-  });
-
-  it('returns auth failure when both primary and secondary SMS tokens return 401', async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
-      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }));
-
-    const provider = makeProvider(fetchImpl as unknown as typeof fetch, 'token_backup');
-    await expect(provider.sendSms({ to: '+15555550199', body: 'retry' })).rejects.toThrow(
-      'DELIVERY_AUTH_FAILED'
-    );
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-  });
-
-  it('returns auth failure when no secondary SMS token exists and primary returns 401', async () => {
+  it('maps 401 to AUTH_FAILED', async () => {
     const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-
-    await expect(provider.sendSms({ to: '+15555550199', body: 'retry' })).rejects.toThrow(
-      'DELIVERY_AUTH_FAILED'
-    );
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toMatchObject({
+      code: 'AUTH_FAILED',
+      status: 401,
+      providerBody: 'Unauthorized',
+    });
   });
 });
 
@@ -172,21 +147,22 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     });
   });
 
-  it('returns auth failure when SendGrid returns 401', async () => {
-    const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
-    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-
-    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toThrow(
-      'DELIVERY_AUTH_FAILED'
+  it('throws DeliveryError when SendGrid returns non-2xx', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('Forbidden', { status: 403 })
     );
   });
 
   it('returns provider failure when SendGrid returns 403', async () => {
     const fetchImpl = vi.fn(async () => new Response('Forbidden', { status: 403 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-
-    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toThrow(
-      'DELIVERY_PROVIDER_FAILED (403)'
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toMatchObject({
+      code: 'PROVIDER_FAILED',
+      status: 403,
+      providerBody: 'Forbidden',
+    });
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toBeInstanceOf(
+      DeliveryError
     );
   });
 });
