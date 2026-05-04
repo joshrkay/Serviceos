@@ -52,6 +52,7 @@
  * "agent response synthesized". The runner accumulates these for the
  * floor-3 (`noHang`) check.
  */
+import { performance } from 'node:perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { LLMGateway } from '../gateway/gateway';
 import {
@@ -237,7 +238,11 @@ export class TextModeDriver implements AgentDriver {
       ts: Date.now(),
     });
 
-    const startedAt = Date.now();
+    // Use `performance.now()` for sub-millisecond resolution: on fast
+    // hardware the entire speak() pipeline can complete inside a single
+    // ms, which would make `Date.now()` deltas round to 0 and break
+    // strict `latencyMs > 0` assertions in the test suite (see VQ-007).
+    const startedAt = performance.now();
 
     // 2. Classify intent. Errors → low-confidence-style "couldn't catch
     //    that" line; mirrors the Twilio adapter's failure-mode for
@@ -318,7 +323,7 @@ export class TextModeDriver implements AgentDriver {
       agentResponse = `I had trouble processing that — ${message}`;
     }
 
-    const latencyMs = Date.now() - startedAt;
+    const latencyMs = performance.now() - startedAt;
 
     // Capture the agent's reply on the transcript so summarizeSession
     // sees both sides (mirrors twilio-adapter.processCallerUtterance).
@@ -395,7 +400,8 @@ export class TextModeDriver implements AgentDriver {
     }
 
     const sharedInput = { tenantId, customerId, sessionId: session.id };
-    const startMs = Date.now();
+    // `performance.now()` for sub-ms resolution — see speak() comment.
+    const startMs = performance.now();
     try {
       switch (intentType) {
         case 'lookup_appointments': {
@@ -409,7 +415,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -424,7 +430,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -439,7 +445,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -453,7 +459,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -467,7 +473,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -489,7 +495,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -510,7 +516,7 @@ export class TextModeDriver implements AgentDriver {
           );
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -525,7 +531,7 @@ export class TextModeDriver implements AgentDriver {
           });
           session.events.emit(
             'voice-event',
-            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
         }
@@ -536,7 +542,7 @@ export class TextModeDriver implements AgentDriver {
       const message = err instanceof Error ? err.message : String(err);
       session.events.emit(
         'voice-event',
-        lookupExecutedEvent(intentType, Date.now() - startMs, false, message),
+        lookupExecutedEvent(intentType, performance.now() - startMs, false, message),
       );
       return LOOKUP_NOT_WIRED_FALLBACK;
     }
