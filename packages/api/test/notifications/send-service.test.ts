@@ -345,7 +345,7 @@ describe('SendService — failure audit and idempotency', () => {
       },
       sendEmail: async () => ({
         providerMessageId: 'sg-ok',
-        provider: 'twilio-sendgrid',
+        provider: 'email-gateway',
         channel: 'email' as const,
       }),
     };

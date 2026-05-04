@@ -2,12 +2,13 @@ import { describe, it, expect, vi } from 'vitest';
 import { TwilioDeliveryProvider } from '../../src/notifications/twilio-delivery-provider';
 import { DeliveryError } from '../../src/notifications/notification-errors';
 
-function makeProvider(fetchImpl: typeof fetch) {
+function makeProvider(fetchImpl: typeof fetch, secondaryAuthToken?: string) {
   return new TwilioDeliveryProvider({
     sms: {
       accountSid: 'AC_test',
       authToken: 'token_test',
       fromNumber: '+15555550100',
+      secondaryAuthToken,
       apiBaseUrl: 'https://test.example/twilio',
       fetchImpl,
     },
@@ -46,7 +47,7 @@ describe('TwilioDeliveryProvider — SMS', () => {
     });
 
     expect(result.providerMessageId).toBe('SM_abc');
-    expect(result.provider).toBe('twilio-sms');
+    expect(result.provider).toBe('sms-gateway');
     expect(result.channel).toBe('sms');
   });
 
@@ -57,6 +58,10 @@ describe('TwilioDeliveryProvider — SMS', () => {
           status: 400,
         })
     );
+  });
+
+  it('throws normalized provider failure when Twilio returns non-401', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Twilio rejected', { status: 400 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
     await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toMatchObject({
       code: 'PROVIDER_FAILED',
@@ -123,7 +128,7 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     });
 
     expect(result.providerMessageId).toBe('sg-msg-123');
-    expect(result.provider).toBe('twilio-sendgrid');
+    expect(result.provider).toBe('email-gateway');
     expect(result.channel).toBe('email');
   });
 
@@ -146,6 +151,10 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     const fetchImpl = vi.fn(
       async () => new Response('Forbidden', { status: 403 })
     );
+  });
+
+  it('returns provider failure when SendGrid returns 403', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Forbidden', { status: 403 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
     await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toMatchObject({
       code: 'PROVIDER_FAILED',
