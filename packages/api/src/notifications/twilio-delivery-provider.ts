@@ -60,6 +60,60 @@ interface TwilioMessageResponse {
   error_message?: string;
 }
 
+interface NormalizedProviderFailure {
+  code: "AUTH_FAILED" | "PROVIDER_FAILED";
+  message: string;
+  status?: number;
+  providerBody?: string;
+  providerCode?: string;
+  retriable: boolean;
+  retryAfterSeconds?: number;
+  providerRequestId?: string;
+}
+
+function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number.parseInt(value, 10);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+function classifyTwilioError(response: Response, providerBody: string): NormalizedProviderFailure {
+  const providerCode = response.headers.get("twilio-error-code") ?? undefined;
+  const requestId =
+    response.headers.get("twilio-request-id") ?? response.headers.get("x-request-id") ?? undefined;
+  const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+  const code = response.status === 401 ? "AUTH_FAILED" : "PROVIDER_FAILED";
+  const message = response.status === 401 ? "SMS authentication failed" : "SMS provider failed";
+  return {
+    code,
+    message,
+    status: response.status,
+    providerBody,
+    providerCode,
+    retriable: response.status === 429 || response.status >= 500,
+    retryAfterSeconds,
+    providerRequestId: requestId,
+  };
+}
+
+function classifySendgridError(response: Response, providerBody: string): NormalizedProviderFailure {
+  const providerCode = response.headers.get("x-sendgrid-error-code") ?? undefined;
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+  const code = response.status === 401 ? "AUTH_FAILED" : "PROVIDER_FAILED";
+  const message = response.status === 401 ? "Email authentication failed" : "Email provider failed";
+  return {
+    code,
+    message,
+    status: response.status,
+    providerBody,
+    providerCode,
+    retriable: response.status === 429 || response.status >= 500,
+    retryAfterSeconds,
+    providerRequestId: requestId,
+  };
+}
+
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
   private readonly sms: Required<
     Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
@@ -136,16 +190,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const providerBody = text.slice(0, 300);
-      if (response.status === 401) {
-        throw new DeliveryError("AUTH_FAILED", "SMS authentication failed", {
-          status: 401,
-          providerBody,
-        });
-      }
-      throw new DeliveryError("PROVIDER_FAILED", "SMS provider failed", {
-        status: response.status,
-        providerBody,
-      });
+      const failure = classifyTwilioError(response, providerBody);
+      throw new DeliveryError(failure.code, failure.message, failure);
     }
 
     if (!response.ok) {
@@ -219,16 +265,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const providerBody = text.slice(0, 300);
-      if (response.status === 401) {
-        throw new DeliveryError("AUTH_FAILED", "Email authentication failed", {
-          status: 401,
-          providerBody,
-        });
-      }
-      throw new DeliveryError("PROVIDER_FAILED", "Email provider failed", {
-        status: response.status,
-        providerBody,
-      });
+      const failure = classifySendgridError(response, providerBody);
+      throw new DeliveryError(failure.code, failure.message, failure);
     }
 
     // SendGrid returns 202 Accepted with the message ID in `X-Message-Id`.
