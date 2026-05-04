@@ -16,6 +16,7 @@
 
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { describeAtomGrammar, findUnknownAtoms } from './condition-grammar';
 
 export const TIER_KEYS = [
   'TIER_1_EVACUATE',
@@ -27,11 +28,29 @@ export const TIER_KEYS = [
 export type TierKey = (typeof TIER_KEYS)[number];
 const tierKeyEnum = z.enum(TIER_KEYS);
 
+/**
+ * Phase 4d-1 review carryover (Issue #2): condition expressions are
+ * lint-checked at boot. A typo like `elderly_present` (instead of
+ * `elderly`) would otherwise silently never fire — invisible to the
+ * classifier but real to dispatchers reviewing the eval-run table
+ * weeks later. We catch it here and refuse to load the rules at all.
+ */
+const conditionExpressionSchema = z.string().min(1).superRefine((value, ctx) => {
+  const unknown = findUnknownAtoms(value);
+  if (unknown.length === 0) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message:
+      `Unknown atom(s) in condition: ${unknown.join(', ')}. ` +
+      describeAtomGrammar(),
+  });
+});
+
 const conditionalPhraseSchema = z.object({
   phrase: z.string().min(1),
-  /** Free-form expression like "outdoor_temp_below_40f OR
-   *  indoor_temp_below_55f". The classifier evaluates a small grammar. */
-  condition: z.string().min(1),
+  /** Lint-validated expression. See condition-grammar.ts for the
+   *  allowed atom catalogue + operator grammar. */
+  condition: conditionExpressionSchema,
   escalate_to: tierKeyEnum,
   /** Tier to use when the condition is FALSE. Optional — when absent,
    *  the condition acts as a hard requirement (no match if false). */
