@@ -125,60 +125,6 @@ describe('voice-action-router worker', () => {
     expect(byTenant[0].proposalType).toBe('create_appointment');
   });
 
-  it('P0-035: passes the slotConflictChecker to CreateAppointmentAITaskHandler so the pre-check is wired in production', async () => {
-    // The point of this test: catch the regression where
-    // voice-action-router constructs CreateAppointmentAITaskHandler
-    // WITHOUT the checker, so the slot-conflict pre-check ships as
-    // dead code. Codex P1 finding on PR #201 review.
-    const gateway = gatewayReturning([
-      JSON.stringify({
-        intentType: 'create_appointment',
-        confidence: 0.88,
-        extractedEntities: { customerName: 'Mrs Lee' },
-      } satisfies IntentClassification),
-      JSON.stringify({
-        customerId: '11111111-1111-1111-1111-111111111111',
-        technicianId: '22222222-2222-2222-2222-222222222222',
-        scheduledStart: '2026-04-21T21:00:00Z',
-        scheduledEnd: '2026-04-21T22:00:00Z',
-        confidence_score: 0.92,
-      }),
-    ]);
-
-    const checker = {
-      check: vi.fn(async () => ({
-        ok: false,
-        conflict: 'technician_busy' as const,
-        appointmentId: 'appt-existing',
-        conflictWindow: {
-          start: new Date('2026-04-21T20:30:00Z'),
-          end: new Date('2026-04-21T21:30:00Z'),
-        },
-      })),
-    };
-
-    const worker = createVoiceActionRouterWorker({
-      gateway,
-      proposalRepo,
-      slotConflictChecker: checker,
-    });
-
-    await worker.handle(
-      msg({
-        tenantId: 't-1',
-        userId: 'u-1',
-        transcript: 'Schedule a follow-up with Mrs Lee at 2pm',
-      }),
-      silentLogger()
-    );
-
-    expect(checker.check).toHaveBeenCalledTimes(1);
-    const byTenant = await proposalRepo.findByTenant('t-1');
-    expect(byTenant).toHaveLength(1);
-    // Conflict path means voice_clarification, not create_appointment.
-    expect(byTenant[0].proposalType).toBe('voice_clarification');
-  });
-
   it('classifies "add item to invoice" and persists an update_invoice proposal', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({

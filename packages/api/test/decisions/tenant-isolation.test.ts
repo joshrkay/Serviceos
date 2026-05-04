@@ -171,11 +171,6 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
   beforeAll(async () => {
     prevSecret = process.env.CLERK_SECRET_KEY;
     process.env.CLERK_SECRET_KEY = TEST_SECRET;
-    // P0-033: this suite uses synthetic HMAC dev tokens via signToken().
-    // The new RS256 verifier is the default; honor the legacy HMAC path
-    // explicitly. Production-mode would refuse this flag (defense in depth)
-    // but vitest defaults NODE_ENV to 'test'.
-    process.env.CLERK_DEV_HMAC_TOKENS = 'true';
     // NODE_ENV must be non-prod so createApp doesn't require DATABASE_URL.
     if (process.env.NODE_ENV === 'prod' || process.env.NODE_ENV === 'staging') {
       process.env.NODE_ENV = 'test';
@@ -272,7 +267,6 @@ describe('Adversarial tenant isolation — /api/* over real createApp()', () => 
   });
 
   afterAll(() => {
-    delete process.env.CLERK_DEV_HMAC_TOKENS;
     if (prevSecret === undefined) {
       delete process.env.CLERK_SECRET_KEY;
     } else {

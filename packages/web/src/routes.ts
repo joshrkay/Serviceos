@@ -23,7 +23,6 @@ import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
-import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
 
 export const router = createBrowserRouter([
@@ -57,8 +56,6 @@ export const router = createBrowserRouter([
       { path: 'leads',          Component: LeadsPage       },
       { path: 'estimates',      Component: EstimatesPage   },
       { path: 'invoices',       Component: InvoicesPage    },
-      { path: 'contracts',      Component: MaintenanceContractsPage },
-      { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'interactions',   Component: InteractionsPage },
       { path: 'settings',       Component: SettingsPage    },
       { path: 'settings/templates', Component: TemplatesPage   },

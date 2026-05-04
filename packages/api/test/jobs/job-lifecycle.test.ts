@@ -1,7 +1,6 @@
 import {
   transitionJobStatus,
   addTimelineEntry,
-  addDelayAcknowledgmentTimelineEntry,
   isValidTransition,
   InMemoryJobTimelineRepository,
 } from '../../src/jobs/job-lifecycle';
@@ -103,57 +102,5 @@ describe('P1-006 — Job lifecycle and timeline events', () => {
     await expect(
       transitionJobStatus('tenant-1', 'nonexistent', 'scheduled', 'u-1', 'owner', jobRepo, timelineRepo)
     ).rejects.toThrow('Job not found');
-  });
-
-  it('happy path — records running-behind delay acknowledgement with fixed delay', async () => {
-    const job = await createJob(
-      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Delay ack', createdBy: 'u-1' },
-      jobRepo
-    );
-
-    const timelineEntry = await addDelayAcknowledgmentTimelineEntry(
-      'tenant-1',
-      job.id,
-      'tech-1',
-      'technician',
-      timelineRepo,
-      {
-        appointmentId: 'apt-1',
-        isRunningBehind: true,
-        delayMinutes: 15,
-        actorId: 'tech-1',
-        actorRole: 'technician',
-        timestamp: new Date().toISOString(),
-        inferredTriggerState: 'running_behind',
-      }
-    );
-
-    expect(timelineEntry.description).toBe('Delay acknowledged (15m)');
-    expect(timelineEntry.eventType).toBe('delay_acknowledged');
-  });
-
-  it('validation — rejects running-behind delay acknowledgement without delayMinutes', async () => {
-    const job = await createJob(
-      { tenantId: 'tenant-1', customerId: 'c-1', locationId: 'l-1', summary: 'Delay ack invalid', createdBy: 'u-1' },
-      jobRepo
-    );
-
-    await expect(
-      addDelayAcknowledgmentTimelineEntry(
-        'tenant-1',
-        job.id,
-        'tech-1',
-        'technician',
-        timelineRepo,
-        {
-          appointmentId: 'apt-1',
-          isRunningBehind: true,
-          actorId: 'tech-1',
-          actorRole: 'technician',
-          timestamp: new Date().toISOString(),
-          inferredTriggerState: 'running_behind',
-        }
-      )
-    ).rejects.toThrow('delayMinutes is required when isRunningBehind is true');
   });
 });

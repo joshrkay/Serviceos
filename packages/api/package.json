@@ -14,8 +14,7 @@
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
-    "migrate:apply": "ts-node src/db/migrate.ts",
-    "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\""
+    "migrate:apply": "ts-node src/db/migrate.ts"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",
@@ -25,9 +24,7 @@
     "openai": "^4.0.0",
     "pg": "^8.20.0",
     "swagger-ui-express": "^5.0.1",
-    "twilio": "^6.0.0",
     "uuid": "^9.0.0",
-    "ws": "^8.20.0",
     "zod": "^3.22.0"
   },
   "devDependencies": {
@@ -39,7 +36,6 @@
     "@types/supertest": "^6.0.0",
     "@types/swagger-ui-express": "^4.1.8",
     "@types/uuid": "^9.0.0",
-    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^1.6.0",
     "supertest": "^6.3.0",
     "ts-node": "^10.9.0",

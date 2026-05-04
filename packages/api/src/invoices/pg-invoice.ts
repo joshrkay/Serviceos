@@ -1,14 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import {
-  Invoice,
-  InvoiceListOptions,
-  InvoiceListResult,
-  InvoiceRepository,
-  InvoiceStatus,
-  DEFAULT_INVOICE_LIMIT,
-  MAX_INVOICE_LIMIT,
-} from './invoice';
+import { Invoice, InvoiceRepository, InvoiceStatus } from './invoice';
 import { LineItem, DocumentTotals } from '../shared/billing-engine';
 
 export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepository {
@@ -85,100 +77,19 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
-  /**
-   * Build the parameterized WHERE clause shared between data and count queries
-   * for `findByTenant` / `listWithMeta`. tenant_id is the FIRST predicate as
-   * defense-in-depth alongside RLS.
-   */
-  private buildListWhere(tenantId: string, options?: InvoiceListOptions): {
-    where: string;
-    params: unknown[];
-  } {
-    const conditions: string[] = ['tenant_id = $1'];
-    const params: unknown[] = [tenantId];
-    let paramIndex = 2;
-
-    if (options?.status) {
-      conditions.push(`status = $${paramIndex}`);
-      params.push(options.status);
-      paramIndex++;
-    }
-
-    if (options?.jobId) {
-      conditions.push(`job_id = $${paramIndex}`);
-      params.push(options.jobId);
-      paramIndex++;
-    }
-
-    if (options?.fromDueDate) {
-      conditions.push(`due_date >= $${paramIndex}`);
-      params.push(options.fromDueDate);
-      paramIndex++;
-    }
-
-    if (options?.toDueDate) {
-      conditions.push(`due_date <= $${paramIndex}`);
-      params.push(options.toDueDate);
-      paramIndex++;
-    }
-
-    if (options?.search) {
-      const searchParam = `%${options.search}%`;
-      conditions.push(
-        `(invoice_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex})`
-      );
-      params.push(searchParam);
-      paramIndex++;
-    }
-
-    return { where: `WHERE ${conditions.join(' AND ')}`, params };
-  }
-
-  async findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]> {
+  async findByTenant(tenantId: string): Promise<Invoice[]> {
     return this.withTenant(tenantId, async (client) => {
-      return this.queryListRows(client, tenantId, options);
-    });
-  }
-
-  private async queryListRows(
-    client: PoolClient,
-    tenantId: string,
-    options?: InvoiceListOptions
-  ): Promise<Invoice[]> {
-    const { where, params } = this.buildListWhere(tenantId, options);
-    const sortDirection = options?.sort === 'asc' ? 'ASC' : 'DESC';
-    const usePagination = options?.limit !== undefined || options?.offset !== undefined;
-    let sql = `SELECT * FROM invoices ${where} ORDER BY created_at ${sortDirection}`;
-    let queryParams = params;
-    if (usePagination) {
-      const limit = Math.min(options?.limit ?? DEFAULT_INVOICE_LIMIT, MAX_INVOICE_LIMIT);
-      const offset = options?.offset ?? 0;
-      sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-      queryParams = [...params, limit, offset];
-    }
-    const { rows } = await client.query(sql, queryParams);
-    return Promise.all(
-      rows.map(async (row) => {
-        const lineItems = await this.fetchLineItems(client, tenantId, row.id);
-        return this.mapRowToInvoice(row, lineItems);
-      }),
-    );
-  }
-
-  async listWithMeta(
-    tenantId: string,
-    options?: InvoiceListOptions
-  ): Promise<InvoiceListResult> {
-    return this.withTenant(tenantId, async (client) => {
-      const limit = Math.min(options?.limit ?? DEFAULT_INVOICE_LIMIT, MAX_INVOICE_LIMIT);
-      const offset = options?.offset ?? 0;
-      const data = await this.queryListRows(client, tenantId, { ...options, limit, offset });
-      const { where, params } = this.buildListWhere(tenantId, options);
-      const countResult = await client.query(
-        `SELECT COUNT(*)::int AS total FROM invoices ${where}`,
-        params
+      const { rows } = await client.query(
+        `SELECT * FROM invoices WHERE tenant_id = $1 ORDER BY created_at DESC`,
+        [tenantId],
       );
-      return { data, total: countResult.rows[0].total as number };
+
+      return Promise.all(
+        rows.map(async (row) => {
+          const lineItems = await this.fetchLineItems(client, tenantId, row.id);
+          return this.mapRowToInvoice(row, lineItems);
+        }),
+      );
     });
   }
 
@@ -237,38 +148,6 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         setClauses.push(`updated_at = $${paramIndex++}`);
         values.push(updates.updatedAt);
       }
-      if (updates.viewToken !== undefined) {
-        setClauses.push(`view_token = $${paramIndex++}`);
-        values.push(updates.viewToken);
-      }
-      if (updates.sentAt !== undefined) {
-        setClauses.push(`sent_at = $${paramIndex++}`);
-        values.push(updates.sentAt);
-      }
-      if (updates.lastDispatchId !== undefined) {
-        setClauses.push(`last_dispatch_id = $${paramIndex++}`);
-        values.push(updates.lastDispatchId);
-      }
-      if (updates.viewTokenExpiresAt !== undefined) {
-        setClauses.push(`view_token_expires_at = $${paramIndex++}`);
-        values.push(updates.viewTokenExpiresAt);
-      }
-      if (updates.firstViewedAt !== undefined) {
-        setClauses.push(`first_viewed_at = $${paramIndex++}`);
-        values.push(updates.firstViewedAt);
-      }
-      if (updates.viewCount !== undefined) {
-        setClauses.push(`view_count = $${paramIndex++}`);
-        values.push(updates.viewCount);
-      }
-      if (updates.stripePaymentLinkId !== undefined) {
-        setClauses.push(`stripe_payment_link_id = $${paramIndex++}`);
-        values.push(updates.stripePaymentLinkId);
-      }
-      if (updates.stripePaymentLinkUrl !== undefined) {
-        setClauses.push(`stripe_payment_link_url = $${paramIndex++}`);
-        values.push(updates.stripePaymentLinkUrl);
-      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -287,35 +166,6 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       }
 
       return this.findByIdWithClient(client, tenantId, id);
-    });
-  }
-
-  async findByViewToken(token: string): Promise<Invoice | null> {
-    const headerRow = await this.withClient(async (client) => {
-      const { rows } = await client.query(
-        `SELECT * FROM invoices
-         WHERE view_token = $1
-           AND (view_token_expires_at IS NULL OR view_token_expires_at > NOW())
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [token],
-      );
-      return rows[0] ?? null;
-    });
-    if (!headerRow) return null;
-    return this.findById(headerRow.tenant_id, headerRow.id);
-  }
-
-  async incrementViewCount(tenantId: string, id: string): Promise<void> {
-    await this.withTenant(tenantId, async (client) => {
-      await client.query(
-        `UPDATE invoices
-         SET view_count = view_count + 1,
-             first_viewed_at = COALESCE(first_viewed_at, NOW()),
-             updated_at = NOW()
-         WHERE id = $1 AND tenant_id = $2`,
-        [id, tenantId],
-      );
     });
   }
 
@@ -409,14 +259,6 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       issuedAt: row.issued_at ? new Date(row.issued_at) : undefined,
       dueDate: row.due_date ? new Date(row.due_date) : undefined,
       customerMessage: row.customer_message ?? undefined,
-      viewToken: row.view_token ?? undefined,
-      viewTokenExpiresAt: row.view_token_expires_at ? new Date(row.view_token_expires_at) : undefined,
-      sentAt: row.sent_at ? new Date(row.sent_at) : undefined,
-      lastDispatchId: row.last_dispatch_id ?? undefined,
-      firstViewedAt: row.first_viewed_at ? new Date(row.first_viewed_at) : undefined,
-      viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
-      stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
-      stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

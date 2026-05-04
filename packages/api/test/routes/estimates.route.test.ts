@@ -221,51 +221,6 @@ describe('GET /api/estimates', () => {
   });
 });
 
-describe('P1-018 — listEstimates filter + pagination', () => {
-  let app: Express;
-
-  beforeEach(async () => {
-    ({ app } = await buildTestApp());
-  });
-
-  it('filter by status=draft returns only drafts', async () => {
-    const e1 = await createEstimate(app);
-    await createEstimate(app);
-    // Transition e1 to sent
-    await request(app).post(`/api/estimates/${e1.body.id}/transition`).send({ status: 'sent' });
-
-    const res = await request(app).get('/api/estimates?status=draft');
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].status).toBe('draft');
-  });
-
-  it('pagination with limit/offset returns { data, total }', async () => {
-    for (let i = 0; i < 3; i++) {
-      await createEstimate(app);
-    }
-    const res = await request(app).get('/api/estimates?limit=2&offset=0');
-    expect(res.status).toBe(200);
-    expect(res.body.data).toHaveLength(2);
-    expect(res.body.total).toBe(3);
-  });
-
-  it('rejects limit > 200 with 400', async () => {
-    const res = await request(app).get('/api/estimates?limit=500');
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
-  });
-
-  it('legacy ?jobId= without other params still returns bare array', async () => {
-    await createEstimate(app, { jobId: 'job-a' });
-    await createEstimate(app, { jobId: 'job-b' });
-    const res = await request(app).get('/api/estimates?jobId=job-a');
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body).toHaveLength(1);
-  });
-});
-
 describe('POST /api/estimates/:id/transition', () => {
   let app: Express;
 

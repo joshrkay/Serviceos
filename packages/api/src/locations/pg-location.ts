@@ -1,7 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { LocationRepository, ServiceLocation } from './location';
-import { normalizeAddress } from './dedup';
 
 function mapRow(row: Record<string, unknown>): ServiceLocation {
   return {
@@ -138,57 +137,6 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
         params
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
-    });
-  }
-
-  /**
-   * P1-019: Pg-backed dedup candidate query for service locations.
-   *
-   * Hard requirement: tenant_id AND customer_id are the FIRST predicates
-   * in the WHERE clause. RLS enforces tenant_id, but defense-in-depth
-   * means we bind both explicitly.
-   *
-   * Address normalization is performed server-side via lower(trim(...))
-   * with whitespace collapsed via regexp_replace, matching the
-   * `normalizeAddress` helper. We bind the normalized form of each
-   * address component as a separate parameter ($N) — never concatenate.
-   *
-   * Returns at most a handful of rows (typically 0 or 1) per customer,
-   * so we do not need a composite index for v1. Surfaced in the commit
-   * body as a follow-up if customer location counts grow.
-   */
-  async findDuplicateAddresses(
-    tenantId: string,
-    customerId: string,
-    address: { street1: string; city: string; state: string; postalCode: string }
-  ): Promise<ServiceLocation[]> {
-    const norm = (s: string): string =>
-      s.toLowerCase().trim().replace(/\s+/g, ' ');
-    return this.withTenant(tenantId, async (client) => {
-      const result = await client.query(
-        `SELECT * FROM service_locations
-         WHERE tenant_id = $1
-           AND customer_id = $2
-           AND is_archived = false
-           AND regexp_replace(lower(trim(street1)), '\\s+', ' ', 'g') = $3
-           AND regexp_replace(lower(trim(city)), '\\s+', ' ', 'g') = $4
-           AND regexp_replace(lower(trim(state)), '\\s+', ' ', 'g') = $5
-           AND regexp_replace(lower(trim(postal_code)), '\\s+', ' ', 'g') = $6`,
-        [
-          tenantId,
-          customerId,
-          norm(address.street1),
-          norm(address.city),
-          norm(address.state),
-          norm(address.postalCode),
-        ]
-      );
-      // Belt-and-braces: confirm `normalizeAddress` agrees with the SQL
-      // (catches future divergence between the two).
-      const target = normalizeAddress(address);
-      return result.rows
-        .map(mapRow)
-        .filter((l) => normalizeAddress(l) === target);
     });
   }
 }

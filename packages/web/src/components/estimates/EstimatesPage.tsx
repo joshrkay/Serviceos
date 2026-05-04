@@ -428,54 +428,22 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
 }
 
 // ─── Send Estimate Sheet ──────────────────────────────────────────────────
-function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
+function SendEstimateSheet({ est, total, onClose, onSent }: {
   est: EstCompat; total: number; onClose: () => void; onSent: () => void;
-  /** When set, the sheet calls the real /api/estimates/:id/send endpoint. */
-  apiId?: string;
 }) {
   const customer = customers.find(c => c.id === est.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
-  const [recipient, setRecipient] = useState<string>(customer?.phone ?? '');
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
 
-  const [msg, setMsg] = useState('');
+  const smsMsg = `Hi ${customer?.name.split(' ')[0] ?? 'there'},\n\nI've prepared an estimate for ${est.description}.\n\nTotal: $${total.toLocaleString()}\n\nReview and approve here:\nfieldly.app/e/${est.estimateNumber.toLowerCase().replace('-','')}\n\nQuestions? Call (512) 555-0000.\n– Mike from Fieldly Pro`;
+  const emailMsg = `Hi ${customer?.name.split(' ')[0] ?? 'there'},\n\nPlease find your estimate attached below.\n\nEstimate: ${est.estimateNumber}\nDescription: ${est.description}\nTotal: $${total.toLocaleString()}\n\nClick the button below to review and accept.\n\nThank you,\nMike\nFieldly Pro Services`;
 
-  type SendBody = {
-    channel: 'sms' | 'email';
-    recipientPhone?: string;
-    recipientEmail?: string;
-    customMessage?: string;
-  };
-  type SendResp = { viewUrl: string; viewToken: string };
-  const { mutate: sendEstimate } = useMutation<SendBody, SendResp>(
-    'POST',
-    apiId ? `/api/estimates/${apiId}/send` : '/api/estimates/_/send'
-  );
+  const [msg, setMsg] = useState(smsMsg);
 
-  async function handleSend() {
+  function handleSend() {
     setSending(true);
-    setSendError(null);
-    try {
-      if (apiId) {
-        await sendEstimate({
-          channel,
-          recipientPhone: channel === 'sms' ? recipient : undefined,
-          recipientEmail: channel === 'email' ? recipient : undefined,
-          customMessage: msg,
-        });
-      } else {
-        // No API id: fall back to local animation only (used by mock-data screens).
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-      setSending(false);
-      setSent(true);
-      setTimeout(() => { onSent(); onClose(); }, 1200);
-    } catch (err) {
-      setSending(false);
-      setSendError(err instanceof Error ? err.message : 'Send failed');
-    }
+    setTimeout(() => { setSending(false); setSent(true); setTimeout(() => { onSent(); onClose(); }, 1200); }, 1500);
   }
 
   return (
@@ -508,10 +476,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
               {(['sms', 'email'] as const).map(c => (
                 <button
                   key={c}
-                  onClick={() => {
-                    setChannel(c);
-                    setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
-                  }}
+                  onClick={() => { setChannel(c); setMsg(c === 'sms' ? smsMsg : emailMsg); }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
                     channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
                   }`}
@@ -526,20 +491,18 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
           <div>
             <p className="text-xs text-slate-500 mb-1.5">{channel === 'sms' ? 'Phone number' : 'Email address'}</p>
             <input
-              value={recipient}
-              onChange={(e) => setRecipient(e.target.value)}
+              defaultValue={channel === 'sms' ? customer?.phone : customer?.email}
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
             />
           </div>
 
-          {/* Personal note */}
+          {/* Message */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Personal note <span className="text-slate-400">(optional)</span></p>
+            <p className="text-xs text-slate-500 mb-1.5">Message</p>
             <textarea
               value={msg}
               onChange={e => setMsg(e.target.value)}
-              rows={3}
-              placeholder="Add a personal note to your customer..."
+              rows={channel === 'sms' ? 7 : 9}
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-blue-400 bg-white resize-none leading-relaxed"
             />
           </div>
@@ -549,10 +512,6 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
             <p className="text-xs text-slate-400 flex items-center gap-1.5">
               <Clock size={11} /> Estimate valid until {est.validUntil}
             </p>
-          )}
-
-          {sendError && (
-            <p className="text-xs text-red-600 -mt-2">Send failed: {sendError}</p>
           )}
 
           {/* Send button */}
@@ -755,12 +714,10 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
         <SendEstimateSheet
           est={estCompat}
           total={total}
-          apiId={est?.id}
           onClose={() => setSendOpen(false)}
           onSent={async () => {
             setWasSent(true);
-            // Backend send route already transitions the estimate to "sent" —
-            // skip the redundant transition call here.
+            await transitionEstimate({ status: 'sent' });
           }}
         />
       )}

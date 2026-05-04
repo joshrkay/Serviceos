@@ -229,26 +229,6 @@ export class RecordPaymentTaskHandler implements TaskHandler {
   }
 }
 
-// ───────────── emergency_dispatch ─────────────
-//
-// Fast-path — irreversible action class. Proposal creation is the only
-// step; the state machine skips entity_resolution and intent_confirm.
-export class EmergencyDispatchTaskHandler implements TaskHandler {
-  readonly taskType = 'emergency_dispatch' as const;
-
-  async handle(context: TaskContext): Promise<TaskResult> {
-    const payload: Record<string, unknown> = {
-      emergencyDescription: context.message,
-      detectedKeywords: [],
-    };
-
-    return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
-      taskType: this.taskType,
-    };
-  }
-}
-
 // ───────────── create_job (LLM-free variant for voice) ─────────────
 //
 // The task-handlers.ts CreateJobTaskHandler is a plain passthrough

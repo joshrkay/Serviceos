@@ -27,7 +27,6 @@ export type IntentType =
   | 'add_note'
   | 'send_invoice'
   | 'record_payment'
-  | 'emergency_dispatch'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -45,7 +44,6 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'add_note',
   'send_invoice',
   'record_payment',
-  'emergency_dispatch',
   'unknown',
 ] as const;
 
@@ -125,13 +123,6 @@ export interface IntentClassification {
    * pipeline. Empty / undefined when every enum is valid.
    */
   invalidEnumFields?: Array<{ field: string; value: unknown }>;
-  /**
-   * Token usage from the underlying LLM call, surfaced so callers
-   * (e.g., the calling-agent adapter) can feed the SessionCostTracker
-   * and enforce per-session caps. Omitted when the classifier
-   * short-circuits without an LLM call.
-   */
-  tokenUsage?: { input: number; output: number };
 }
 
 export interface ClassifyContext {
@@ -235,17 +226,6 @@ Supported intents (return exactly ONE):
                            Examples: "Mark the Jones invoice paid, 450 cash"
                                      "Record a check for 200 from Smith, check 1042"
                                      "Rodriguez paid the invoice in full"
-- "emergency_dispatch"  — caller describes a life-safety or property-
-                           emergency situation requiring IMMEDIATE
-                           response: no heat/cool in extreme weather, gas
-                           smell, burning smell, smoke, sparks, flooding,
-                           burst pipe, sewage backup, no water. Skip normal
-                           intent confirmation — escalate directly to
-                           on-call dispatcher. Never auto-execute.
-                           Examples: "There's a gas smell coming from the furnace"
-                                     "My pipes burst and water is everywhere"
-                                     "No heat and it's 10 degrees outside"
-                                     "I smell burning from my AC unit"
 - "unknown"             — anything else: queries ("when is my next
                            appointment"), ambiguous transcripts, or edit
                            commands without a clear reference.
@@ -467,24 +447,17 @@ export async function classifyIntent(
     metadata: { tenantId: context.tenantId },
   });
 
-  const tokenUsage = response.tokenUsage
-    ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
-    : undefined;
-
   const parsed = parseClassifierJson(response.content);
   if (!parsed) {
-    const result = unknownResult('could not parse classifier output', 'parse_failed');
-    if (tokenUsage) result.tokenUsage = tokenUsage;
-    return result;
+    return unknownResult('could not parse classifier output', 'parse_failed');
   }
-  if (tokenUsage) parsed.tokenUsage = tokenUsage;
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
   // We keep the original intent and confidence in the result so the router
   // can emit a clarification proposal that offers the low-confidence intent
   // as a suggestion ("did you mean: create invoice?") instead of dropping.
   if (parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD) {
-    const lowConf: IntentClassification = {
+    return {
       intentType: 'unknown',
       confidence: parsed.confidence,
       reasoning:
@@ -495,8 +468,6 @@ export async function classifyIntent(
       lowConfidenceIntent:
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
-    if (tokenUsage) lowConf.tokenUsage = tokenUsage;
-    return lowConf;
   }
 
   // Classifier picked 'unknown' at adequate confidence — nothing to route.

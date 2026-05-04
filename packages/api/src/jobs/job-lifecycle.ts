@@ -27,17 +27,6 @@ export const JOB_TIMELINE_EVENT_TYPES = {
   DELAY_ACKNOWLEDGED: 'delay_acknowledged',
 } as const;
 
-export interface DelayAcknowledgmentMetadata extends Record<string, unknown> {
-  appointmentId: string;
-  isRunningBehind: boolean;
-  delayMinutes?: 10 | 15 | 20 | 60;
-  reasonCode?: string;
-  actorId: string;
-  actorRole: string;
-  timestamp: string;
-  inferredTriggerState: 'running_behind' | 'on_time';
-}
-
 export const JOB_STATUS_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
   new: ['scheduled', 'canceled'],
   scheduled: ['in_progress', 'canceled'],
@@ -128,34 +117,6 @@ export async function addTimelineEntry(
   };
 
   return timelineRepo.create(entry);
-}
-
-export async function addDelayAcknowledgmentTimelineEntry(
-  tenantId: string,
-  jobId: string,
-  actorId: string,
-  actorRole: string,
-  timelineRepo: JobTimelineRepository,
-  metadata: DelayAcknowledgmentMetadata
-): Promise<JobTimelineEntry> {
-  if (metadata.isRunningBehind && metadata.delayMinutes === undefined) {
-    throw new ValidationError('delayMinutes is required when isRunningBehind is true');
-  }
-
-  const description = metadata.isRunningBehind
-    ? `Delay acknowledged (${metadata.delayMinutes}m)`
-    : 'Delay cleared';
-
-  return addTimelineEntry(
-    tenantId,
-    jobId,
-    JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED,
-    description,
-    actorId,
-    actorRole,
-    timelineRepo,
-    metadata
-  );
 }
 
 export class InMemoryJobTimelineRepository implements JobTimelineRepository {

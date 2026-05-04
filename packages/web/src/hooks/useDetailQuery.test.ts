@@ -2,10 +2,6 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useDetailQuery } from './useDetailQuery';
 
-// P0-030 note: useDetailQuery now reads the Clerk JWT via useAuth(). The
-// global test-setup.ts installs a permissive Clerk mock — so this file can
-// keep validating its existing data-fetching contract unchanged.
-
 describe('useDetailQuery', () => {
   beforeEach(() => {
     vi.restoreAllMocks();

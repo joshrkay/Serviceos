@@ -29,7 +29,6 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   send_invoice: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
-  emergency_dispatch: 1,
   onboarding_tenant_settings: 6,
   onboarding_service_category: 7,
   onboarding_estimate_template: 8,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useApiClient } from '../lib/apiClient';
+import { apiFetch } from '../utils/api-fetch';
 
 export interface ListQueryOptions {
   search?: string;
@@ -24,20 +24,10 @@ export interface ListQueryResult<T> {
   setFilters: (filters: Record<string, string>) => void;
 }
 
-/**
- * Authenticated list-fetching hook (P0-030).
- *
- * Every request flows through {@link useApiClient}, which injects the Clerk
- * Bearer token, cancels unauthenticated requests, and redirects to /login
- * on a persistent 401. The public surface — `{ data, total, page, pageSize,
- * isLoading, error, refetch, setPage, setSearch, setFilters }` — is
- * unchanged from the pre-P0-030 hook.
- */
 export function useListQuery<T>(
   endpoint: string,
   initialOptions: ListQueryOptions = {}
 ): ListQueryResult<T> {
-  const apiFetch = useApiClient();
   const [data, setData] = useState<T[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(initialOptions.page ?? 1);
@@ -68,17 +58,11 @@ export function useListQuery<T>(
       setData(result.data ?? result);
       setTotal(result.total ?? result.length ?? 0);
     } catch (err) {
-      // Sign-out transitions surface as AbortError — treat as a non-error
-      // (the request was deliberately cancelled). Real errors still surface.
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setError(null);
-      } else {
-        setError(err instanceof Error ? err.message : 'Unknown error');
-      }
+      setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setIsLoading(false);
     }
-  }, [apiFetch, enabled, endpoint, page, pageSize, search, filters]);
+  }, [enabled, endpoint, page, pageSize, search, filters]);
 
   useEffect(() => {
     refetch();

@@ -17,8 +17,6 @@ import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
-import { InMemoryQueue } from '../../src/queues/queue';
-import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
 import { DelayNotificationEnqueuer } from '../../src/routes/appointments';
 
 function tomorrowIso(hoursFromNowStart: number, hoursFromNowEnd: number) {
@@ -71,73 +69,6 @@ describe('POST /api/appointments', () => {
   });
 });
 
-describe('P1-018 — listAppointments date range + pagination', () => {
-  let app: Express;
-
-  beforeEach(async () => {
-    ({ app } = await buildTestApp());
-  });
-
-  async function seedAt(jobId: string, hoursOffset: number) {
-    const start = new Date(Date.now() + hoursOffset * 60 * 60 * 1000);
-    const end = new Date(Date.now() + (hoursOffset + 2) * 60 * 60 * 1000);
-    return request(app).post('/api/appointments').send({
-      jobId,
-      scheduledStart: start.toISOString(),
-      scheduledEnd: end.toISOString(),
-      timezone: 'UTC',
-    });
-  }
-
-  it('filter by date range returns only appointments in window', async () => {
-    await seedAt('job-1', 1); // tomorrow + 1h
-    await seedAt('job-2', 24 * 7); // a week out
-    const fromDate = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30m from now
-    const toDate = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(); // 6h from now
-
-    const res = await request(app).get(
-      `/api/appointments?fromDate=${encodeURIComponent(fromDate)}&toDate=${encodeURIComponent(toDate)}`
-    );
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty('data');
-    expect(res.body).toHaveProperty('total');
-    expect(res.body.total).toBe(1);
-    expect(res.body.data[0].jobId).toBe('job-1');
-  });
-
-  it('pagination with limit/offset returns { data, total }', async () => {
-    await seedAt('job-1', 1);
-    await seedAt('job-2', 2);
-    await seedAt('job-3', 3);
-    const res = await request(app).get('/api/appointments?limit=2&offset=0');
-    expect(res.status).toBe(200);
-    expect(res.body.data).toHaveLength(2);
-    expect(res.body.total).toBe(3);
-  });
-
-  it('rejects limit > 200 with 400', async () => {
-    const res = await request(app).get('/api/appointments?limit=500');
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
-  });
-
-  it('rejects invalid fromDate with 400', async () => {
-    const res = await request(app).get('/api/appointments?fromDate=not-a-date');
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
-  });
-
-  it('legacy ?jobId= still returns bare array of appointments', async () => {
-    await seedAt('job-x', 1);
-    await seedAt('job-x', 4);
-    await seedAt('job-y', 1);
-    const res = await request(app).get('/api/appointments?jobId=job-x');
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body).toHaveLength(2);
-  });
-});
-
 describe('POST /api/appointments/:id/delay-ack', () => {
   function buildDelayAckApp(options?: { delayNotificationCoordinator?: DelayNotificationEnqueuer }): Express {
     const app = express();
@@ -159,7 +90,7 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     const timelineRepo = new InMemoryJobTimelineRepository();
     const auditRepo = new InMemoryAuditRepository();
     const ownership = permissiveTenantOwnership();
-    app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
+    app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
     app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, options));
     return app;
   }
@@ -264,8 +195,11 @@ describe('POST /api/appointments/:id/delay-ack', () => {
     expect(res.body.error).toBe('FORBIDDEN');
   });
 
-  it('rejects running-behind acknowledgement without fixed delay value', async () => {
-    const app = buildDelayAckApp();
+  it('enqueues delay notification for running-behind acknowledgement', async () => {
+    const enqueueDelayNotice = vi.fn().mockResolvedValue('next-appt:1');
+    const app = buildDelayAckApp({
+      delayNotificationCoordinator: { enqueueDelayNotice },
+    });
     const appointmentId = await seedScheduledAppointment(app, 'tech-1');
 
     const res = await request(app)
@@ -275,45 +209,15 @@ describe('POST /api/appointments/:id/delay-ack', () => {
       .send({
         appointmentId,
         isRunningBehind: true,
+        delayMinutes: 20,
       });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
-  });
-
-  it('rejects delayMinutes when not running behind', async () => {
-    const app = buildDelayAckApp();
-    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
-
-    const res = await request(app)
-      .post(`/api/appointments/${appointmentId}/delay-ack`)
-      .set('x-test-role', 'dispatcher')
-      .set('x-test-user-id', 'dispatcher-1')
-      .send({
-        appointmentId,
-        isRunningBehind: false,
-        delayMinutes: 15,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
-  });
-
-  it('rejects body appointmentId mismatch with route id', async () => {
-    const app = buildDelayAckApp();
-    const appointmentId = await seedScheduledAppointment(app, 'tech-1');
-
-    const res = await request(app)
-      .post(`/api/appointments/${appointmentId}/delay-ack`)
-      .set('x-test-role', 'dispatcher')
-      .set('x-test-user-id', 'dispatcher-1')
-      .send({
-        appointmentId: 'different-id',
-        isRunningBehind: true,
-        delayMinutes: 10,
-      });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.status).toBe(201);
+    expect(res.body.delayNoticeIdempotencyKey).toBe('next-appt:1');
+    expect(enqueueDelayNotice).toHaveBeenCalledTimes(1);
+    expect(enqueueDelayNotice.mock.calls[0][0]).toMatchObject({
+      delayVersion: 1,
+      delayMinutes: 20,
+    });
   });
 });

@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
+import { useState } from 'react';
 import {
   Plus, Send, ArrowLeft, DollarSign, CheckCircle, CheckCircle2,
   Clock, AlertCircle, FileText, CreditCard, ChevronRight, X,
@@ -317,56 +316,25 @@ function InvoiceLineItems({ items, editable, onChange }: {
 }
 
 // ─── Send Payment Sheet ────────────────────────────────────────────────────
-function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
+function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent }: {
   inv: InvCompat; total: number; paymentLink: string;
   onClose: () => void; onSent: () => void;
-  /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
-  apiId?: string;
 }) {
   const customer = customers.find(c => c.id === inv.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
-  const [recipient, setRecipient] = useState<string>(customer?.phone ?? '');
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
 
   const firstName = customer?.name.split(' ')[0] ?? 'there';
 
-  const [msg, setMsg] = useState('');
+  const smsMsg  = `Hi ${firstName},\n\nYour invoice for ${inv.description} is ready.\n\nAmount due: $${total.toLocaleString()}\n\nPay securely online:\n${paymentLink}\n\nQuestions? Call (512) 555-0000.\nThanks! – Mike`;
+  const emailMsg = `Hi ${firstName},\n\nYour invoice ${inv.invoiceNumber} is ready for payment.\n\nDescription: ${inv.description}\nAmount due: $${total.toLocaleString()}${inv.dueDate ? `\nDue date: ${inv.dueDate}` : ''}\n\nPay by card or ACH:\n${paymentLink}\n\nThank you,\nMike\nFieldly Pro Services\n(512) 555-0000`;
 
-  type SendBody = {
-    channel: 'sms' | 'email';
-    recipientPhone?: string;
-    recipientEmail?: string;
-    customMessage?: string;
-  };
-  type SendResp = { viewUrl: string; viewToken: string };
-  const { mutate: sendInvoice } = useMutation<SendBody, SendResp>(
-    'POST',
-    apiId ? `/api/invoices/${apiId}/send` : '/api/invoices/_/send'
-  );
+  const [msg, setMsg] = useState(smsMsg);
 
-  async function handleSend() {
+  function handleSend() {
     setSending(true);
-    setSendError(null);
-    try {
-      if (apiId) {
-        await sendInvoice({
-          channel,
-          recipientPhone: channel === 'sms' ? recipient : undefined,
-          recipientEmail: channel === 'email' ? recipient : undefined,
-          customMessage: msg,
-        });
-      } else {
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-      setSending(false);
-      setSent(true);
-      setTimeout(() => { onSent(); onClose(); }, 1200);
-    } catch (err) {
-      setSending(false);
-      setSendError(err instanceof Error ? err.message : 'Send failed');
-    }
+    setTimeout(() => { setSending(false); setSent(true); setTimeout(() => { onSent(); onClose(); }, 1200); }, 1500);
   }
 
   const isOverdue = inv.status === 'Overdue';
@@ -415,10 +383,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
               {(['sms', 'email'] as const).map(c => (
                 <button
                   key={c}
-                  onClick={() => {
-                    setChannel(c);
-                    setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
-                  }}
+                  onClick={() => { setChannel(c); setMsg(c === 'sms' ? smsMsg : emailMsg); }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
                     channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
                   }`}
@@ -433,20 +398,18 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
           <div>
             <p className="text-xs text-slate-500 mb-1.5">{channel === 'sms' ? 'Phone number' : 'Email address'}</p>
             <input
-              value={recipient}
-              onChange={(e) => setRecipient(e.target.value)}
+              defaultValue={channel === 'sms' ? customer?.phone : customer?.email}
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-blue-400 bg-white"
             />
           </div>
 
-          {/* Personal note */}
+          {/* Message */}
           <div>
-            <p className="text-xs text-slate-500 mb-1.5">Personal note <span className="text-slate-400">(optional)</span></p>
+            <p className="text-xs text-slate-500 mb-1.5">Message</p>
             <textarea
               value={msg}
               onChange={e => setMsg(e.target.value)}
-              rows={3}
-              placeholder="Add a personal note to your customer..."
+              rows={channel === 'sms' ? 8 : 10}
               className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-blue-400 bg-white resize-none leading-relaxed"
             />
           </div>
@@ -462,10 +425,6 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
             <p className="text-xs text-slate-400 flex items-center gap-1.5">
               <Clock size={11} /> Payment due {inv.dueDate}
             </p>
-          )}
-
-          {sendError && (
-            <p className="text-xs text-red-600 -mt-2">Send failed: {sendError}</p>
           )}
 
           {/* Send button */}
@@ -754,7 +713,6 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           inv={invCompat}
           total={total}
           paymentLink={paymentLink}
-          apiId={inv?.id}
           onClose={() => setSendOpen(false)}
           onSent={() => {}}
         />
@@ -790,46 +748,11 @@ const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
   { label: 'Paid',    value: 'Paid'    },
 ];
 
-/**
- * P5-018 — refresh interval for the dispatcher invoice list. 30s gives
- * ~near-real-time visibility on payment receipts without hammering the
- * API. Lifted to a constant so tests can reason about it.
- */
-const INVOICE_LIST_REFRESH_MS = 30_000;
-
 export function InvoicesPage() {
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(null);
 
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
-
-  // P5-018 — Auto-refresh loop. Webhooks update the DB; the dispatcher
-  // sees the change on the next poll. Pause polling while a detail
-  // page is open so the user isn't yanked around.
-  useEffect(() => {
-    if (selected) return;
-    const id = setInterval(() => {
-      refetch();
-    }, INVOICE_LIST_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [selected, refetch]);
-
-  // P5-018 — Toast when an invoice transitions to paid. We track the
-  // previous status map across renders; a transition `previous !== paid
-  // && next === paid` fires a Sonner toast.
-  const previousStatusesRef = useRef<Map<string, string>>(new Map());
-  useEffect(() => {
-    const previous = previousStatusesRef.current;
-    const next = new Map<string, string>();
-    for (const inv of data) {
-      next.set(inv.id, inv.status);
-      const prev = previous.get(inv.id);
-      if (prev && prev !== 'paid' && inv.status === 'paid') {
-        toast.success(`Payment received on ${inv.invoiceNumber}`);
-      }
-    }
-    previousStatusesRef.current = next;
-  }, [data]);
 
   if (selected) {
     return <InvoiceDetail invoiceId={selected} onBack={() => setSelected(null)} />;

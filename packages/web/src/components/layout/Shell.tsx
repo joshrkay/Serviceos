@@ -5,10 +5,8 @@ import {
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
 } from 'lucide-react';
 import { useUser, useClerk } from '@clerk/clerk-react';
-import { Toaster } from 'sonner';
 import { VoiceBar } from '../shared/VoiceBar';
 import { CameraCapture, CameraButton } from '../shared/CameraCapture';
-import { ErrorBoundary } from './ErrorBoundary';
 
 const NAV = [
   { to: '/',              label: 'Home',        icon: Home          },
@@ -56,13 +54,7 @@ export function Shell() {
   const initials = getInitials(user?.fullName ?? null, user?.primaryEmailAddress?.emailAddress);
 
   return (
-    <ErrorBoundary>
     <div className="flex h-screen bg-slate-50 overflow-hidden">
-
-      {/* Toast portal — mounted at the layout root so toasts surface
-          across all authenticated pages. role="status"/role="alert" are
-          applied per-toast by sonner internally. */}
-      <Toaster richColors position="top-right" />
 
       {/* ── Desktop Sidebar ── */}
       <aside className="hidden md:flex flex-col w-56 shrink-0 bg-white border-r border-slate-100 z-10">
@@ -203,6 +195,5 @@ export function Shell() {
       )}
 
     </div>
-    </ErrorBoundary>
   );
 }

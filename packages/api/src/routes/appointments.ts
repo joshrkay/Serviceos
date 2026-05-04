@@ -9,17 +9,12 @@ import {
   getAppointment,
   updateAppointment,
   listByJob,
-  listAppointmentsWithMeta,
   AppointmentRepository,
-  AppointmentStatus,
-  DEFAULT_APPOINTMENT_LIMIT,
-  MAX_APPOINTMENT_LIMIT,
 } from '../appointments/appointment';
 import { JobRepository } from '../jobs/job';
 import {
-  addDelayAcknowledgmentTimelineEntry,
+  addTimelineEntry,
   JobTimelineRepository,
-  DelayAcknowledgmentMetadata,
   JOB_TIMELINE_EVENT_TYPES,
 } from '../jobs/job-lifecycle';
 export interface DelayNotificationEnqueuer {
@@ -83,77 +78,12 @@ export function createAppointmentRouter(
     requirePermission('appointments:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
-        const technicianId = typeof req.query.technicianId === 'string' ? req.query.technicianId : undefined;
-        const status = typeof req.query.status === 'string' ? req.query.status as AppointmentStatus : undefined;
-        const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
-
-        const fromRaw = typeof req.query.fromDate === 'string' ? req.query.fromDate : undefined;
-        const toRaw = typeof req.query.toDate === 'string' ? req.query.toDate : undefined;
-        const fromDate = fromRaw ? new Date(fromRaw) : undefined;
-        const toDate = toRaw ? new Date(toRaw) : undefined;
-        if (fromDate && Number.isNaN(fromDate.getTime())) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'fromDate must be a valid ISO date' });
-          return;
-        }
-        if (toDate && Number.isNaN(toDate.getTime())) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'toDate must be a valid ISO date' });
-          return;
-        }
-
-        const wantsPaginated =
-          req.query.paginated === 'true' ||
-          req.query.limit !== undefined ||
-          req.query.offset !== undefined ||
-          fromDate !== undefined ||
-          toDate !== undefined ||
-          technicianId !== undefined ||
-          status !== undefined;
-
-        // Legacy contract: GET /api/appointments?jobId=... still returns
-        // a bare array of appointments for that job. Only enter the new
-        // paginated path when one of the new filters/pagination params is
-        // present so existing UI consumers don't break.
-        if (jobId && !wantsPaginated) {
-          const result = await listByJob(req.auth!.tenantId, jobId, appointmentRepo);
-          res.json(result);
-          return;
-        }
-        if (!jobId && !wantsPaginated) {
-          // Preserve historical 400 when caller provides no usable filter.
+        const jobId = req.query.jobId as string;
+        if (!jobId) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'jobId query parameter is required' });
           return;
         }
-
-        const limitRaw = req.query.limit as string | undefined;
-        const offsetRaw = req.query.offset as string | undefined;
-        const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_APPOINTMENT_LIMIT;
-        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
-        if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_APPOINTMENT_LIMIT)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: `limit must be between 1 and ${MAX_APPOINTMENT_LIMIT}`,
-          });
-          return;
-        }
-        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
-          res.status(400).json({
-            error: 'VALIDATION_ERROR',
-            message: 'offset must be a non-negative integer',
-          });
-          return;
-        }
-
-        const result = await listAppointmentsWithMeta(req.auth!.tenantId, appointmentRepo, {
-          jobId,
-          technicianId,
-          status,
-          fromDate,
-          toDate,
-          sort,
-          limit,
-          offset,
-        });
+        const result = await listByJob(req.auth!.tenantId, jobId, appointmentRepo);
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -242,7 +172,7 @@ export function createAppointmentRouter(
         }
 
         const inferredTriggerState = parsed.isRunningBehind ? 'running_behind' : 'on_time';
-        const metadata: DelayAcknowledgmentMetadata = {
+        const metadata: Record<string, unknown> = {
           appointmentId: parsed.appointmentId,
           isRunningBehind: parsed.isRunningBehind,
           delayMinutes: parsed.delayMinutes,
@@ -253,9 +183,13 @@ export function createAppointmentRouter(
           inferredTriggerState,
         };
 
-        const timelineEntry = await addDelayAcknowledgmentTimelineEntry(
+        const timelineEntry = await addTimelineEntry(
           req.auth!.tenantId,
           appointment.jobId,
+          JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED,
+          parsed.isRunningBehind
+            ? `Delay acknowledged (${parsed.delayMinutes ?? 'unspecified'}m)`
+            : 'Delay cleared',
           actorId,
           role,
           timelineRepo,

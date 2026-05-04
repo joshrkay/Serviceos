@@ -1,14 +1,6 @@
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import {
-  Customer,
-  CustomerListOptions,
-  CustomerListResult,
-  CustomerRepository,
-  DEFAULT_LIST_LIMIT,
-  MAX_LIST_LIMIT,
-} from './customer';
-import { normalizeEmail, normalizePhone } from './dedup';
+import { Customer, CustomerListOptions, CustomerRepository } from './customer';
 
 function mapRow(row: Record<string, unknown>): Customer {
   return {
@@ -80,76 +72,30 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     });
   }
 
-  /**
-   * Build the parameterized WHERE clause used by both `findByTenant` and
-   * `listWithMeta` so the data + count queries see identical filters.
-   * tenant_id is always the FIRST predicate (defense-in-depth alongside RLS).
-   */
-  private buildListWhere(tenantId: string, options?: CustomerListOptions): {
-    where: string;
-    params: unknown[];
-  } {
-    const conditions: string[] = ['tenant_id = $1'];
-    const params: unknown[] = [tenantId];
-    let paramIndex = 2;
-
-    if (!options?.includeArchived) {
-      conditions.push('is_archived = false');
-    }
-
-    if (options?.search) {
-      const searchParam = `%${options.search}%`;
-      conditions.push(
-        `(display_name ILIKE $${paramIndex} OR company_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex} OR primary_phone ILIKE $${paramIndex})`
-      );
-      params.push(searchParam);
-      paramIndex++;
-    }
-
-    return { where: `WHERE ${conditions.join(' AND ')}`, params };
-  }
-
   async findByTenant(tenantId: string, options?: CustomerListOptions): Promise<Customer[]> {
     return this.withTenant(tenantId, async (client) => {
-      return this.queryListRows(client, tenantId, options);
-    });
-  }
+      const conditions: string[] = ['tenant_id = $1'];
+      const params: unknown[] = [tenantId];
+      let paramIndex = 2;
 
-  private async queryListRows(
-    client: PoolClient,
-    tenantId: string,
-    options?: CustomerListOptions
-  ): Promise<Customer[]> {
-    const { where, params } = this.buildListWhere(tenantId, options);
-    // P1-018: default sort = display_name ASC for customers per spec.
-    const sortDirection = options?.sort === 'desc' ? 'DESC' : 'ASC';
-    const usePagination = options?.limit !== undefined || options?.offset !== undefined;
-    let sql = `SELECT * FROM customers ${where} ORDER BY display_name ${sortDirection}`;
-    let queryParams = params;
-    if (usePagination) {
-      const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
-      const offset = options?.offset ?? 0;
-      sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-      queryParams = [...params, limit, offset];
-    }
-    const result = await client.query(sql, queryParams);
-    return result.rows.map(mapRow);
-  }
+      if (!options?.includeArchived) {
+        conditions.push('is_archived = false');
+      }
 
-  async listWithMeta(
-    tenantId: string,
-    options?: CustomerListOptions
-  ): Promise<CustomerListResult> {
-    return this.withTenant(tenantId, async (client) => {
-      const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
-      const offset = options?.offset ?? 0;
-      const data = await this.queryListRows(client, tenantId, { ...options, limit, offset });
-      const { where, params } = this.buildListWhere(tenantId, options);
-      const countResult = await client.query(
-        `SELECT COUNT(*)::int AS total FROM customers ${where}`,
+      if (options?.search) {
+        const searchParam = `%${options.search}%`;
+        conditions.push(
+          `(display_name ILIKE $${paramIndex} OR company_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`
+        );
+        params.push(searchParam);
+        paramIndex++;
+      }
+
+      const result = await client.query(
+        `SELECT * FROM customers WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
         params
       );
-      return { data, total: countResult.rows[0].total as number };
+      return result.rows.map(mapRow);
     });
   }
 
@@ -206,74 +152,6 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
            AND (display_name ILIKE $2 OR company_name ILIKE $2 OR email ILIKE $2 OR primary_phone ILIKE $2)
          ORDER BY display_name ASC`,
         [tenantId, searchParam]
-      );
-      return result.rows.map(mapRow);
-    });
-  }
-
-  /**
-   * P1-019: Pg-backed dedup candidate query.
-   *
-   * Hard requirement (see /docs/superpowers/contracts/repository-conventions.md):
-   *   tenant_id MUST be the FIRST predicate in the WHERE clause.
-   *   RLS enforces this at the row level, but defense-in-depth means
-   *   we also bind `tenant_id = $1` explicitly so a misconfigured RLS
-   *   context can never leak cross-tenant rows.
-   *
-   * Phone matching strategy:
-   *   The `primary_phone` column stores the user-provided string, not
-   *   a normalized form. Existing data may include `(415) 555-1234`,
-   *   `415-555-1234`, `+14155551234`, etc. To match across formats we
-   *   strip non-digits in SQL via `regexp_replace(..., '\D', '', 'g')`
-   *   and compare against the normalized input. This is a sequential
-   *   scan within the tenant; for a v1 with low customer counts per
-   *   tenant this is acceptable. See follow-up note in commit body
-   *   re: a future expression index.
-   *
-   * Email matching strategy:
-   *   `lower(trim(...))` on both sides, parameterized.
-   *
-   * All variables are bound via $N — never concatenated.
-   */
-  async findDuplicates(
-    tenantId: string,
-    criteria: { phone?: string; email?: string }
-  ): Promise<Customer[]> {
-    const normalizedPhone = criteria.phone ? normalizePhone(criteria.phone) : '';
-    const normalizedEmail = criteria.email ? normalizeEmail(criteria.email) : '';
-
-    // Phone shorter than 7 digits is too ambiguous for a high-confidence
-    // match — skip the predicate (mirrors checkCustomerDuplicates).
-    const includePhone = normalizedPhone.length >= 7;
-    const includeEmail = normalizedEmail.length > 0;
-
-    if (!includePhone && !includeEmail) return [];
-
-    return this.withTenant(tenantId, async (client) => {
-      const conditions: string[] = ['tenant_id = $1', 'is_archived = false'];
-      const params: unknown[] = [tenantId];
-      const matchClauses: string[] = [];
-      let paramIndex = 2;
-
-      if (includePhone) {
-        // Strip non-digits server-side for tolerant matching.
-        matchClauses.push(
-          `regexp_replace(coalesce(primary_phone, ''), '\\D', '', 'g') = $${paramIndex}`
-        );
-        params.push(normalizedPhone);
-        paramIndex++;
-      }
-      if (includeEmail) {
-        matchClauses.push(`lower(trim(coalesce(email, ''))) = $${paramIndex}`);
-        params.push(normalizedEmail);
-        paramIndex++;
-      }
-
-      conditions.push(`(${matchClauses.join(' OR ')})`);
-
-      const result = await client.query(
-        `SELECT * FROM customers WHERE ${conditions.join(' AND ')}`,
-        params
       );
       return result.rows.map(mapRow);
     });

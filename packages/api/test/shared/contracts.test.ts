@@ -93,21 +93,4 @@ describe('P0-005 — Backend service skeleton and shared contracts', () => {
     });
     expect(result.success).toBe(false);
   });
-
-  it('validation — delayAcknowledgmentSchema requires delayMinutes when running behind', () => {
-    const result = delayAcknowledgmentSchema.safeParse({
-      appointmentId: 'apt-1',
-      isRunningBehind: true,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('validation — delayAcknowledgmentSchema rejects delayMinutes when not running behind', () => {
-    const result = delayAcknowledgmentSchema.safeParse({
-      appointmentId: 'apt-1',
-      isRunningBehind: false,
-      delayMinutes: 10,
-    });
-    expect(result.success).toBe(false);
-  });
 });

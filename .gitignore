@@ -2,9 +2,6 @@ node_modules/
 dist/
 *.js.map
 *.d.ts
-
-# Multi-agent dispatch worktrees (created by /dispatch-story; ephemeral)
-.claude/worktrees/
 !jest.config.ts
 !**/vite-env.d.ts
 .env

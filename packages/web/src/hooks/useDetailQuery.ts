@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useApiClient } from '../lib/apiClient';
+import { apiFetch } from '../utils/api-fetch';
 
 export interface DetailQueryResult<T> {
   data: T | null;
@@ -8,19 +8,10 @@ export interface DetailQueryResult<T> {
   refetch: () => void;
 }
 
-/**
- * Authenticated detail-fetching hook (P0-030).
- *
- * Routes through {@link useApiClient}, which attaches the Clerk Bearer
- * token, cancels mid-sign-out requests, and bounces the user to /login
- * after a persistent 401. The public surface
- * (`{ data, isLoading, error, refetch }`) is unchanged.
- */
 export function useDetailQuery<T>(
   endpoint: string,
   id: string | null
 ): DetailQueryResult<T> {
-  const apiFetch = useApiClient();
   const [data, setData] = useState<T | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,17 +26,11 @@ export function useDetailQuery<T>(
       const result = await response.json();
       setData(result);
     } catch (err) {
-      // AbortError indicates a deliberately cancelled request (sign-out
-      // transition); we don't want to surface that as a user-facing error.
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setError(null);
-      } else {
-        setError(err instanceof Error ? err.message : 'Unknown error');
-      }
+      setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setIsLoading(false);
     }
-  }, [apiFetch, endpoint, id]);
+  }, [endpoint, id]);
 
   useEffect(() => {
     refetch();
