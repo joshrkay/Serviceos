@@ -348,6 +348,53 @@ describe('VQ-020 — gradeFloor', () => {
     expect(result.reasons[8]).toMatch(/hangup|terminat/i);
   });
 
+  it('PR#265 review — noPiiLeak treats underscored skill names (lookup_customer / lookup_account_summary) as identity-resolving', () => {
+    // Production emit sites stamp `skillName` with the canonical
+    // intent type (e.g. `lookup_customer`, NOT `lookup-customer`).
+    // The grader must accept the underscore form so that PII spoken
+    // AFTER a successful identity lookup does not false-fail #1.
+    const events: VoiceSessionEvent[] = [
+      lookupExecuted('lookup_customer', true, 50),
+      // Agent reads the phone back AFTER identity is resolved — legal.
+      {
+        type: 'speech_outbound',
+        text: 'I have 555-123-4567 on file for you, is that right?',
+        ts: 100,
+      } as unknown as VoiceSessionEvent,
+    ];
+    const obs = makeObservation({
+      events,
+      perTurnLatencyMs: [200],
+      audit: [makeAuditEvent({ tenantId: 't-1' })],
+    });
+    const script = makeScript();
+
+    const result = gradeFloor(obs, script);
+
+    expect(result.failedCriteria).not.toContain(1);
+  });
+
+  it('PR#265 review — noPiiLeak also treats underscored lookup_account_summary as identity-resolving', () => {
+    const events: VoiceSessionEvent[] = [
+      lookupExecuted('lookup_account_summary', true, 50),
+      {
+        type: 'speech_outbound',
+        text: 'Your balance is $124.50, anything else?',
+        ts: 100,
+      } as unknown as VoiceSessionEvent,
+    ];
+    const obs = makeObservation({
+      events,
+      perTurnLatencyMs: [200],
+      audit: [makeAuditEvent({ tenantId: 't-1' })],
+    });
+    const script = makeScript();
+
+    const result = gradeFloor(obs, script);
+
+    expect(result.failedCriteria).not.toContain(1);
+  });
+
   it('VQ-020 — gradeFloor produces failedCriteria with multiple entries when multiple fail simultaneously', () => {
     const obs = makeObservation({
       tenantId: 't-1',

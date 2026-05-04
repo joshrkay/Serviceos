@@ -16,9 +16,16 @@
  * Per-turn correlation is positional: the i-th `intent_classified` event
  * pairs with the i-th script turn, the i-th `proposal_created` event pairs
  * the same way (proposals are looked up by id in `observation.proposals`).
- * Escalation is checked across the whole call window — once any
- * `escalation_triggered` event fires, every later turn inherits the
- * "escalated" disposition (an escalated call doesn't un-escalate).
+ *
+ * Escalation correlation is per-turn by timestamp: a turn is graded as
+ * "escalated" iff an `escalation_triggered` event fired AFTER the
+ * previous turn's `intent_classified` event AND AT-OR-BEFORE the current
+ * turn's `intent_classified` event. (For turn 0 the lower bound is the
+ * start of the call.) For the final turn, anything after the previous
+ * turn's intent counts. This avoids retroactively marking earlier turns
+ * "escalated" when only a late turn triggered escalation — which is
+ * the correct behavior for adversarial multi-turn scripts where
+ * `expected.escalates` differs across turns.
  *
  * Hard/soft heuristic — v1, deliberately simple, will be tuned with usage:
  *   HARD if the key:
@@ -285,11 +292,25 @@ export function gradeDispositionStructured(
         ? true
         : expectedProposalType === actualProposalType;
 
-    // Escalation correlation: any escalation in the call counts —
-    // once escalated, the agent stays escalated through the rest of
-    // the call. If a turn-window timestamp ever becomes important we
-    // can refine using turn boundaries; for v1, call-level is enough.
-    const actualEscalated = escalations.length > 0;
+    // Escalation correlation (per-turn): an escalation_triggered event
+    // is attributed to turn i iff its timestamp falls within turn i's
+    // window. The window's lower bound is the previous turn's
+    // intent_classified.ts (or -Inf for turn 0); the upper bound is
+    // turn i's intent_classified.ts EXCEPT for the last turn, whose
+    // upper bound extends to +Inf so an escalation that fires AFTER
+    // the agent's last classification (but before session_terminated)
+    // still gets attributed to the final turn. When the i-th intent
+    // event is missing AND it isn't the last turn, the window is
+    // un-anchored and we record "no escalation observed for this
+    // turn" — false positives would mis-grade.
+    const lowerBound = i === 0 ? -Infinity : intents[i - 1]?.ts ?? -Infinity;
+    const isLastTurn = i === script.turns.length - 1;
+    const upperBound = isLastTurn
+      ? Infinity
+      : intentEv?.ts ?? -Infinity;
+    const actualEscalated = escalations.some(
+      (esc) => esc.ts > lowerBound && esc.ts <= upperBound,
+    );
     const expectedEscalates = expected.escalates;
     const escalationMatched =
       expectedEscalates === undefined ? true : expectedEscalates === actualEscalated;

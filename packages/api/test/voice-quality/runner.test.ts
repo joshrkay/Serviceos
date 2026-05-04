@@ -246,6 +246,47 @@ describe('VQ-008 — runner', () => {
   it("VQ-008 — runScript respects repoMode='pg' is not yet supported", () => {
     expect(() => makeRepoBundle('pg')).toThrow(/not yet supported/);
   });
+
+  it('PR#265 review — runScript on a happy-path script emits session_terminated{completed} so observation.sessionEndedAs === completed', async () => {
+    const script = syntheticLookupScript();
+    const factory = makeDriverFactory(
+      'cust-vq-1',
+      JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
+    );
+
+    const result = await runScript(script, { driverFactory: factory, repoMode: 'memory' });
+
+    expect(result.observation.hangupOccurred).toBe(false);
+    expect(result.observation.sessionEndedAs).toBe('completed');
+    const terminatedEvents = result.observation.events.filter(
+      (e) => e.type === 'session_terminated',
+    );
+    expect(terminatedEvents).toHaveLength(1);
+    expect(
+      (terminatedEvents[0] as { type: 'session_terminated'; cause: string }).cause,
+    ).toBe('completed');
+  });
+
+  it('PR#265 review — runScript on a hangup script still ends as terminated and does NOT add a competing completed event', async () => {
+    const script = syntheticHangupScript();
+    const factory = makeDriverFactory(
+      'cust-vq-1',
+      JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
+    );
+
+    const result = await runScript(script, { driverFactory: factory, repoMode: 'memory' });
+
+    expect(result.observation.sessionEndedAs).toBe('terminated');
+    expect(result.observation.hangupOccurred).toBe(true);
+    const terminatedEvents = result.observation.events.filter(
+      (e) => e.type === 'session_terminated',
+    );
+    // Only the hangup event — no spurious completed event tacked on.
+    expect(terminatedEvents).toHaveLength(1);
+    expect(
+      (terminatedEvents[0] as { type: 'session_terminated'; cause: string }).cause,
+    ).toBe('hangup');
+  });
 });
 
 describe('VQ-008 — corpus loader', () => {

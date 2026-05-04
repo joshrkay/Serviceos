@@ -49,8 +49,17 @@ const BALANCE_REGEX = /\$\s?\d+(?:\.\d{2})?/;
  * Lookup-skill names that, when executed successfully, mark the caller as
  * identity-resolved. Anything earlier in the event stream is "pre-identity"
  * and PII must not be spoken yet.
+ *
+ * Production emit sites (`twilio-adapter.ts`, `text-mode-driver.ts`) stamp
+ * `lookup_executed.skillName` with the canonical intent type from
+ * `intent-classifier.ts`, which uses underscore form
+ * (`lookup_customer`, `lookup_account_summary`). The hyphenated forms
+ * are accepted defensively in case a future adapter slugifies the name.
  */
 const IDENTITY_RESOLVING_LOOKUPS = new Set([
+  'lookup_customer',
+  'lookup_account_summary',
+  // Defensive: tolerate hyphenated variants if any caller normalizes.
   'lookup-customer',
   'lookup-account-summary',
 ]);

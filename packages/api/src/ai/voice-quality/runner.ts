@@ -377,30 +377,6 @@ export async function runScript(
       }
     }
 
-    // Mark a clean end if no terminating event has fired yet. The
-    // observation builder consumes the *last* `session_terminated`
-    // event, so emitting `completed` here would override an earlier
-    // hangup — defend by checking the bus first.
-    const alreadyTerminated = bus
-      .events()
-      .some((e) => e.type === 'session_terminated');
-    if (!alreadyTerminated) {
-      // No bus to emit through — but `endSession` doesn't emit
-      // anything, so synthesize a `completed` event on the bus
-      // directly. We do this by walking the bus's listener path: the
-      // session's EventEmitter is what feeds the bus, but we don't
-      // hold a reference to it from here. Push the event onto the bus
-      // by reusing the public emit pathway via the driver's session
-      // store — but that's not exposed. Pragmatic answer: graders
-      // already treat "no session_terminated event" as `terminated`
-      // (see observation.ts), so for the no-hangup path we leave the
-      // bus alone and `sessionEndedAs` defaults conservatively.
-      //
-      // Future revision: thread the session reference through the
-      // driver contract so the runner can stamp `completed`
-      // explicitly.
-      void sessionTerminatedEvent;
-    }
   } finally {
     if (sessionId) {
       try {
@@ -411,6 +387,20 @@ export async function runScript(
         );
       }
     }
+  }
+
+  // Mark a clean end. The production driver only emits
+  // `session_terminated` for hangup/cost-cap paths, so a successful
+  // happy-path script otherwise has no termination event and
+  // `buildObservation` would conservatively classify it as
+  // 'terminated' (see VQ-004's default). Stamp `completed` here when
+  // — and only when — no terminating event already exists, so we
+  // don't override an earlier hangup/cost_cap.
+  const alreadyTerminated = bus
+    .events()
+    .some((e) => e.type === 'session_terminated');
+  if (!alreadyTerminated) {
+    bus.record(sessionTerminatedEvent('completed'));
   }
 
   // Post-counts + observation.

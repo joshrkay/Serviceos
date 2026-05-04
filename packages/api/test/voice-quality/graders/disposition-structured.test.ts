@@ -328,6 +328,113 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     expect(result.perTurnDetail[0].hardSlotMismatches).not.toContain('notes');
   });
 
+  it('PR#265 review — per-turn escalation correlation: escalation only on turn 2 does NOT retroactively mark turn 1 escalated', () => {
+    // Two-turn script: turn 1 expects no escalation, turn 2 expects
+    // escalation. A single `escalation_triggered` event lands AFTER
+    // turn 2's intent_classified. Turn 1 must be graded as not
+    // escalated even though the call as a whole did escalate.
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'what are your hours',
+          expected: { intent: 'business_hours_lookup', escalates: false },
+          hangupAfter: false,
+        },
+        {
+          caller: 'I want a manager',
+          expected: { intent: 'escalate', escalates: true },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        intentEvent('business_hours_lookup', 1_000),
+        intentEvent('escalate', 2_000),
+        escalationEvent('caller_request', 2_500),
+      ],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[0].actualEscalated).toBe(false);
+    expect(result.perTurnDetail[1].actualEscalated).toBe(true);
+    expect(result.perTurnDetail[0].escalationMatched).toBe(true);
+    expect(result.perTurnDetail[1].escalationMatched).toBe(true);
+    expect(result.failedCriteria).not.toContain(11);
+  });
+
+  it('PR#265 review — per-turn escalation correlation: escalation between turn 1 and turn 2 is attributed to turn 2', () => {
+    // The escalation event's timestamp falls between turn 1 and turn
+    // 2's intent_classified events. Per the per-turn heuristic, it
+    // belongs to the FOLLOWING turn (the agent's response window for
+    // turn 1 produced the escalation, observed at-or-before turn 2's
+    // intent classification).
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'first',
+          expected: { intent: 'i1', escalates: false },
+          hangupAfter: false,
+        },
+        {
+          caller: 'second',
+          expected: { intent: 'i2', escalates: true },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        intentEvent('i1', 1_000),
+        escalationEvent('reason', 1_500),
+        intentEvent('i2', 2_000),
+      ],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[0].actualEscalated).toBe(false);
+    expect(result.perTurnDetail[1].actualEscalated).toBe(true);
+    expect(result.failedCriteria).not.toContain(11);
+  });
+
+  it('PR#265 review — per-turn escalation correlation: an escalation event in every turn-window marks every turn escalated', () => {
+    // Heuristic: an escalation belongs to turn i iff
+    // intent[i-1].ts < esc.ts <= intent[i].ts (lower bound is -Inf
+    // for turn 0, upper bound is +Inf for the last turn).
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'a',
+          expected: { intent: 'i1', escalates: true },
+          hangupAfter: false,
+        },
+        {
+          caller: 'b',
+          expected: { intent: 'i2', escalates: true },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        // esc before intent[0] — falls into turn 0's (-Inf, 1000] window.
+        escalationEvent('r1', 800),
+        intentEvent('i1', 1_000),
+        // esc between intents — falls into turn 1's (1000, 2000] window.
+        escalationEvent('r2', 1_500),
+        intentEvent('i2', 2_000),
+      ],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[0].actualEscalated).toBe(true);
+    expect(result.perTurnDetail[1].actualEscalated).toBe(true);
+    expect(result.failedCriteria).not.toContain(11);
+  });
+
   it('VQ-021 — produces failedCriteria with [9, 10, 11] when all three fail in the same call', () => {
     const script = makeScript({
       turns: [
