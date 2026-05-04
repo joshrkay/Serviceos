@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TwilioDeliveryProvider } from '../../src/notifications/twilio-delivery-provider';
+import { DeliveryError } from '../../src/notifications/notification-errors';
 
 function makeProvider(fetchImpl: typeof fetch) {
   return new TwilioDeliveryProvider({
@@ -49,7 +50,7 @@ describe('TwilioDeliveryProvider — SMS', () => {
     expect(result.channel).toBe('sms');
   });
 
-  it('throws when Twilio returns non-2xx', async () => {
+  it('throws DeliveryError when Twilio returns non-2xx', async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response('Twilio rejected', {
@@ -57,9 +58,14 @@ describe('TwilioDeliveryProvider — SMS', () => {
         })
     );
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-    await expect(
-      provider.sendSms({ to: '+15555550199', body: 'oops' })
-    ).rejects.toThrow(/Twilio SMS send failed/);
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toMatchObject({
+      code: 'PROVIDER_FAILED',
+      status: 400,
+      providerBody: 'Twilio rejected',
+    });
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toBeInstanceOf(
+      DeliveryError
+    );
   });
 
   it('passes idempotency key header when provided', async () => {
@@ -75,6 +81,16 @@ describe('TwilioDeliveryProvider — SMS', () => {
       idempotencyKey: 'estimate:1234:sms',
     });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('maps 401 to AUTH_FAILED', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toMatchObject({
+      code: 'AUTH_FAILED',
+      status: 401,
+      providerBody: 'Unauthorized',
+    });
   });
 });
 
@@ -126,14 +142,19 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     });
   });
 
-  it('throws when SendGrid returns non-2xx', async () => {
+  it('throws DeliveryError when SendGrid returns non-2xx', async () => {
     const fetchImpl = vi.fn(
       async () => new Response('Forbidden', { status: 403 })
     );
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-    await expect(
-      provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })
-    ).rejects.toThrow(/SendGrid email send failed \(403\)/);
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toMatchObject({
+      code: 'PROVIDER_FAILED',
+      status: 403,
+      providerBody: 'Forbidden',
+    });
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toBeInstanceOf(
+      DeliveryError
+    );
   });
 });
 
