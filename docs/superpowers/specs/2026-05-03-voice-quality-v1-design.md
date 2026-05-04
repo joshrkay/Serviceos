@@ -299,3 +299,4 @@ Launch gate = all four sub-thresholds met simultaneously, AND no regression vs p
 - `docs/PRD.md` — phase-based execution PRD
 - `docs/stories/phase-17-gap-stories.md` — Phase 17 voice/UI parity stories (P17-001..010)
 - `packages/api/src/ai/skills/` — current voice skills (16 .ts files)
+- See: `docs/superpowers/runbooks/voice-quality-cassette-refresh.md` for the refresh procedure
