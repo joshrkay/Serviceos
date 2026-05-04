@@ -4,6 +4,13 @@ on:
   pull_request:
     branches: [main]
 
+# VQ-025 — `voice-quality` job posts a sticky PR comment with the
+# voice-quality report, which requires write access to PR comments.
+# `contents: read` is the standard checkout permission.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -76,3 +83,12 @@ jobs:
         with:
           name: voice-quality-report
           path: packages/api/voice-quality-report.json
+      # VQ-025 — Post the report as a sticky PR comment. Runs even when
+      # the corpus suite fails so the author still has a signal; the
+      # script handles a missing report file with a fallback message.
+      - name: Post voice quality summary to PR
+        if: always() && github.event_name == 'pull_request'
+        run: npx ts-node .github/scripts/post-voice-quality-pr-comment.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_PATH: packages/api/voice-quality-report.json
