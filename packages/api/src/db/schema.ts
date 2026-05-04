@@ -1668,10 +1668,11 @@ export const MIGRATIONS = {
   // Lookup is hash-only (system-level / no tenant context) — RLS still
   // applies for tenant-scoped reads/writes via `tenant_isolation_portal_sessions`.
   //
-  // Originally landed as 060_create_portal_sessions; bumped to 064 because
-  // 060_capture_schema and 061_create_lookup_events claimed 060/061 on main
+  // Originally landed as 060_create_portal_sessions; bumped to 065 because
+  // 060_capture_schema, 061_create_lookup_events, 062_create_knowledge_chunks,
+  // 063_language_detection, and 064_create_job_photos claimed 060–064 on main
   // before this branch merged.
-  '064_create_portal_sessions': `
+  '065_create_portal_sessions': `
     CREATE TABLE IF NOT EXISTS portal_sessions (
       id UUID PRIMARY KEY,
       tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -1702,6 +1703,7 @@ export const MIGRATIONS = {
         OR current_setting('app.current_tenant_id', true) = ''
         OR tenant_id::text = current_setting('app.current_tenant_id', true)
       );
+  `,
   // P12-001: per-job photo storage. job_photos rows reference rows in
   // the existing `files` table (the upload pipeline still creates a
   // file row + S3 object); the join row carries photo-specific

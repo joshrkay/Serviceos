@@ -56,17 +56,24 @@ class TokenBucketRegistry {
    */
   allow(key: string, now: number): boolean {
     const bucket = this.buckets.get(key);
-    if (!bucket || now - bucket.windowStart >= this.windowMs) {
-      // New window. Evict if we're over the cap to keep memory bounded.
-      if (this.buckets.size >= this.maxBuckets) {
-        const oldestKey = this.buckets.keys().next().value as string | undefined;
-        if (oldestKey !== undefined) this.buckets.delete(oldestKey);
+    if (bucket) {
+      if (now - bucket.windowStart >= this.windowMs) {
+        // Existing key, new window — overwrite in place. Map size is
+        // unchanged, so eviction would be premature here.
+        bucket.count = 1;
+        bucket.windowStart = now;
+        return true;
       }
-      this.buckets.set(key, { count: 1, windowStart: now });
+      if (bucket.count >= this.max) return false;
+      bucket.count += 1;
       return true;
     }
-    if (bucket.count >= this.max) return false;
-    bucket.count += 1;
+    // Brand-new key — only now do we risk growing the map. Evict if at cap.
+    if (this.buckets.size >= this.maxBuckets) {
+      const oldestKey = this.buckets.keys().next().value as string | undefined;
+      if (oldestKey !== undefined) this.buckets.delete(oldestKey);
+    }
+    this.buckets.set(key, { count: 1, windowStart: now });
     return true;
   }
 
@@ -100,9 +107,18 @@ export function createPortalTokenMiddleware(
       return;
     }
 
+    // Validate token shape BEFORE touching the rate-limit map. Tokens are
+    // 64 hex chars (`crypto.randomBytes(32).toString('hex')`); anything else
+    // can't possibly resolve, and accepting arbitrary strings as Map keys
+    // would let an attacker spray large unique strings to grow the bucket
+    // map's heap footprint between evictions.
+    if (!isValidTokenShape(token)) {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Invalid or expired portal token' });
+      return;
+    }
+
     // Rate-limit BEFORE the DB lookup so a flood of bad tokens can't
-    // amplify into a DB hot path. We key by raw token text; a malformed
-    // token still consumes a slot, which is the desired behaviour.
+    // amplify into a DB hot path.
     if (!buckets.allow(token, now())) {
       res.status(429).json({
         error: 'RATE_LIMITED',
@@ -120,9 +136,17 @@ export function createPortalTokenMiddleware(
       req.portal = resolved;
       next();
     } catch (err) {
-      // Any unexpected failure resolving the token — fail closed.
-      const message = err instanceof Error ? err.message : 'Token resolution failed';
-      res.status(500).json({ error: 'INTERNAL_ERROR', message });
+      // Fail closed — log internally, return a generic message so we don't
+      // leak DB / driver internals to an unauthenticated caller.
+      // eslint-disable-next-line no-console
+      console.error('[portal] token resolution failed', err);
+      res.status(500).json({ error: 'INTERNAL_ERROR', message: 'Token resolution failed' });
     }
   };
+}
+
+const PORTAL_TOKEN_RE = /^[0-9a-f]{64}$/i;
+
+function isValidTokenShape(token: string): boolean {
+  return PORTAL_TOKEN_RE.test(token);
 }
