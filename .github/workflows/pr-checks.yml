@@ -37,3 +37,42 @@ jobs:
 
       - name: Coverage check
         run: npm run test:coverage
+
+  # VQ-024 — Voice Quality v1 Layer 1 corpus suite.
+  #
+  # Runs the 40-script voice-quality corpus against the InMemory repo
+  # bundle in cassette-replay mode. This is the fast PR-time signal
+  # that a code change broke the voice agent.
+  #
+  # `continue-on-error: true` is TEMPORARY: the corpus cassettes are
+  # currently empty (no recorded LLM responses). In replay mode against
+  # empty cassettes the runner fails the first time the agent tries to
+  # make an LLM call. Remove this line once VQ-024 follow-up records
+  # the cassettes for the corpus. The artifact upload step still runs
+  # via `if: always()` so failures are visible.
+  #
+  # The plan calls for `needs: [typecheck]`, but the current pipeline
+  # bundles typecheck into the `test` job, so we depend on that.
+  voice-quality:
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    continue-on-error: true # TODO(VQ-024-followup): remove once cassettes are recorded
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run voice quality suite
+        run: npm run voice-quality --workspace=packages/api
+        env:
+          VOICE_QUALITY_REPO: memory
+          VOICE_QUALITY_CASSETTE_MODE: replay
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-quality-report
+          path: packages/api/voice-quality-report.json
