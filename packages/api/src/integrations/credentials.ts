@@ -1,131 +1,139 @@
-import type { Pool } from 'pg';
+import { Client, Pool, PoolConfig } from 'pg';
 
-export interface TenantTwilioCreds {
-  tenantId: string;
-  credentialVersion: string;
-  accountSid: string;
-  authTokenPrimary: string;
-  authTokenSecondary?: string;
-  fromNumber: string;
-}
+const CHANNEL = 'tenant_integration_rotated';
+const DEFAULT_RECONNECT_MS = 250;
+const MAX_RECONNECT_MS = 5_000;
 
-export interface TenantSendGridCreds {
-  tenantId: string;
-  credentialVersion: string;
-  apiKey: string;
-  fromEmail: string;
-  fromName?: string;
-  replyToEmail?: string;
-}
-
-type RuntimeEnv = 'production' | 'non-production';
-
-interface CacheEntry<T> { key: string; value: T }
-
-class LruCache<T> {
-  private readonly maxEntries: number;
-  private readonly entries = new Map<string, T>();
-  constructor(maxEntries = 512) { this.maxEntries = Math.max(1, maxEntries); }
-  get(key: string): T | undefined {
-    const hit = this.entries.get(key);
-    if (!hit) return undefined;
-    this.entries.delete(key); this.entries.set(key, hit);
-    return hit;
-  }
-  set(key: string, value: T): void {
-    if (this.entries.has(key)) this.entries.delete(key);
-    this.entries.set(key, value);
-    if (this.entries.size > this.maxEntries) {
-      const oldest = this.entries.keys().next().value as string | undefined;
-      if (oldest) this.entries.delete(oldest);
-    }
-  }
-  deleteByPrefix(prefix: string): void {
-    for (const key of this.entries.keys()) if (key.startsWith(prefix)) this.entries.delete(key);
-  }
-  clear(): void { this.entries.clear(); }
-}
-
-interface TenantIntegrationRow {
+export type CredentialRow = {
   tenant_id: string;
-  provider: 'twilio' | 'sendgrid';
-  credential_version: string;
-  enabled: boolean;
-  config: Record<string, unknown>;
-}
+  provider: string;
+  credentials: Record<string, unknown>;
+  credential_version: number;
+};
 
-export interface TenantCredentialResolver {
-  getTenantTwilioCreds(tenantId: string): Promise<TenantTwilioCreds>;
-  getTenantSendGridCreds(tenantId: string): Promise<TenantSendGridCreds>;
-  invalidateTenant(tenantId: string): void;
+export type CredentialResolver = {
+  getCredential(tenantId: string, provider: string): Promise<CredentialRow | null>;
   close(): Promise<void>;
-}
+};
 
-export function createTenantCredentialResolver(pool: Pool, options?: { env?: RuntimeEnv; cacheSize?: number }): TenantCredentialResolver {
-  const env: RuntimeEnv = options?.env ?? (process.env.NODE_ENV === 'production' ? 'production' : 'non-production');
-  const twilioCache = new LruCache<TenantTwilioCreds>(options?.cacheSize ?? 512);
-  const sendGridCache = new LruCache<TenantSendGridCreds>(options?.cacheSize ?? 512);
+export type TenantCredentialResolver = CredentialResolver;
 
-  async function loadRow(tenantId: string, provider: 'twilio' | 'sendgrid'): Promise<TenantIntegrationRow | null> {
-    const res = await pool.query<TenantIntegrationRow>(
-      `SELECT tenant_id, provider, credential_version, enabled, config
-         FROM tenant_integrations
-        WHERE tenant_id = $1 AND provider = $2
-        LIMIT 1`,
-      [tenantId, provider]
-    );
-    return res.rows[0] ?? null;
-  }
+type ListenerClient = Pick<Client, 'connect' | 'end' | 'on' | 'off' | 'query'>;
+
+type CreateCredentialResolverDeps = {
+  pool: Pool;
+  createListener?: (config: string | PoolConfig) => ListenerClient;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+export function createCredentialResolver({
+  pool,
+  createListener = (config) => new Client(config),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}: CreateCredentialResolverDeps): CredentialResolver {
+  const cache = new Map<string, CredentialRow | null>();
+  const keyOf = (tenantId: string, provider: string): string => `${tenantId}:${provider}`;
+
+  const listenerConfig = pool.options.connectionString ?? {
+    host: pool.options.host,
+    port: pool.options.port,
+    user: pool.options.user,
+    password: pool.options.password,
+    database: pool.options.database,
+    ssl: pool.options.ssl,
+  };
+
+  const listener = createListener(listenerConfig);
+  let closed = false;
+  let reconnecting: Promise<void> | null = null;
+
+  const onNotification = (msg: { channel?: string; payload?: string | null }): void => {
+    if (msg.channel !== CHANNEL) return;
+    if (!msg.payload) {
+      cache.clear();
+      return;
+    }
+
+    const [tenantId, provider] = msg.payload.split(':');
+    if (tenantId && provider) {
+      cache.delete(keyOf(tenantId, provider));
+      return;
+    }
+
+    cache.clear();
+  };
+
+  const listen = async (): Promise<void> => {
+    await listener.connect();
+    await listener.query(`LISTEN ${CHANNEL}`);
+  };
+
+  const reconnect = async (): Promise<void> => {
+    if (closed || reconnecting) return reconnecting ?? Promise.resolve();
+
+    reconnecting = (async () => {
+      let delay = DEFAULT_RECONNECT_MS;
+      while (!closed) {
+        try {
+          await listener.end();
+        } catch {
+          // best effort cleanup
+        }
+
+        try {
+          await listen();
+          reconnecting = null;
+          return;
+        } catch {
+          await sleep(delay);
+          delay = Math.min(delay * 2, MAX_RECONNECT_MS);
+        }
+      }
+      reconnecting = null;
+    })();
+
+    return reconnecting;
+  };
+
+  const onListenerError = (): void => {
+    void reconnect();
+  };
+
+  listener.on('notification', onNotification);
+  listener.on('error', onListenerError);
+  listener.on('end', onListenerError);
+  void listen().catch(() => reconnect());
 
   return {
-    async getTenantTwilioCreds(tenantId: string): Promise<TenantTwilioCreds> {
-      const row = await loadRow(tenantId, 'twilio');
-      if (row?.enabled) {
-        const key = `${tenantId}::${row.credential_version}`;
-        const cached = twilioCache.get(key);
-        if (cached) return cached;
-        const accountSid = String(row.config.accountSid ?? '');
-        const authTokenPrimary = String(row.config.authTokenPrimary ?? '');
-        const authTokenSecondary = row.config.authTokenSecondary ? String(row.config.authTokenSecondary) : undefined;
-        const fromNumber = String(row.config.fromNumber ?? '');
-        if (!accountSid || !authTokenPrimary || !fromNumber) throw new Error(`Tenant ${tenantId} has incomplete Twilio credentials`);
-        const value: TenantTwilioCreds = { tenantId, credentialVersion: row.credential_version, accountSid, authTokenPrimary, authTokenSecondary, fromNumber };
-        twilioCache.set(key, value);
-        return value;
+    async getCredential(tenantId: string, provider: string): Promise<CredentialRow | null> {
+      const key = keyOf(tenantId, provider);
+      if (cache.has(key)) {
+        return cache.get(key) ?? null;
       }
-      if (env === 'production') throw new Error(`Tenant ${tenantId} has no enabled Twilio integration`);
-      const sid = process.env.TWILIO_ACCOUNT_SID ?? '';
-      const token = process.env.TWILIO_AUTH_TOKEN ?? '';
-      const from = process.env.TWILIO_FROM_NUMBER ?? '';
-      if (!sid || !token || !from) throw new Error(`Tenant ${tenantId} has no Twilio integration and env fallback is incomplete`);
-      return { tenantId, credentialVersion: 'env-fallback', accountSid: sid, authTokenPrimary: token, fromNumber: from };
+
+      const result = await pool.query<CredentialRow>(
+        `SELECT tenant_id, provider, credentials, credential_version
+         FROM tenant_integrations
+         WHERE tenant_id = $1 AND provider = $2`,
+        [tenantId, provider],
+      );
+
+      const row = result.rows[0] ?? null;
+      cache.set(key, row);
+      return row;
     },
-    async getTenantSendGridCreds(tenantId: string): Promise<TenantSendGridCreds> {
-      const row = await loadRow(tenantId, 'sendgrid');
-      if (row?.enabled) {
-        const key = `${tenantId}::${row.credential_version}`;
-        const cached = sendGridCache.get(key);
-        if (cached) return cached;
-        const apiKey = String(row.config.apiKey ?? '');
-        const fromEmail = String(row.config.fromEmail ?? '');
-        const fromName = row.config.fromName ? String(row.config.fromName) : undefined;
-        const replyToEmail = row.config.replyToEmail ? String(row.config.replyToEmail) : undefined;
-        if (!apiKey || !fromEmail) throw new Error(`Tenant ${tenantId} has incomplete SendGrid credentials`);
-        const value: TenantSendGridCreds = { tenantId, credentialVersion: row.credential_version, apiKey, fromEmail, fromName, replyToEmail };
-        sendGridCache.set(key, value);
-        return value;
-      }
-      if (env === 'production') throw new Error(`Tenant ${tenantId} has no enabled SendGrid integration`);
-      const apiKey = process.env.SENDGRID_API_KEY ?? '';
-      const fromEmail = process.env.SENDGRID_FROM_EMAIL ?? '';
-      if (!apiKey || !fromEmail) throw new Error(`Tenant ${tenantId} has no SendGrid integration and env fallback is incomplete`);
-      return { tenantId, credentialVersion: 'env-fallback', apiKey, fromEmail, fromName: process.env.SENDGRID_FROM_NAME, replyToEmail: process.env.SENDGRID_REPLY_TO };
-    },
-    invalidateTenant(tenantId: string): void {
-      twilioCache.deleteByPrefix(`${tenantId}::`); sendGridCache.deleteByPrefix(`${tenantId}::`);
-    },
+
     async close(): Promise<void> {
-      // no-op in current implementation (no dedicated LISTEN client wired).
+      closed = true;
+      listener.off('notification', onNotification);
+      listener.off('error', onListenerError);
+      listener.off('end', onListenerError);
+      try {
+        await listener.query(`UNLISTEN ${CHANNEL}`);
+      } catch {
+        // ignore shutdown errors
+      }
+      await listener.end();
     },
   };
 }
