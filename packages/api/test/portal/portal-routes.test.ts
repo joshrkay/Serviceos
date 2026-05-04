@@ -462,8 +462,11 @@ describe('P10-001 POST /api/public/portal/:token/request-service', () => {
 
     const leads = h.leadRepo.getAll();
     expect(leads).toHaveLength(1);
-    expect(leads[0].source).toBe('web_form');
-    expect(leads[0].sourceDetail).toBe('Customer Portal');
+    // P12-005: portal leads now use the dedicated 'customer_portal' source
+    // instead of the prior `'web_form' + sourceDetail='Customer Portal'`
+    // workaround.
+    expect(leads[0].source).toBe('customer_portal');
+    expect(leads[0].sourceDetail).toBeUndefined();
     expect(leads[0].tenantId).toBe(TENANT);
     // tenantId/customerId in body must be ignored — pinned from req.portal.
     expect(leads[0].notes).toContain('Need a quote');
