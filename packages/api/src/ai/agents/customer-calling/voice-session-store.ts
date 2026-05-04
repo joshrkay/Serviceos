@@ -34,7 +34,39 @@ export type VoiceSessionEvent =
   /** Session was ended (normally or by reap). */
   | { type: 'ended'; reason: string }
   /** A proposal was created during this turn. */
-  | { type: 'proposal_created'; proposalId: string };
+  | { type: 'proposal_created'; proposalId: string }
+  /**
+   * VQ-003: classifier returned (above the confidence threshold or as
+   * unknown — the harness wants to see both). `tokenUsage` matches the
+   * shape used by `SessionCostTracker.recordUsage` so cost-incurred
+   * accounting can chain off the same numbers.
+   */
+  | {
+      type: 'intent_classified';
+      intentType: string;
+      confidence: number;
+      tokenUsage: { inputTokens: number; outputTokens: number; costCents: number };
+      ts: number;
+    }
+  /** VQ-003: a lookup-skill (read-only) ran to completion or threw. */
+  | {
+      type: 'lookup_executed';
+      skillName: string;
+      durationMs: number;
+      success: boolean;
+      error?: string;
+      ts: number;
+    }
+  /** VQ-003: escalateToHuman committed. `reason` is the EscalationReason value. */
+  | { type: 'escalation_triggered'; reason: string; ts: number }
+  /** VQ-003: cost tracker absorbed a turn's usage. */
+  | { type: 'cost_incurred'; deltaCents: number; totalCents: number; ts: number }
+  /** VQ-003: session ended for one of the canonical reasons. */
+  | {
+      type: 'session_terminated';
+      cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'completed';
+      ts: number;
+    };
 
 export interface TranscriptEntry {
   speaker: 'caller' | 'agent';

@@ -40,6 +40,12 @@ import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
 import { escalateToHuman } from '../ai/skills/escalate-to-human';
 import { estimateCostCents } from '../ai/skills/session-cost-tracker';
+import {
+  intentClassifiedEvent,
+  lookupExecutedEvent,
+  costIncurredEvent,
+  sessionTerminatedEvent,
+} from '../ai/voice-quality/events';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
@@ -423,6 +429,15 @@ export class TwilioGatherAdapter {
           { tenantId: opts.tenantId },
           this.deps.gateway,
         );
+        // VQ-003: surface the classifier outcome for the harness.
+        session.events.emit(
+          'voice-event',
+          intentClassifiedEvent({
+            intentType: classification.intentType,
+            confidence: classification.confidence,
+            tokenUsage: classification.tokenUsage,
+          }),
+        );
         const capExceeded = this.recordCost(session, classification.tokenUsage);
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };
@@ -783,6 +798,15 @@ export class TwilioGatherAdapter {
           { tenantId: opts.tenantId },
           this.deps.gateway,
         );
+        // VQ-003: surface the classifier outcome for the harness.
+        session.events.emit(
+          'voice-event',
+          intentClassifiedEvent({
+            intentType: classification.intentType,
+            confidence: classification.confidence,
+            tokenUsage: classification.tokenUsage,
+          }),
+        );
         const capExceeded = this.recordCost(session, classification.tokenUsage);
         if (capExceeded) {
           classifierEvent = { type: 'cost_cap_exceeded' };
@@ -932,18 +956,31 @@ export class TwilioGatherAdapter {
   /**
    * Push token usage from an LLM skill into the per-session cost tracker.
    * Returns true when a hard cap was crossed (caller should escalate).
+   *
+   * VQ-003: also emits `cost_incurred` on the session bus for the
+   * voice-quality harness, plus `session_terminated{cause: 'cap_exceeded'}`
+   * when the cap is crossed. Pure book-keeping — no FSM dispatch.
    */
   private recordCost(
     session: VoiceSession,
     usage: { input: number; output: number } | undefined,
   ): boolean {
     if (!usage) return false;
+    const cents = estimateCostCents(usage.input, usage.output);
     const events = session.costTracker.recordUsage({
       inputTokens: usage.input,
       outputTokens: usage.output,
-      costCents: estimateCostCents(usage.input, usage.output),
+      costCents: cents,
     });
-    return events.some((e) => e.type === 'cost_cap_exceeded');
+    session.events.emit(
+      'voice-event',
+      costIncurredEvent(cents, session.costTracker.totals.costCents),
+    );
+    const exceeded = events.some((e) => e.type === 'cost_cap_exceeded');
+    if (exceeded) {
+      session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+    }
+    return exceeded;
   }
 
   /** Build the absolute Gather action URL. */
@@ -995,6 +1032,12 @@ export class TwilioGatherAdapter {
       sessionId: session.id,
     };
 
+    // VQ-003: time the skill end-to-end and emit `lookup_executed` on
+    // the session bus. Both the success and error branches emit so the
+    // harness sees that a lookup attempt occurred even when it fell
+    // back to the "let me get someone" string. Errors carry the raw
+    // message; successes set `success: true` with no error field.
+    const startMs = Date.now();
     try {
       switch (intentType) {
         case 'lookup_appointments': {
@@ -1006,6 +1049,10 @@ export class TwilioGatherAdapter {
             appointmentRepo: this.deps.appointmentRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
           return result.summary;
         }
         case 'lookup_invoices': {
@@ -1017,6 +1064,10 @@ export class TwilioGatherAdapter {
             invoiceRepo: this.deps.invoiceRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
           return result.summary;
         }
         case 'lookup_balance': {
@@ -1028,6 +1079,10 @@ export class TwilioGatherAdapter {
             invoiceRepo: this.deps.invoiceRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
           return result.summary;
         }
         case 'lookup_jobs': {
@@ -1038,6 +1093,10 @@ export class TwilioGatherAdapter {
             jobRepo: this.deps.jobRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
           return result.summary;
         }
         case 'lookup_agreements': {
@@ -1048,6 +1107,10 @@ export class TwilioGatherAdapter {
             agreementRepo: this.deps.agreementRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
           return result.summary;
         }
         case 'lookup_account_summary': {
@@ -1066,17 +1129,26 @@ export class TwilioGatherAdapter {
             agreementRepo: this.deps.agreementRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
           return result.summary;
         }
         default:
           return this.lookupNotWiredFallback();
       }
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       logger.warn('runLookupSkill failed', {
         sessionId: session.id,
         intentType,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(intentType, Date.now() - startMs, false, message),
+      );
       return this.lookupNotWiredFallback();
     }
   }
@@ -1248,6 +1320,9 @@ export class TwilioGatherAdapter {
         channel: 'telephony',
         onCallRepo: this.deps.onCallRepo,
         auditRepo: this.deps.auditRepo,
+        // VQ-003: pass the live session so escalateToHuman can emit
+        // `escalation_triggered` for the voice-quality harness.
+        session,
         // P8-013: when a callControl + resolver are wired, the skill
         // walks the rotation and returns a transfer descriptor we use
         // to render <Dial> TwiML in place of the next <Gather>.

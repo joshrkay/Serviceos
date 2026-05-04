@@ -3,6 +3,11 @@ import { createAuditEvent } from '../../audit/audit';
 import type { AuditRepository } from '../../audit/audit';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { TwilioCallControl } from '../../telephony/twilio-call-control';
+import type { VoiceSession } from '../agents/customer-calling/voice-session-store';
+import {
+  escalationTriggeredEvent,
+} from '../voice-quality/events';
+import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 
 /**
  * Phase 12 — emergency-intent immediate-Dial decision.
@@ -123,6 +128,14 @@ export interface EscalateToHumanInput {
    * completes. Required when `callControl` is set.
    */
   dialActionUrl?: string;
+  /**
+   * VQ-003: optional live session reference. When supplied, the skill
+   * emits an `escalation_triggered` event on the session's emitter
+   * once the escalation is committed (telephony transfer initiated OR
+   * in-app dispatcher assigned). Left undefined for callers that
+   * don't have a session in scope; pre-VQ-003 behavior is preserved.
+   */
+  session?: VoiceSession;
 }
 
 /**
@@ -207,6 +220,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     dispatcherPhoneResolver,
     callSid,
     dialActionUrl,
+    session,
   } = input;
 
   // Telephony branch with `<Dial>` support.
@@ -317,6 +331,10 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
       message = `Emergency escalation in progress${desc}. Connecting you with a dispatcher immediately.`;
     }
 
+    if (session) {
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+    }
+
     return {
       escalated: true,
       assignedUserId: chosen.entry.userId,
@@ -383,6 +401,10 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     assignedUserId: entry.userId,
     message,
   };
+
+  if (session) {
+    session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+  }
 
   return result;
 }

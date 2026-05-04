@@ -1,4 +1,3 @@
-import { normalizePhone } from '../shared/phone';
 import { LeadSource, LeadStage } from './enums';
 
 /**
@@ -116,80 +115,7 @@ export interface LeadRepository {
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 200;
 
-export class InMemoryLeadRepository implements LeadRepository {
-  private leads: Map<string, Lead> = new Map();
-
-  async create(lead: Lead): Promise<Lead> {
-    this.leads.set(lead.id, { ...lead });
-    return { ...lead };
-  }
-
-  async findById(tenantId: string, id: string): Promise<Lead | null> {
-    const l = this.leads.get(id);
-    if (!l || l.tenantId !== tenantId) return null;
-    return { ...l };
-  }
-
-  private filterAndSort(tenantId: string, options?: LeadListOptions): Lead[] {
-    let results = Array.from(this.leads.values()).filter((l) => l.tenantId === tenantId);
-    if (options?.stage) results = results.filter((l) => l.stage === options.stage);
-    if (options?.source) results = results.filter((l) => l.source === options.source);
-    if (options?.assignedUserId) {
-      results = results.filter((l) => l.assignedUserId === options.assignedUserId);
-    }
-    // Newest first — kanban / list both want this.
-    results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-    return results;
-  }
-
-  async findByTenant(tenantId: string, options?: LeadListOptions): Promise<Lead[]> {
-    let results = this.filterAndSort(tenantId, options);
-    if (options?.offset !== undefined || options?.limit !== undefined) {
-      const offset = options?.offset ?? 0;
-      const limit = options?.limit !== undefined
-        ? Math.min(options.limit, MAX_LIST_LIMIT)
-        : results.length;
-      results = results.slice(offset, offset + limit);
-    }
-    return results.map((l) => ({ ...l }));
-  }
-
-  async listWithMeta(tenantId: string, options?: LeadListOptions): Promise<LeadListResult> {
-    const all = this.filterAndSort(tenantId, options);
-    const offset = options?.offset ?? 0;
-    const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
-    return {
-      data: all.slice(offset, offset + limit).map((l) => ({ ...l })),
-      total: all.length,
-    };
-  }
-
-  async update(tenantId: string, id: string, updates: Partial<Lead>): Promise<Lead | null> {
-    const l = this.leads.get(id);
-    if (!l || l.tenantId !== tenantId) return null;
-    const merged = { ...l, ...updates };
-    this.leads.set(id, merged);
-    return { ...merged };
-  }
-
-  async findByPhoneNormalized(
-    tenantId: string,
-    phoneNormalized: string
-  ): Promise<Lead | null> {
-    if (!phoneNormalized) return null;
-    const matches = Array.from(this.leads.values())
-      .filter(
-        (l) =>
-          l.tenantId === tenantId &&
-          l.primaryPhone &&
-          normalizePhone(l.primaryPhone) === phoneNormalized
-      )
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-    return matches.length > 0 ? { ...matches[0] } : null;
-  }
-
-  /** Test helper. */
-  getAll(): Lead[] {
-    return Array.from(this.leads.values()).map((l) => ({ ...l }));
-  }
-}
+// VQ-002 — InMemoryLeadRepository moved to ./in-memory-lead.ts so the
+// in-memory and Pg variants are symmetric (each in its own file). Re-exported
+// here so existing callers that import from './lead' continue to compile.
+export { InMemoryLeadRepository } from './in-memory-lead';
