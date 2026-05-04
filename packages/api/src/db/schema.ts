@@ -1675,6 +1675,57 @@ export const MIGRATIONS = {
   //     the weekly rollup can sum without re-deriving.
   '065_create_time_entries': `
     CREATE TABLE IF NOT EXISTS time_entries (
+  // P10-001: Customer self-service portal sessions. A single signed token
+  // grants a customer read access to all of their estimates, invoices,
+  // jobs, agreements, and appointments. The plaintext token is returned
+  // ONCE at create time and stored only as `token_hash = sha256(token)`.
+  // Lookup is hash-only (system-level / no tenant context) — RLS still
+  // applies for tenant-scoped reads/writes via `tenant_isolation_portal_sessions`.
+  //
+  // Originally landed as 060_create_portal_sessions; bumped to 065 because
+  // 060_capture_schema, 061_create_lookup_events, 062_create_knowledge_chunks,
+  // 063_language_detection, and 064_create_job_photos claimed 060–064 on main
+  // before this branch merged.
+  '065_create_portal_sessions': `
+    CREATE TABLE IF NOT EXISTS portal_sessions (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      last_accessed_at TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_token_hash
+      ON portal_sessions (token_hash);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_tenant
+      ON portal_sessions (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_customer
+      ON portal_sessions (tenant_id, customer_id);
+    ALTER TABLE portal_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
+    -- Tenant-scoped reads/writes (most paths) match the active GUC. The
+    -- system-level token-hash lookup (resolvePortalToken) runs without
+    -- a tenant context — that's literally what it returns — so the
+    -- policy permits the read when the GUC is unset. The lookup is
+    -- still safe because the candidate row is selected by sha256 hash.
+    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
+      USING (
+        current_setting('app.current_tenant_id', true) IS NULL
+        OR current_setting('app.current_tenant_id', true) = ''
+        OR tenant_id::text = current_setting('app.current_tenant_id', true)
+      );
+  `,
+  // P12-001: per-job photo storage. job_photos rows reference rows in
+  // the existing `files` table (the upload pipeline still creates a
+  // file row + S3 object); the join row carries photo-specific
+  // metadata (category/notes/taken_at/uploader). Deleting a job
+  // cascades photo rows; deleting a photo row leaves the underlying
+  // file/S3 object intact so existing download URLs still resolve.
+  '064_create_job_photos': `
+    CREATE TABLE IF NOT EXISTS job_photos (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL REFERENCES tenants(id),
       user_id TEXT NOT NULL,
