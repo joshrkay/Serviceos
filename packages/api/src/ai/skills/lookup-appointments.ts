@@ -18,6 +18,7 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { t, type Language } from '../i18n/i18n';
 
 export interface LookupAppointmentsInput {
   tenantId: string;
@@ -32,6 +33,8 @@ export interface LookupAppointmentsInput {
   timezone?: string;
   /** Voice session this lookup is being run for. Used for the audit row. */
   sessionId?: string;
+  /** P11-002: spoken-summary language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export interface LookupAppointmentsItem {
@@ -62,20 +65,22 @@ export interface LookupAppointmentsDeps {
 }
 
 /** Render a single Date in the tenant timezone for TTS. Drops trailing :00. */
-function formatWhen(d: Date, timezone?: string): string {
-  const day = new Intl.DateTimeFormat('en-US', {
+function formatWhen(d: Date, timezone?: string, language: Language = 'en'): string {
+  const locale = language === 'es' ? 'es-US' : 'en-US';
+  const day = new Intl.DateTimeFormat(locale, {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
     timeZone: timezone,
   }).format(d);
-  const time = new Intl.DateTimeFormat('en-US', {
+  const time = new Intl.DateTimeFormat(locale, {
     hour: 'numeric',
     minute: 'numeric',
     hour12: true,
     timeZone: timezone,
   }).format(d);
-  return `${day} at ${time.replace(':00', '')}`;
+  const sep = language === 'es' ? 'a las' : 'at';
+  return `${day} ${sep} ${time.replace(':00', '')}`;
 }
 
 export async function lookupAppointments(
@@ -83,6 +88,7 @@ export async function lookupAppointments(
   deps: LookupAppointmentsDeps,
 ): Promise<LookupAppointmentsResult> {
   const start = Date.now();
+  const lang: Language = input.language ?? 'en';
   const limit = input.limit ?? 3;
   const dateFrom = input.dateFrom ?? new Date();
 
@@ -111,8 +117,7 @@ export async function lookupAppointments(
     }
     jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId);
   } catch (err) {
-    const message =
-      "I'm having trouble pulling up your appointments right now. Let me get someone to help.";
+    const message = t('lookup.appointments.error', lang);
     await recordEvent({
       resultStatus: 'error',
       resultCount: 0,
@@ -158,8 +163,7 @@ export async function lookupAppointments(
   const sliced = items.slice(0, limit);
 
   if (sliced.length === 0) {
-    const summary =
-      "I'm not seeing any upcoming appointments on your account. Would you like to schedule one?";
+    const summary = t('lookup.appointments.none', lang);
     await recordEvent({
       resultStatus: 'none',
       resultCount: 0,
@@ -169,15 +173,28 @@ export async function lookupAppointments(
   }
 
   const head = sliced[0];
-  const headWhen = formatWhen(head.scheduledStart, input.timezone);
+  const headWhen = formatWhen(head.scheduledStart, input.timezone, lang);
   let summary: string;
   if (sliced.length === 1) {
-    summary = `Your next appointment is ${headWhen} for ${head.jobSummary}.`;
+    summary = t('lookup.appointments.single', lang, {
+      when: headWhen,
+      summary: head.jobSummary,
+    });
   } else {
-    const otherWhens = sliced.slice(1).map((s) => formatWhen(s.scheduledStart, input.timezone));
-    summary =
-      `Your next appointment is ${headWhen} for ${head.jobSummary}. ` +
-      `You also have ${otherWhens.length === 1 ? 'one more on ' : 'appointments on '}${otherWhens.join(' and ')}.`;
+    const otherWhens = sliced
+      .slice(1)
+      .map((s) => formatWhen(s.scheduledStart, input.timezone, lang));
+    const sep = lang === 'es' ? ' y ' : ' and ';
+    const others = otherWhens.join(sep);
+    const tplKey =
+      otherWhens.length === 1
+        ? 'lookup.appointments.multiple_one_more'
+        : 'lookup.appointments.multiple_many';
+    summary = t(tplKey, lang, {
+      when: headWhen,
+      summary: head.jobSummary,
+      others,
+    });
   }
 
   await recordEvent({

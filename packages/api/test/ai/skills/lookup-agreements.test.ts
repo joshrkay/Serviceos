@@ -161,7 +161,8 @@ describe('P11-001 — lookupAgreements skill', () => {
         { agreementRepo },
       );
       expect(result.status).toBe('none');
-      expect(result.summary.toLowerCase()).toContain('any active service plans');
+      // P11-002 i18n catalog: "service plans" → "service agreement" (matches entity name).
+      expect(result.summary.toLowerCase()).toContain('active service agreement');
     });
 
     it('P18-004 lookup-agreements tenant isolation — tenant A plans invisible to tenant B', async () => {
