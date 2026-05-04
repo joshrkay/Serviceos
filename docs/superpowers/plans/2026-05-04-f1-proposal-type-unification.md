@@ -197,7 +197,7 @@ export type { Proposal, ProposalStatus, ProposalType } from '@ai-service-os/shar
   - `proposal.status === 'pending'` → `proposal.status === 'ready_for_review'`
   - Conditional rendering keyed off `'pending'` (badges, filter buttons) → key off `'ready_for_review'` (and consider also handling `'draft'`, `'expired'`, `'execution_failed'` since they are now valid states the UI could see).
 
-- [ ] **Step 4: If any file uses a Date field as a string (e.g. `proposal.createdAt` was `string` in the old web type, now `Date`), wrap with `new Date(proposal.createdAt)` or update display to handle Date directly.** See "Open question — Date wire format" near the bottom of this plan for context on whether to keep `Date` or switch the shared type to `IsoDateString` before this step lands.
+- [ ] **Step 4: Run the Date wire-format audit described in the "Decision — Date wire format" section near the bottom of this plan.** That audit (mandatory) ensures every web fetch entry point deserializes ISO timestamps to `Date` instances before consumers touch them. After the audit, any remaining display-time uses of `proposal.createdAt` etc. work directly because the deserializer hydrated them.
 
 - [ ] **Step 5: tsc green:** `cd packages/web && npx tsc --noEmit`
 
@@ -301,29 +301,28 @@ cd /home/user/Serviceos && \
 
 ---
 
-## Open question — Date wire format
+## Decision — Date wire format (resolved 2026-05-04)
 
-> **Status (PR #263 review):** Surfaced by an automated reviewer; resolution
-> pending user decision. Until decided, executors should default to **Option A
-> below** but flag the choice in the PR description so reviewers can object
-> before merge.
+> **Status:** Resolved per PR #263 review feedback. Decision: **Option A** —
+> shared type uses `Date`; web deserializes ISO strings to `Date` at the API
+> boundary. Two alternatives (Option B: `IsoDateString` brand; Option C:
+> separate API vs wire types) were considered and rejected for now in favor
+> of lowest-friction execution. May be revisited if runtime mismatches appear.
 
-The shared `Proposal` interface declares `expiresAt`, `approvedAt`, `executedAt`, `undoneAt`, `createdAt`, `updatedAt` as `Date`. The API holds these as `Date` in memory; `JSON.stringify` converts them to ISO strings on the wire; `JSON.parse` does NOT reconstruct `Date`. So the web receives strings at runtime even though TypeScript thinks they're `Date`. Anything calling `.getTime()` on a wire-deserialized value will crash.
+The shared `Proposal` interface declares `expiresAt`, `approvedAt`, `executedAt`, `undoneAt`, `createdAt`, `updatedAt` as `Date`. The API holds these as `Date` in memory; `JSON.stringify` converts them to ISO strings on the wire; `JSON.parse` does NOT reconstruct `Date`. So without intervention the web would receive strings at runtime even though TypeScript thinks they're `Date`.
 
-Three ways to resolve, with tradeoffs:
+Resolution: every web fetch entry point that returns a `Proposal` (or anything containing one) must convert ISO timestamps to `Date` instances before handing the object to consumers. This converts a runtime-error class into an API-boundary contract.
 
-**Option A (current spec default) — keep `Date` in the shared type, adapt at the boundary.**
-The web's API client (e.g. `apiFetch` / `useQuery` wrappers) is responsible for deserializing ISO strings back into `Date` instances on the way in. Pro: the shared type matches the API's in-memory shape; existing API code keeps working unchanged. Con: requires an audit of every web API entry point to ensure string→Date conversion happens; a missed entry point silently breaks at runtime.
+**Required Phase 3 audit (executor must complete before claiming F-1 done):**
 
-**Option B — switch the shared type to a branded `IsoDateString`.**
-Introduce `type IsoDateString = string & { readonly __brand: unique symbol }` in `packages/shared`. All wire-format-relevant timestamp fields become `IsoDateString`. The API does the `Date.toISOString()` conversion at its serializer; the web treats fields as opaque strings (or wraps them with `new Date(...)` at display sites). Pro: type matches reality; runtime mismatches become impossible. Con: API code that currently does `proposal.approvedAt.getTime()` on the API side breaks — every API call site needs to either treat them as strings or coerce locally.
+- [ ] Grep `packages/web/src` for `fetch(` / `apiFetch(` / `useQuery(` / `useMutation(` / any other API client wrapper. For each call that returns or includes a `Proposal`, verify the response is run through a deserializer that converts `expiresAt`, `approvedAt`, `executedAt`, `undoneAt`, `createdAt`, `updatedAt` from string to `Date`.
+- [ ] If a deserializer exists (e.g. a shared `parseProposal()` utility), confirm it covers ALL six timestamp fields; add any missing.
+- [ ] If no deserializer exists, add one in `packages/web/src/api/proposal-deserializer.ts` (a one-pass `proposal => ({ ...proposal, approvedAt: proposal.approvedAt ? new Date(proposal.approvedAt) : undefined, ... })`) and route every Proposal-returning fetch through it.
+- [ ] Add a runtime touch-test in the F-1 shape-guard test file: assert `proposal.approvedAt instanceof Date` after a round-trip through the deserializer.
 
-**Option C — separate API-internal type from wire-format type.**
-`packages/api/src/proposals/proposal.ts` keeps `Date`-typed fields locally; `packages/shared/src/types/proposal.ts` exports a wire-format `Proposal` with `IsoDateString` fields. The web imports the wire-format. The API converts at the serializer. Pro: each side is honest about its own shape. Con: doubles the type surface in `shared` (or in API) — adds maintenance overhead, partially defeats the unification goal.
+**Why not Option B (IsoDateString brand):** would force every API call site that currently does `.getTime()` / `.toISOString()` on a Proposal field to either coerce locally or refactor. Larger blast radius. The shape-guard test in Task 4 + the audit step above narrows Option A's risk to acceptable.
 
-**Recommendation pending user decision:** Option A is what's written. It's the lowest-friction first cut and preserves API code unchanged. The risk is an unaudited web API entry point, which is mitigated by the shape-guard test plus runtime touch-tests in the Phase 4 task. If the team wants stronger compile-time safety, Option B is the move (and is the cleaner long-term design); it requires a follow-up sweep of API call sites that currently rely on `Date` methods.
-
-This question is intentionally NOT blocking the rest of the plan — Option A's code is what executes by default. Reviewers can change it to Option B before the F-1 PR merges if they prefer.
+**Why not Option C (split types):** doubles the type surface in `shared` and partially defeats the unification goal F-1 was opened to achieve. Worth revisiting only if the team decides API-internal types should diverge from wire types as a longer-term pattern.
 
 ---
 
