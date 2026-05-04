@@ -153,7 +153,8 @@ export class WhisperClientError extends Error {
 }
 
 export interface WhisperTranscribeOptions {
-  /** Optional ISO-639-1 language hint. */
+  /** Optional ISO-639-1 language hint. P11-002: 'en' / 'es' threaded
+   *  through from the voice session's detected language. */
   language?: string;
 }
 
@@ -293,7 +294,9 @@ export interface StreamingTranscriptionProvider {
   openSession(
     onEvent: StreamingTranscriptCallback,
     onError: (err: Error) => void,
-    onClose: () => void
+    onClose: () => void,
+    /** P11-002: optional language hint ('en' | 'es'); defaults to 'en'. */
+    language?: 'en' | 'es'
   ): Promise<StreamingSession>;
 }
 
@@ -309,24 +312,36 @@ export interface StreamingTranscriptionProvider {
  * Whisper stays in place for the existing async technician voice path.
  */
 export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
-  private readonly wsUrl: string;
+  private readonly defaultLanguage: 'en' | 'es';
 
-  constructor(private readonly apiKey: string) {
+  constructor(
+    private readonly apiKey: string,
+    /** P11-002: per-session default; openSession() can override per-call. */
+    defaultLanguage: 'en' | 'es' = 'en'
+  ) {
     if (!apiKey) throw new Error('DeepgramStreamingProvider requires DEEPGRAM_API_KEY');
-    this.wsUrl =
+    this.defaultLanguage = defaultLanguage;
+  }
+
+  /** Build the Deepgram WS URL for a given language. Exposed for testing. */
+  private buildWsUrl(language: 'en' | 'es'): string {
+    return (
       'wss://api.deepgram.com/v1/listen' +
-      '?model=nova-3&language=en&encoding=linear16&sample_rate=16000' +
-      '&channels=1&interim_results=true&smart_format=true&endpointing=300';
+      `?model=nova-3&language=${language}&encoding=linear16&sample_rate=16000` +
+      '&channels=1&interim_results=true&smart_format=true&endpointing=300'
+    );
   }
 
   async openSession(
     onEvent: StreamingTranscriptCallback,
     onError: (err: Error) => void,
-    onClose: () => void
+    onClose: () => void,
+    language?: 'en' | 'es'
   ): Promise<StreamingSession> {
     // Node 22 native WebSocket follows the WHATWG spec and does not accept
     // a headers option. Pass the API key via query param instead.
-    const ws = new WebSocket(`${this.wsUrl}&token=${this.apiKey}`);
+    const lang = language ?? this.defaultLanguage;
+    const ws = new WebSocket(`${this.buildWsUrl(lang)}&token=${this.apiKey}`);
 
     // Attach message listener BEFORE awaiting open to avoid missing frames
     // that Deepgram sends immediately on connection.

@@ -36,6 +36,13 @@ export interface Lead {
   convertedCustomerId?: string;
   /** Required when stage='lost'; captured via `lose` endpoint. */
   lostReason?: string;
+  /**
+   * P11-002: optional preferred language. Auto-stamped to 'es' when
+   * find-or-create-lead fires for an unknown caller and the detected
+   * call language is Spanish; otherwise null and resolved from the
+   * tenant default at session time.
+   */
+  preferredLanguage?: 'en' | 'es';
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

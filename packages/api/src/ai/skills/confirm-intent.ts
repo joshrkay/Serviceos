@@ -19,6 +19,7 @@
 
 import { LLMGateway } from '../gateway/gateway';
 import { TtsProvider } from '../tts/tts-provider';
+import { t, type Language } from '../i18n/i18n';
 
 export interface ConfirmIntentInput {
   /**
@@ -36,6 +37,8 @@ export interface ConfirmIntentInput {
    * synthesis throws, the skill logs and returns without audio.
    */
   ttsProvider?: TtsProvider;
+  /** P11-002: spoken-readback language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export interface ConfirmIntentResult {
@@ -72,9 +75,10 @@ function parseYesNo(content: string): YesNoClassification | null {
 
 export async function confirmIntent(input: ConfirmIntentInput): Promise<ConfirmIntentResult> {
   const { intentSummary, callerResponse, tenantId, gateway, ttsProvider } = input;
+  const lang: Language = input.language ?? 'en';
 
   // Step 1: Build the readback question.
-  const readbackText = `Just to confirm — ${intentSummary}. Is that right?`;
+  const readbackText = t('confirm.readback', lang, { summary: intentSummary });
 
   // Step 2: Optionally synthesize the readback to audio. TTS failure is
   // non-fatal — the caller flow still has a text-based path.
@@ -84,6 +88,7 @@ export async function confirmIntent(input: ConfirmIntentInput): Promise<ConfirmI
       const result = await ttsProvider.synthesize({
         text: readbackText,
         tenantId,
+        language: lang,
       });
       readbackAudio = result.audio;
     } catch {

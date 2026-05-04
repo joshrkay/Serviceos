@@ -15,10 +15,13 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { t, type Language } from '../i18n/i18n';
 
 export interface LookupInvoicesInput {
   tenantId: string;
   customerId: string;
+  /** P11-002: spoken-summary language. Defaults to 'en'. */
+  language?: Language;
   /**
    * Optional explicit status filter. When omitted, defaults to "open"
    * — invoices the customer can still pay (`open` or
@@ -81,6 +84,7 @@ export async function lookupInvoices(
   deps: LookupInvoicesDeps,
 ): Promise<LookupInvoicesResult> {
   const start = Date.now();
+  const lang: Language = input.language ?? 'en';
   const recordEvent = async (
     payload: Omit<RecordLookupEventInput, 'tenantId' | 'sessionId' | 'customerId' | 'intent' | 'latencyMs'>,
   ): Promise<void> => {
@@ -100,7 +104,7 @@ export async function lookupInvoices(
   };
 
   if (!deps.jobRepo.findByCustomer) {
-    const message = "I'm having trouble pulling up your invoices right now.";
+    const message = t('lookup.invoices.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -115,7 +119,7 @@ export async function lookupInvoices(
       includeArchived: true,
     });
   } catch (err) {
-    const message = "I'm having trouble pulling up your invoices right now.";
+    const message = t('lookup.invoices.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -152,8 +156,10 @@ export async function lookupInvoices(
   if (items.length === 0) {
     const message =
       input.status && input.status !== 'open_only'
-        ? `I'm not seeing any ${input.status.replace('_', ' ')} invoices on your account.`
-        : "You don't have any open invoices right now.";
+        ? lang === 'es'
+          ? `No veo ninguna factura ${input.status.replace('_', ' ')} en su cuenta.`
+          : `I'm not seeing any ${input.status.replace('_', ' ')} invoices on your account.`
+        : t('lookup.invoices.none', lang);
     await recordEvent({ resultStatus: 'none', resultCount: 0, summary: message });
     return {
       status: 'none',
