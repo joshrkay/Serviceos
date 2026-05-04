@@ -119,20 +119,33 @@ export async function lookupCustomer(
         // compare misses these. We match on the last 10 digits (the
         // North American national number) which is permissive enough
         // for caller-ID resolution but still tenant-scoped.
+        //
+        // PR #265 review fix: push the filter to the repo so we don't
+        // page through every tenant row in-memory. `findByPhoneNormalized`
+        // uses the indexed `phone_normalized` column on Pg and the same
+        // tail semantics on the in-memory repo. Older test fakes that
+        // don't implement it fall through to the legacy filter.
         const target = input.identifier.value.replace(/\D/g, '');
         if (target.length < 7) {
           matches = [];
           break;
         }
-        const tail = target.slice(-10);
-        const all = await deps.customerRepo.findByTenant(input.tenantId, {
-          includeArchived: true,
-        });
-        matches = all.filter((c) => {
-          if (!c.primaryPhone) return false;
-          const digits = c.primaryPhone.replace(/\D/g, '');
-          return digits.endsWith(tail) || tail.endsWith(digits);
-        });
+        if (deps.customerRepo.findByPhoneNormalized) {
+          matches = await deps.customerRepo.findByPhoneNormalized(
+            input.tenantId,
+            target,
+          );
+        } else {
+          const tail = target.slice(-10);
+          const all = await deps.customerRepo.findByTenant(input.tenantId, {
+            includeArchived: true,
+          });
+          matches = all.filter((c) => {
+            if (!c.primaryPhone) return false;
+            const digits = c.primaryPhone.replace(/\D/g, '');
+            return digits.endsWith(tail) || tail.endsWith(digits);
+          });
+        }
         break;
       }
       case 'email': {

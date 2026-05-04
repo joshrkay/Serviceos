@@ -94,6 +94,11 @@ These tasks build the audio primitives Layer 2 depends on. Sequential because ea
 - [ ] **Step 2: Run → FAIL** (`npm test -- voice-quality/audio/whisper-real-provider`).
 - [ ] **Step 3: Implement the wrapper.** Compose the existing `OpenAiWhisperProvider` (`packages/api/src/voice/transcription-providers.ts:18`) with:
   ```ts
+  // Whisper-1 pricing as of 2026-04: $0.006 / minute = 0.6 cents / minute.
+  // Hoisted to a named constant so a future price change is one line, not
+  // a magic-number hunt across the file.
+  const WHISPER_CENTS_PER_MINUTE = 0.6;
+
   export class WhisperRealProvider {
     constructor(
       private readonly inner: OpenAiWhisperProvider,
@@ -102,14 +107,13 @@ These tasks build the audio primitives Layer 2 depends on. Sequential because ea
     ) {}
     async transcribeBuffer(audio: Buffer, scriptId: string): Promise<string> {
       const t0 = performance.now();
-      // Whisper-1 pricing as of 2026-04: $0.006 / minute
       const audioSeconds = estimateAudioSeconds(audio);
       const result = await retryOn429(
         () => this.inner.transcribe(uploadAsBlob(audio)),
         { attempts: 2, backoffMs: [500] }
       );
       const ms = performance.now() - t0;
-      const cents = Math.ceil((audioSeconds / 60) * 0.6);
+      const cents = Math.ceil((audioSeconds / 60) * WHISPER_CENTS_PER_MINUTE);
       this.costTracker.addCents(cents);
       this.bus.emit({ type: 'lookup_executed', skillName: 'whisper.transcribe', durationMs: ms, success: true, ts: Date.now() });
       return result.transcript;
@@ -203,7 +207,12 @@ export function ttfaPerTurn(events: VoiceSessionEvent[]): number[] {
   const ttfas: number[] = [];
   let pendingSilenceTs: number | null = null;
   for (const e of events) {
-    if (e.type === 'caller_silence_detected') pendingSilenceTs = e.ts;
+    // Layer 2 uses Whisper batch (not streaming VAD), so the TTFA
+    // start is the moment the transcript is returned — not a silence
+    // detector firing. The event name is `transcript_received`; we
+    // keep the variable name `pendingSilenceTs` for readability since
+    // semantically it's still "the moment the caller stopped talking".
+    if (e.type === 'transcript_received') pendingSilenceTs = e.ts;
     else if (e.type === 'audio_frame_emitted' && pendingSilenceTs !== null) {
       ttfas.push(e.ts - pendingSilenceTs);
       pendingSilenceTs = null;
@@ -216,7 +225,7 @@ export function ttfaPerTurn(events: VoiceSessionEvent[]): number[] {
 **Steps:**
 - [ ] **Step 1: Failing test.** Synthesize an event sequence; assert `ttfaPerTurn` returns expected per-turn millisecond array.
 - [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Add `caller_silence_detected` and `audio_frame_emitted` to `VoiceSessionEvent` union; add emit sites in `mediastream-adapter.ts` (5 lines each). Verify all existing `mediastream-adapter` tests still pass.
+- [ ] **Step 3: Add `transcript_received` and `audio_frame_emitted` to `VoiceSessionEvent` union; add emit sites in `mediastream-adapter.ts` (5 lines each). Verify all existing `mediastream-adapter` tests still pass. (Layer 2 uses Whisper batch — the TTFA-start event is the moment Whisper returns, not a streaming-VAD silence trigger.)
 - [ ] **Step 4: Implement** `audio-timings.ts` with `ttfaPerTurn`, `lookupToSpeakLatency`, `totalCallDurationMs` helpers.
 - [ ] **Step 5: Run → PASS.**
 - [ ] **Step 6: Commit:** `feat(voice-quality): VQ2-004 — audio timing events + helpers`
@@ -244,11 +253,16 @@ export function createRealLLMGatewayForLayer2(
     cacheBreakpoints: ['system', 'tools'],
   });
   const gateway = new LLMGateway(provider, { ... });
+  // Hoisted constants so a Haiku price update (or a model swap) is a
+  // one-line change instead of a magic-number hunt across the file.
+  const HAIKU_INPUT_CENTS_PER_MTOKEN = 300;
+  const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
+  const HAIKU_CACHE_READ_CENTS_PER_MTOKEN = 30;
   // Wrap to intercept response.usage and emit cost_incurred events
   return wrapWithCostTracking(gateway, bus, costTracker, {
-    inputCostPerMTokens: 300,    // cents
-    outputCostPerMTokens: 1500,  // cents
-    cacheReadCostPerMTokens: 30,
+    inputCostPerMTokens: HAIKU_INPUT_CENTS_PER_MTOKEN,
+    outputCostPerMTokens: HAIKU_OUTPUT_CENTS_PER_MTOKEN,
+    cacheReadCostPerMTokens: HAIKU_CACHE_READ_CENTS_PER_MTOKEN,
   });
 }
 ```
@@ -412,7 +426,7 @@ Each grader is independent and operates on `Observation` (extended with audio ti
 
 | Metric | Threshold | Source of truth |
 |---|---|---|
-| TTFA (time-to-first-audio) | **P95 ≤ 800 ms** across all turns in run | `audio_frame_emitted.ts - caller_silence_detected.ts` |
+| TTFA (time-to-first-audio) | **P95 ≤ 800 ms** across all turns in run | `audio_frame_emitted.ts - transcript_received.ts` |
 | Lookup → speak latency | **P95 ≤ 2000 ms** | `audio_frame_emitted.ts - lookup_executed.ts` (only turns containing a lookup) |
 | Reprompt rate | **≤ 10%** of turns | turns where agent's response classifies as a reprompt (LLM-judged binary) divided by total turns |
 | Misunderstanding recovery | **≤ 2 turns** to resolution | from first reprompt to first non-reprompt response in the same intent thread |

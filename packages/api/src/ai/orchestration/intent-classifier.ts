@@ -582,10 +582,17 @@ const CREATE_CUSTOMER_SIGNUP_PATTERNS: ReadonlyArray<RegExp> = [
   /\bsign(?:ing)?\s*up\b(?!.*\bappointment\b)/i,
   /\bnew\s+customer\b/i,
   /\bbecome\s+a\s+customer\b/i,
-  /\bset\s+up\s+(?:an?\s+)?account\b/i,
-  /\bopen\s+(?:an?\s+)?account\b/i,
+  // PR #265 review fix: each "account/me" phrasing was firing on
+  // adjacent appointment/schedule wording — e.g. "set up an account
+  // for my appointment" was being collapsed to create_customer and
+  // overriding the LLM's correct create_appointment classification.
+  // Negative lookaheads exclude appointment/schedule context, and the
+  // generic "add me" was tightened to "add/register me to (your) system"
+  // so "add me to the schedule" stays in create_appointment.
+  /\bset\s+up\s+(?:an?\s+)?account\b(?!.*\b(?:appointment|schedule)\b)/i,
+  /\bopen\s+(?:an?\s+)?account\b(?!.*\b(?:appointment|schedule)\b)/i,
   /\bfirst[-\s]time\s+calling\b/i,
-  /\b(?:add|register)\s+me\b/i,
+  /\b(?:add|register)\s+me\s+to\s+(?:your\s+)?system\b/i,
   /\bregistrarme\b/i,
   /\bcliente\s+nuevo\b/i,
   /\bnuevo\s+cliente\b/i,
