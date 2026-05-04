@@ -1381,6 +1381,19 @@ export function createApp(): express.Express {
               row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
           };
         },
+        async getTenantIntegrationStatuses(tenantId) {
+          const r = await pool.query(
+            `SELECT provider, status, updated_at
+             FROM tenant_integrations
+             WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          return r.rows.map((row) => ({
+            provider: String(row.provider),
+            status: String(row.status),
+            updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
+          }));
+        },
         async setMode(tenantId, userId, mode) {
           // P12-001 review fix — `userId` is the Clerk subject; match
           // on `clerk_user_id`, not the UUID PK. Without this the
