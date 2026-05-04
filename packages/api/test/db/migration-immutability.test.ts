@@ -116,6 +116,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
+  // Phase-13 voice_sessions + per-user current_mode + tenant-level
+  // backup-supervisor / unsupervised routing. Body byte-identical to
+  // the original 063_create_voice_sessions_and_modes entry from the
+  // p12-mode-switching branch; key bumped to 066 on merge because
+  // main claimed 063–065 first.
+  ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
+  ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
 ];
 
 function hashMigration(value: string): string {

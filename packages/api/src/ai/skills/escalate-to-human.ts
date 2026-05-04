@@ -5,6 +5,65 @@ import type { OnCallRepository } from '../../oncall/rotation';
 import type { TwilioCallControl } from '../../telephony/twilio-call-control';
 import { t, type Language } from '../i18n/i18n';
 
+/**
+ * Phase 12 — emergency-intent immediate-Dial decision.
+ *
+ * When an emergency intent is detected mid-call AND the tenant is
+ * unsupervised AND the channel is voice (telephony), the AI gateway
+ * should skip proposal generation entirely and route the call straight
+ * through `escalateToHuman` with `reason='emergency_dispatch'`.
+ *
+ * This helper centralizes the predicate so call sites (intent classifier
+ * branch, voice-action-router) consult it instead of duplicating logic.
+ * It is intentionally a pure function — no I/O, no side effects.
+ *
+ * Returns `true` when the call site should bypass the normal AI path
+ * and invoke `escalateToHuman` immediately. Returns `false` for any
+ * non-emergency intent, any in-app channel (no Twilio Dial available),
+ * or any tenant that has at least one supervisor present.
+ *
+ * Note on intent: the existing intent classifier emits free-form
+ * intent strings. The "emergency set" is the small list of intents
+ * that signal customer harm potential — burst pipe, gas leak, no
+ * heat in winter, no AC in extreme heat. We accept the set as input
+ * (via `EMERGENCY_INTENTS`) so the classifier remains the source of
+ * truth and this helper stays presentation-agnostic.
+ */
+export const EMERGENCY_INTENTS: ReadonlySet<string> = new Set([
+  'emergency_plumbing',
+  'emergency_hvac',
+  'emergency_dispatch',
+  'gas_leak',
+  'burst_pipe',
+  'no_heat',
+  'no_ac',
+]);
+
+export interface ImmediateDialDecisionInput {
+  /** Free-form intent string from the classifier. */
+  intent: string;
+  /**
+   * Tenant-wide supervisor presence (from `isSupervisorPresent`).
+   * `true` means at least one user is in 'supervisor' or 'both' mode.
+   */
+  supervisorPresent: boolean;
+  /**
+   * Channel of the active conversation. Only 'telephony' supports
+   * Twilio `<Dial>`; in-app voice falls back to the existing
+   * escalate-to-human in-app path.
+   */
+  channel: 'telephony' | 'inapp';
+}
+
+export function shouldImmediatelyDialOnEmergency(
+  input: ImmediateDialDecisionInput,
+): boolean {
+  if (!EMERGENCY_INTENTS.has(input.intent)) return false;
+  if (input.supervisorPresent === true) return false;
+  if (input.channel !== 'telephony') return false;
+  return true;
+}
+
 export type EscalationReason =
   | 'caller_requested'
   | 'low_confidence'

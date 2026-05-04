@@ -253,6 +253,12 @@ export const updateSettingsSchema = z.object({
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),
   terminologyPreferences: z.record(z.string()).optional(),
+  // Phase 12 — supervisor backup + unsupervised proposal routing.
+  // `backupSupervisorUserId: null` explicitly clears the backup.
+  backupSupervisorUserId: z.string().uuid().nullable().optional(),
+  unsupervisedProposalRouting: z
+    .enum(['queue_and_sms', 'queue_only', 'escalate_to_oncall'])
+    .optional(),
 });
 
 export const conversationAccessSchema = z.object({
