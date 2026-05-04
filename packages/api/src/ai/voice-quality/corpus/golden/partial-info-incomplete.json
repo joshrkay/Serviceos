@@ -1,0 +1,11 @@
+[
+  null,
+  {
+    "proposalType": "create_appointment",
+    "payload": {
+      "customerId": "cust_08_partial_info_jane",
+      "scheduledStart": "2026-05-12T21:00:00.000Z",
+      "scheduledEnd": "2026-05-12T23:00:00.000Z"
+    }
+  }
+]
