@@ -202,13 +202,6 @@ export function PriceBookPage() {
     setIsSaving(false);
   };
 
-  const updateFormField = <K extends keyof PriceBookFormState>(
-    field: K,
-    value: PriceBookFormState[K]
-  ) => {
-    setFormState(prev => ({ ...prev, [field]: value }));
-  };
-
   const handleArchive = async (itemId: string) => {
     setActionError(null);
     setArchiveItemId(itemId);
@@ -468,6 +461,67 @@ export function PriceBookPage() {
           })}
         </div>
 
+        {editingItemId && (
+          <form className="mb-4 rounded-lg border border-slate-200 bg-white p-3" onSubmit={handleSaveItem}>
+            <p className="mb-3 text-sm text-slate-700">Edit price book item</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Item name</span>
+                <input
+                  type="text"
+                  value={formState.name}
+                  onChange={event => setFormState(prev => ({ ...prev, name: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Description</span>
+                <input
+                  type="text"
+                  value={formState.description}
+                  onChange={event => setFormState(prev => ({ ...prev, description: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Unit price</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.unitPrice}
+                  onChange={event => setFormState(prev => ({ ...prev, unitPrice: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Unit</span>
+                <input
+                  type="text"
+                  value={formState.unit}
+                  onChange={event => setFormState(prev => ({ ...prev, unit: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm text-slate-700">
+                <span>Category</span>
+                <input
+                  type="text"
+                  value={formState.category}
+                  onChange={event => setFormState(prev => ({ ...prev, category: event.target.value }))}
+                  className="rounded border border-slate-300 px-2 py-1 text-sm"
+                />
+              </label>
+            </div>
+            <button
+              type="submit"
+              className="mt-3 inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              Save
+            </button>
+          </form>
+        )}
+
         {progressText && (
           <p data-testid="csv-import-progress" className="mb-3 text-sm text-slate-600">{progressText}</p>
         )}
@@ -538,6 +592,28 @@ export function PriceBookPage() {
                         <Archive size={14} />
                       </button>
                     </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="inline-flex text-slate-500 hover:text-indigo-600"
+                        aria-label={`Edit ${item.name}`}
+                        onClick={() => openEditForm(item)}
+                        disabled={archiveItemId === item.id || isSaving}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="inline-flex text-slate-500 hover:text-red-600"
+                        aria-label={`Archive ${item.name}`}
+                        onClick={() => handleArchive(item.id)}
+                        disabled={archiveItemId === item.id}
+                      >
+                        <Archive size={14} />
+                      </button>
+                    </td>
                   </tr>
                 ))}
                 {filteredItems.length === 0 && (
@@ -579,7 +655,7 @@ export function PriceBookPage() {
                 <input
                   type="text"
                   value={formState.name}
-                  onChange={event => updateFormField('name', event.target.value)}
+                  onChange={event => setFormState(prev => ({ ...prev, name: event.target.value }))}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
               </label>
@@ -588,7 +664,7 @@ export function PriceBookPage() {
                 <span className="mb-1 block">Description</span>
                 <textarea
                   value={formState.description}
-                  onChange={event => updateFormField('description', event.target.value)}
+                  onChange={event => setFormState(prev => ({ ...prev, description: event.target.value }))}
                   rows={3}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
@@ -601,7 +677,7 @@ export function PriceBookPage() {
                   min="0"
                   step="0.01"
                   value={formState.unitPrice}
-                  onChange={event => updateFormField('unitPrice', event.target.value)}
+                  onChange={event => setFormState(prev => ({ ...prev, unitPrice: event.target.value }))}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 />
               </label>
@@ -610,7 +686,7 @@ export function PriceBookPage() {
                 <span className="mb-1 block">Unit</span>
                 <select
                   value={formState.unit}
-                  onChange={event => updateFormField('unit', event.target.value as ItemUnit)}
+                  onChange={event => setFormState(prev => ({ ...prev, unit: event.target.value as ItemUnit }))}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 >
                   {UNIT_OPTIONS.map(option => (
@@ -625,7 +701,7 @@ export function PriceBookPage() {
                 <span className="mb-1 block">Category</span>
                 <select
                   value={formState.category}
-                  onChange={event => updateFormField('category', event.target.value as ItemCategory)}
+                  onChange={event => setFormState(prev => ({ ...prev, category: event.target.value as ItemCategory }))}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 >
                   {CATEGORY_OPTIONS.map(option => (
