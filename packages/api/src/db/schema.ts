@@ -457,8 +457,19 @@ export const MIGRATIONS = {
       auth_token_primary_secret_ref TEXT,
       auth_token_secondary_secret_ref TEXT,
       credential_version INTEGER NOT NULL DEFAULT 1,
-      status TEXT NOT NULL DEFAULT 'provisioning'
-        CHECK (status IN ('provisioning', 'active', 'suspended', 'terminated', 'releasing', 'failed')),
+      status TEXT NOT NULL DEFAULT 't0_requested'
+        CHECK (status IN (
+          't0_requested',
+          'partial_readiness',
+          'pending_compliance_dns',
+          'full_readiness',
+          'failed',
+          'failed_compensated',
+          'compensating',
+          'suspended',
+          'terminated',
+          'releasing'
+        )),
       provider_data JSONB NOT NULL DEFAULT '{}'::jsonb,
       provisioned_at TIMESTAMPTZ,
       last_error TEXT,
