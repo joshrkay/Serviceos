@@ -59,6 +59,15 @@ interface TwilioMessageResponse {
   error_message?: string;
 }
 
+type InternalTwilioSmsConfig = {
+  accountSid: string;
+  authToken: string;
+  fromNumber: string;
+  apiBaseUrl: string;
+  fetchImpl: typeof fetch;
+  authTokenSecondary?: string;
+};
+
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
   private readonly sms: Omit<TwilioSmsConfig, 'fetchImpl'> & {
     apiBaseUrl: string;
@@ -81,6 +90,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     this.sms = {
       accountSid: config.sms.accountSid,
       authToken: config.sms.authToken,
+      authTokenSecondary: config.sms.authTokenSecondary,
       fromNumber: config.sms.fromNumber,
       secondaryAuthToken: config.sms.secondaryAuthToken,
       apiBaseUrl: config.sms.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01',
@@ -122,6 +132,21 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     let response = await sendWithToken(this.sms.authToken);
     if (response.status === 401 && this.sms.secondaryAuthToken) {
       response = await sendWithToken(this.sms.secondaryAuthToken);
+    }
+
+    if (response.status === 401 && this.sms.authTokenSecondary) {
+      const secondaryAuth = Buffer.from(`${this.sms.accountSid}:${this.sms.authTokenSecondary}`).toString('base64');
+      response = await this.sms.fetchImpl(
+        `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+        {
+          method: 'POST',
+          headers: {
+            ...headers,
+            Authorization: `Basic ${secondaryAuth}`,
+          },
+          body: body.toString(),
+        }
+      );
     }
 
     if (!response.ok) {
