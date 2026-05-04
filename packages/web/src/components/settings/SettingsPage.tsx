@@ -8,9 +8,12 @@ import {
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
+import { useMe } from '../../hooks/useMe';
+import { SupervisorBackupSection } from './SupervisorBackupSection';
 
 export function SettingsPage() {
   const navigate = useNavigate();
+  const { me } = useMe();
   const [aiAuto, setAiAuto]         = useState(true);
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
@@ -435,6 +438,20 @@ export function SettingsPage() {
             setQbConnected(true);
           }}
         />
+      )}
+
+      {/* P12-005-fe — Supervisor backup + unsupervised routing.
+          Owner-only; the backend PUT /api/settings already enforces
+          the same rule via the existing settings:update permission,
+          so this gate is a UX nicety. Mounted only when role==='owner'
+          to avoid rendering disabled UI for dispatchers/techs. */}
+      {me?.role === 'owner' && (
+        <div className="px-4 md:px-6 pb-6">
+          <SupervisorBackupSection
+            initialBackupUserId={me.backup_supervisor_user_id ?? null}
+            initialRouting={me.unsupervised_proposal_routing}
+          />
+        </div>
       )}
 
       {/* Suppliers sheet */}

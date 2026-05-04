@@ -1633,17 +1633,10 @@ export const MIGRATIONS = {
       USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // Phase 4c: language detection telemetry for the inbound AI CSR. Adds
-  // detected_language to voice_recordings + retrieval_eval_runs, plus a
-  // per-customer preferred_language hint that the FSM can use to bias
-  // ASR on caller-ID match. All three columns are nullable / no backfill
-  // — pre-Phase-4c rows simply have NULL detected_language and the
-  // dashboards group them as 'unknown'. The BCP-47 short codes ('en',
-  // 'es', 'vi', 'zh', 'tl', etc.) are stored as plain TEXT — a CHECK
-  // constraint here would require migration churn every time a new
-  // language enters the corpus, and the detector library (franc-min)
-  // already returns a normalised code, so application-level validation
-  // is the right layer.
+  // Phase 4c: language detection telemetry for the inbound AI CSR.
+  // (Restored verbatim from origin/main; main's three migrations
+  // 063/064/065 must travel as a unit alongside any new migration on
+  // this branch.)
   '063_language_detection': `
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS detected_language TEXT;
