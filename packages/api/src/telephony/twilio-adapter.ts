@@ -21,6 +21,10 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import { classifyIntent, isLookupIntent } from '../ai/orchestration/intent-classifier';
+import {
+  CreateCustomerVoiceTaskHandler,
+  CREATE_CUSTOMER_CONFIRMATION_TTS,
+} from '../ai/tasks/create-customer-task';
 import { lookupAppointments } from '../ai/skills/lookup-appointments';
 import { lookupInvoices } from '../ai/skills/lookup-invoices';
 import { lookupBalance } from '../ai/skills/lookup-balance';
@@ -158,6 +162,28 @@ function intentToProposalType(intent: string | undefined): ProposalType {
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
+/**
+ * P18-001: detect a Twilio `From` value that represents a withheld /
+ * blocked / private caller-id. Twilio surfaces these as common literal
+ * strings; an empty string signals "we never recorded one". Returns
+ * true ONLY for explicitly blocked indicators — a plain missing string
+ * returns false so the caller can prompt for a callback rather than
+ * assuming the caller chose to withhold.
+ */
+export function isBlockedCallerId(from: string | undefined): boolean {
+  if (!from) return false;
+  const v = from.trim().toLowerCase();
+  if (v.length === 0) return false;
+  return (
+    v === 'restricted' ||
+    v === 'private' ||
+    v === 'blocked' ||
+    v === 'unknown' ||
+    v === 'anonymous' ||
+    v === 'unavailable'
+  );
+}
+
 /** Escape a string for safe inclusion in TwiML. */
 export function xmlEscape(s: string): string {
   return s
@@ -269,6 +295,19 @@ export class TwilioGatherAdapter {
    * current webhook turn only.
    */
   private readonly pendingTransferTwiml = new Map<string, string>();
+
+  /**
+   * P18-001: caller-ID phone keyed by sessionId. Recorded at inbound-
+   * call time so the create_customer voice flow can stamp the new
+   * customer's `primaryPhone` from the caller-id without forcing the
+   * caller to spell it back. Lives in-memory on the adapter — same
+   * lifetime as the in-memory voice session — and is removed when the
+   * session terminates. The map's separate from `VoiceSession` so the
+   * session-store interface stays unchanged. A blocked / withheld
+   * caller-id stores an empty string so `_isBlocked` can distinguish
+   * "missing" (never recorded) from "explicitly blocked".
+   */
+  private readonly callerIdBySession = new Map<string, string>();
 
   constructor(private deps: TwilioAdapterDeps) {}
 
@@ -543,6 +582,11 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+
+    // P18-001: record the caller-id (or "" when blocked/withheld) so
+    // the create_customer voice flow can use it as the new customer's
+    // primaryPhone without re-prompting.
+    this.callerIdBySession.set(session.id, opts.from ?? '');
 
     // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
     const disclosure = await discloseRecording({
@@ -859,6 +903,31 @@ export class TwilioGatherAdapter {
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
+      // P18-001: `create_customer` runs through a dedicated task handler
+      // so the proposal payload uses the contract-validated shape
+      // (name + caller-ID phone + optional email) instead of the
+      // generic { intent, entities } envelope `handleCreateProposal`
+      // would emit. Bypasses the FSM's `entity_resolution` →
+      // `intent_confirm` round-trip — identity creation always asks
+      // a human, so we go straight from "intent classified" to
+      // "proposal queued" + the confirmation TTS (AC-5).
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifiedIntentType === 'create_customer'
+      ) {
+        const handled = await this.handleCreateCustomerVoiceIntent(
+          session,
+          classifierEvent.entities,
+          classifierEvent.confidence,
+          opts,
+          sideEffectsAll,
+        );
+        if (handled) {
+          await this.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
 
       // After intent_classified, the FSM is in 'entity_resolution' (unless
@@ -1155,6 +1224,151 @@ export class TwilioGatherAdapter {
 
   private lookupNotWiredFallback(): string {
     return "I'm having trouble pulling that up right now. Let me get a person to help.";
+  }
+
+  /**
+   * P18-001 — `create_customer` voice flow.
+   *
+   * Runs the `CreateCustomerVoiceTaskHandler` to build a contract-shaped
+   * proposal (name + caller-id phone + optional email) and persists it
+   * via the wired proposalRepo. Always asks a human to approve — money
+   * / identity creation is never auto-executed (D3, CLAUDE.md).
+   *
+   * Returns true when the create_customer flow handled this turn end-
+   * to-end (the caller emits its TwiML and skips the FSM
+   * `intent_classified` → `intent_confirm` round-trip). Returns false
+   * when the precondition isn't met (e.g. caller already a customer)
+   * so the caller falls back to the standard FSM dispatch.
+   */
+  private async handleCreateCustomerVoiceIntent(
+    session: VoiceSession,
+    classifierEntities: Record<string, unknown>,
+    classifierConfidence: number,
+    opts: { sessionId: string; callSid: string; tenantId: string; speechResult: string },
+    sideEffectsAll: SideEffect[],
+  ): Promise<boolean> {
+    // Caller already matched — confirm identity instead.
+    if (session.customerId) {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I've got you in our system already. Let me know what you'd like help with today.",
+        },
+      });
+      return true;
+    }
+
+    const callerIdRaw = this.callerIdBySession.get(opts.sessionId);
+    const phoneBlocked = isBlockedCallerId(callerIdRaw);
+    const callerIdPhone = phoneBlocked ? undefined : callerIdRaw;
+
+    const handler = new CreateCustomerVoiceTaskHandler();
+    const outcome = await handler.run({
+      tenantId: opts.tenantId,
+      message: opts.speechResult,
+      conversationId: session.id,
+      userId: this.deps.systemActorId ?? 'voice_agent',
+      existingEntities: {
+        ...classifierEntities,
+        callerIdPhone,
+        phoneBlocked,
+        sessionId: session.id,
+        callSid: session.callSid,
+        correlationId: session.id,
+        classifierConfidence,
+        ...(session.leadId ? { existingLeadId: session.leadId } : {}),
+      },
+    });
+
+    if (outcome.status === 'needs_name') {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text: "Of course — could I get your name to get you set up?",
+        },
+      });
+      return true;
+    }
+
+    if (outcome.status === 'needs_callback') {
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+        },
+      });
+      return true;
+    }
+
+    if (!outcome.proposal) {
+      return false;
+    }
+
+    // Persist the proposal directly so we control the payload shape
+    // (instead of going through `handleCreateProposal` which builds
+    // the generic { intent, entities } envelope).
+    if (!this.deps.proposalRepo) {
+      logger.warn('create_customer: proposalRepo not wired; skipping persist', {
+        sessionId: session.id,
+      });
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: { text: CREATE_CUSTOMER_CONFIRMATION_TTS },
+      });
+      return true;
+    }
+
+    try {
+      const stored = await this.deps.proposalRepo.create(outcome.proposal);
+      session.proposalIds.push(stored.id);
+      // Audit row tying the proposal back to the voice session.
+      if (this.deps.auditRepo) {
+        try {
+          const ev = createAuditEvent({
+            tenantId: opts.tenantId,
+            actorId: this.deps.systemActorId ?? 'voice_agent',
+            actorRole: 'system',
+            eventType: 'proposal.created',
+            entityType: 'proposal',
+            entityId: stored.id,
+            correlationId: session.id,
+            metadata: {
+              proposalType: 'create_customer',
+              source: 'voice',
+              sessionId: session.id,
+              callSid: session.callSid,
+              classifierConfidence,
+            },
+          });
+          await this.deps.auditRepo.create(ev);
+        } catch (err) {
+          logger.warn('create_customer: audit persist failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
+      }
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: { text: CREATE_CUSTOMER_CONFIRMATION_TTS },
+      });
+      return true;
+    } catch (err) {
+      logger.warn('create_customer: persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      sideEffectsAll.push({
+        type: 'tts_play',
+        payload: {
+          text:
+            "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+        },
+      });
+      return true;
+    }
   }
 
   /**
