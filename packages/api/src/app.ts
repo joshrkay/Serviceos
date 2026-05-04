@@ -58,6 +58,9 @@ import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createReportsRouter } from './routes/reports';
+import { createTimeEntriesRouter } from './routes/time-entries';
+import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
+import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
 import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
@@ -523,6 +526,7 @@ export function createApp(): express.Express {
   // uses its own InMemoryWebhookRepository for the legacy
   // (provider/event/svix-id) shape — that one is unchanged.
   const webhookEventRepo   = pool ? new PgWebhookEventRepository(pool)    : new InMemoryWebhookEventRepository();
+  const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
   // Reference the variable so TS doesn't drop it; downstream consumers will
   // attach in a follow-up PR.
   void webhookEventRepo;
@@ -1253,6 +1257,7 @@ export function createApp(): express.Express {
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
   // because routes/customers.ts is on the freeze list — the body

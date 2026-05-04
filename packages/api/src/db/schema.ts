@@ -1654,8 +1654,12 @@ export const MIGRATIONS = {
       WHERE detected_language IS NOT NULL;
   `,
 
-  // P12-001 (Field Operations): per-job photo storage. Restored from
-  // origin/main.
+  // P12-001: per-job photo storage. job_photos rows reference rows in
+  // the existing `files` table (the upload pipeline still creates a
+  // file row + S3 object); the join row carries photo-specific
+  // metadata (category/notes/taken_at/uploader). Deleting a job
+  // cascades photo rows; deleting a photo row leaves the underlying
+  // file/S3 object intact so existing download URLs still resolve.
   '064_create_job_photos': `
     CREATE TABLE IF NOT EXISTS job_photos (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1676,8 +1680,17 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // P10-001: Customer self-service portal sessions. Restored from
-  // origin/main.
+  // P10-001: Customer self-service portal sessions. A single signed token
+  // grants a customer read access to all of their estimates, invoices,
+  // jobs, agreements, and appointments. The plaintext token is returned
+  // ONCE at create time and stored only as `token_hash = sha256(token)`.
+  // Lookup is hash-only (system-level / no tenant context) — RLS still
+  // applies for tenant-scoped reads/writes via `tenant_isolation_portal_sessions`.
+  //
+  // Originally landed as 060_create_portal_sessions; bumped to 065 because
+  // 060_capture_schema, 061_create_lookup_events, 062_create_knowledge_chunks,
+  // 063_language_detection, and 064_create_job_photos claimed 060–064 on main
+  // before this branch merged.
   '065_create_portal_sessions': `
     CREATE TABLE IF NOT EXISTS portal_sessions (
       id UUID PRIMARY KEY,
@@ -1711,20 +1724,11 @@ export const MIGRATIONS = {
       );
   `,
 
-  // P12-001 (Supervisor / Tech Mode Switching) — persistent FSM state
-  // for AI operator instances + per-user current_mode + tenant-level
-  // backup-supervisor / unsupervised routing.
-  //
-  // Originally landed as 063_create_voice_sessions_and_modes on the
-  // p12-mode-switching branch; bumped to 066 on merge with main because
-  // 063_language_detection (Phase 4c), 064_create_job_photos (P12 Field
-  // Operations), and 065_create_portal_sessions (P10-001) claimed 063–065
-  // on main before this branch merged.
-  //
-  // Idempotent: every CREATE / ALTER uses IF NOT EXISTS, the policy is
-  // dropped before recreate. The migration-immutability snapshot will
-  // hash this entry; do NOT mutate after merge — use a follow-up
-  // migration (067+) for any change.
+  // P12 — voice_sessions table + supervisor/tech mode columns.
+  // Originally landed on main as 066_create_voice_sessions_and_modes;
+  // ported here verbatim so the snapshot hash matches. Indices and
+  // policies use IF NOT EXISTS / DROP-then-CREATE so the migration is
+  // re-runnable.
   '066_create_voice_sessions_and_modes': `
     -- voice_sessions: persistent FSM state per AI operator instance
     CREATE TABLE IF NOT EXISTS voice_sessions (
@@ -1764,6 +1768,45 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS backup_supervisor_user_id UUID REFERENCES users(id),
       ADD COLUMN IF NOT EXISTS unsupervised_proposal_routing TEXT NOT NULL DEFAULT 'queue_and_sms'
         CHECK (unsupervised_proposal_routing IN ('queue_and_sms','queue_only','escalate_to_oncall'));
+  `,
+
+  // P12-002: Tech time tracking. Captures clock-in / clock-out events per
+  // user, optionally linked to a job. Schema choices:
+  //   - user_id is TEXT (Clerk subject) to mirror audit_events.actor_id —
+  //     keeps the route handler from hitting a DB lookup for the FK.
+  //   - job_id is nullable to support non-billable hours (drive/break/admin).
+  //   - clocked_out_at is nullable while a shift is running; the partial
+  //     UNIQUE index enforces "at most one open entry per user per tenant"
+  //     at the database level, which is what makes the concurrent-clock-in
+  //     race correctness story possible (the service catches 23505 and
+  //     auto-closes the prior entry).
+  //   - duration_minutes is computed in app code on close; we store it so
+  //     the weekly rollup can sum without re-deriving.
+  '067_create_time_entries': `
+    CREATE TABLE IF NOT EXISTS time_entries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id TEXT NOT NULL,
+      job_id UUID,
+      entry_type TEXT NOT NULL CHECK (entry_type IN ('job', 'drive', 'break', 'admin')),
+      clocked_in_at TIMESTAMPTZ NOT NULL,
+      clocked_out_at TIMESTAMPTZ,
+      duration_minutes INTEGER,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_user
+      ON time_entries(tenant_id, user_id, clocked_in_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_job
+      ON time_entries(tenant_id, job_id) WHERE job_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_time_entries_one_active_per_user
+      ON time_entries(tenant_id, user_id) WHERE clocked_out_at IS NULL;
+    ALTER TABLE time_entries ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE time_entries FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_time_entries ON time_entries;
+    CREATE POLICY tenant_isolation_time_entries ON time_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 
