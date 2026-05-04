@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { vi } from 'vitest';
 import {
   decodeClerkToken,
   bootstrapTenant,
@@ -175,6 +176,42 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
       });
       expect(result.created).toBe(true);
       expect(result.tenantId).toBeTruthy();
+    });
+
+    it('validation — rejects malformed signup email', async () => {
+      await expect(bootstrapTenant('user_1', 'not-an-email', mockRepo)).rejects.toThrow(
+        'Invalid signup email format'
+      );
+    });
+
+    it('validation — rejects malformed signup phone when provided', async () => {
+      await expect(
+        bootstrapTenant('user_1', 'test@example.com', mockRepo, {
+          onboardingContact: { phone: '415-555-0123' },
+        })
+      ).rejects.toThrow('Invalid signup phone format');
+    });
+
+    it('anti-fraud — blocks tenant creation when fraud hook denies signup', async () => {
+      const fraudCheck = vi.fn().mockResolvedValue({ allowed: false, reason: 'high email risk score' });
+      await expect(
+        bootstrapTenant('user_1', 'test@example.com', mockRepo, {
+          onboardingContact: { phone: '+14155550123' },
+          fraudCheck,
+        })
+      ).rejects.toThrow('Signup blocked by anti-fraud checks: high email risk score');
+      expect(fraudCheck).toHaveBeenCalledWith({
+        userId: 'user_1',
+        email: 'test@example.com',
+        phone: '+14155550123',
+      });
+    });
+
+    it('anti-fraud — allows tenant creation when fraud hook approves signup', async () => {
+      const fraudCheck = vi.fn().mockResolvedValue({ allowed: true });
+      const result = await bootstrapTenant('user_1', 'test@example.com', mockRepo, { fraudCheck });
+      expect(result.created).toBe(true);
+      expect(fraudCheck).toHaveBeenCalled();
     });
   });
 });
