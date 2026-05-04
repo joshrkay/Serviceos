@@ -1,246 +1,175 @@
-# Phase 12 (Supervisor / Tech Mode Switching) — Multi-Agent Dispatch Addendum
+# Phase 12 (Field Operations) — Multi-Agent Dispatch Addendum
 
-This addendum extends `docs/stories/phase-12-mode-switching-stories.md` with the metadata needed to dispatch each story to a Claude agent in an isolated worktree.
+This addendum extends `docs/stories/phase-12-gap-stories.md` with the metadata needed to dispatch each story to a Claude agent in an isolated worktree.
 
 For every story, the agent prompt should include:
-- The full body of the story from `phase-12-mode-switching-stories.md`
+- The full body of the story from `phase-12-gap-stories.md`
 - This addendum's per-story block
 - `repository-conventions.md` and `freeze-list.md` from `docs/superpowers/contracts/`
-- The full plan at `~/.claude/plans/how-would-this-affect-sorted-clock.md` (for context, not as instructions)
 
 ## Wave plan
 
 | Wave | Stories | Run-mode | Blocks |
 |---|---|---|---|
-| 12A | P12-001 | single agent (schema 063 + middleware + `/api/me`) | unlocks 12B + 12C-2 + 12C-3 |
-| 12B | P12-002 | single agent (Shell + useMe + mode-aware nav) | unlocks 12C-1 |
-| 12C-1 | P12-003 | parallel-eligible after 12B merges (ModeSwitchModal + CompressedSessionStrip) | none |
-| 12C-2 | P12-004 | parallel-eligible after 12A merges (mode-aware AI behavior) | none |
-| 12C-3 | P12-005 | parallel-eligible after 12A merges (Settings UI) | none |
-| 12D | P12-006 | last — after 12B, 12C-1, 12C-2, 12C-3 merge (4-concurrent + 50-flip harness) | none |
+| 12A | P12-005 | single agent (XS, lands in ~10 min) | unlocks 12B clean baseline |
+| 12B | P12-001, P12-002 | parallel (different domains) | unlocks 12C |
+| 12C | P12-003, P12-004 | parallel (different domains) | sprint complete |
 
-P12-001 ships alone because it touches `schema.ts` migration 063 (high blast radius — must not collide with concurrent migration adds). P12-002 ships alone because Shell.tsx is a layout-critical file. The 12C trio (003/004/005) can fan out in parallel after their respective predecessors.
+P12-005 ships alone first because it touches the LEAD_SOURCES enum (Tier-1 frozen surface) and `routes/public-portal.ts`. Tiny story, high signal, low risk — gives the bigger stories a clean main.
+
+## Migration ledger
+
+- 064: P12-001 `job_photos`
+- 065: P12-002 `time_entries`
+- 066: P12-004 `job_signatures`
+- P12-003: additive ALTER on tenant_settings (no migration number; in-place ALTER block)
+- P12-005: no migration
 
 ---
 
-## P12-001 — Schema 063 + middleware + `/api/me`
+## P12-005 — LEAD_SOURCES enum extension
 
 **Wave:** 12A
-**Migration number reserved:** `063_create_voice_sessions_and_modes`
-
+**Migration number reserved:** none
 **Forbidden files:**
-- `packages/api/src/auth/rbac.ts` (frozen)
-- `packages/shared/src/enums.ts` (Tier-1 — add `Mode` type to `packages/shared/src/types.ts` instead)
-- `packages/api/src/proposals/**` (this story does NOT change proposal behavior — that's P12-004)
-- `packages/api/src/ai/**` (touched in P12-004)
-- `packages/web/**`
+- `packages/shared/src/enums.ts` (Tier-1 — additions allowed only in `packages/api/src/leads/enums.ts`)
+- `packages/api/src/leads/lead.ts` (interface — do NOT add new fields)
+- `packages/api/src/leads/lead-service.ts`
 
-**Allowed files (concrete):**
-- `packages/api/src/db/schema.ts` (modify — add migration 063 ONLY)
-- `packages/api/src/middleware/auth.ts` (modify — extend `requireTenant` to attach `req.auth.mode`)
-- `packages/api/src/routes/me.ts` (new)
-- `packages/api/src/app.ts` (modify — mount `/api/me` router)
-- `packages/api/test/middleware/auth-mode.test.ts` (new)
-- `packages/api/test/routes/me.test.ts` (new)
-- `packages/shared/src/types.ts` (modify — add `Mode = 'supervisor'|'tech'|'both'` and `MeResponse` types)
+**Allowed files (concrete list):**
+- `packages/api/src/leads/enums.ts` (modify)
+- `packages/api/src/leads/__tests__/enums.test.ts` (new placeholder)
+- `packages/api/test/leads/enums.test.ts` (real tests)
+- `packages/api/src/routes/public-portal.ts` (modify — replace `'web_form' + sourceDetail='Customer Portal'` with `'customer_portal'`)
+- `packages/web/src/components/leads/LeadCard.tsx` (modify — add icon mapping for new source)
+- `packages/web/src/components/leads/__tests__/LeadCard.test.tsx` (modify — add render-test for customer_portal)
 
-**Verification gate (single command):**
+**Verification gate:**
 ```bash
 cd /home/user/Serviceos && \
   (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
-  (cd packages/api && npm test -- -t "P12-001|mode|/api/me|auth-mode")
+  (cd packages/api && npm test -- -t "lead source|enums|customer_portal|P12-005") && \
+  (cd packages/web && npm test -- --run -t "LeadCard|P12-005")
 ```
 
-**Pre-flight:**
-- `git fetch origin && git rev-parse origin/main` succeeds.
-- Migration 063 is NOT yet present in `packages/api/src/db/schema.ts`.
-- `tenant_settings` table has migration history through current head.
-
-**Risk notes:**
-- **Migration immutability.** The migration-immutability snapshot will hash the migration entry. Do not edit after merge — use a follow-up migration.
-- **No RBAC change.** `rbac.ts` is frozen. Mode is **not** a permission. A user with `owner` role retains full permissions in any mode.
-- **Cache window.** 60s in-process cache for `current_mode` is intentional. Document the multi-instance staleness window.
-- **One backfill.** `UPDATE users SET can_field_serve = true WHERE role = 'owner'` must run inside the same migration so existing owners can reach `tech` mode immediately.
+**Risk note:** None — purely additive enum value + UI mapping.
 
 ---
 
-## P12-002 — `useMe()` hook + Shell mode toggle + mode-aware nav
+## P12-001 — Job photos
 
 **Wave:** 12B
-**Migration number reserved:** none (frontend)
-
+**Migration number reserved:** 064_create_job_photos
 **Forbidden files:**
+- `packages/api/src/db/pg-base.ts` (frozen)
+- `packages/shared/**`
+- `packages/api/src/files/**` (READ ONLY — reuse existing file-service + storage-provider)
+- `packages/api/src/jobs/job.ts` (interface — do NOT add new fields, photos are a separate entity)
 - `packages/web/src/components/auth/**`
-- `packages/web/src/components/sessions/**` (CompressedSessionStrip is P12-003)
-- `packages/web/src/components/mode/**` (ModeSwitchModal is P12-003)
-- `packages/web/src/pages/technician/**` (mobile-first pass is the Thursday tech-mobile work)
-- `packages/web/src/pages/settings/**` (P12-005)
-- `packages/api/**`
 
-**Allowed files (concrete):**
-- `packages/web/src/hooks/useMe.ts` (new)
-- `packages/web/src/hooks/__tests__/useMe.test.ts` (new)
-- `packages/web/src/api/me.ts` (new)
-- `packages/web/src/components/layout/Shell.tsx` (modify — segmented control + mode-aware NAV/BOTTOM_NAV; replace hardcoded "Owner" label at line 125; do NOT refactor responsive behavior)
-- `packages/web/src/components/layout/__tests__/Shell-mode.test.tsx` (new)
-
-**Verification gate:**
-```bash
-cd /home/user/Serviceos && \
-  (cd packages/web && npm run typecheck) && \
-  (cd packages/web && npm test -- --run -t "useMe|Shell-mode|P12-002")
-```
-
-**Pre-flight:**
-- P12-001 merged on `origin/main`.
-- Verify `GET /api/me` returns the documented shape against a local API.
-
-**Risk notes:**
-- **Sessions / Dispatch routes may not exist yet.** Use placeholder route components; do not build the supervisor wall here.
-- **Don't break sign-out.** Shell currently wires Clerk `signOut`. Keep that path intact.
-- **Toggle visibility** — only show when `me.can_field_serve === true || me.role === 'owner'`. Hidden (not disabled) for users locked to a single mode.
-- **`data-mode` attribute** on `<body>` for CSS hooks. Don't set it as a class on the Shell root — must be `<body>` for global CSS.
-
----
-
-## P12-003 — ModeSwitchModal + CompressedSessionStrip
-
-**Wave:** 12C-1
-**Migration number reserved:** none (frontend)
-
-**Forbidden files:**
-- `packages/api/**` (frontend-only)
-- `packages/web/src/components/auth/**`
-- `packages/web/src/pages/**` (this story is components only; routes live elsewhere)
-
-**Allowed files (concrete):**
-- `packages/web/src/components/mode/ModeSwitchModal.tsx` (new)
-- `packages/web/src/components/mode/__tests__/ModeSwitchModal.test.tsx` (new)
-- `packages/web/src/components/sessions/CompressedSessionStrip.tsx` (new)
-- `packages/web/src/components/sessions/__tests__/CompressedSessionStrip.test.tsx` (new)
-- `packages/web/src/hooks/useActiveSessions.ts` (new — stub OK if WS isn't yet in main)
-- `packages/web/src/components/layout/Shell.tsx` (modify — wire modal into mode-toggle flow; render strip when `mode === 'both'`)
-
-**Verification gate:**
-```bash
-cd /home/user/Serviceos && \
-  (cd packages/web && npm run typecheck) && \
-  (cd packages/web && npm test -- --run -t "ModeSwitchModal|CompressedSessionStrip|P12-003")
-```
-
-**Pre-flight:**
-- P12-002 merged on `origin/main`.
-
-**Risk notes:**
-- **WS may not exist.** `useActiveSessions` ships as a stub returning `[]` if no transport exists. Document the swap-in TODO in a code comment.
-- **Modal suppression rules.** `tech → both` and `both → supervisor` skip the modal (gentler transitions). `supervisor → tech` and `both → tech` always show it.
-- **Strip click target** must be ≥ 44×44 px (mobile tap target).
-
----
-
-## P12-004 — Mode-aware AI behavior
-
-**Wave:** 12C-2
-**Migration number reserved:** none
-
-**Forbidden files:**
-- `packages/api/src/auth/rbac.ts`
-- `packages/api/src/db/schema.ts`
-- `packages/api/src/middleware/**` (P12-001 owns)
-- `packages/api/src/routes/**`
-- `packages/web/**`
-
-**Allowed files (concrete):**
-- `packages/api/src/proposals/auto-approve.ts` (new — pure helper)
-- `packages/api/src/proposals/lifecycle.ts` (modify — call helper at the existing decision point; do NOT refactor FSM)
-- `packages/api/src/ai/supervisor-presence.ts` (new)
-- `packages/api/src/ai/skills/escalate-to-human.ts` (modify — branch on `isSupervisorPresent` for emergency-intent immediate-Dial)
-- `packages/api/test/proposals/auto-approve.test.ts` (new)
-- `packages/api/test/ai/supervisor-presence.test.ts` (new)
-- `packages/api/test/ai/skills/escalate-to-human-unsupervised.test.ts` (new)
+**Allowed files:** as listed in story.
 
 **Verification gate:**
 ```bash
 cd /home/user/Serviceos && \
   (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
-  (cd packages/api && npm test -- -t "P12-004|auto-approve|supervisor-presence|escalate-to-human-unsupervised")
+  (cd packages/api && npm test -- -t "job-photo|P12-001") && \
+  (cd packages/web && npm test -- --run -t "JobPhoto|P12-001")
 ```
 
-**Pre-flight:**
-- P12-001 merged.
-- Confirm existing `lifecycle.ts` decision point for auto-execution.
+**Risk note:**
+- **Direct-to-S3 upload**: photos MUST NOT proxy through API. Use existing presigned-PUT pattern from S3StorageProvider.
+- **EXIF stripping**: server should strip GPS/EXIF from server-side validation (don't trust client). Document if deferred.
+- **Mobile camera**: `<input type="file" accept="image/*" capture="environment">` works on iOS Safari + Android Chrome. Verify in dev.
+- **Image size cap**: enforce 10MB per file at presign-time.
 
-**Risk notes:**
-- **Threshold inequality.** Use `confidence >= threshold` consistently. Test boundary equality.
-- **One-tap re-approve link.** Reuse `estimate.view_token` style HMAC; single-use; TTL ≤ 30 min.
-- **Don't rewrite the FSM.** Add the threshold call at one decision point.
-- **Audit emission** must use existing `pg-audit.ts` insert pattern; do not introduce a new audit table.
+**Implementation hints:**
+1. Read `packages/api/src/files/file-service.ts` for the existing upload pattern.
+2. Mirror `notes` repo shape — file is the "blob", job_photos row is the metadata join.
+3. UI: gallery uses CSS grid; upload via FormData → presigned URL.
 
 ---
 
-## P12-005 — Settings UI: backup supervisor + routing
+## P12-002 — Tech time tracking
 
-**Wave:** 12C-3
-**Migration number reserved:** none
-
+**Wave:** 12B
+**Migration number reserved:** 065_create_time_entries
 **Forbidden files:**
-- `packages/api/src/db/schema.ts` (P12-001 already added the columns)
-- `packages/api/src/auth/rbac.ts`
-- `packages/api/src/middleware/**`
-- `packages/web/src/components/layout/**`
+- `packages/api/src/db/pg-base.ts`
+- `packages/shared/**`
+- `packages/api/src/auth/rbac.ts` (use existing role check inline)
+- `packages/api/src/jobs/**` (READ ONLY — link by job_id)
+- `packages/api/src/customers/**`
+- `packages/web/src/components/auth/**`
 
-**Allowed files (concrete):**
-- `packages/web/src/pages/settings/SettingsPage.tsx` (modify — add section at bottom; do NOT refactor existing sections)
-- `packages/web/src/pages/settings/__tests__/SettingsPage-mode.test.tsx` (new)
-- `packages/web/src/api/tenant-settings.ts` (modify if exists; otherwise new)
-- `packages/api/src/routes/tenant.ts` (modify — accept the two new fields in the PATCH body; validate enum)
-- `packages/api/test/routes/tenant-settings-mode.test.ts` (new)
+**Allowed files:** as listed in story.
 
 **Verification gate:**
 ```bash
 cd /home/user/Serviceos && \
-  (cd packages/web && npm run typecheck) && \
-  (cd packages/web && npm test -- --run -t "SettingsPage-mode|P12-005") && \
   (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
-  (cd packages/api && npm test -- -t "P12-005|tenant-settings-mode")
+  (cd packages/api && npm test -- -t "time-entry|time-tracking|clock|P12-002") && \
+  (cd packages/web && npm test -- --run -t "ClockInOut|WeeklyHours|P12-002")
 ```
 
-**Pre-flight:**
-- P12-001 merged.
-
-**Risk notes:**
-- **Owner-only section.** Gate visibility on `me.role === 'owner'` and the existing PATCH route's permission.
-- **Don't touch other settings sections.** Append only.
+**Risk note:**
+- **Single-active-entry constraint**: enforce server-side by querying `WHERE clocked_out_at IS NULL AND user_id = $1` before insert; if found, auto-close before opening new.
+- **Timezone handling**: weekly rollup uses tenant timezone, not UTC.
+- **Role guard**: tech can only operate on own user_id; owner can operate on any.
 
 ---
 
-## P12-006 — Tests + 50-flip / 4-session concurrency harness
+## P12-003 — Geofence arrival ETA
 
-**Wave:** 12D
-
+**Wave:** 12C
+**Migration number reserved:** none (additive ALTER on tenant_settings)
 **Forbidden files:**
-- `packages/api/src/**` (no source changes; this is the launch gate)
-- `packages/web/src/**`
+- `packages/api/src/db/pg-base.ts`
+- `packages/api/src/notifications/**` (READ ONLY — call existing send-service)
+- `packages/api/src/telemetry/technician-location-ping.ts` (READ ONLY)
+- `packages/api/src/appointments/**` (READ ONLY)
+- `packages/shared/**`
 
-**Allowed files (concrete):**
-- `qa-runner/scenarios/concurrent-supervisor.ts` (new)
-- `qa-runner/scenarios/mode-switch-during-sessions.ts` (new)
-- `qa-runner/config/p12-mode-switch.yaml` (new)
-- `qa-runner/README.md` (modify — add P12 section)
-- `packages/api/test/integration/mode-switch-no-bleed.test.ts` (new — supertest version for CI)
+**Allowed files:** as listed in story.
 
 **Verification gate:**
 ```bash
 cd /home/user/Serviceos && \
-  (cd qa-runner && npm run scenario -- mode-switch-during-sessions) && \
-  (cd qa-runner && npm run scenario -- concurrent-supervisor) && \
-  (cd packages/api && npm test -- -t "P12-006|mode-switch-no-bleed")
+  (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
+  (cd packages/api && npm test -- -t "arrival-eta|geofence|P12-003") && \
+  (cd packages/web && npm test -- --run -t "ArrivalEta|P12-003")
 ```
 
-**Pre-flight:**
-- P12-001 through P12-005 merged.
+**Risk note:**
+- **Stale ping protection**: ignore pings older than 5 min. Don't fire if last ping age > threshold.
+- **SMS rate-limit**: max 1 ETA SMS per appointment per 15 min (in-memory dedup at v1; document HA need).
+- **Disabled tenant**: feature flag must short-circuit at the worker entry; no DB queries when disabled.
+- **Worker pattern**: mirror `recurring-agreements-worker.ts` (P9-003) for the periodic loop.
 
-**Risk notes:**
-- **Cost.** Document approximate LLM cost per run; default to test-mode provider.
-- **CI vs. local.** Heavy harness runs locally; lightweight integration test runs in CI.
-- **Pass criteria are launch gate** — failures here block ship, not hide.
+---
+
+## P12-004 — Customer signature on job completion
+
+**Wave:** 12C
+**Migration number reserved:** 066_create_job_signatures
+**Forbidden files:**
+- `packages/api/src/db/pg-base.ts`
+- `packages/shared/**`
+- `packages/api/src/estimates/**` (READ ONLY — mirror their signature pattern)
+- `packages/api/src/jobs/job.ts` (interface — do NOT add fields)
+- `packages/web/src/components/customer/EstimateApprovalPage.tsx` (READ ONLY — copy the signature canvas pattern; do NOT refactor it)
+
+**Allowed files:** as listed in story.
+
+**Verification gate:**
+```bash
+cd /home/user/Serviceos && \
+  (cd packages/api && npx tsc --project tsconfig.build.json --noEmit) && \
+  (cd packages/api && npm test -- -t "signature|job-signature|P12-004") && \
+  (cd packages/web && npm test -- --run -t "Signature|JobCompletion|P12-004")
+```
+
+**Risk note:**
+- **SVG sanitization**: signature_svg accepts only path data (`M L H V Z`-style), no `<script>` or external refs. Validate via Zod or a minimal allowlist regex.
+- **Storage**: SVG path strings are typically <5kb; do NOT store as image blob.
+- **Mobile drawing**: pointer events (not touch + mouse separately) — single event model.

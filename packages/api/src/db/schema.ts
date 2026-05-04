@@ -1633,14 +1633,99 @@ export const MIGRATIONS = {
       USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // P12-001 — Persistent FSM state for AI operator instances + per-user
-  // current_mode + tenant-level backup-supervisor / unsupervised routing.
+  // Phase 4c: language detection telemetry for the inbound AI CSR.
+  // (Restored verbatim from origin/main; main's three migrations
+  // 063/064/065 must travel as a unit alongside any new migration on
+  // this branch.)
+  '063_language_detection': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS detected_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_lang
+      ON voice_recordings (tenant_id, detected_language)
+      WHERE detected_language IS NOT NULL;
+
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT;
+
+    ALTER TABLE retrieval_eval_runs
+      ADD COLUMN IF NOT EXISTS detected_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_lang
+      ON retrieval_eval_runs (tenant_id, detected_language, created_at DESC)
+      WHERE detected_language IS NOT NULL;
+  `,
+
+  // P12-001 (Field Operations): per-job photo storage. Restored from
+  // origin/main.
+  '064_create_job_photos': `
+    CREATE TABLE IF NOT EXISTS job_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      uploaded_by_user_id TEXT NOT NULL,
+      file_id UUID NOT NULL REFERENCES files(id),
+      category TEXT NOT NULL CHECK (category IN ('before','after','problem','completion','other')),
+      notes TEXT,
+      taken_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_photos_tenant_job ON job_photos(tenant_id, job_id);
+    ALTER TABLE job_photos ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_photos FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_photos ON job_photos;
+    CREATE POLICY tenant_isolation_job_photos ON job_photos
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P10-001: Customer self-service portal sessions. Restored from
+  // origin/main.
+  '065_create_portal_sessions': `
+    CREATE TABLE IF NOT EXISTS portal_sessions (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      last_accessed_at TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_token_hash
+      ON portal_sessions (token_hash);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_tenant
+      ON portal_sessions (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_customer
+      ON portal_sessions (tenant_id, customer_id);
+    ALTER TABLE portal_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
+    -- Tenant-scoped reads/writes (most paths) match the active GUC. The
+    -- system-level token-hash lookup (resolvePortalToken) runs without
+    -- a tenant context — that's literally what it returns — so the
+    -- policy permits the read when the GUC is unset. The lookup is
+    -- still safe because the candidate row is selected by sha256 hash.
+    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
+      USING (
+        current_setting('app.current_tenant_id', true) IS NULL
+        OR current_setting('app.current_tenant_id', true) = ''
+        OR tenant_id::text = current_setting('app.current_tenant_id', true)
+      );
+  `,
+
+  // P12-001 (Supervisor / Tech Mode Switching) — persistent FSM state
+  // for AI operator instances + per-user current_mode + tenant-level
+  // backup-supervisor / unsupervised routing.
+  //
+  // Originally landed as 063_create_voice_sessions_and_modes on the
+  // p12-mode-switching branch; bumped to 066 on merge with main because
+  // 063_language_detection (Phase 4c), 064_create_job_photos (P12 Field
+  // Operations), and 065_create_portal_sessions (P10-001) claimed 063–065
+  // on main before this branch merged.
   //
   // Idempotent: every CREATE / ALTER uses IF NOT EXISTS, the policy is
   // dropped before recreate. The migration-immutability snapshot will
   // hash this entry; do NOT mutate after merge — use a follow-up
-  // migration (064+) for any change.
-  '063_create_voice_sessions_and_modes': `
+  // migration (067+) for any change.
+  '066_create_voice_sessions_and_modes': `
     -- voice_sessions: persistent FSM state per AI operator instance
     CREATE TABLE IF NOT EXISTS voice_sessions (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
