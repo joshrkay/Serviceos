@@ -50,8 +50,31 @@ import type {
   ConditionalPhrase,
   FalsePositiveGuard,
 } from './triage-rules.schema';
+import {
+  PARAMETRIC_ATOM_PATTERNS,
+  STATIC_ATOMS,
+  type StaticAtom,
+} from './condition-grammar';
 
-export type UrgencyTier = TierKey;
+/**
+ * Phase 4d-1 review carryover (Issue #1): explicit ambiguous tier so
+ * the FSM consumer cannot accidentally route a guard-matched call
+ * straight to dispatch.
+ *
+ * `AMBIGUOUS_NEEDS_CLARIFICATION` means the classifier matched a
+ * trigger phrase that LOOKS like an emergency but the false-positive
+ * guard says "in this context, it's likely benign" (heat-pump defrost
+ * misread as steam from a fire). The FSM MUST ask the
+ * `falsePositiveGuard.clarification` question and re-classify before
+ * routing — booking the customer onto the schedule based on this
+ * outcome would be exactly the kind of silent failure that motivated
+ * the 5-tier change.
+ *
+ * Carries strictly higher operational priority than TIER_4 because
+ * the customer is engaged enough to describe a symptom; should NOT
+ * be merged with TIER_4 in dashboards.
+ */
+export type UrgencyTier = TierKey | 'AMBIGUOUS_NEEDS_CLARIFICATION';
 
 export interface UrgencyContext {
   /** Optional caller / location context. All fields optional — when
@@ -103,9 +126,13 @@ export interface UrgencyClassification {
 }
 
 const TIER_PRIORITY: Record<UrgencyTier, number> = {
-  TIER_1_EVACUATE: 4,
-  TIER_2_EMERGENCY_DISPATCH: 3,
-  TIER_3_SAME_DAY_URGENT: 2,
+  TIER_1_EVACUATE: 5,
+  TIER_2_EMERGENCY_DISPATCH: 4,
+  TIER_3_SAME_DAY_URGENT: 3,
+  // Ambiguous outranks routine schedule because the customer reported a
+  // potentially-urgent symptom — we just don't know yet. Forces the FSM
+  // to ask the clarifier instead of silently treating as routine.
+  AMBIGUOUS_NEEDS_CLARIFICATION: 2,
   TIER_4_SCHEDULE: 1,
 };
 
@@ -119,12 +146,22 @@ export function classifyUrgencyTier(
   // ── Step 1: false-positive guards. A phrase that looks like an
   // emergency may be benign in context. Run first so we don't escalate
   // before checking.
+  //
+  // Phase 4d-1 review (Issue #1): return AMBIGUOUS_NEEDS_CLARIFICATION
+  // instead of TIER_4. The FSM has to handle this as a distinct state
+  // — ask the `clarification` question, then re-classify with the
+  // customer's answer in `context`. Routing AMBIGUOUS straight to the
+  // schedule path would silently miss real emergencies hiding behind a
+  // benign-looking pattern (the dust-burnoff case is the canonical
+  // example: smells like fire, IS sometimes fire).
   const fpGuard = matchFalsePositiveGuard(utterance, rules.false_positive_guards, ctx);
   if (fpGuard) {
     return {
-      tier: 'TIER_4_SCHEDULE',
+      tier: 'AMBIGUOUS_NEEDS_CLARIFICATION',
       matchedPhrases: [fpGuard.trigger_phrase],
-      rationale: `False-positive guard matched: ${fpGuard.classification}. ${fpGuard.action}`,
+      rationale:
+        `Ambiguous: trigger phrase matched but a false-positive guard fires in this context (${fpGuard.classification}). ` +
+        `FSM must ask the clarifier and re-classify before routing.`,
       requiresEvacuation: false,
       falsePositiveGuard: {
         classification: fpGuard.classification,
@@ -134,7 +171,7 @@ export function classifyUrgencyTier(
   }
 
   // ── Step 2: walk tiers high-to-low; collect the highest match.
-  let bestTier: UrgencyTier | undefined;
+  let bestTier: TierKey | undefined;
   const matched: string[] = [];
   let tierResponseScript: string | undefined;
 
@@ -212,7 +249,9 @@ export function classifyUrgencyTier(
   };
 }
 
-const TIER_ORDER: UrgencyTier[] = [
+// Walked top-down at step 2; AMBIGUOUS_NEEDS_CLARIFICATION is NOT
+// included because it's only reachable via a guard match (step 1).
+const TIER_ORDER: TierKey[] = [
   'TIER_1_EVACUATE',
   'TIER_2_EMERGENCY_DISPATCH',
   'TIER_3_SAME_DAY_URGENT',
@@ -254,7 +293,7 @@ function guardContextMatches(guardContext: string, ctx: UrgencyContext): boolean
 function resolveConditionalTier(
   cond: ConditionalPhrase,
   ctx: UrgencyContext,
-): UrgencyTier | undefined {
+): TierKey | undefined {
   if (cond.condition === 'any') {
     return cond.escalate_to;
   }
@@ -312,33 +351,63 @@ function splitTopLevelAnd(expr: string): string[] {
   return parts;
 }
 
+/**
+ * Lookup table from static atom name → context predicate. Kept in
+ * sync with `STATIC_ATOMS` in `condition-grammar.ts` (the schema's
+ * source of truth) — adding an atom there must be paired with an entry
+ * here, otherwise the schema accepts a rule that the evaluator can
+ * never make true. The TypeScript `Record<StaticAtom, ...>` type
+ * enforces exhaustiveness at compile time.
+ */
+const STATIC_ATOM_EVALUATORS: Record<StaticAtom, (ctx: UrgencyContext) => boolean> = {
+  elderly: (ctx) => ctx.hasElderly === true,
+  infant: (ctx) => ctx.hasInfant === true,
+  medical_equipment_in_home: (ctx) => ctx.hasMedicalEquipment === true,
+  single_family_home: (ctx) => ctx.isSingleFamilyHome === true,
+  winter: (ctx) => ctx.season === 'winter',
+  summer: (ctx) => ctx.season === 'summer',
+};
+
 function evaluateAtom(atom: string, ctx: UrgencyContext): boolean {
   const a = atom.trim().toLowerCase();
-  // Temperature predicates
-  const tempBelow = a.match(/^outdoor_temp_below_(\d+)f$/);
-  if (tempBelow) return ctx.outdoorTempF !== undefined && ctx.outdoorTempF < Number(tempBelow[1]);
-  const tempAbove = a.match(/^outdoor_temp_above_(\d+)f$/);
-  if (tempAbove) return ctx.outdoorTempF !== undefined && ctx.outdoorTempF > Number(tempAbove[1]);
-  const indoorBelow = a.match(/^indoor_temp_below_(\d+)f$/);
-  if (indoorBelow) return ctx.indoorTempF !== undefined && ctx.indoorTempF < Number(indoorBelow[1]);
 
-  // Boolean attributes
-  if (a === 'elderly') return ctx.hasElderly === true;
-  if (a === 'infant') return ctx.hasInfant === true;
-  if (a === 'medical_equipment_in_home') return ctx.hasMedicalEquipment === true;
-  if (a === 'single_family_home') return ctx.isSingleFamilyHome === true;
-  if (a === 'winter') return ctx.season === 'winter';
-  if (a === 'summer') return ctx.season === 'summer';
+  // Parametric atoms first — extract the numeric threshold via the
+  // shared pattern catalogue and apply the appropriate predicate.
+  for (const { regex } of PARAMETRIC_ATOM_PATTERNS) {
+    const m = a.match(regex);
+    if (!m) continue;
+    const threshold = Number(m[1]);
+    if (regex.source.includes('outdoor_temp_below')) {
+      return ctx.outdoorTempF !== undefined && ctx.outdoorTempF < threshold;
+    }
+    if (regex.source.includes('outdoor_temp_above')) {
+      return ctx.outdoorTempF !== undefined && ctx.outdoorTempF > threshold;
+    }
+    if (regex.source.includes('indoor_temp_below')) {
+      return ctx.indoorTempF !== undefined && ctx.indoorTempF < threshold;
+    }
+  }
 
+  // Static atoms via the shared evaluator table.
+  if (a in STATIC_ATOM_EVALUATORS) {
+    return STATIC_ATOM_EVALUATORS[a as StaticAtom](ctx);
+  }
+
+  // Unknown atom: schema validation should have caught this at boot,
+  // so we treat reaching here as a defect rather than a silent false.
+  // Defensive: still return false so a hot-path bug doesn't crash a
+  // call, but log via the eval-trail when one's wired in 4d-2.
+  // eslint-disable-next-line no-console
+  console.warn('classify-urgency-tier: unknown atom at runtime', { atom: a });
   return false;
 }
 
 function applySeasonalAdjustments(
-  currentTier: UrgencyTier | undefined,
+  currentTier: TierKey | undefined,
   ctx: UrgencyContext,
   utterance: string,
   rules: TriageRules,
-): UrgencyTier | undefined {
+): TierKey | undefined {
   if (!rules.seasonal_adjustments || !ctx.season) return undefined;
   const matchingRule = rules.seasonal_adjustments.find((r) => r.season === ctx.season);
   if (!matchingRule) return undefined;
@@ -373,6 +442,9 @@ function buildRationale(
   matched: string[],
   multiFixture: boolean,
 ): string {
+  if (tier === 'AMBIGUOUS_NEEDS_CLARIFICATION') {
+    return 'Trigger phrase matched but a false-positive guard fires; needs clarification before routing.';
+  }
   if (tier === 'TIER_4_SCHEDULE' && matched.length === 0) {
     return 'No urgency triggers matched; classified as routine schedule.';
   }
