@@ -70,6 +70,19 @@ export class AgentEventBus {
     return this.observed;
   }
 
+  /**
+   * Append an externally-synthesized event directly to the captured
+   * log. Used by the harness runner to stamp a `session_terminated
+   * { cause: 'completed' }` event for clean (non-hangup) script ends —
+   * the production driver only emits `session_terminated` for
+   * hangup/cost-cap paths, and the runner doesn't hold a session ref
+   * after `endSession()` runs. Callers must be content with appending
+   * AFTER any subscribed-session events that have already arrived.
+   */
+  record(event: VoiceSessionEvent): void {
+    this.observed.push(event);
+  }
+
   /** Reset the captured log. Subscriptions are preserved. */
   clear(): void {
     this.observed = [];

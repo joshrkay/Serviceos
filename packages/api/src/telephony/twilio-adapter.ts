@@ -31,10 +31,14 @@ import { lookupBalance } from '../ai/skills/lookup-balance';
 import { lookupJobs } from '../ai/skills/lookup-jobs';
 import { lookupAgreements } from '../ai/skills/lookup-agreements';
 import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
+import { lookupCustomer } from '../ai/skills/lookup-customer';
+import { lookupEstimates } from '../ai/skills/lookup-estimates';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { AgreementRepository } from '../agreements/agreement';
+import type { CustomerRepository } from '../customers/customer';
+import type { EstimateRepository } from '../estimates/estimate';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
@@ -135,6 +139,9 @@ export interface TwilioAdapterDeps {
   appointmentRepo?: AppointmentRepository;
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
+  /** VQ-006: read-only customer + estimate lookups. */
+  customerRepo?: CustomerRepository;
+  estimateRepo?: EstimateRepository;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
 }
@@ -207,9 +214,18 @@ interface BuildTwimlOpts {
    * undefined.
    */
   recordingStatusCallback?: string;
+  /**
+   * P11-002: spoken-output language. Drives both the `<Say voice=...>`
+   * Polly voice selection and the `<Gather language=...>` STT hint
+   * so Twilio's built-in recognizer picks the right phonetic model.
+   */
+  language?: 'en' | 'es';
 }
 
-const GATHER_VOICE = 'Polly.Joanna';
+const GATHER_VOICE_EN = 'Polly.Joanna';
+const GATHER_VOICE_ES = 'Polly.Mia-Neural';
+const GATHER_LOCALE_EN = 'en-US';
+const GATHER_LOCALE_ES = 'es-US';
 
 /**
  * Translate FSM side effects into a TwiML string.
@@ -256,7 +272,8 @@ export function buildTwiML(
       // audible feedback rather than silence; a real prompt registry is a
       // follow-up.
       const sayText = text.length > 0 ? text : '...';
-      parts.push(`<Say voice="${GATHER_VOICE}">${xmlEscape(sayText)}</Say>`);
+      const voice = opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN;
+      parts.push(`<Say voice="${voice}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       parts.push('<Hangup/>');
       ended = true;
@@ -273,8 +290,11 @@ export function buildTwiML(
 
   if (!ended) {
     // Loop back to <Gather> so the caller can speak the next turn.
+    // P11-002: thread the session language to Twilio's built-in STT so
+    // Spanish callers don't get transcribed against the English model.
+    const gatherLang = opts.language === 'es' ? GATHER_LOCALE_ES : GATHER_LOCALE_EN;
     parts.push(
-      `<Gather input="speech" speechTimeout="auto" action="${xmlEscape(
+      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" action="${xmlEscape(
         opts.gatherActionUrl
       )}" method="POST"/>`
     );
@@ -1196,6 +1216,46 @@ export class TwilioGatherAdapter {
             appointmentRepo: this.deps.appointmentRepo,
             invoiceRepo: this.deps.invoiceRepo,
             agreementRepo: this.deps.agreementRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_customer': {
+          if (!this.deps.customerRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          // The caller is already identity-resolved (customerId in
+          // session) — use that as the fuzzy-lookup target so the
+          // skill returns the record matching this caller, not a
+          // free-form fuzzy phone search.
+          const result = await lookupCustomer(
+            {
+              tenantId,
+              identifier: { type: 'id', value: customerId },
+              sessionId: session.id,
+            },
+            {
+              customerRepo: this.deps.customerRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_estimates': {
+          if (!this.deps.jobRepo || !this.deps.estimateRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupEstimates(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            estimateRepo: this.deps.estimateRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
           session.events.emit(

@@ -26,3 +26,6 @@ coverage/
 !/qa/artifacts/.gitkeep
 /qa/reports/*/
 !/qa/reports/.gitkeep
+
+# Voice Quality v1 corpus runner — generated JSON report (VQ-009)
+packages/api/voice-quality-report.json

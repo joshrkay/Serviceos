@@ -326,9 +326,10 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       const noteParts = [parsed.summary];
       if (parsed.notes) noteParts.push(parsed.notes);
 
-      // 'customer_portal' is not in LEAD_SOURCES (and enums.ts is frozen).
-      // Use 'web_form' with a sourceDetail tag so analytics can still
-      // distinguish portal-originated leads from generic intake-form ones.
+      // P12-005: 'customer_portal' is now a first-class LEAD_SOURCES value
+      // so we drop the prior workaround (`source='web_form' +
+      // sourceDetail='Customer Portal'`) in favor of the dedicated enum.
+      // The DB CHECK constraint accepts it via migration 068.
       const lead = await createLead(
         {
           tenantId,
@@ -337,8 +338,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           companyName: parsed.companyName ?? customer.companyName,
           primaryPhone: parsed.primaryPhone ?? customer.primaryPhone,
           email: parsed.email ?? customer.email,
-          source: 'web_form',
-          sourceDetail: 'Customer Portal',
+          source: 'customer_portal',
           notes: noteParts.join('\n\n'),
           createdBy: `portal:customer:${customerId}`,
           actorRole: 'customer_portal',

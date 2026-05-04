@@ -123,6 +123,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // main claimed 063–065 first.
   ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
+  ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
+  ['069_extend_leads_source_check', '12bbc1a8418385bed45dd66e9429700f82626b5f09c6752d195dac9cf87fdd84'],
 ];
 
 function hashMigration(value: string): string {

@@ -44,7 +44,8 @@ export interface Customer {
    * only the column + type; the FSM hint that consumes it is Phase 4d
    * once we have ASR-provider language-bias plumbing). Optional —
    * unset means "no preference recorded" and the FSM falls back to
-   * detect-from-first-utterance.
+   * detect-from-first-utterance. P11-002 voice flows narrow this at
+   * the call-site to 'en' | 'es' for runtime catalog lookups.
    */
   preferredLanguage?: string;
   createdBy: string;
@@ -119,6 +120,29 @@ export interface CustomerRepository {
   findDuplicates?(
     tenantId: string,
     criteria: { phone?: string; email?: string }
+  ): Promise<Customer[]>;
+  /**
+   * VQ-006 follow-up (PR #265 review): push the lookup-by-phone filter
+   * down to the repository so we don't fetch every tenant row to filter
+   * in-memory by last-10-digits. The argument is a normalized digits-
+   * only string (see `normalizePhone` in dedup.ts); implementations
+   * MUST scope by tenantId first (defense-in-depth on top of RLS).
+   *
+   * Matching semantics: returns rows whose `phone_normalized` ends with
+   * the supplied digits (or where the supplied digits end with the
+   * stored value, for tolerant short-vs-long matching). This mirrors
+   * the previous in-memory tail comparison so caller-ID resolution
+   * keeps working across `+15551234567` / `5551234567` / `(555) 123-4567`.
+   *
+   * Includes archived rows so callers (e.g. `lookup_customer`) decide.
+   *
+   * Optional on the interface so existing CustomerRepository test
+   * fakes keep type-checking — `lookup_customer` falls back to the
+   * old findByTenant path when this method is missing.
+   */
+  findByPhoneNormalized?(
+    tenantId: string,
+    phoneNormalized: string
   ): Promise<Customer[]>;
 }
 
@@ -489,6 +513,30 @@ export class InMemoryCustomerRepository implements CustomerRepository {
             (c.email && c.email.toLowerCase().includes(q)) ||
             (c.primaryPhone && c.primaryPhone.includes(q)))
       )
+      .map((c) => ({ ...c }));
+  }
+
+  /**
+   * VQ-006 follow-up (PR #265): in-memory mirror of the Pg phone lookup.
+   * Tenant-scope FIRST, then match against the normalized digits using
+   * the same tolerant-tail semantics as the pre-refactor lookup-customer
+   * skill: stored.endsWith(target) || target.endsWith(stored). Includes
+   * archived rows so callers can decide. Returns multiple matches when
+   * a phone is shared (e.g. household lines).
+   */
+  async findByPhoneNormalized(
+    tenantId: string,
+    phoneNormalized: string
+  ): Promise<Customer[]> {
+    if (!phoneNormalized || phoneNormalized.length < 7) return [];
+    const target = phoneNormalized.slice(-10);
+    return Array.from(this.customers.values())
+      .filter((c) => c.tenantId === tenantId)
+      .filter((c) => {
+        if (!c.primaryPhone) return false;
+        const stored = normalizePhone(c.primaryPhone);
+        return stored.endsWith(target) || target.endsWith(stored);
+      })
       .map((c) => ({ ...c }));
   }
 

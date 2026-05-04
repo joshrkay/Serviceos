@@ -27,7 +27,8 @@ function mapRow(row: Record<string, unknown>): Customer {
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
     originatingLeadId: (row.originating_lead_id as string) ?? undefined,
-    preferredLanguage: (row.preferred_language as string | null) ?? undefined,
+    preferredLanguage:
+      (row.preferred_language as 'en' | 'es' | null | undefined) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -174,6 +175,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         originatingLeadId: 'originating_lead_id',
+        preferredLanguage: 'preferred_language',
         updatedAt: 'updated_at',
       };
 
@@ -212,6 +214,49 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
            AND (display_name ILIKE $2 OR company_name ILIKE $2 OR email ILIKE $2 OR primary_phone ILIKE $2)
          ORDER BY display_name ASC`,
         [tenantId, searchParam]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
+  /**
+   * VQ-006 follow-up (PR #265 review): repository-side phone lookup.
+   *
+   * Replaces the previous "fetch every tenant row, filter in-memory by
+   * last-10-digits" path used by the lookup_customer voice skill. The
+   * stored generated column `phone_normalized` (migration
+   * 053_p8_customers_phone_index) is digits-only, so the predicate is
+   * a parameterized comparison against the trailing-10 substring.
+   *
+   * tenant_id is the first WHERE predicate (defense-in-depth alongside
+   * RLS). Index `idx_customers_phone_normalized (tenant_id, phone_normalized)`
+   * makes the equality fast; the trailing-10 fallback is bounded to a
+   * single tenant so it's still tractable for the v1 row counts.
+   *
+   * Returns multiple rows when a phone is shared (e.g. household line)
+   * — callers decide whether to ask "which person?". Archived rows are
+   * included so the skill can confirm record info even on archived
+   * customers.
+   */
+  async findByPhoneNormalized(
+    tenantId: string,
+    phoneNormalized: string
+  ): Promise<Customer[]> {
+    if (!phoneNormalized || phoneNormalized.length < 7) return [];
+    const tail = phoneNormalized.slice(-10);
+    return this.withTenant(tenantId, async (client) => {
+      // Match either:
+      //   (a) phone_normalized ends with the supplied tail (caller said
+      //       a 10-digit number; record stored with country prefix), or
+      //   (b) the supplied tail ends with phone_normalized (caller had
+      //       a country prefix; record stored without).
+      const result = await client.query(
+        `SELECT * FROM customers
+         WHERE tenant_id = $1
+           AND phone_normalized IS NOT NULL
+           AND phone_normalized <> ''
+           AND (right(phone_normalized, 10) = $2 OR $2 LIKE '%' || phone_normalized)`,
+        [tenantId, tail]
       );
       return result.rows.map(mapRow);
     });

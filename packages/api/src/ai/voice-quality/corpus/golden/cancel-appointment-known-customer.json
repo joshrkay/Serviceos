@@ -1,0 +1,9 @@
+[
+  {
+    "proposalType": "cancel_appointment",
+    "payload": {
+      "appointmentId": "appt_02_cancel_existing",
+      "cancellationType": "customer_request"
+    }
+  }
+]

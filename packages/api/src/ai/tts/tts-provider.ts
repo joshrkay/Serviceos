@@ -20,6 +20,12 @@ export interface TtsSynthesizeInput {
   voice?: string;
   /** Optional per-tenant id for cost accounting and routing. */
   tenantId?: string;
+  /**
+   * P11-002: language code for the text being synthesized. Threads through
+   * to provider-specific voice/model selection (ElevenLabs multilingual
+   * model, OpenAI tts-1 with es voice). Defaults to 'en' downstream.
+   */
+  language?: 'en' | 'es';
 }
 
 export interface TtsSynthesizeResult {
@@ -52,6 +58,10 @@ export class OpenAiTtsProvider implements TtsProvider {
   }
 
   async synthesize(input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> {
+    // P11-002: OpenAI tts-1 has no explicit language parameter, but the
+    // 'nova' voice handles Spanish more naturally than 'alloy'. Pick a
+    // language-appropriate default when the caller doesn't override.
+    const defaultVoice = input.language === 'es' ? 'nova' : 'alloy';
     const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: {
@@ -61,7 +71,7 @@ export class OpenAiTtsProvider implements TtsProvider {
       body: JSON.stringify({
         model: this.model,
         input: input.text,
-        voice: input.voice ?? 'alloy',
+        voice: input.voice ?? defaultVoice,
         response_format: 'mp3',
       }),
     });
@@ -96,6 +106,11 @@ export class ElevenLabsTtsProvider implements TtsProvider {
   }
 
   async synthesize(input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> {
+    // P11-002: ElevenLabs Spanish synthesis uses the multilingual model.
+    // Caller-supplied language='es' upgrades the model id automatically;
+    // English falls back to the constructor default (turbo).
+    const modelId =
+      input.language === 'es' ? 'eleven_multilingual_v2' : this.modelId;
     const res = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`,
       {
@@ -107,7 +122,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
         },
         body: JSON.stringify({
           text: input.text,
-          model_id: this.modelId,
+          model_id: modelId,
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
       }

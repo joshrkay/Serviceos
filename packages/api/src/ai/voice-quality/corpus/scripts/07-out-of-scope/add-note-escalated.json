@@ -1,0 +1,50 @@
+{
+  "id": "add-note-escalated",
+  "bucket": "07-out-of-scope",
+  "callerId": "+15555550703",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_07_oos_note",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_07_note_jane",
+        "tenantId": "t_07_oos_note",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550703",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. I want to leave a note about my last service visit.",
+      "expected": {
+        "escalates": true,
+        "spokenAnswerMatches": "agent acknowledges the request to leave a note, explains that voice MVP cannot attach notes to customer records, and offers to connect Jane with someone who can help; no add_note proposal is drafted"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

@@ -2,6 +2,7 @@ import React from 'react';
 import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
+import { LanguageBadge } from '../../components/customers/LanguageBadge';
 
 interface Customer {
   id: string;
@@ -14,6 +15,8 @@ interface Customer {
   secondaryPhone?: string;
   preferredChannel: string;
   isArchived: boolean;
+  /** P11-002: optional spoken-language preference. */
+  preferredLanguage?: 'en' | 'es' | null;
 }
 
 interface CustomerDetailProps {
@@ -58,6 +61,25 @@ export function CustomerDetail({ customerId, onBack }: CustomerDetailProps) {
               <p>Phone: {data.primaryPhone || 'N/A'}</p>
               <p>Secondary: {data.secondaryPhone || 'N/A'}</p>
               <p>Preferred: {data.preferredChannel}</p>
+              {/* P11-002: surface the customer's spoken-language preference
+                  so dispatchers can route Spanish callers correctly. The
+                  badge renders nothing when no preference is set. */}
+              <p className="flex items-center gap-2">
+                <span>Language:</span>
+                <LanguageBadge language={data.preferredLanguage ?? null} />
+                <label className="ml-2 text-xs">
+                  <span className="sr-only">Edit preferred language</span>
+                  <select
+                    aria-label="Preferred language"
+                    defaultValue={data.preferredLanguage ?? ''}
+                    className="rounded border px-1 py-0.5 text-xs"
+                  >
+                    <option value="">—</option>
+                    <option value="en">English</option>
+                    <option value="es">Español</option>
+                  </select>
+                </label>
+              </p>
             </div>
           ),
         },

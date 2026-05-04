@@ -1,0 +1,59 @@
+# VQ-024 — Voice Quality v1 Layer 1 nightly Pg variant.
+#
+# Runs the same corpus suite as the PR-checks `voice-quality` job but
+# against a real Postgres testcontainer (VOICE_QUALITY_REPO=pg). Catches
+# Pg-specific regressions (RLS, transaction boundaries, JSONB shape)
+# that the InMemory repo bundle can't surface.
+#
+# Status: the runner currently throws on `pg` mode (per VQ-008's
+# "pg mode not yet supported" comment). This workflow file is correct
+# but will fail until pg mode lands. `continue-on-error: true` keeps
+# the schedule non-fatal until then; remove once both cassettes and
+# pg mode are ready.
+name: Voice Quality (nightly Pg)
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # 06:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  layer1-pg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Apply migrations
+        run: npm run migrate:apply --workspace=packages/api
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      - name: Run voice quality (Pg variant)
+        run: npm run voice-quality --workspace=packages/api
+        env:
+          VOICE_QUALITY_REPO: pg
+          VOICE_QUALITY_CASSETTE_MODE: replay
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        continue-on-error: true # TODO(VQ-024-followup): remove once pg mode + cassettes are ready
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-quality-nightly-report
+          path: packages/api/voice-quality-report.json

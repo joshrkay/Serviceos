@@ -1,0 +1,58 @@
+{
+  "id": "mumble-low-confidence-reprompt",
+  "bucket": "08-ambiguity",
+  "callerId": "+15555550801",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_08_ambiguity_mumble",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_08_mumble_jane",
+        "tenantId": "t_08_ambiguity_mumble",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550801",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "uhh, wnsh",
+      "expected": {
+        "spokenAnswerMatches": "agent does not classify a confident intent from the gibberish utterance; instead it reprompts the caller (e.g. 'I'm sorry, I didn't catch that — could you repeat?') and does not draft any proposal"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "I'd like to schedule.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent now classifies the booking intent and asks for the date/time; no proposal is drafted yet because slots are still missing"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}
