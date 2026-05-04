@@ -27,7 +27,7 @@ import { DeliveryError } from "./notification-errors";
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
-  authTokenSecondary?: string;
+  secondaryAuthToken?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
