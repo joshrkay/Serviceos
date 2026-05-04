@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
+import { tzMidnight } from '../shared/timezone';
 import { AuditRepository } from '../audit/audit';
 import { NegativeDurationError, TimeEntryRepository } from '../time-tracking/time-entry';
 import { TimeEntryService } from '../time-tracking/time-entry-service';
@@ -166,10 +167,13 @@ export function createTimeEntriesRouter(
         const tz = (req.query.tz as string | undefined) ?? 'UTC';
 
         if (weekOf) {
-          // Parse YYYY-MM-DD as a UTC midnight; the service interprets the
-          // window in `tz` for date-bucket assignment.
-          const weekStart = new Date(`${weekOf}T00:00:00.000Z`);
-          if (Number.isNaN(weekStart.getTime())) {
+          // weekOf is YYYY-MM-DD; resolve to the UTC instant that
+          // corresponds to 00:00 local time in tenant tz so the rollup
+          // window aligns with the tenant's calendar week.
+          let weekStart: Date;
+          try {
+            weekStart = tzMidnight(weekOf, tz);
+          } catch {
             res.status(400).json({
               error: 'VALIDATION_ERROR',
               message: 'weekOf must be a valid YYYY-MM-DD date',

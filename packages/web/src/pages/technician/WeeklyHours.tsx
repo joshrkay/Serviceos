@@ -23,21 +23,51 @@ export interface WeeklyHoursProps {
   tz?: string;
 }
 
-function previousMondayIso(d: Date = new Date()): string {
-  const dt = new Date(d);
-  const day = dt.getUTCDay(); // 0 = Sun … 6 = Sat
-  const diff = (day + 6) % 7; // days back to Monday
-  dt.setUTCDate(dt.getUTCDate() - diff);
-  return dt.toISOString().slice(0, 10);
+/**
+ * Returns the YYYY-MM-DD of the most recent Monday relative to `now`,
+ * evaluated in the given IANA tz. Using `getUTCDay` here would skew
+ * by up to a day for callers whose tz is far from UTC (Sunday evening
+ * in Los Angeles is already Monday in UTC).
+ */
+function previousMondayIsoInTz(now: Date, tz: string): string {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+  });
+  const parts = fmt.formatToParts(now).reduce<Record<string, string>>(
+    (acc, p) => {
+      if (p.type !== 'literal') acc[p.type] = p.value;
+      return acc;
+    },
+    {},
+  );
+  const dow =
+    ({ Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 } as Record<
+      string,
+      number
+    >)[parts.weekday] ?? 0;
+  const diff = (dow + 6) % 7;
+  const back = new Date(
+    Date.UTC(+parts.year, +parts.month - 1, +parts.day - diff),
+  );
+  return back.toISOString().slice(0, 10);
 }
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+/**
+ * Build 7 consecutive YYYY-MM-DD dates starting at `weekStart`. Uses
+ * Date.UTC calendar arithmetic (month/day rollover) so DST transitions
+ * don't shift dates by a day the way `+ i * 24h` would.
+ */
 function buildWeekDates(weekStart: string): string[] {
-  const start = new Date(`${weekStart}T00:00:00.000Z`);
+  const [y, m, d] = weekStart.split('-').map(Number);
   return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(start.getTime() + i * 24 * 60 * 60 * 1000);
-    return d.toISOString().slice(0, 10);
+    const dt = new Date(Date.UTC(y, m - 1, d + i));
+    return dt.toISOString().slice(0, 10);
   });
 }
 
@@ -49,7 +79,7 @@ export default function WeeklyHours({
   const fetcher = useApiClient();
   const { userId: signedInUserId } = useAuth();
   const userId = userIdOverride ?? signedInUserId ?? '';
-  const week = weekOf ?? previousMondayIso();
+  const week = weekOf ?? previousMondayIsoInTz(new Date(), tz);
   const [rollup, setRollup] = useState<WeeklyHoursRollup | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { addCalendarDays } from '../shared/timezone';
 import {
   ActiveEntryConflictError,
   EntryType,
@@ -236,7 +237,10 @@ export class TimeEntryService {
     weekStart: Date,
     tz: string
   ): Promise<WeeklyHours[]> {
-    const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+    // DST-safe: a calendar week may be 167 or 169 hours, so we can't
+    // just add 7 * 24 * 60 * 60 * 1000. addCalendarDays lands on the
+    // tz-midnight of the next Monday.
+    const weekEnd = addCalendarDays(weekStart, 7, tz);
     const entries = await this.repo.findByTenant(tenantId, {
       weekStart,
       weekEnd,

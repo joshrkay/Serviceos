@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryTimeEntryRepository } from '../../src/time-tracking/time-entry';
 import { TimeEntryService } from '../../src/time-tracking/time-entry-service';
+import { tzMidnight } from '../../src/shared/timezone';
 
 describe('P12-002 — TimeEntryService (clock-in/out + weekly rollup)', () => {
   let repo: InMemoryTimeEntryRepository;
@@ -199,12 +200,13 @@ describe('P12-002 — TimeEntryService (clock-in/out + weekly rollup)', () => {
 
   it('time-tracking weeklyHoursByUser — DST week (LA spring-forward) totals are honest', async () => {
     // Spring forward in America/Los_Angeles 2026-03-08 02:00 → 03:00.
-    // Sunday 23:00Z is 16:00 PT same day; Monday 06:00Z is 23:00 PT Sunday.
-    // Clock-in 2026-03-08 13:00Z → 06:00 PT Sunday. Clock-out 21:00Z →
-    // 14:00 PT Sunday. Across spring-forward boundary the wall-clock
-    // difference is 7h; the actual elapsed is 8h (one hour skipped).
-    // We assert ELAPSED hours, never wall-clock — the test guards against
-    // someone "fixing" the rollup by computing wall-clock deltas.
+    // Clock-in 2026-03-08 13:00Z → 06:00 PDT Sunday. Clock-out 21:00Z →
+    // 14:00 PDT. Elapsed wall-clock is 8h on either side of the
+    // transition because both timestamps are post-spring-forward.
+    // The DST guard we're testing is that weekEnd is computed via
+    // calendar arithmetic (167h, not 168h) so the entry doesn't slip
+    // out of the window; weekStart is the tz-midnight UTC instant for
+    // Mon 2026-03-02 in LA (08:00Z, PST).
     await service.clockIn('tenant-1', 'user-1', {
       entryType: 'job',
       clockedInAt: new Date('2026-03-08T13:00:00Z'),
@@ -214,7 +216,7 @@ describe('P12-002 — TimeEntryService (clock-in/out + weekly rollup)', () => {
     });
     const rollups = await service.weeklyHoursByUser(
       'tenant-1',
-      new Date('2026-03-02T00:00:00Z'),
+      tzMidnight('2026-03-02', 'America/Los_Angeles'),
       'America/Los_Angeles'
     );
     expect(rollups[0].totalHours).toBe(8);
