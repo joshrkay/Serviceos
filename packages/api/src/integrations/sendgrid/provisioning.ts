@@ -75,7 +75,7 @@ export async function provisionSendgridApiKey(
             {
             apiKeyId,
             rawApiKey,
-            reason: error instanceof Error ? error.message : String(error),
+            reason: (error instanceof Error ? error.message : String(error)).split(rawApiKey).join('[REDACTED]'),
             },
             [rawApiKey],
           ),
