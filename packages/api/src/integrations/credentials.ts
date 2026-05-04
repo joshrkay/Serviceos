@@ -1,4 +1,4 @@
-import type { Pool, Notification } from 'pg';
+import type { Pool } from 'pg';
 
 export interface TenantTwilioCreds {
   tenantId: string;
@@ -66,24 +66,6 @@ export function createTenantCredentialResolver(pool: Pool, options?: { env?: Run
   const twilioCache = new LruCache<TenantTwilioCreds>(options?.cacheSize ?? 512);
   const sendGridCache = new LruCache<TenantSendGridCreds>(options?.cacheSize ?? 512);
 
-  const onNotification = (msg: Notification): void => {
-    if (msg.channel !== 'tenant_integration_rotated') return;
-    if (!msg.payload) { twilioCache.clear(); sendGridCache.clear(); return; }
-    try {
-      const parsed = JSON.parse(msg.payload) as { tenantId?: string };
-      if (parsed.tenantId) {
-        twilioCache.deleteByPrefix(`${parsed.tenantId}::`);
-        sendGridCache.deleteByPrefix(`${parsed.tenantId}::`);
-      } else {
-        twilioCache.clear(); sendGridCache.clear();
-      }
-    } catch {
-      twilioCache.clear(); sendGridCache.clear();
-    }
-  };
-  pool.on('notification', onNotification);
-  void pool.query('LISTEN tenant_integration_rotated').catch(() => undefined);
-
   async function loadRow(tenantId: string, provider: 'twilio' | 'sendgrid'): Promise<TenantIntegrationRow | null> {
     const res = await pool.query<TenantIntegrationRow>(
       `SELECT tenant_id, provider, credential_version, enabled, config
@@ -143,8 +125,7 @@ export function createTenantCredentialResolver(pool: Pool, options?: { env?: Run
       twilioCache.deleteByPrefix(`${tenantId}::`); sendGridCache.deleteByPrefix(`${tenantId}::`);
     },
     async close(): Promise<void> {
-      pool.off('notification', onNotification);
-      await pool.query('UNLISTEN tenant_integration_rotated').catch(() => undefined);
+      // no-op in current implementation (no dedicated LISTEN client wired).
     },
   };
 }
