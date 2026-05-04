@@ -27,6 +27,7 @@ import {
 } from '../middleware/auth';
 import { getPermissions, isValidRole, Role } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { TenantIntegrationStatus } from '../integrations/status-machine';
 
 const VALID_MODES: ReadonlyArray<Mode> = ['supervisor', 'tech', 'both'];
 
@@ -57,6 +58,9 @@ export interface UserModeService {
   getUser(tenantId: string, userId: string): Promise<MeUserRecord | null>;
   /** Fetch the tenant-scoped settings consumed by `GET /api/me`. */
   getTenantSettings(tenantId: string): Promise<MeTenantSettings>;
+  getTenantIntegrationStatuses(
+    tenantId: string,
+  ): Promise<Array<{ provider: string; status: TenantIntegrationStatus; updated_at: Date | null }>>;
   /**
    * Persist a mode switch. Implementations MUST update both
    * `users.current_mode` and `users.mode_changed_at`. Returns the new
@@ -84,6 +88,7 @@ export function createMeRouter(
         const auth = req.auth!;
         const user = await service.getUser(auth.tenantId, auth.userId);
         const settings = await service.getTenantSettings(auth.tenantId);
+        const integrationStatuses = await service.getTenantIntegrationStatuses(auth.tenantId);
 
         // Derive permissions from rbac.ts. If the JWT carries an
         // unexpected role, fall back to an empty list rather than 500
@@ -112,6 +117,11 @@ export function createMeRouter(
           backup_supervisor_user_id: settings.backup_supervisor_user_id,
           unsupervised_proposal_routing:
             settings.unsupervised_proposal_routing,
+          integration_statuses: integrationStatuses.map((s) => ({
+            provider: s.provider,
+            status: s.status,
+            updated_at: s.updated_at ? s.updated_at.toISOString() : null,
+          })),
         });
       } catch (err) {
         const message =
@@ -250,6 +260,12 @@ export class InMemoryUserModeService implements UserModeService {
       });
     }
     return { modeChangedAt };
+  }
+
+  async getTenantIntegrationStatuses(
+    _tenantId: string,
+  ): Promise<Array<{ provider: string; status: TenantIntegrationStatus; updated_at: Date | null }>> {
+    return [];
   }
 
   private userKey(tenantId: string, userId: string): string {
