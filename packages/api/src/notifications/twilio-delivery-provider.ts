@@ -4,6 +4,7 @@ import {
   MessageDeliveryProvider,
   SmsMessage,
 } from "./delivery-provider";
+import { DeliveryError } from "./notification-errors";
 
 /**
  * Production message delivery via Twilio.
@@ -59,18 +60,12 @@ interface TwilioMessageResponse {
   error_message?: string;
 }
 
-type InternalTwilioSmsConfig = {
-  accountSid: string;
-  authToken: string;
-  fromNumber: string;
-  apiBaseUrl: string;
-  fetchImpl: typeof fetch;
-  authTokenSecondary?: string;
-};
-
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<Omit<TwilioSmsConfig, "fetchImpl">> & {
+  private readonly sms: Required<
+    Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
+  > & {
     fetchImpl: typeof fetch;
+    secondaryAuthToken?: string;
   };
   private readonly email: Required<
     Omit<SendGridConfig, "fetchImpl" | "fromName" | "replyToEmail">
@@ -95,7 +90,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     this.sms = {
       accountSid: config.sms.accountSid,
       authToken: config.sms.authToken,
-      authTokenSecondary: config.sms.authTokenSecondary,
+      secondaryAuthToken: config.sms.secondaryAuthToken,
       fromNumber: config.sms.fromNumber,
       apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
       fetchImpl: config.sms.fetchImpl ?? fetch,
@@ -140,21 +135,30 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(
-        `Twilio SMS send failed (${response.status}): ${text.slice(0, 300)}`,
-      );
+      const providerBody = text.slice(0, 300);
+      if (response.status === 401) {
+        throw new DeliveryError("AUTH_FAILED", "SMS authentication failed", {
+          status: 401,
+          providerBody,
+        });
+      }
+      throw new DeliveryError("PROVIDER_FAILED", "SMS provider failed", {
+        status: response.status,
+        providerBody,
+      });
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
     if (data.error_code) {
-      throw new Error(
-        `Twilio SMS rejected: ${data.error_code} ${data.error_message ?? ""}`,
-      );
+      throw new DeliveryError("PROVIDER_FAILED", "SMS provider rejected", {
+        status: response.status,
+        providerBody: `${data.error_code} ${data.error_message ?? ""}`.trim(),
+      });
     }
 
     return {
       providerMessageId: data.sid,
-      provider: "twilio-sms",
+      provider: "sms-gateway",
       channel: "sms",
     };
   }
@@ -205,9 +209,17 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(
-        `SendGrid email send failed (${response.status}): ${text.slice(0, 300)}`,
-      );
+      const providerBody = text.slice(0, 300);
+      if (response.status === 401) {
+        throw new DeliveryError("AUTH_FAILED", "Email authentication failed", {
+          status: 401,
+          providerBody,
+        });
+      }
+      throw new DeliveryError("PROVIDER_FAILED", "Email provider failed", {
+        status: response.status,
+        providerBody,
+      });
     }
 
     // SendGrid returns 202 Accepted with the message ID in `X-Message-Id`.
@@ -216,7 +228,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     return {
       providerMessageId,
-      provider: "twilio-sendgrid",
+      provider: "email-gateway",
       channel: "email",
     };
   }
