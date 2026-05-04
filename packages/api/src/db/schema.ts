@@ -439,11 +439,14 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  '019_tenant_location_and_integrations': `
+  '070_tenant_location_and_integrations': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
       ADD COLUMN IF NOT EXISTS region TEXT,
       ADD COLUMN IF NOT EXISTS locale TEXT;
+    ALTER TABLE tenant_settings DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    ALTER TABLE tenant_settings ADD CONSTRAINT tenant_settings_us_region_check
+      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$'));
 
     CREATE TABLE IF NOT EXISTS tenant_integrations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

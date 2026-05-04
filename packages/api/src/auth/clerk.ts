@@ -494,39 +494,17 @@ export interface TenantBootstrapDeps {
    * out of scope for this phase.
    */
   provisioningRequested?: boolean;
-  /**
-   * Optional contact details captured during online signup. Used for
-   * lightweight anti-fraud validation before tenant creation.
-   */
-  onboardingContact?: {
-    phone?: string;
-  };
-  /**
-   * Optional anti-fraud evaluator hook. Callers can inject vendor-backed
-   * reputation checks (email/phone/IP velocity, disposable inbox, etc.)
-   * without coupling bootstrap logic to a specific provider.
-   */
-  fraudCheck?: (input: { userId: string; email: string; phone?: string }) => Promise<{ allowed: boolean; reason?: string }>;
 }
-
-const SIMPLE_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const E164_PHONE_REGEX = /^\+[1-9]\d{7,14}$/;
 
 function assertProvisioningPrerequisites(deps: TenantBootstrapDeps): void {
   if (!deps.provisioningRequested) return;
-  const country = (deps.onboardingLocation?.country ?? 'US').trim().toUpperCase();
+  const country = deps.onboardingLocation?.country?.trim().toUpperCase();
+  if (!country) {
+    throw new Error('Country is required before provisioning can start');
+  }
   const region = (deps.onboardingLocation?.region ?? '').trim();
   if (country === 'US' && !region) {
     throw new Error('Region (US state) is required before provisioning can start');
-  }
-}
-
-function assertSignupFormat(email: string, phone?: string): void {
-  if (!SIMPLE_EMAIL_REGEX.test(email)) {
-    throw new Error('Invalid signup email format');
-  }
-  if (phone && !E164_PHONE_REGEX.test(phone)) {
-    throw new Error('Invalid signup phone format: expected E.164 (for example +14155550123)');
   }
 }
 
@@ -539,15 +517,7 @@ export async function bootstrapTenant(
   if (!userId || !email) {
     throw new Error('userId and email are required for tenant bootstrap');
   }
-  const phone = deps.onboardingContact?.phone?.trim();
-  assertSignupFormat(email, phone);
   assertProvisioningPrerequisites(deps);
-  if (deps.fraudCheck) {
-    const verdict = await deps.fraudCheck({ userId, email, phone });
-    if (!verdict.allowed) {
-      throw new Error(`Signup blocked by anti-fraud checks${verdict.reason ? `: ${verdict.reason}` : ''}`);
-    }
-  }
 
   const existing = await tenantRepository.findByOwner(userId);
   if (existing) {
