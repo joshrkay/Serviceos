@@ -27,7 +27,8 @@ function mapRow(row: Record<string, unknown>): Customer {
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
     originatingLeadId: (row.originating_lead_id as string) ?? undefined,
-    preferredLanguage: (row.preferred_language as string | null) ?? undefined,
+    preferredLanguage:
+      (row.preferred_language as 'en' | 'es' | null | undefined) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -174,6 +175,7 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         originatingLeadId: 'originating_lead_id',
+        preferredLanguage: 'preferred_language',
         updatedAt: 'updated_at',
       };
 

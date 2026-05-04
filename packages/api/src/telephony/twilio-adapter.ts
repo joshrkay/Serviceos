@@ -214,9 +214,18 @@ interface BuildTwimlOpts {
    * undefined.
    */
   recordingStatusCallback?: string;
+  /**
+   * P11-002: spoken-output language. Drives both the `<Say voice=...>`
+   * Polly voice selection and the `<Gather language=...>` STT hint
+   * so Twilio's built-in recognizer picks the right phonetic model.
+   */
+  language?: 'en' | 'es';
 }
 
-const GATHER_VOICE = 'Polly.Joanna';
+const GATHER_VOICE_EN = 'Polly.Joanna';
+const GATHER_VOICE_ES = 'Polly.Mia-Neural';
+const GATHER_LOCALE_EN = 'en-US';
+const GATHER_LOCALE_ES = 'es-US';
 
 /**
  * Translate FSM side effects into a TwiML string.
@@ -263,7 +272,8 @@ export function buildTwiML(
       // audible feedback rather than silence; a real prompt registry is a
       // follow-up.
       const sayText = text.length > 0 ? text : '...';
-      parts.push(`<Say voice="${GATHER_VOICE}">${xmlEscape(sayText)}</Say>`);
+      const voice = opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN;
+      parts.push(`<Say voice="${voice}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       parts.push('<Hangup/>');
       ended = true;
@@ -280,8 +290,11 @@ export function buildTwiML(
 
   if (!ended) {
     // Loop back to <Gather> so the caller can speak the next turn.
+    // P11-002: thread the session language to Twilio's built-in STT so
+    // Spanish callers don't get transcribed against the English model.
+    const gatherLang = opts.language === 'es' ? GATHER_LOCALE_ES : GATHER_LOCALE_EN;
     parts.push(
-      `<Gather input="speech" speechTimeout="auto" action="${xmlEscape(
+      `<Gather input="speech" speechTimeout="auto" language="${gatherLang}" action="${xmlEscape(
         opts.gatherActionUrl
       )}" method="POST"/>`
     );

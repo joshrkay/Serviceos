@@ -1634,9 +1634,10 @@ export const MIGRATIONS = {
   `,
 
   // Phase 4c: language detection telemetry for the inbound AI CSR.
-  // (Restored verbatim from origin/main; main's three migrations
-  // 063/064/065 must travel as a unit alongside any new migration on
-  // this branch.)
+  // Body is byte-identical to origin/main; the immutability test will
+  // reject any in-place mutation here. P11-002's additions
+  // (tenant_settings columns, leads.preferred_language, customers
+  // CHECK constraint) live in a follow-up migration further down.
   '063_language_detection': `
     ALTER TABLE voice_recordings
       ADD COLUMN IF NOT EXISTS detected_language TEXT;
@@ -1807,6 +1808,36 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_time_entries ON time_entries;
     CREATE POLICY tenant_isolation_time_entries ON time_entries
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P11-002: Spanish multilingual support — tenant-level language config
+  // (default lang + per-language TTS voice + auto-detect toggle + Spanish
+  // dispatcher routing) plus per-lead preferred_language column.
+  //
+  // Originally drafted as 063_create_language_settings on this branch,
+  // but main shipped 063 (language_detection), 064 (job_photos), 065
+  // (portal_sessions), 066 (voice_sessions_and_modes) and PR #253 added
+  // 067 (time_entries) before this branch had a chance to merge —
+  // bumped to 068 to keep the post-deploy ordering monotonic. Body uses
+  // ALTER TABLE … ADD COLUMN IF NOT EXISTS so it converges fresh and
+  // existing DBs on the same shape (lessons learned from PR #225).
+  //
+  // We deliberately do NOT add CHECK (preferred_language IN ('en','es'))
+  // to customers.preferred_language — main's 063 created it as a free
+  // BCP-47 string, and the immutability test forbids retro-tightening.
+  // The runtime catalog narrows to 'en'|'es' at the call site instead.
+  '068_create_language_settings': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_language TEXT NOT NULL DEFAULT 'en'
+        CHECK (default_language IN ('en','es')),
+      ADD COLUMN IF NOT EXISTS tts_voice_en TEXT,
+      ADD COLUMN IF NOT EXISTS tts_voice_es TEXT,
+      ADD COLUMN IF NOT EXISTS auto_detect_language BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS spanish_dispatcher_user_ids UUID[];
+
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT
+        CHECK (preferred_language IN ('en','es'));
   `,
 };
 

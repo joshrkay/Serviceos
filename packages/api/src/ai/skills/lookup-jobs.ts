@@ -10,6 +10,7 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { t, type Language } from '../i18n/i18n';
 
 export interface LookupJobsInput {
   tenantId: string;
@@ -18,6 +19,8 @@ export interface LookupJobsInput {
   recentLimit?: number;
   timezone?: string;
   sessionId?: string;
+  /** P11-002: spoken-summary language. Defaults to 'en'. */
+  language?: Language;
 }
 
 export interface LookupJobsItem {
@@ -58,6 +61,7 @@ export async function lookupJobs(
   deps: LookupJobsDeps,
 ): Promise<LookupJobsResult> {
   const start = Date.now();
+  const lang: Language = input.language ?? 'en';
   const recentLimit = input.recentLimit ?? 3;
 
   const recordEvent = async (
@@ -79,7 +83,7 @@ export async function lookupJobs(
   };
 
   if (!deps.jobRepo.findByCustomer) {
-    const message = "I'm having trouble pulling up your jobs right now.";
+    const message = t('lookup.jobs.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -95,7 +99,7 @@ export async function lookupJobs(
       limit: recentLimit,
     });
   } catch (err) {
-    const message = "I'm having trouble pulling up your jobs right now.";
+    const message = t('lookup.jobs.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
     return {
       status: 'error',
@@ -105,7 +109,7 @@ export async function lookupJobs(
   }
 
   if (jobs.length === 0) {
-    const message = "I'm not seeing any jobs on your account.";
+    const message = t('lookup.jobs.none', lang);
     await recordEvent({ resultStatus: 'none', resultCount: 0, summary: message });
     return { status: 'none', summary: message, data: { jobs: [] } };
   }

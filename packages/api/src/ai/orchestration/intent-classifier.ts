@@ -39,6 +39,10 @@ export type IntentType =
   | 'lookup_account_summary'
   | 'lookup_customer'
   | 'lookup_estimates'
+  // P11-002: caller asks to switch the call language ("english please" /
+  // "hablo español"). The adapter consumes this as a signal to flip the
+  // session language — it is NOT a proposal-driving intent.
+  | 'language_switch'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -65,6 +69,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_account_summary',
   'lookup_customer',
   'lookup_estimates',
+  'language_switch',
   'unknown',
 ] as const;
 
@@ -336,6 +341,17 @@ Supported intents (return exactly ONE):
                                      "When's my next maintenance visit?"
                                      "What's on my service contract?"
                                      "Am I still on the membership plan?"
+- "language_switch"     — caller asks to switch the call language.
+                           Read-only, non-proposal — the adapter flips
+                           the session language and acknowledges. Trigger
+                           phrasings include "english please", "speak
+                           english", "hablo español", "en español".
+                           Spanish prompt examples (so the classifier
+                           handles bilingual mid-call switches):
+                              "Hablo español, por favor"
+                              "¿Puedo continuar en español?"
+                              "Switch to english please"
+                              "I'd rather speak english"
 - "lookup_account_summary" — caller asks an open-ended "what's on my
                            account" / "give me an update" question.
                            Read-only. The skill stitches the appointment,

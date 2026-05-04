@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
+import { LanguageBadge } from '../../components/customers/LanguageBadge';
 
 interface Lead {
   id: string;
@@ -16,6 +17,8 @@ interface Lead {
   assignedUserId?: string;
   convertedCustomerId?: string;
   lostReason?: string;
+  /** P11-002: optional spoken-language preference. */
+  preferredLanguage?: 'en' | 'es' | null;
 }
 
 interface ConvertResponse {
@@ -126,6 +129,20 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         <p className="text-sm text-slate-700">Email: {lead.email ?? '—'}</p>
         <p className="text-sm text-slate-700">Phone: {lead.primaryPhone ?? '—'}</p>
         {lead.companyName && <p className="text-sm text-slate-700">Company: {lead.companyName}</p>}
+        {/* P11-002: surface preferred-language signal alongside contact info. */}
+        <p className="text-sm text-slate-700 flex items-center gap-2">
+          <span>Language:</span>
+          <LanguageBadge language={lead.preferredLanguage ?? null} />
+          <select
+            aria-label="Preferred language"
+            defaultValue={lead.preferredLanguage ?? ''}
+            className="rounded border px-1 py-0.5 text-xs"
+          >
+            <option value="">—</option>
+            <option value="en">English</option>
+            <option value="es">Español</option>
+          </select>
+        </p>
       </section>
 
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">

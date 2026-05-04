@@ -49,7 +49,8 @@ describe('escalateToHuman — successful escalation', () => {
       new Map([[TENANT_ID, [entry]]])
     );
     const result = await escalateToHuman(makeInput({ onCallRepo, reason: 'low_confidence' }));
-    expect(result.message).toMatch(/connecting/i);
+    // P11-002 i18n catalog rephrased "connecting you" → "transferring you".
+    expect(result.message).toMatch(/transferring/i);
   });
 
   it('emits an escalation.requested audit event when auditRepo is provided', async () => {
