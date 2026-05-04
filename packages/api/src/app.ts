@@ -24,6 +24,18 @@ import { createEstimateRouter } from './routes/estimates';
 import { createInvoiceRouter } from './routes/invoices';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
+import {
+  createMeRouter,
+  InMemoryUserModeService,
+  type MeUserRecord,
+  type MeTenantSettings,
+  type UserModeService,
+} from './routes/me';
+import { setUserModeLoader } from './middleware/auth';
+import {
+  setSupervisorPresenceLoader,
+  pgSupervisorPresenceLoader,
+} from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createVerticalRouter } from './routes/verticals';
@@ -46,6 +58,9 @@ import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createReportsRouter } from './routes/reports';
+import { createTimeEntriesRouter } from './routes/time-entries';
+import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
+import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
 import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
@@ -167,6 +182,13 @@ import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
+import {
+  InMemoryPortalSessionRepository,
+  PortalSessionRepository,
+} from './portal/portal-session';
+import { PgPortalSessionRepository } from './portal/pg-portal-session';
+import { createPortalRouter } from './routes/portal';
+import { createPublicPortalRouter } from './routes/public-portal';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -328,7 +350,7 @@ class InMemoryWebhookEventRepository {
   }
 }
 
-export function createApp() {
+export function createApp(): express.Express {
   const app = express();
 
   // Stripe webhook needs the raw body for signature verification.
@@ -485,12 +507,26 @@ export function createApp() {
   const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
   const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
   const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
+  // P10-001: portal session repo (single signed token per customer for the
+  // self-service portal). Wired here so both the authed creation route and
+  // the public token-resolver router share one instance.
+  const portalSessionRepo: PortalSessionRepository = pool
+    ? new PgPortalSessionRepository(pool)
+    : new InMemoryPortalSessionRepository();
+  // Agreement-runs are also surfaced on the public portal (read-only).
+  // Hoisted here so the public portal router (mounted before Clerk auth)
+  // can reference it. `agreementRepo` is already declared above (hoisted
+  // for the P11-001 voice lookup-skill family).
+  const agreementRunRepo = pool
+    ? new PgAgreementRunRepository(pool)
+    : new InMemoryAgreementRunRepository();
   // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
   // is wired here so a future webhook handler can pull it from app-level
   // wiring without re-instantiating. The webhooks/routes.ts router still
   // uses its own InMemoryWebhookRepository for the legacy
   // (provider/event/svix-id) shape — that one is unchanged.
   const webhookEventRepo   = pool ? new PgWebhookEventRepository(pool)    : new InMemoryWebhookEventRepository();
+  const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
   // Reference the variable so TS doesn't drop it; downstream consumers will
   // attach in a follow-up PR.
   void webhookEventRepo;
@@ -972,6 +1008,27 @@ export function createApp() {
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
+  // P10-001: Public, token-gated customer portal. Mounted BEFORE the
+  // global `/api` Clerk auth middleware because the portal token IS
+  // the auth — no Clerk session is involved. Routes resolve the
+  // `:token` URL param, set `req.portal = { tenantId, customerId,
+  // sessionId }`, and downstream queries scope to that tenant id.
+  app.use(
+    '/api/public/portal',
+    createPublicPortalRouter({
+      portalRepo: portalSessionRepo,
+      customerRepo,
+      estimateRepo,
+      invoiceRepo,
+      jobRepo,
+      agreementRepo,
+      appointmentRepo,
+      leadRepo,
+      auditRepo,
+      paymentLinkProvider,
+    }),
+  );
+
   // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
   // Returns a `client_secret` so the customer's browser can confirm the
   // payment directly with Stripe — card data never touches our server.
@@ -1200,6 +1257,16 @@ export function createApp() {
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
+  // P10-001: portal session creation/revocation. Mounted at
+  // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
+  // because routes/customers.ts is on the freeze list — the body
+  // carries the customerId. URL composition uses request host so
+  // the link points at this same deployment.
+  app.use(
+    '/api/portal-sessions',
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+  );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
@@ -1239,6 +1306,103 @@ export function createApp() {
   app.use('/api/reports', createReportsRouter(revenueBySourceRepo));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
+
+  // ── P12-001: /api/me — current user + mode ──────────────────────────────
+  // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
+  // dev / no-DB mode. The middleware-side mode loader is wired at the
+  // same time so requireTenant can populate `req.auth.mode` against the
+  // same data source used by the /api/me reads.
+  const userModeService: UserModeService = pool
+    ? {
+        async getUser(tenantId, userId) {
+          // P12-001 review fix — `userId` here is the Clerk subject
+          // (`req.auth.userId` = `payload.sub`), not the UUID PK on
+          // `users.id`. Lookup goes through `clerk_user_id`. The
+          // returned `user_id` continues to be the Clerk sub so
+          // downstream callers (the API surface) stay aligned with
+          // the auth-layer identity.
+          const r = await pool.query(
+            `SELECT clerk_user_id, tenant_id, role,
+                    COALESCE(can_field_serve, false) AS can_field_serve,
+                    COALESCE(current_mode, 'supervisor') AS current_mode,
+                    mode_changed_at
+             FROM users
+             WHERE tenant_id = $1 AND clerk_user_id = $2
+             LIMIT 1`,
+            [tenantId, userId],
+          );
+          if (r.rowCount === 0) return null;
+          const row = r.rows[0] as Record<string, unknown>;
+          const rec: MeUserRecord = {
+            user_id: String(row.clerk_user_id),
+            tenant_id: String(row.tenant_id),
+            role: String(row.role),
+            can_field_serve: Boolean(row.can_field_serve),
+            current_mode: row.current_mode as MeUserRecord['current_mode'],
+            mode_changed_at: row.mode_changed_at
+              ? new Date(row.mode_changed_at as string)
+              : null,
+          };
+          return rec;
+        },
+        async getTenantSettings(tenantId) {
+          const r = await pool.query(
+            `SELECT backup_supervisor_user_id,
+                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing
+             FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
+            [tenantId],
+          );
+          if (r.rowCount === 0) {
+            return {
+              backup_supervisor_user_id: null,
+              unsupervised_proposal_routing: 'queue_and_sms',
+            } as MeTenantSettings;
+          }
+          const row = r.rows[0] as Record<string, unknown>;
+          return {
+            backup_supervisor_user_id: row.backup_supervisor_user_id
+              ? String(row.backup_supervisor_user_id)
+              : null,
+            unsupervised_proposal_routing:
+              row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
+          };
+        },
+        async setMode(tenantId, userId, mode) {
+          // P12-001 review fix — `userId` is the Clerk subject; match
+          // on `clerk_user_id`, not the UUID PK. Without this the
+          // UPDATE silently no-ops in production.
+          const now = new Date();
+          await pool.query(
+            `UPDATE users
+             SET current_mode = $1, mode_changed_at = $2, updated_at = now()
+             WHERE tenant_id = $3 AND clerk_user_id = $4`,
+            [mode, now, tenantId, userId],
+          );
+          return { modeChangedAt: now };
+        },
+      }
+    : new InMemoryUserModeService();
+
+  // Wire the middleware-side mode loader. Reuses the same service so
+  // we don't drift between read paths.
+  setUserModeLoader(async (userId, tenantId) => {
+    try {
+      const u = await userModeService.getUser(tenantId, userId);
+      return u ? u.current_mode : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Phase 12 — wire the tenant-wide supervisor-presence loader. The
+  // proposal auto-approve threshold and the emergency-immediate-Dial
+  // helper both consult this. Keep wired in dev only when a Pool is
+  // available; otherwise the in-memory permissive default applies.
+  if (pool) {
+    setSupervisorPresenceLoader(pgSupervisorPresenceLoader(pool));
+  }
+
+  app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
   app.use('/api/settings', createSettingsRouter(settingsRepo));
@@ -1268,11 +1432,8 @@ export function createApp() {
   // Recurring service contracts auto-generate a job + draft invoice on
   // their cadence. Bypasses the proposals layer because the customer-
   // signing-up step is the approval; subsequent runs execute it.
-  // (P11-001 hoisted `agreementRepo` to the main repo block above so the
-  // Twilio adapter's lookup-skill family can share it.)
-  const agreementRunRepo = pool
-    ? new PgAgreementRunRepository(pool)
-    : new InMemoryAgreementRunRepository();
+  // (`agreementRepo` and `agreementRunRepo` are declared earlier so the
+  // public portal router can reference the same instance.)
   const agreementsJobsService = {
     async createJob(input: {
       tenantId: string;
