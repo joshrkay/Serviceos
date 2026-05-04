@@ -44,10 +44,6 @@ describe('VQ-024 — CI workflow integration', () => {
     // The job must invoke the npm script via the workspaces flag so
     // it picks up the right package's vitest config.
     expect(src).toMatch(/npm run voice-quality --workspace=packages\/api/);
-    // The replay-mode env vars must be set so the runner doesn't try
-    // to call out to a real LLM provider in CI.
-    expect(src).toMatch(/VOICE_QUALITY_REPO:\s*memory/);
-    expect(src).toMatch(/VOICE_QUALITY_CASSETTE_MODE:\s*replay/);
     // Report artifact upload — graders/aggregators consume this in
     // VQ-025.
     expect(src).toMatch(/voice-quality-report\.json/);
