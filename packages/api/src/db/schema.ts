@@ -1810,16 +1810,6 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // P12-005 follow-up: extend the inline CHECK constraint on
-  // leads.source so 'customer_portal' is accepted at the DB layer.
-  // The original CHECK was authored inline in 057_create_leads, which
-  // makes Postgres generate the name `leads_source_check`. We drop it
-  // (IF EXISTS, so fresh DBs that never had the old constraint don't
-  // error) and re-add it with the extended value list.
-  '068_extend_leads_source_check': `
-    ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
-    ALTER TABLE leads ADD CONSTRAINT leads_source_check
-      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
   // P11-002: Spanish multilingual support — tenant-level language config
   // (default lang + per-language TTS voice + auto-detect toggle + Spanish
   // dispatcher routing) plus per-lead preferred_language column.
@@ -1848,6 +1838,20 @@ export const MIGRATIONS = {
     ALTER TABLE leads
       ADD COLUMN IF NOT EXISTS preferred_language TEXT
         CHECK (preferred_language IN ('en','es'));
+  `,
+
+  // P12-005 follow-up: extend the inline CHECK constraint on
+  // leads.source so 'customer_portal' is accepted at the DB layer.
+  // The original CHECK was authored inline in 057_create_leads, which
+  // makes Postgres generate the name `leads_source_check`. We drop it
+  // (IF EXISTS, so fresh DBs that never had the old constraint don't
+  // error) and re-add it with the extended value list. Originally
+  // drafted at slot 068; bumped to 069 because PR #245 landed
+  // 068_create_language_settings on main first.
+  '069_extend_leads_source_check': `
+    ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
+    ALTER TABLE leads ADD CONSTRAINT leads_source_check
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
   `,
 };
 
