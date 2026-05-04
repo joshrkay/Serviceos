@@ -61,9 +61,32 @@ export function extractPrNumber(ref: string | undefined | null): number | null {
 }
 
 /**
+ * Type guard: does the parsed JSON have the VoiceQualityReport shape?
+ *
+ * Today the workflow's `voice-quality-report.json` artifact path is shared
+ * with vitest's JSON reporter (different shape — testResults[], etc.). The
+ * VQ-023 aggregator's report is not yet wired into the corpus runner, so
+ * the file on disk usually has the wrong shape. Guard explicitly so the
+ * script falls back cleanly to the "no report" message instead of crashing
+ * deep in formatReportMarkdown. Once the aggregator is plumbed in, this
+ * guard becomes a meaningful structural check; until then it's the
+ * safety net.
+ */
+function isVoiceQualityReport(value: unknown): value is VoiceQualityReport {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.rubricVersion === 'string' &&
+    typeof v.overallPassRate === 'number' &&
+    typeof v.launchGate === 'object' &&
+    v.launchGate !== null
+  );
+}
+
+/**
  * Read the report JSON from disk. Returns null when the file is
- * missing or unreadable. We deliberately swallow parse errors here
- * (logging a warning) so the caller can post the fallback message.
+ * missing, unreadable, or has the wrong shape (treated equivalently
+ * to a missing report so the caller posts the fallback message).
  */
 export function loadReport(reportPath: string): VoiceQualityReport | null {
   try {
@@ -71,7 +94,15 @@ export function loadReport(reportPath: string): VoiceQualityReport | null {
       return null;
     }
     const raw = fs.readFileSync(reportPath, 'utf-8');
-    return JSON.parse(raw) as VoiceQualityReport;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isVoiceQualityReport(parsed)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[post-voice-quality-pr-comment] report at ${reportPath} is not a VoiceQualityReport (likely vitest reporter output). Falling back.`,
+      );
+      return null;
+    }
+    return parsed;
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
@@ -240,7 +271,21 @@ export async function run(opts: RunOptions = {}): Promise<number> {
     );
   }
 
-  const body = buildCommentBody(report);
+  let body: string;
+  try {
+    body = buildCommentBody(report);
+  } catch (err) {
+    // Defensive: shape drift in VoiceQualityReport could throw inside
+    // formatReportMarkdown. Fall back to the null-report message rather
+    // than crashing the workflow step.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[post-voice-quality-pr-comment] buildCommentBody threw: ${
+        (err as Error).message
+      }; falling back to no-report body`,
+    );
+    body = buildCommentBody(null);
+  }
 
   try {
     await postOrUpdateComment({

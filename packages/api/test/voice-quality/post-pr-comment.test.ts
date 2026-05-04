@@ -69,6 +69,23 @@ describe('VQ-025 — PR comment integration', () => {
     expect(loadReport(missing)).toBeNull();
   });
 
+  it('VQ-025 — loadReport returns null when JSON has wrong shape (e.g. vitest reporter output)', () => {
+    // The CI workflow currently shares the report path with vitest's JSON
+    // reporter, which writes a different schema. Guard structurally so the
+    // post-comment script falls back to the no-report message instead of
+    // crashing in formatReportMarkdown.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vq-025-bad-'));
+    const reportPath = path.join(tmp, 'voice-quality-report.json');
+    const vitestShape = {
+      numTotalTests: 10,
+      numPassedTests: 10,
+      testResults: [{ name: 'corpus.test.ts', status: 'passed' }],
+    };
+    fs.writeFileSync(reportPath, JSON.stringify(vitestShape), 'utf-8');
+    expect(loadReport(reportPath)).toBeNull();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
   it('VQ-025 — generates a sticky-comment body containing the marker', () => {
     const sample = {
       rubricVersion: 'v1',
