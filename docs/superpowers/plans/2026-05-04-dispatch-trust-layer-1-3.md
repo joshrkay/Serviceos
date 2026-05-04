@@ -270,9 +270,21 @@ Stories that don't add wiring (pure refactors, docs-only, test-only) use `**Wiri
 # Extract the **Wiring claim:** block for this story. Format is a small
 # YAML-ish list under the heading; we parse it line-by-line rather than
 # requiring a real YAML lib.
+#
+# Edge case: stories may declare the claim inline on the heading line
+# itself, e.g. `**Wiring claim:** none (rationale: docs-only)`. The
+# parser captures any content after `**Wiring claim:**` on the heading
+# line BEFORE entering block-collection mode so the inline `none` form
+# isn't silently dropped.
 WIRING_BLOCK=$(awk -v id="$STORY_ID" '
   /^## / { in_block = ($0 ~ "^## " id " "); next }
-  in_block && /\*\*Wiring claim/ { in_wiring = 1; next }
+  in_block && /\*\*Wiring claim/ {
+    inline = $0
+    sub(/^.*\*\*Wiring claim:\*\*[[:space:]]*/, "", inline)
+    if (inline != "") print inline
+    in_wiring = 1
+    next
+  }
   in_wiring && /^\*\*/ { exit }
   in_wiring { print }
 ' "$ADDENDUM_PATH")
@@ -288,7 +300,7 @@ fi
 if echo "$WIRING_BLOCK" | grep -qE '^\s*-?\s*none\b'; then
   echo "verify: wiring claim explicitly 'none' for ${STORY_ID}, skipping grep step"
 else
-  WIRING_FILE=$(echo "$WIRING_BLOCK" | grep -E '^\s*-\s*file:' | head -1 | sed -E 's/^\s*-\s*file:\s*//')
+  WIRING_FILE=$(echo "$WIRING_BLOCK" | grep -E '^\s*-\s*file:' | head -1 | sed -E 's/^\s*-\s*file:\s*//; s/[[:space:]]+$//')
   if [[ -z "$WIRING_FILE" ]]; then
     echo "verify: Wiring claim missing 'file:' line for ${STORY_ID}" >&2
     exit 1

@@ -72,21 +72,27 @@ One commit per task. tsc must pass (api + web + shared) after every commit.
 
 **Context:** Mirror the API's `Proposal` interface verbatim. Use the same field names and optionality. The shared type does NOT include any `pg` or `express` references. If the API uses `Date` for timestamp fields and the JSON wire format will surface them as `string`, the shared type may use a branded `IsoDateString` or just `Date`. Match what the API serializer actually does (likely API has `Date` in-memory and JSON.stringify converts to ISO; the shared type should use `Date` for consistency, with a note that wire-format consumers see string).
 
-- [ ] **Step 1: Read `packages/api/src/proposals/proposal.ts` lines 30-90 (the full `Proposal` + `ProposalStatus` declarations).**
+- [ ] **Step 1: Read `packages/api/src/proposals/proposal.ts` lines 30-90 (the full `Proposal` + `ProposalStatus` declarations).** As of 2026-05-04 the API union is the 8-value set below; copy whatever the file actually has at execution time — do NOT trust this example as authoritative.
 
-- [ ] **Step 2: Create `packages/shared/src/types/proposal.ts` with the same shape:**
+- [ ] **Step 2: Create `packages/shared/src/types/proposal.ts` with the same shape. The values below reflect the API today:**
 
 ```typescript
 // packages/shared/src/types/proposal.ts
 
+// Verified against packages/api/src/proposals/proposal.ts on 2026-05-04.
+// If the API has drifted, COPY the API's current union verbatim — this
+// example is illustrative, not authoritative.
 export type ProposalStatus =
-  | 'pending'
+  | 'draft'
+  | 'ready_for_review'
   | 'approved'
   | 'rejected'
+  | 'expired'
   | 'executed'
+  | 'execution_failed'
   | 'undone';
-// (match exact union values from the API definition — copy them, do not paraphrase)
 
+// Same rule — copy verbatim from packages/api/src/proposals/proposal.ts.
 export type ProposalType =
   // ...copy ProposalType union from packages/api/src/proposals/proposal.ts
   ;
@@ -187,7 +193,11 @@ export type { Proposal, ProposalStatus, ProposalType } from '@ai-service-os/shar
   - `.details` → `.payload` (when the value is a Proposal)
   - The fields the web didn't have before (e.g. `approvedAt`, `confidenceScore`) now type-check; no rename needed, but use them as the UI gains the corresponding rendering.
 
-- [ ] **Step 4: If any file uses a Date field as a string (e.g. `proposal.createdAt` was `string` in the old web type, now `Date`), wrap with `new Date(proposal.createdAt)` or update display to handle Date directly.**
+- [ ] **Step 3b: ProposalStatus union migration.** The web's old `ProposalStatus` was `'pending' | 'approved' | 'rejected'`. After the swap, the shared type has the API's 8-value union (no `'pending'`). Every web file using the literal `'pending'` for a Proposal status needs remapping to the API's pre-approval state — likely `'ready_for_review'`, NOT `'draft'` (drafts haven't yet been surfaced to the operator; the existing UI listed proposals waiting for human approval, which is `ready_for_review`). Confirm the right mapping with the API code path that creates the proposals the web list shows. Common patterns to update:
+  - `proposal.status === 'pending'` → `proposal.status === 'ready_for_review'`
+  - Conditional rendering keyed off `'pending'` (badges, filter buttons) → key off `'ready_for_review'` (and consider also handling `'draft'`, `'expired'`, `'execution_failed'` since they are now valid states the UI could see).
+
+- [ ] **Step 4: If any file uses a Date field as a string (e.g. `proposal.createdAt` was `string` in the old web type, now `Date`), wrap with `new Date(proposal.createdAt)` or update display to handle Date directly.** See "Open question — Date wire format" near the bottom of this plan for context on whether to keep `Date` or switch the shared type to `IsoDateString` before this step lands.
 
 - [ ] **Step 5: tsc green:** `cd packages/web && npx tsc --noEmit`
 
@@ -288,6 +298,32 @@ cd /home/user/Serviceos && \
 
 **Pre-flight:** none. Independent of all other in-flight work.
 ```
+
+---
+
+## Open question — Date wire format
+
+> **Status (PR #263 review):** Surfaced by an automated reviewer; resolution
+> pending user decision. Until decided, executors should default to **Option A
+> below** but flag the choice in the PR description so reviewers can object
+> before merge.
+
+The shared `Proposal` interface declares `expiresAt`, `approvedAt`, `executedAt`, `undoneAt`, `createdAt`, `updatedAt` as `Date`. The API holds these as `Date` in memory; `JSON.stringify` converts them to ISO strings on the wire; `JSON.parse` does NOT reconstruct `Date`. So the web receives strings at runtime even though TypeScript thinks they're `Date`. Anything calling `.getTime()` on a wire-deserialized value will crash.
+
+Three ways to resolve, with tradeoffs:
+
+**Option A (current spec default) — keep `Date` in the shared type, adapt at the boundary.**
+The web's API client (e.g. `apiFetch` / `useQuery` wrappers) is responsible for deserializing ISO strings back into `Date` instances on the way in. Pro: the shared type matches the API's in-memory shape; existing API code keeps working unchanged. Con: requires an audit of every web API entry point to ensure string→Date conversion happens; a missed entry point silently breaks at runtime.
+
+**Option B — switch the shared type to a branded `IsoDateString`.**
+Introduce `type IsoDateString = string & { readonly __brand: unique symbol }` in `packages/shared`. All wire-format-relevant timestamp fields become `IsoDateString`. The API does the `Date.toISOString()` conversion at its serializer; the web treats fields as opaque strings (or wraps them with `new Date(...)` at display sites). Pro: type matches reality; runtime mismatches become impossible. Con: API code that currently does `proposal.approvedAt.getTime()` on the API side breaks — every API call site needs to either treat them as strings or coerce locally.
+
+**Option C — separate API-internal type from wire-format type.**
+`packages/api/src/proposals/proposal.ts` keeps `Date`-typed fields locally; `packages/shared/src/types/proposal.ts` exports a wire-format `Proposal` with `IsoDateString` fields. The web imports the wire-format. The API converts at the serializer. Pro: each side is honest about its own shape. Con: doubles the type surface in `shared` (or in API) — adds maintenance overhead, partially defeats the unification goal.
+
+**Recommendation pending user decision:** Option A is what's written. It's the lowest-friction first cut and preserves API code unchanged. The risk is an unaudited web API entry point, which is mitigated by the shape-guard test plus runtime touch-tests in the Phase 4 task. If the team wants stronger compile-time safety, Option B is the move (and is the cleaner long-term design); it requires a follow-up sweep of API call sites that currently rely on `Date` methods.
+
+This question is intentionally NOT blocking the rest of the plan — Option A's code is what executes by default. Reviewers can change it to Option B before the F-1 PR merges if they prefer.
 
 ---
 
