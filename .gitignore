@@ -5,6 +5,10 @@ dist/
 
 # Multi-agent dispatch worktrees (created by /dispatch-story; ephemeral)
 .claude/worktrees/
+
+# Superpowers using-git-worktrees skill — project-local worktrees for
+# executing-plans / subagent-driven-development. Ephemeral; never committed.
+.worktrees/
 !jest.config.ts
 !**/vite-env.d.ts
 .env
