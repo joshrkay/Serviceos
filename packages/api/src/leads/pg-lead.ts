@@ -51,6 +51,8 @@ function mapRow(row: Record<string, unknown>): Lead {
     assignedUserId: (row.assigned_user_id as string) ?? undefined,
     convertedCustomerId: (row.converted_customer_id as string) ?? undefined,
     lostReason: (row.lost_reason as string) ?? undefined,
+    preferredLanguage:
+      (row.preferred_language as 'en' | 'es' | null | undefined) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -240,6 +242,7 @@ export class PgLeadRepository extends PgBaseRepository implements LeadRepository
       assignedUserId: 'assigned_user_id',
       convertedCustomerId: 'converted_customer_id',
       lostReason: 'lost_reason',
+      preferredLanguage: 'preferred_language',
       updatedAt: 'updated_at',
     };
 

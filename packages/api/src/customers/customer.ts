@@ -44,7 +44,8 @@ export interface Customer {
    * only the column + type; the FSM hint that consumes it is Phase 4d
    * once we have ASR-provider language-bias plumbing). Optional —
    * unset means "no preference recorded" and the FSM falls back to
-   * detect-from-first-utterance.
+   * detect-from-first-utterance. P11-002 voice flows narrow this at
+   * the call-site to 'en' | 'es' for runtime catalog lookups.
    */
   preferredLanguage?: string;
   createdBy: string;

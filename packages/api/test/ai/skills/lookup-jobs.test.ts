@@ -112,7 +112,8 @@ describe('P11-001 — lookupJobs skill', () => {
         { jobRepo },
       );
       expect(result.status).toBe('none');
-      expect(result.summary.toLowerCase()).toContain('not seeing any jobs');
+      // P11-002 i18n catalog adds "active" qualifier: "not seeing any active jobs".
+      expect(result.summary.toLowerCase()).toContain('not seeing any active jobs');
     });
 
     it('P18-004 lookup-jobs tenant isolation — tenant A jobs invisible to tenant B caller', async () => {
