@@ -37,6 +37,8 @@ export type IntentType =
   | 'lookup_jobs'
   | 'lookup_agreements'
   | 'lookup_account_summary'
+  | 'lookup_customer'
+  | 'lookup_estimates'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -61,6 +63,8 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_jobs',
   'lookup_agreements',
   'lookup_account_summary',
+  'lookup_customer',
+  'lookup_estimates',
   'unknown',
 ] as const;
 
@@ -322,6 +326,22 @@ Supported intents (return exactly ONE):
                                      "Catch me up on my account"
                                      "Where do I stand?"
                                      "Tell me about my account"
+- "lookup_customer"     — caller is ASKING about the contact info or
+                           CRM record we have on file for them — name,
+                           phone, email, communication notes. Read-only.
+                           Examples: "Can you confirm my contact info?"
+                                     "What number do you have on file?"
+                                     "Read me the email you have for me"
+                                     "Do you have my correct address?"
+                                     "Check what's on my customer record"
+- "lookup_estimates"    — caller is ASKING about quotes/estimates on
+                           their account — count, totals, status of
+                           prior estimates. Read-only.
+                           Examples: "What estimates have you sent me?"
+                                     "Read me my open quotes"
+                                     "Did you send me an estimate yet?"
+                                     "What's the status of my quote?"
+                                     "How much was that estimate?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
