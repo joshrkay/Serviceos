@@ -1,12 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TwilioDeliveryProvider } from '../../src/notifications/twilio-delivery-provider';
 
-function makeProvider(fetchImpl: typeof fetch) {
+function makeProvider(fetchImpl: typeof fetch, secondaryAuthToken?: string) {
   return new TwilioDeliveryProvider({
     sms: {
       accountSid: 'AC_test',
       authToken: 'token_test',
       fromNumber: '+15555550100',
+      secondaryAuthToken,
       apiBaseUrl: 'https://test.example/twilio',
       fetchImpl,
     },
@@ -45,21 +46,24 @@ describe('TwilioDeliveryProvider — SMS', () => {
     });
 
     expect(result.providerMessageId).toBe('SM_abc');
-    expect(result.provider).toBe('twilio-sms');
+    expect(result.provider).toBe('sms-gateway');
     expect(result.channel).toBe('sms');
   });
 
-  it('throws when Twilio returns non-2xx', async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response('Twilio rejected', {
-          status: 400,
-        })
-    );
+  it('throws normalized auth failure when Twilio returns 401', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-    await expect(
-      provider.sendSms({ to: '+15555550199', body: 'oops' })
-    ).rejects.toThrow(/Twilio SMS send failed/);
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toThrow(
+      'DELIVERY_AUTH_FAILED'
+    );
+  });
+
+  it('throws normalized provider failure when Twilio returns non-401', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Twilio rejected', { status: 400 }));
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toThrow(
+      'DELIVERY_PROVIDER_FAILED (400)'
+    );
   });
 
   it('passes idempotency key header when provided', async () => {
@@ -75,6 +79,48 @@ describe('TwilioDeliveryProvider — SMS', () => {
       idempotencyKey: 'estimate:1234:sms',
     });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('retries SMS with secondary token after primary returns 401 and then succeeds', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ sid: 'SM_retry', status: 'queued' }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        })
+      );
+
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch, 'token_backup');
+    const result = await provider.sendSms({ to: '+15555550199', body: 'retry' });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.providerMessageId).toBe('SM_retry');
+    expect(result.provider).toBe('sms-gateway');
+  });
+
+  it('returns auth failure when both primary and secondary SMS tokens return 401', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+      .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }));
+
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch, 'token_backup');
+    await expect(provider.sendSms({ to: '+15555550199', body: 'retry' })).rejects.toThrow(
+      'DELIVERY_AUTH_FAILED'
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns auth failure when no secondary SMS token exists and primary returns 401', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+
+    await expect(provider.sendSms({ to: '+15555550199', body: 'retry' })).rejects.toThrow(
+      'DELIVERY_AUTH_FAILED'
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -107,7 +153,7 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     });
 
     expect(result.providerMessageId).toBe('sg-msg-123');
-    expect(result.provider).toBe('twilio-sendgrid');
+    expect(result.provider).toBe('email-gateway');
     expect(result.channel).toBe('email');
   });
 
@@ -126,14 +172,22 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     });
   });
 
-  it('throws when SendGrid returns non-2xx', async () => {
-    const fetchImpl = vi.fn(
-      async () => new Response('Forbidden', { status: 403 })
-    );
+  it('returns auth failure when SendGrid returns 401', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Unauthorized', { status: 401 }));
     const provider = makeProvider(fetchImpl as unknown as typeof fetch);
-    await expect(
-      provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })
-    ).rejects.toThrow(/SendGrid email send failed \(403\)/);
+
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toThrow(
+      'DELIVERY_AUTH_FAILED'
+    );
+  });
+
+  it('returns provider failure when SendGrid returns 403', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Forbidden', { status: 403 }));
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toThrow(
+      'DELIVERY_PROVIDER_FAILED (403)'
+    );
   });
 });
 
