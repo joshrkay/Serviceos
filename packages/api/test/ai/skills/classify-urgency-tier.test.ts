@@ -139,8 +139,8 @@ describe('classifyUrgencyTier', () => {
     });
   });
 
-  describe('false-positive guards', () => {
-    it('does NOT escalate "steam coming off the outdoor unit" in winter — heat pump defrost', () => {
+  describe('false-positive guards → AMBIGUOUS_NEEDS_CLARIFICATION', () => {
+    it('returns AMBIGUOUS for "steam coming off the outdoor unit" in winter — heat pump defrost', () => {
       const r = classifyUrgencyTier(
         {
           utterance: 'I see steam coming off the outdoor unit, is that bad?',
@@ -148,9 +148,14 @@ describe('classifyUrgencyTier', () => {
         },
         rules,
       );
-      expect(r.tier).toBe('TIER_4_SCHEDULE');
+      // Issue #1 fix: don't silently bucket as routine; force the FSM
+      // to ask the clarifier.
+      expect(r.tier).toBe('AMBIGUOUS_NEEDS_CLARIFICATION');
+      expect(r.requiresEvacuation).toBe(false);
       expect(r.falsePositiveGuard).toBeDefined();
       expect(r.falsePositiveGuard!.classification).toMatch(/heat pump defrost/i);
+      expect(r.falsePositiveGuard!.clarification.length).toBeGreaterThan(0);
+      expect(r.rationale).toMatch(/clarif/i);
     });
 
     it('does NOT trigger heat-pump-defrost guard outside winter context', () => {
@@ -162,8 +167,9 @@ describe('classifyUrgencyTier', () => {
         rules,
       );
       // Without the winter-context guard, no other rule matches steam,
-      // so it falls through to TIER_4 BUT without the falsePositiveGuard
-      // attribution.
+      // so it falls through to TIER_4 (not AMBIGUOUS) BUT without the
+      // falsePositiveGuard attribution.
+      expect(r.tier).toBe('TIER_4_SCHEDULE');
       expect(r.falsePositiveGuard).toBeUndefined();
     });
   });
