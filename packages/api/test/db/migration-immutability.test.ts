@@ -70,6 +70,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['016_create_jobs', 'd13851154b8b98a02c7f73b59d5be99c813b7d04aecef004ace5dc9d39723c31'],
   ['017_create_job_timeline_events', 'b249f4702f2904b120a5b3b6a01d0372e701f768bd2c50e53cea7bedd99f6e47'],
   ['018_create_appointments', '5b9aab1df3fabe35d130752b5af9d7531d7dc92da97a41e7fab601b5cfe6815c'],
+  ['019_tenant_location_and_integrations', '249da4c75e28dc9fb52a71fa3bd5d55cc4f2873600af203ab0e6bfd8689538b1'],
   ['019_create_appointment_assignments', 'e9394cf3cdc8c89bc8b7f12556d397a86bfdd5a980f3b39af70e45815e98c35b'],
   ['020_create_estimates', 'b4b9e04bbe669956419eb7083e1e8b441db7398aaa8e9e4d80f683c68792cc4d'],
   ['021_create_estimate_line_items', '43b3f8ba9491c53f7701961bb28eae9cddd4c7d9a3c1c908a5d50b8c1a65cabc'],
