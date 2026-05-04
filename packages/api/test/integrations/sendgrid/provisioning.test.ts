@@ -24,7 +24,7 @@ describe('provisionSendgridApiKey', () => {
     const rawApiKey = 'SG.super.secret';
     const result = await provisionSendgridApiKey('sg-key-id', rawApiKey, {
       encryptApiKey: vi.fn(async () => {
-        throw new Error('kms unavailable');
+        throw new Error(`kms unavailable for ${rawApiKey}`);
       }),
       storeSecret: vi.fn(async () => ({ secretRef: 'never' })),
     });
@@ -35,6 +35,7 @@ describe('provisionSendgridApiKey', () => {
     const payload = JSON.stringify(result);
     expect(payload).not.toContain(rawApiKey);
     expect(result.error.details?.rawApiKey).toBe('[REDACTED]');
+    expect(String(result.error.details?.reason)).not.toContain(rawApiKey);
   });
 
   it('redacts raw key when storage fails', async () => {
@@ -42,7 +43,7 @@ describe('provisionSendgridApiKey', () => {
     const result = await provisionSendgridApiKey('sg-key-id', rawApiKey, {
       encryptApiKey: vi.fn(async () => ({ ciphertext: 'enc', keyId: 'k1' })),
       storeSecret: vi.fn(async () => {
-        throw new Error('vault write failed');
+        throw new Error(`vault write failed for ${rawApiKey}`);
       }),
     });
 
@@ -52,6 +53,7 @@ describe('provisionSendgridApiKey', () => {
     const payload = JSON.stringify(result);
     expect(payload).not.toContain(rawApiKey);
     expect(result.error.details?.rawApiKey).toBe('[REDACTED]');
+    expect(String(result.error.details?.reason)).not.toContain(rawApiKey);
   });
 });
 

@@ -30,6 +30,27 @@ export function redactSensitiveFields<T extends Record<string, unknown>>(input: 
   return out as T;
 }
 
+function sanitizeText(value: string, secrets: readonly string[]): string {
+  let out = value;
+  for (const secret of secrets) {
+    if (!secret) continue;
+    out = out.split(secret).join('[REDACTED]');
+  }
+  return out;
+}
+
+function sanitizeDetails(details: Record<string, unknown>, secrets: readonly string[]): Record<string, unknown> {
+  const redacted = redactSensitiveFields(details);
+  return Object.fromEntries(
+    Object.entries(redacted).map(([key, value]) => {
+      if (typeof value === 'string') {
+        return [key, sanitizeText(value, secrets)];
+      }
+      return [key, value];
+    }),
+  );
+}
+
 export async function provisionSendgridApiKey(
   apiKeyId: string,
   rawApiKey: string,
@@ -50,11 +71,14 @@ export async function provisionSendgridApiKey(
         error: {
           code: 'SENDGRID_STORAGE_FAILED',
           message: 'Failed to persist encrypted SendGrid API key',
-          details: redactSensitiveFields({
+          details: sanitizeDetails(
+            {
             apiKeyId,
             rawApiKey,
             reason: error instanceof Error ? error.message : String(error),
-          }),
+            },
+            [rawApiKey],
+          ),
         },
       };
     }
@@ -64,11 +88,14 @@ export async function provisionSendgridApiKey(
       error: {
         code: 'SENDGRID_ENCRYPTION_FAILED',
         message: 'Failed to encrypt SendGrid API key',
-        details: redactSensitiveFields({
-          apiKeyId,
-          rawApiKey,
-          reason: error instanceof Error ? error.message : String(error),
-        }),
+        details: sanitizeDetails(
+          {
+            apiKeyId,
+            rawApiKey,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+          [rawApiKey],
+        ),
       },
     };
   }
