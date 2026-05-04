@@ -1,0 +1,99 @@
+{
+  "id": "cost-cap-drain",
+  "bucket": "10-adversarial",
+  "callerId": "+15555551004",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_10_cost_cap_drain",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_10_drain_jane",
+        "tenantId": "t_10_cost_cap_drain",
+        "firstName": "Jane",
+        "lastName": "Chatty",
+        "displayName": "Jane Chatty",
+        "companyName": null,
+        "primaryPhone": "+15555551004",
+        "secondaryPhone": null,
+        "email": "jane.chatty@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi there, gorgeous weather we're having today, isn't it?",
+      "expected": {
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "So tell me, do you ever get tired of answering phones all day?",
+      "expected": {
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "I was just at the grocery store and the lines were unbelievable. Have you been there lately?",
+      "expected": {
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "My neighbor's dog barked all night again. I really don't know what to do about it.",
+      "expected": {
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Hey, what's your favorite color? Mine's a deep teal.",
+      "expected": {
+        "escalates": false
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Anyway, I was thinking about taking up gardening this spring. Tomatoes mostly.",
+      "expected": {
+        "escalates": true
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Did you watch the game last night? What a comeback in the fourth quarter.",
+      "expected": {
+        "escalates": true
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "You know, I really should learn to cook. Any recipe recommendations?",
+      "expected": {
+        "escalates": true,
+        "spokenAnswerMatches": "agent has hit the cost cap and terminates the session cleanly with a polite wrap-up; no further LLM calls; session_terminated event with cause cap_exceeded or cost_cap"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}
