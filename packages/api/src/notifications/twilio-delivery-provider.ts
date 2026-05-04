@@ -26,7 +26,7 @@ import {
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
-  authTokenSecondary?: string;
+  secondaryAuthToken?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -69,7 +69,10 @@ type InternalTwilioSmsConfig = {
 };
 
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: InternalTwilioSmsConfig;
+  private readonly sms: Omit<TwilioSmsConfig, 'fetchImpl'> & {
+    apiBaseUrl: string;
+    fetchImpl: typeof fetch;
+  };
   private readonly email: Required<Omit<SendGridConfig, 'fetchImpl' | 'fromName' | 'replyToEmail'>> & {
     fromName?: string;
     replyToEmail?: string;
@@ -89,6 +92,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       authToken: config.sms.authToken,
       authTokenSecondary: config.sms.authTokenSecondary,
       fromNumber: config.sms.fromNumber,
+      secondaryAuthToken: config.sms.secondaryAuthToken,
       apiBaseUrl: config.sms.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01',
       fetchImpl: config.sms.fetchImpl ?? fetch,
     };
@@ -109,24 +113,26 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       Body: message.body,
     });
 
-    const auth = Buffer.from(`${this.sms.accountSid}:${this.sms.authToken}`).toString('base64');
-    const headers: Record<string, string> = {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    };
-    if (message.idempotencyKey) {
-      // Twilio accepts an Idempotency-Key header on Messages.json
-      headers['Idempotency-Key'] = message.idempotencyKey;
-    }
-
-    let response = await this.sms.fetchImpl(
-      `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
-      {
-        method: 'POST',
-        headers,
-        body: body.toString(),
+    const sendWithToken = async (authToken: string) => {
+      const auth = Buffer.from(`${this.sms.accountSid}:${authToken}`).toString('base64');
+      const headers: Record<string, string> = {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+      if (message.idempotencyKey) {
+        headers['Idempotency-Key'] = message.idempotencyKey;
       }
-    );
+
+      return this.sms.fetchImpl(
+        `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+        { method: 'POST', headers, body: body.toString() }
+      );
+    };
+
+    let response = await sendWithToken(this.sms.authToken);
+    if (response.status === 401 && this.sms.secondaryAuthToken) {
+      response = await sendWithToken(this.sms.secondaryAuthToken);
+    }
 
     if (response.status === 401 && this.sms.authTokenSecondary) {
       const secondaryAuth = Buffer.from(`${this.sms.accountSid}:${this.sms.authTokenSecondary}`).toString('base64');
@@ -144,10 +150,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     }
 
     if (!response.ok) {
-      if (response.status === 401) {
-      throw new Error('DELIVERY_AUTH_FAILED');
-    }
-    throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
+      if (response.status === 401) throw new Error('DELIVERY_AUTH_FAILED');
+      throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
@@ -202,10 +206,8 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     });
 
     if (!response.ok) {
-      if (response.status === 401) {
-      throw new Error('DELIVERY_AUTH_FAILED');
-    }
-    throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
+      if (response.status === 401) throw new Error('DELIVERY_AUTH_FAILED');
+      throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
     }
 
     // SendGrid returns 202 Accepted with the message ID in `X-Message-Id`.
