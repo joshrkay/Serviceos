@@ -1,0 +1,80 @@
+{
+  "id": "lookup-jobs-known-customer",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550103",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_jobs",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_jobs_dana",
+        "tenantId": "t_01_lookup_jobs",
+        "firstName": "Dana",
+        "lastName": "Nguyen",
+        "displayName": "Dana Nguyen",
+        "companyName": null,
+        "primaryPhone": "+15555550103",
+        "secondaryPhone": null,
+        "email": "dana.nguyen@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-05T08:00:00.000Z",
+        "updatedAt": "2026-04-01T08:00:00.000Z"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "job_01_jobs_1",
+        "tenantId": "t_01_lookup_jobs",
+        "customerId": "cust_01_jobs_dana",
+        "locationId": "loc_01_jobs_1",
+        "jobNumber": "JOB-2001",
+        "summary": "Furnace replacement",
+        "problemDescription": "Old furnace not heating second floor",
+        "status": "in_progress",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-10T08:00:00.000Z",
+        "updatedAt": "2026-04-25T08:00:00.000Z"
+      },
+      {
+        "id": "job_01_jobs_2",
+        "tenantId": "t_01_lookup_jobs",
+        "customerId": "cust_01_jobs_dana",
+        "locationId": "loc_01_jobs_1",
+        "jobNumber": "JOB-2002",
+        "summary": "Annual maintenance",
+        "problemDescription": "Yearly service check",
+        "status": "new",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-28T08:00:00.000Z",
+        "updatedAt": "2026-04-28T08:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What jobs do I have scheduled?",
+      "expected": {
+        "intent": "lookup_jobs",
+        "spokenAnswerMatches": "list Dana's two jobs: JOB-2001 furnace replacement (in progress) and JOB-2002 annual maintenance (new)"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": true
+}
