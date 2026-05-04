@@ -32,9 +32,9 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
 /**
  * Split a single `name` field into firstName + lastName. Mirrors what
  * the manual customer routes do: split on the first whitespace, treat
- * everything after as the last name. Single-token names land in
- * companyName so the customer record validates (validateCustomerInput
- * requires firstName OR companyName).
+ * everything after as the last name. A single-token name is treated
+ * as a `firstName` (validateCustomerInput accepts a firstName-only
+ * record; we don't fabricate a `companyName`).
  */
 export function splitName(name: string): {
   firstName: string;

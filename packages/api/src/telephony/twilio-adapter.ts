@@ -31,10 +31,14 @@ import { lookupBalance } from '../ai/skills/lookup-balance';
 import { lookupJobs } from '../ai/skills/lookup-jobs';
 import { lookupAgreements } from '../ai/skills/lookup-agreements';
 import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
+import { lookupCustomer } from '../ai/skills/lookup-customer';
+import { lookupEstimates } from '../ai/skills/lookup-estimates';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { AgreementRepository } from '../agreements/agreement';
+import type { CustomerRepository } from '../customers/customer';
+import type { EstimateRepository } from '../estimates/estimate';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
@@ -135,6 +139,9 @@ export interface TwilioAdapterDeps {
   appointmentRepo?: AppointmentRepository;
   invoiceRepo?: InvoiceRepository;
   agreementRepo?: AgreementRepository;
+  /** VQ-006: read-only customer + estimate lookups. */
+  customerRepo?: CustomerRepository;
+  estimateRepo?: EstimateRepository;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
 }
@@ -1209,6 +1216,46 @@ export class TwilioGatherAdapter {
             appointmentRepo: this.deps.appointmentRepo,
             invoiceRepo: this.deps.invoiceRepo,
             agreementRepo: this.deps.agreementRepo,
+            ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+          });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_customer': {
+          if (!this.deps.customerRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          // The caller is already identity-resolved (customerId in
+          // session) — use that as the fuzzy-lookup target so the
+          // skill returns the record matching this caller, not a
+          // free-form fuzzy phone search.
+          const result = await lookupCustomer(
+            {
+              tenantId,
+              identifier: { type: 'id', value: customerId },
+              sessionId: session.id,
+            },
+            {
+              customerRepo: this.deps.customerRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_estimates': {
+          if (!this.deps.jobRepo || !this.deps.estimateRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupEstimates(sharedInput, {
+            jobRepo: this.deps.jobRepo,
+            estimateRepo: this.deps.estimateRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
           session.events.emit(

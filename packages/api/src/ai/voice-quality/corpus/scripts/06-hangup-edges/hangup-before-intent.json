@@ -1,0 +1,30 @@
+{
+  "id": "hangup-before-intent",
+  "bucket": "06-hangup-edges",
+  "callerId": "+15555550602",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_06_before_intent",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hello?",
+      "expected": {
+        "escalates": false
+      },
+      "hangupAfter": true
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 8],
+    "appliesDisposition": [11]
+  },
+  "layer2Eligible": false
+}

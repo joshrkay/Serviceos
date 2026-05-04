@@ -1,0 +1,60 @@
+{
+  "id": "accent-uncertain-confidence",
+  "bucket": "08-ambiguity",
+  "callerId": "+15555550804",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_08_ambiguity_accent",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_08_accent_jane",
+        "tenantId": "t_08_ambiguity_accent",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550804",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Ah wud lyk ta scedool an apointmunt.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent attempts to interpret the heavily-accented transcription; if confidence is low it confirms understanding (e.g. 'I think I heard you'd like to schedule an appointment — is that right?') rather than auto-classifying and proposing; no proposal is drafted on this turn"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Yes.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent confirms the create_appointment intent and asks for the specific day and time; no proposal yet because slots are still missing"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

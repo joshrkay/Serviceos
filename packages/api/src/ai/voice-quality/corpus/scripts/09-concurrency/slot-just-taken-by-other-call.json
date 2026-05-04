@@ -1,0 +1,90 @@
+{
+  "id": "slot-just-taken-by-other-call",
+  "bucket": "09-concurrency",
+  "callerId": "+15555550902",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_09_slot_taken",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_09_slot_caller",
+        "tenantId": "t_09_slot_taken",
+        "firstName": "Maria",
+        "lastName": "Garcia",
+        "displayName": "Maria Garcia",
+        "companyName": null,
+        "primaryPhone": "+15555550902",
+        "secondaryPhone": null,
+        "email": "maria.garcia@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "cust_09_slot_other",
+        "tenantId": "t_09_slot_taken",
+        "firstName": "Bob",
+        "lastName": "Jones",
+        "displayName": "Bob Jones",
+        "companyName": null,
+        "primaryPhone": "+15555559999",
+        "secondaryPhone": null,
+        "email": "bob.jones@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_09_slot_taken_other",
+        "tenantId": "t_09_slot_taken",
+        "jobId": "job_09_slot_other_1",
+        "customerId": "cust_09_slot_other",
+        "scheduledStart": "2026-05-12T21:00:00.000Z",
+        "scheduledEnd": "2026-05-12T23:00:00.000Z",
+        "arrivalWindowStart": "2026-05-12T21:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-12T21:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "notes": "AC service for other customer — slot taken seconds before this call",
+        "createdBy": "user_seed",
+        "createdAt": "2026-05-04T17:59:45.000Z",
+        "updatedAt": "2026-05-04T17:59:45.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Maria Garcia. Book me Tuesday at 2pm.",
+      "expected": {
+        "intent": "create_appointment",
+        "proposalType": "create_appointment",
+        "slots": {
+          "customerId": "cust_09_slot_caller",
+          "scheduledStart": "2026-05-12T21:00:00.000Z"
+        },
+        "spokenAnswerMatches": "That Tuesday 2pm slot was just booked by another customer — the next opening is Tuesday at 4pm. I've drafted that for an operator to confirm.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}

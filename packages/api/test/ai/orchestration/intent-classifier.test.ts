@@ -319,6 +319,76 @@ describe('intent-classifier — classifyIntent', () => {
       expect(result.extractedEntities?.phone).toBeUndefined();
     });
 
+    it('PR #265 review — "set up an account for my appointment" stays as create_appointment (no false override)', async () => {
+      // The deterministic create_customer signup-phrasing regex used
+      // to fire on "set up an account" even when the sentence was
+      // unambiguously about scheduling. Negative-lookahead now
+      // excludes appointment/schedule context.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_appointment',
+          confidence: 0.9,
+          extractedEntities: { dateTimeDescription: 'tomorrow at 2pm' },
+        })
+      );
+      const result = await classifyIntent(
+        'Could you set up an account for my appointment tomorrow at 2pm?',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_appointment');
+    });
+
+    it('PR #265 review — "add me to the schedule" stays as create_appointment', async () => {
+      // The previous /\b(?:add|register)\s+me\b/i was so loose it
+      // caught any "add me" phrasing. Tightened to require "to (your) system".
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_appointment',
+          confidence: 0.88,
+          extractedEntities: { dateTimeDescription: 'next Tuesday' },
+        })
+      );
+      const result = await classifyIntent(
+        'Add me to the schedule for next Tuesday',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_appointment');
+    });
+
+    it('PR #265 review — "set up an account please" still classifies as create_customer', async () => {
+      // Negative lookahead must NOT swallow legitimate signup phrasings
+      // when no appointment/schedule context appears.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'unknown',
+          confidence: 0.4,
+        })
+      );
+      const result = await classifyIntent(
+        'Set up an account please',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_customer');
+    });
+
+    it('PR #265 review — "register me to your system" classifies as create_customer', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'unknown',
+          confidence: 0.3,
+        })
+      );
+      const result = await classifyIntent(
+        'Please register me to your system',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_customer');
+    });
+
     it('routes genuinely ambiguous input to unknown so clarification can ask for the intent', async () => {
       // "Add Jordan" could mean customer, line item, or team member.
       // When the LLM is not confident, the threshold guardrail must

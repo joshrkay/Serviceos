@@ -1,0 +1,87 @@
+{
+  "id": "lookup-account-summary-known-customer",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550101",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_account_summary",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_account_summary_jane",
+        "tenantId": "t_01_lookup_account_summary",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550101",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_01_account_summary_1",
+        "tenantId": "t_01_lookup_account_summary",
+        "jobId": "job_01_account_summary_1",
+        "scheduledStart": "2026-05-20T17:00:00.000Z",
+        "scheduledEnd": "2026-05-20T19:00:00.000Z",
+        "arrivalWindowStart": "2026-05-20T17:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-20T17:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "notes": "AC tune-up follow-up",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-04-15T10:00:00.000Z"
+      }
+    ],
+    "invoices": [
+      {
+        "id": "inv_01_account_summary_1",
+        "tenantId": "t_01_lookup_account_summary",
+        "jobId": "job_01_account_summary_1",
+        "estimateId": null,
+        "invoiceNumber": "INV-1001",
+        "status": "sent",
+        "lineItems": [
+          { "description": "AC tune-up", "quantity": 1, "unitPriceCents": 12500 }
+        ],
+        "totals": { "subtotalCents": 12500, "discountCents": 0, "taxCents": 1000, "totalCents": 13500 },
+        "amountPaidCents": 0,
+        "amountDueCents": 13500,
+        "issuedAt": "2026-04-20T10:00:00.000Z",
+        "dueDate": "2026-05-20T10:00:00.000Z",
+        "customerMessage": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-20T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith, can you tell me what's on my account?",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "spokenAnswerMatches": "summarize Jane Smith's account: one upcoming appointment on May 20 and one outstanding invoice for $135"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": true
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "proposalType": "create_customer",
+    "payload": {
+      "firstName": "",
+      "lastName": "",
+      "primaryPhone": "+15555550302"
+    }
+  }
+]

@@ -318,6 +318,69 @@ describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blo
     expect(types).toEqual(['email', 'phone']);
   });
 
+  describe('findByPhoneNormalized (PR #265 review — repo-side phone lookup)', () => {
+    it('returns customers whose phone matches the trailing 10 digits', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Bob',
+          lastName: 'Jones',
+          primaryPhone: '(555) 234-5678',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '15552345678');
+      expect(matches).toHaveLength(1);
+      expect(matches[0].displayName).toBe('Bob Jones');
+    });
+
+    it('is tenant-isolated', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-A',
+          firstName: 'Alice',
+          lastName: 'A',
+          primaryPhone: '+15558888888',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const fromB = await repo.findByPhoneNormalized('tenant-B', '5558888888');
+      expect(fromB).toEqual([]);
+    });
+
+    it('returns multiple matches when the phone is shared (household line)', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Mom',
+          lastName: 'Smith',
+          primaryPhone: '+15559999999',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Dad',
+          lastName: 'Smith',
+          primaryPhone: '+15559999999',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '5559999999');
+      expect(matches).toHaveLength(2);
+    });
+
+    it('returns [] for inputs shorter than 7 digits', async () => {
+      const matches = await repo.findByPhoneNormalized('tenant-1', '12345');
+      expect(matches).toEqual([]);
+    });
+  });
+
   it('createCustomer.duplicate — creation is NEVER blocked (advisory only)', async () => {
     // Even when both phone AND email exactly match an existing record,
     // the new customer is still persisted. This is the contract.

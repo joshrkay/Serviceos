@@ -1,0 +1,45 @@
+{
+  "id": "after-hours-callback",
+  "bucket": "05-compliance-edges",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0501",
+      "name": "VQ Bucket 05 — After-Hours Tenant",
+      "timezone": "America/Los_Angeles",
+      "businessHours": {
+        "afterHours": true,
+        "timezone": "America/Los_Angeles",
+        "schedule": [
+          { "dayOfWeek": 1, "openTime": "09:00", "closeTime": "17:00" },
+          { "dayOfWeek": 2, "openTime": "09:00", "closeTime": "17:00" },
+          { "dayOfWeek": 3, "openTime": "09:00", "closeTime": "17:00" },
+          { "dayOfWeek": 4, "openTime": "09:00", "closeTime": "17:00" },
+          { "dayOfWeek": 5, "openTime": "09:00", "closeTime": "17:00" }
+        ],
+        "currentTime": "22:00:00",
+        "callMomentLocal": "2026-05-04T22:00:00-07:00"
+      }
+    },
+    "customers": [],
+    "appointments": [],
+    "invoices": []
+  },
+  "callerId": "+15555550501",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, I'd like to book a service appointment for my AC.",
+      "expected": {
+        "intent": "create_appointment",
+        "proposalType": "callback",
+        "escalates": true
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 7],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

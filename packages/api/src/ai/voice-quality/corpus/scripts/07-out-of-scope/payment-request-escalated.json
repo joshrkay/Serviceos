@@ -1,0 +1,50 @@
+{
+  "id": "payment-request-escalated",
+  "bucket": "07-out-of-scope",
+  "callerId": "+15555550701",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_07_oos_payment",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_07_payment_jane",
+        "tenantId": "t_07_oos_payment",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550701",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. I'd like to make a payment over the phone.",
+      "expected": {
+        "escalates": true,
+        "spokenAnswerMatches": "agent acknowledges the payment request, declines to take payment over the phone in voice MVP, and offers to connect Jane with someone who can help; no record_payment proposal is drafted"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

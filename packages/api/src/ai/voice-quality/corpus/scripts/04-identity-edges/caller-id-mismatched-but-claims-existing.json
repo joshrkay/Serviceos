@@ -1,0 +1,60 @@
+{
+  "id": "caller-id-mismatched-but-claims-existing",
+  "bucket": "04-identity-edges",
+  "callerId": "+15555550404",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_04_identity_mismatched_claim",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_04_mismatched_jane",
+        "tenantId": "t_04_identity_mismatched_claim",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550494",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith.",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "escalates": true,
+        "spokenAnswerMatches": "caller-id does not match Jane Smith's number on file, so the agent asks for verification (e.g. address on file, email, or last service date) rather than auto-resolving from the spoken name alone"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "I'm calling from a friend's phone — my address on file is 123 Main Street.",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "escalates": true,
+        "spokenAnswerMatches": "agent confirms the verification answer is consistent with the existing Jane Smith customer record; agent does not create a new customer and does not silently overwrite the primary phone; if confidence is insufficient, the agent escalates to a human"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 5, 6],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

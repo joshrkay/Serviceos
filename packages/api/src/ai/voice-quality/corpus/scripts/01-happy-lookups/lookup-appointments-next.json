@@ -1,0 +1,65 @@
+{
+  "id": "lookup-appointments-next",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550104",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_appointments",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_appts_evan",
+        "tenantId": "t_01_lookup_appointments",
+        "firstName": "Evan",
+        "lastName": "Park",
+        "displayName": "Evan Park",
+        "companyName": null,
+        "primaryPhone": "+15555550104",
+        "secondaryPhone": null,
+        "email": "evan.park@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-03-01T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_01_appts_next_1",
+        "tenantId": "t_01_lookup_appointments",
+        "jobId": "job_01_appts_1",
+        "scheduledStart": "2026-06-12T16:00:00.000Z",
+        "scheduledEnd": "2026-06-12T18:00:00.000Z",
+        "arrivalWindowStart": "2026-06-12T16:00:00.000Z",
+        "arrivalWindowEnd": "2026-06-12T16:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "notes": "Heat pump diagnostic",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-30T10:00:00.000Z",
+        "updatedAt": "2026-04-30T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "When's my next appointment?",
+      "expected": {
+        "intent": "lookup_appointments",
+        "spokenAnswerMatches": "Evan's next appointment is on June 12 with a 9:00 AM Pacific arrival window"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": true
+}
