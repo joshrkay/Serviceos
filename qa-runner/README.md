@@ -57,3 +57,9 @@ Outputs:
 - Artifacts: `qa-runner/artifacts/*`
 - Test rows: `qa-runner/reports/test_results.json`
 - Summary: `qa-runner/reports/summary.md`
+
+## Phase 12 — Mode switching launch gate
+
+Per-PR gate (lightweight, no LLM): `packages/api/test/integration/mode-switch-no-bleed.test.ts` runs in CI on every push.
+
+Soak / launch-gate (real LLM, opt-in): `qa-runner/scenarios/concurrent-supervisor.md` documents the 4-concurrent-session × 50-mode-flip scenario. Gated by `ENABLE_REAL_LLM_HARNESS=1` + `LLM_BUDGET_USD_CEIL` to prevent runaway cost. See that file for env + invariants.

@@ -3,6 +3,25 @@ import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
 
+/**
+ * Phase 12 — supervisor-mode-related settings on tenant_settings.
+ *
+ * Schema lives in migration 063 (P12-001). The repository round-trips
+ * these alongside the rest of TenantSettings; the routes layer
+ * exposes them via the existing PUT /api/settings handler with
+ * enum validation on `unsupervisedProposalRouting`.
+ */
+export type UnsupervisedProposalRouting =
+  | 'queue_and_sms'
+  | 'queue_only'
+  | 'escalate_to_oncall';
+
+export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedProposalRouting> = [
+  'queue_and_sms',
+  'queue_only',
+  'escalate_to_oncall',
+];
+
 export interface TenantSettings {
   id: string;
   tenantId: string;
@@ -17,6 +36,19 @@ export interface TenantSettings {
   defaultPaymentTermDays: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /**
+   * Phase 12 — userId of the backup supervisor invoked when the
+   * primary supervisor switches to tech mode. Null = no backup
+   * (unsupervised routing applies). Validated by the route as a
+   * non-empty string; FK enforcement happens at the DB.
+   */
+  backupSupervisorUserId?: string | null;
+  /**
+   * Phase 12 — what to do with low-confidence proposals while the
+   * tenant is unsupervised. See `auto-approve.ts` and the routing
+   * worker (follow-up). Default `'queue_and_sms'`.
+   */
+  unsupervisedProposalRouting?: UnsupervisedProposalRouting;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -44,6 +76,10 @@ export interface UpdateSettingsInput {
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /** Phase 12 — null clears the backup. */
+  backupSupervisorUserId?: string | null;
+  /** Phase 12 — see `UnsupervisedProposalRouting` for accepted values. */
+  unsupervisedProposalRouting?: UnsupervisedProposalRouting;
 }
 
 export interface SettingsRepository {

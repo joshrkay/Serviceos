@@ -26,6 +26,7 @@ import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
 import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
+import { PortalShell } from './pages/portal/PortalShell';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
 import { JobCreate } from './pages/jobs/JobCreate';
@@ -68,6 +69,7 @@ export const router = createBrowserRouter([
   { path: '/pay/:id',    Component: InvoicePaymentPage },
   { path: '/intake',     Component: IntakeFormPage },
   { path: '/public/feedback/:token', Component: FeedbackPage },
+  { path: '/portal/:token',          Component: PortalShell },
 
   // ── App (with Shell nav, auth-gated) ────────────────────────────────────
   {
