@@ -26,6 +26,7 @@ import {
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
+  authTokenSecondary?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -86,6 +87,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     this.sms = {
       accountSid: config.sms.accountSid,
       authToken: config.sms.authToken,
+      authTokenSecondary: config.sms.authTokenSecondary,
       fromNumber: config.sms.fromNumber,
       apiBaseUrl: config.sms.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01',
       fetchImpl: config.sms.fetchImpl ?? fetch,
@@ -117,7 +119,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers['Idempotency-Key'] = message.idempotencyKey;
     }
 
-    const response = await this.sms.fetchImpl(
+    let response = await this.sms.fetchImpl(
       `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
       {
         method: 'POST',
@@ -126,9 +128,26 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       }
     );
 
+    if (response.status === 401 && this.sms.authTokenSecondary) {
+      const secondaryAuth = Buffer.from(`${this.sms.accountSid}:${this.sms.authTokenSecondary}`).toString('base64');
+      response = await this.sms.fetchImpl(
+        `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
+        {
+          method: 'POST',
+          headers: {
+            ...headers,
+            Authorization: `Basic ${secondaryAuth}`,
+          },
+          body: body.toString(),
+        }
+      );
+    }
+
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`Twilio SMS send failed (${response.status}): ${text.slice(0, 300)}`);
+      if (response.status === 401) {
+      throw new Error('DELIVERY_AUTH_FAILED');
+    }
+    throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
@@ -138,7 +157,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     return {
       providerMessageId: data.sid,
-      provider: 'twilio-sms',
+      provider: 'sms-gateway',
       channel: 'sms',
     };
   }
@@ -183,10 +202,10 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     });
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(
-        `SendGrid email send failed (${response.status}): ${text.slice(0, 300)}`
-      );
+      if (response.status === 401) {
+      throw new Error('DELIVERY_AUTH_FAILED');
+    }
+    throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
     }
 
     // SendGrid returns 202 Accepted with the message ID in `X-Message-Id`.
@@ -195,7 +214,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     return {
       providerMessageId,
-      provider: 'twilio-sendgrid',
+      provider: 'email-gateway',
       channel: 'email',
     };
   }

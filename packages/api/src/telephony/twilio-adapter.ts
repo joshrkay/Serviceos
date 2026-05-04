@@ -67,6 +67,7 @@ import type { TwilioCallControl } from './twilio-call-control';
 import { maskPhone } from './twilio-call-control';
 import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
+import type { TenantCredentialResolver } from '../integrations/credentials';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -144,6 +145,12 @@ export interface TwilioAdapterDeps {
   estimateRepo?: EstimateRepository;
   /** P11-001: when wired, every lookup invocation writes a row. */
   lookupEvents?: LookupEventService;
+  /**
+   * Phase C: per-tenant integration resolver for runtime auth lookups.
+   * Wiring is optional in this adapter phase; consumers can inject and
+   * use it for tenant-specific Twilio auth outside this gather loop.
+   */
+  credentialResolver?: TenantCredentialResolver;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
