@@ -154,10 +154,12 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     }
 
     if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      const detail = '(' + response.status + '): ' + text.slice(0, 300);
       if (response.status === 401) {
-        throw new Error('DELIVERY_AUTH_FAILED');
+        throw new Error('DELIVERY_AUTH_FAILED ' + detail);
       }
-      throw new Error(`DELIVERY_PROVIDER_FAILED (${response.status})`);
+      throw new Error('DELIVERY_PROVIDER_FAILED ' + detail);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
