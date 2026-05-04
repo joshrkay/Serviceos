@@ -1,5 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import {
+  resolveAutoApproveThreshold,
+  shouldAutoApprove,
+  type Mode,
+  type ResolveThresholdInput,
+} from './auto-approve';
 
 export type ProposalStatus =
   | 'draft'
@@ -14,7 +20,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
 
 const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -33,6 +39,7 @@ const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'add_note',
   'send_invoice',
   'record_payment',
+  'emergency_dispatch',
   'onboarding_tenant_settings',
   'onboarding_service_category',
   'onboarding_estimate_template',
@@ -200,6 +207,10 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // operator always screen-taps. Per CLAUDE.md "Never auto-execute".
     case 'cancel_appointment':
       return 'irreversible';
+    // Emergency dispatch escalates a live call to on-call personnel —
+    // irreversible in the sense that the notification fires immediately.
+    case 'emergency_dispatch':
+      return 'irreversible';
     // Outbound communications: even with autonomous trust, we do not
     // let the system send a customer-facing message without an
     // explicit approval. A mis-sent invoice is a real reputation
@@ -234,6 +245,33 @@ export function decideInitialStatus(input: {
   sourceTrustTier?: TrustTier;
   confidenceScore?: number;
   missingFields?: string[];
+  /**
+   * Phase 12: the supervisor's current_mode at the time the proposal
+   * was generated. Read from `voice_sessions.supervisor_mode_at_start`
+   * by the caller (the proposal-creation site in the AI gateway).
+   *
+   * When supplied, the auto-approve threshold becomes mode-aware
+   * (0.90 supervisor / 0.92 both / 0.95 tech by default). Optional —
+   * legacy callers that don't thread mode keep the pre-Phase-12 0.9.
+   */
+  supervisorMode?: Mode;
+  /**
+   * Phase 12: tenant-wide supervisor presence — false means the
+   * tenant is "unsupervised" (no user in supervisor or both mode).
+   * When false, auto-approval is hard-blocked regardless of
+   * confidence and the proposal lands in 'ready_for_review' so it
+   * surfaces in the queue + the unsupervised-routing worker can
+   * notify the owner per `tenant_settings.unsupervised_proposal_routing`.
+   *
+   * Optional, defaults to `true` so legacy callers preserve behavior.
+   */
+  supervisorPresent?: boolean;
+  /**
+   * Phase 12: per-tenant override map for the auto-approve threshold,
+   * read from `tenant_settings.auto_approve_threshold` (a JSONB column
+   * keyed by mode). Pass-through to `resolveAutoApproveThreshold`.
+   */
+  tenantThresholdOverride?: ResolveThresholdInput['tenantOverride'];
 }): ProposalStatus {
   // Missing required fields always land in 'draft' — a partial payload
   // can't be auto-approved even by an autonomous agent with high
@@ -244,12 +282,30 @@ export function decideInitialStatus(input: {
 
   const cls = actionClassForProposalType(input.proposalType);
 
-  if (
-    input.sourceTrustTier === 'autonomous' &&
-    cls === 'capture' &&
-    (input.confidenceScore ?? 0) >= 0.9
-  ) {
-    return 'approved';
+  // Auto-approve is only ever a possibility for `sourceTrustTier === 'autonomous'`
+  // and capture-class. Money / comms / irreversible classes never auto-approve
+  // regardless of trust tier or mode (see `actionClassForProposalType` doc).
+  if (input.sourceTrustTier === 'autonomous' && cls === 'capture') {
+    // Phase 12 — resolve the mode-aware threshold. `null` means the
+    // tenant is unsupervised and auto-approval is categorically blocked.
+    const threshold = resolveAutoApproveThreshold({
+      supervisorMode: input.supervisorMode,
+      supervisorPresent: input.supervisorPresent,
+      tenantOverride: input.tenantThresholdOverride,
+    });
+
+    if (threshold === null) {
+      // Unsupervised. The proposal would have auto-approved if a
+      // supervisor were present — surface it in the queue (rather than
+      // 'draft') so the unsupervised-routing path picks it up. The
+      // routing worker reads `status='ready_for_review'` rows and
+      // applies tenant_settings.unsupervised_proposal_routing.
+      return 'ready_for_review';
+    }
+
+    if (shouldAutoApprove(input.confidenceScore, threshold)) {
+      return 'approved';
+    }
   }
 
   return 'draft';

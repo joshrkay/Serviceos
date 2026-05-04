@@ -1,228 +1,143 @@
-import { useState } from 'react';
+import { useState, useEffect, FormEvent, useMemo } from 'react';
 import {
-  CreditCard, Building2, Lock, Check, Phone, Mail,
+  Lock, Check, Phone, Mail,
   CheckCircle2, ChevronDown, ChevronUp, Shield, AlertCircle,
 } from 'lucide-react';
-import { useParams } from 'react-router';
-import { invoices, customers, calcInvoiceTotal } from '../../data/mock-data';
+import { useParams, useSearchParams } from 'react-router';
+import {
+  Elements,
+  PaymentElement,
+  useElements,
+  useStripe,
+} from '@stripe/react-stripe-js';
+import { loadStripe, Stripe } from '@stripe/stripe-js';
+import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
 
-type PaymentMethod = 'card' | 'ach';
+// ─── API types ──────────────────────────────────────────────────────────────
 
-interface PayRequest {
-  method: PaymentMethod;
-  invoiceId: string;
-  amount: number;
+interface LineItem {
+  description: string;
+  quantity: number;
+  unitPriceCents: number;
+  totalCents: number;
 }
 
-async function submitPayment(request: PayRequest): Promise<void> {
-  const res = await fetch('/api/payments/public/collect', {
+interface PublicInvoiceView {
+  id: string;
+  invoiceNumber: string;
+  status: string;
+  customerName: string;
+  businessName: string;
+  businessPhone?: string;
+  businessEmail?: string;
+  lineItems: LineItem[];
+  totalCents: number;
+  subtotalCents: number;
+  taxCents: number;
+  discountCents: number;
+  amountPaidCents: number;
+  amountDueCents: number;
+  dueDate?: string;
+  customerMessage?: string;
+  isPaid: boolean;
+  viewCount: number;
+  stripePaymentLinkUrl?: string;
+}
+
+function formatMoney(cents: number) {
+  return (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatDate(iso?: string) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// ─── Stripe loader ─────────────────────────────────────────────────────────
+//
+// Resolved once at module load. When the publishable key is missing (dev
+// without Stripe configured, or test runs that mock the module), the promise
+// resolves to null and we fall back to a "Stripe not configured" message.
+
+function getPublishableKey(): string | undefined {
+  // import.meta.env is replaced by Vite at build time. Guard the access so
+  // the test environment (where import.meta.env may not be defined) does
+  // not crash on first import.
+  try {
+    const fromImport = (import.meta as { env?: Record<string, string | undefined> })
+      .env?.VITE_STRIPE_PUBLISHABLE_KEY;
+    if (fromImport) return fromImport;
+  } catch {
+    /* import.meta unavailable (Node test) — fall through */
+  }
+  // Test fallback: vitest's `vi.stubEnv` writes to process.env. Vite
+  // strips this branch in production builds via dead-code elimination
+  // (process.env is undefined on the client there).
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+  }
+  return undefined;
+}
+
+// Stripe's docs recommend calling `loadStripe` once at module level,
+// but doing so reads `import.meta.env` at module-load time, which makes
+// the env effectively immutable across the test runtime. We resolve it
+// at component-mount time via `useMemo` (below) — the underlying
+// `loadStripe` cache still ensures a single network roundtrip per
+// publishable key per page load.
+
+async function fetchInvoice(token: string): Promise<PublicInvoiceView> {
+  const res = await fetch(`/public/invoices/${token}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string };
+    throw new Error(body.message ?? `Error ${res.status}`);
+  }
+  return res.json() as Promise<PublicInvoiceView>;
+}
+
+async function pingView(token: string) {
+  await fetch(`/public/invoices/${token}/view`, { method: 'POST' }).catch(() => undefined);
+}
+
+async function createPaymentIntent(invoiceId: string, viewToken: string): Promise<string> {
+  const res = await fetch('/api/public-payments/create-payment-intent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
+    body: JSON.stringify({ invoiceId, viewToken }),
   });
-
   if (!res.ok) {
-    let message = `Payment request failed (${res.status})`;
-    try {
-      const body = await res.json() as { message?: string; error?: string };
-      message = body.message || body.error || message;
-    } catch {
-      // Keep default message when response body is not JSON.
+    const body = await res.json().catch(() => ({})) as { error?: string; message?: string };
+    if (body.error === 'STRIPE_NOT_CONFIGURED') {
+      throw new Error('STRIPE_NOT_CONFIGURED');
     }
-    throw new Error(message);
+    throw new Error(body.message ?? `Error ${res.status}`);
   }
-}
-
-// ─── Card input form ──────────────────────────────────────────────────────
-function CardForm({
-  onPay, total, isSubmitting,
-}: { onPay: () => Promise<void>; total: number; isSubmitting: boolean }) {
-  const [card,   setCard]   = useState('');
-  const [expiry, setExpiry] = useState('');
-  const [cvc,    setCvc]    = useState('');
-  const [name,   setName]   = useState('');
-  const [zip,    setZip]    = useState('');
-  function fmt(val: string) { return val.replace(/\D/g,'').replace(/(.{4})/g,'$1 ').trim().slice(0, 19); }
-  function fmtExp(val: string) { const d = val.replace(/\D/g,''); return d.length > 2 ? `${d.slice(0,2)}/${d.slice(2,4)}` : d; }
-
-  const canPay = card.replace(/\s/g,'').length >= 15 && expiry.length === 5 && cvc.length >= 3 && name.trim() && zip.length === 5;
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canPay || isSubmitting) return;
-    await onPay();
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-col gap-3">
-      {/* Card number */}
-      <div>
-        <label className="block text-xs text-slate-500 mb-1.5">Card number</label>
-        <div className="relative">
-          <input
-            value={card}
-            onChange={e => setCard(fmt(e.target.value))}
-            placeholder="1234 5678 9012 3456"
-            inputMode="numeric"
-            maxLength={19}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors pr-14 disabled:bg-slate-50 disabled:text-slate-400"
-            disabled={isSubmitting}
-          />
-          <div className="absolute right-3 top-1/2 -translate-y-1/2 flex gap-1">
-            {['V','M','A'].map(b => (
-              <span key={b} className="flex size-5 items-center justify-center rounded bg-slate-100 text-xs text-slate-500">{b}</span>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs text-slate-500 mb-1.5">Expiry</label>
-          <input
-            value={expiry}
-            onChange={e => setExpiry(fmtExp(e.target.value))}
-            placeholder="MM/YY"
-            inputMode="numeric"
-            maxLength={5}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-            disabled={isSubmitting}
-          />
-        </div>
-        <div>
-          <label className="block text-xs text-slate-500 mb-1.5">CVC</label>
-          <input
-            value={cvc}
-            onChange={e => setCvc(e.target.value.replace(/\D/g,'').slice(0, 4))}
-            placeholder="123"
-            inputMode="numeric"
-            maxLength={4}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-            disabled={isSubmitting}
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-xs text-slate-500 mb-1.5">Name on card</label>
-        <input
-          value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="Full name"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-          disabled={isSubmitting}
-        />
-      </div>
-
-      <div>
-        <label className="block text-xs text-slate-500 mb-1.5">Billing ZIP</label>
-        <input
-          value={zip}
-          onChange={e => setZip(e.target.value.replace(/\D/g,'').slice(0, 5))}
-          placeholder="78701"
-          inputMode="numeric"
-          maxLength={5}
-            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-            disabled={isSubmitting}
-          />
-      </div>
-
-      <button
-        type="submit"
-        disabled={!canPay || isSubmitting}
-        className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all mt-1 ${
-          !canPay   ? 'bg-slate-100 text-slate-400 cursor-not-allowed' :
-          isSubmitting    ? 'bg-green-500 text-white' :
-                      'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
-        }`}
-      >
-        {isSubmitting
-          ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Processing…</>
-          : <><Lock size={14} /> Pay ${total.toLocaleString()} securely</>
-        }
-      </button>
-    </form>
-  );
-}
-
-// ─── ACH form ─────────────────────────────────────────────────────────────
-function ACHForm({
-  onPay, total, isSubmitting,
-}: { onPay: () => Promise<void>; total: number; isSubmitting: boolean }) {
-  const [routing, setRouting] = useState('');
-  const [account, setAccount] = useState('');
-  const [name,    setName]    = useState('');
-  const canPay = routing.length === 9 && account.length >= 8 && name.trim();
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canPay || isSubmitting) return;
-    await onPay();
-  }
-
-  return (
-    <form onSubmit={submit} className="flex flex-col gap-3">
-      <div className="flex items-start gap-3 rounded-xl bg-blue-50 border border-blue-100 px-4 py-3 mb-1">
-        <Building2 size={14} className="text-blue-500 shrink-0 mt-0.5" />
-        <p className="text-xs text-blue-700 leading-relaxed">
-          ACH bank transfers typically process in 1–3 business days. You'll receive a confirmation email once payment is received.
-        </p>
-      </div>
-      <div>
-        <label className="block text-xs text-slate-500 mb-1.5">Account holder name</label>
-        <input
-          value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="Full name on account"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-          disabled={isSubmitting}
-        />
-      </div>
-      <div>
-        <label className="block text-xs text-slate-500 mb-1.5">Routing number (9 digits)</label>
-        <input
-          value={routing}
-          onChange={e => setRouting(e.target.value.replace(/\D/g,'').slice(0, 9))}
-          placeholder="021000021"
-          inputMode="numeric"
-          maxLength={9}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-          disabled={isSubmitting}
-        />
-      </div>
-      <div>
-        <label className="block text-xs text-slate-500 mb-1.5">Account number</label>
-        <input
-          value={account}
-          onChange={e => setAccount(e.target.value.replace(/\D/g,'').slice(0, 17))}
-          placeholder="•••••••••••"
-          inputMode="numeric"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-indigo-400 transition-colors disabled:bg-slate-50 disabled:text-slate-400"
-          disabled={isSubmitting}
-        />
-      </div>
-      <button
-        type="submit"
-        disabled={!canPay || isSubmitting}
-        className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all mt-1 ${
-          !canPay ? 'bg-slate-100 text-slate-400 cursor-not-allowed' :
-          isSubmitting  ? 'bg-green-500 text-white' :
-                    'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
-        }`}
-      >
-        {isSubmitting
-          ? <><span className="size-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Processing…</>
-          : <><Building2 size={14} /> Submit bank transfer — ${total.toLocaleString()}</>
-        }
-      </button>
-    </form>
-  );
+  const data = await res.json() as { clientSecret: string };
+  return data.clientSecret;
 }
 
 // ─── Success screen ────────────────────────────────────────────────────────
-function PaidScreen({ customer, invoiceNumber, total, method }: {
-  customer: string; invoiceNumber: string; total: number; method: 'card' | 'ach';
+
+function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone, paidAt }: {
+  customerName: string;
+  invoiceNumber: string;
+  totalCents: number;
+  businessPhone?: string;
+  /** ISO date string. When provided, rendered in the receipt block. */
+  paidAt?: string | null;
 }) {
+  // P5-018: keep the receipt block intentionally minimal — invoice
+  // number, amount paid, and a paid timestamp. We deliberately do NOT
+  // surface card brand / last-4 / payment-intent ids in the customer
+  // view. Stripe sends an emailed receipt with that detail.
+  const paidAtLabel = paidAt
+    ? new Date(paidAt).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+      })
+    : null;
   return (
     <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center">
       <div className="flex flex-col items-center gap-5 max-w-xs" style={{ animation: 'popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) both' }}>
@@ -232,7 +147,8 @@ function PaidScreen({ customer, invoiceNumber, total, method }: {
         <div>
           <h1 className="text-slate-900" style={{ fontSize: '1.6rem', lineHeight: 1.2 }}>Payment received!</h1>
           <p className="text-slate-500 mt-2 leading-relaxed text-sm">
-            Thank you, {customer.split(' ')[0]}! Your payment of <strong>${total.toLocaleString()}</strong> for {invoiceNumber} has been {method === 'ach' ? 'submitted' : 'processed'}.
+            Thank you, {(customerName || 'there').split(' ')[0] || 'there'}! Your payment of{' '}
+            <strong>${formatMoney(totalCents)}</strong> for {invoiceNumber} has been processed.
           </p>
         </div>
         <div className="w-full rounded-2xl bg-slate-50 border border-slate-200 px-5 py-4 flex flex-col gap-2">
@@ -242,69 +158,316 @@ function PaidScreen({ customer, invoiceNumber, total, method }: {
           </div>
           <div className="flex justify-between text-sm">
             <span className="text-slate-500">Amount</span>
-            <span className="text-slate-800">${total.toLocaleString()}</span>
+            <span className="text-slate-800">${formatMoney(totalCents)}</span>
           </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-slate-500">Method</span>
-            <span className="text-slate-800">{method === 'ach' ? 'ACH bank transfer' : 'Credit card'}</span>
-          </div>
+          {paidAtLabel && (
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-500">Paid on</span>
+              <span className="text-slate-800">{paidAtLabel}</span>
+            </div>
+          )}
           <div className="flex justify-between text-sm">
             <span className="text-slate-500">Status</span>
-            <span className="text-green-700 flex items-center gap-1"><Check size={12} /> {method === 'ach' ? 'Submitted' : 'Paid'}</span>
+            <span className="text-green-700 flex items-center gap-1"><Check size={12} /> Paid</span>
           </div>
         </div>
-        <p className="text-xs text-slate-400">A receipt has been sent. Questions? (512) 555-0000</p>
+        {businessPhone && (
+          <p className="text-xs text-slate-400">A receipt has been sent. Questions? {businessPhone}</p>
+        )}
       </div>
       <style>{`@keyframes popIn { 0%{opacity:0;transform:scale(0.8);}70%{transform:scale(1.05);}100%{opacity:1;transform:scale(1);} }`}</style>
     </div>
   );
 }
 
-// ─── Main page ────────────────────────────────────────────────────────────
-export function InvoicePaymentPage() {
-  const { id }                      = useParams<{ id: string }>();
-  const [method,  setMethod]        = useState<PaymentMethod>('card');
-  const [paid,    setPaid]          = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [showAll, setShowAll]       = useState(false);
+// ─── Stripe payment form ───────────────────────────────────────────────────
 
-  const inv = invoices.find(i =>
-    i.id === id || i.invoiceNumber.toLowerCase().replace('-','') === id?.toLowerCase()
-  ) ?? invoices[1]; // fallback to unpaid invoice for demo
+type PayStatus =
+  | 'idle'
+  | 'processing'        // submit in flight (waiting for Stripe)
+  | 'processing_async'  // intent settling async (ACH / capture-later)
+  | 'succeeded'         // intent.status === 'succeeded'
+  | 'failed';
 
-  const customer = customers.find(c => c.id === inv.customerId);
-  const total    = calcInvoiceTotal(inv);
-  const isOverdue = inv.status === 'Overdue';
-  const visItems  = showAll ? inv.lineItems : inv.lineItems.slice(0, 3);
+function PaymentForm({
+  amountCents,
+  onSucceeded,
+  onProcessingAsync,
+}: {
+  amountCents: number;
+  /**
+   * Called after a successful inline confirmation (no redirect path).
+   * Implementations should re-render the success screen — typically by
+   * setting a `success=true` query param via react-router so we don't
+   * trigger a full-page reload (which would re-fetch the invoice).
+   */
+  onSucceeded: () => void;
+  /**
+   * P5-018: called when the PaymentIntent settles asynchronously (ACH /
+   * processing) so the parent page can start polling the status
+   * endpoint and flip to "Payment received" once the webhook lands.
+   */
+  onProcessingAsync?: () => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [status, setStatus] = useState<PayStatus>('idle');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function handlePay(selectedMethod: PaymentMethod) {
-    if (isSubmitting) return;
-    setIsSubmitting(true);
-    setSubmitError(null);
-    try {
-      await submitPayment({
-        method: selectedMethod,
-        invoiceId: inv.id,
-        amount: total,
-      });
-      setPaid(true);
-    } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Payment failed. Please try again.');
-    } finally {
-      setIsSubmitting(false);
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!stripe || !elements || status === 'processing') return;
+    setStatus('processing');
+    setErrorMessage(null);
+    const result = await stripe.confirmPayment({
+      elements,
+      confirmParams: {
+        return_url: `${window.location.origin}${window.location.pathname}?success=true`,
+      },
+      redirect: 'if_required',
+    });
+    if (result.error) {
+      setStatus('failed');
+      setErrorMessage(
+        result.error.message ?? 'Payment failed. Please try a different card.',
+      );
+      return;
     }
+    // P1 review fix: confirmPayment returning without `error` does NOT
+    // mean payment is settled. With `redirect: 'if_required'` the
+    // resolved paymentIntent can still be in `processing` /
+    // `requires_action` / `requires_capture` states for delayed payment
+    // methods. Only flip to "Payment received" on `succeeded`. For
+    // intermediate states, show a processing screen and let the webhook
+    // reconciliation be the source of truth.
+    const intentStatus = result.paymentIntent?.status;
+    if (intentStatus === 'succeeded') {
+      setStatus('succeeded');
+      onSucceeded();
+      return;
+    }
+    if (intentStatus === 'processing' || intentStatus === 'requires_capture') {
+      // Bank/ACH or capture-later flows: payment is in flight but not
+      // settled. The Stripe webhook will mark the invoice paid when the
+      // intent transitions to succeeded; the customer doesn't need to
+      // refresh — the parent page polls the status endpoint and flips
+      // to "Payment received" automatically (P5-018).
+      setStatus('processing_async');
+      setErrorMessage(null);
+      onProcessingAsync?.();
+      return;
+    }
+    // requires_action / requires_payment_method / canceled / unknown —
+    // leave as failed with an actionable message.
+    setStatus('failed');
+    setErrorMessage(
+      `Payment is not yet complete (status: ${intentStatus ?? 'unknown'}). ` +
+        'Please try again or contact support if the issue persists.',
+    );
   }
 
-  if (paid) return <PaidScreen customer={inv.customer} invoiceNumber={inv.invoiceNumber} total={total} method={method} />;
+  const disabled = !stripe || !elements || status === 'processing';
 
-  if (inv.status === 'Paid') {
+  if (status === 'processing_async') {
+    // ACH / capture-later flows where the intent has cleared the
+    // submit step but isn't yet `succeeded`. Webhook reconciliation
+    // will mark the invoice paid when Stripe finishes.
     return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center">
-        <CheckCircle2 size={48} className="text-green-500 mb-4" />
-        <h1 className="text-slate-900 mb-2">Already paid</h1>
-        <p className="text-sm text-slate-500">This invoice has already been paid. Thank you!</p>
+      <div
+        role="status"
+        className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
+      >
+        <p className="text-sm text-slate-700">
+          We've received your payment instructions and they're processing
+          with your bank. You'll get a confirmation email when the funds
+          settle. You can close this window.
+        </p>
       </div>
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5">
+      {errorMessage && (
+        <div
+          role="alert"
+          className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
+          {errorMessage}
+        </div>
+      )}
+      <div className="mb-4">
+        <PaymentElement
+          options={{
+            // Mobile-friendly defaults: tabs layout + responsive billing
+            // details so the iframe sizes to the viewport.
+            layout: { type: 'tabs', defaultCollapsed: false },
+          }}
+        />
+      </div>
+      <button
+        type="submit"
+        disabled={disabled}
+        className={`w-full flex items-center justify-center gap-2 rounded-2xl py-4 text-sm transition-all ${
+          disabled
+            ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            : 'bg-slate-900 text-white hover:bg-slate-700 active:scale-[0.98] shadow-lg shadow-slate-900/20'
+        }`}
+      >
+        {status === 'processing'
+          ? <><span className="size-4 rounded-full border-2 border-slate-300 border-t-slate-600 animate-spin" /> Processing payment…</>
+          : <><Lock size={14} /> Pay ${formatMoney(amountCents)} securely</>
+        }
+      </button>
+      <p className="text-xs text-slate-400 text-center mt-3">
+        Powered by Stripe · Your card details never touch our servers
+      </p>
+    </form>
+  );
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────
+
+export function InvoicePaymentPage() {
+  const { id: token } = useParams<{ id: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const [invoice, setInvoice] = useState<PublicInvoiceView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+
+  // Stripe PaymentIntent state — fetched once after the invoice loads.
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [intentError, setIntentError] = useState<string | null>(null);
+  const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
+
+  // P5-018: when Stripe returns an async-settling intent (ACH /
+  // capture-later), we kick off polling so the page can flip to
+  // "Payment received" once the webhook reconciliation lands.
+  const [processingAsync, setProcessingAsync] = useState(false);
+
+  // Built per mount so vitest can stub the publishable key. `loadStripe`
+  // de-dupes internally so this still results in a single network call
+  // per key over the page lifecycle.
+  const stripePromise = useMemo<Promise<Stripe | null>>(() => {
+    const key = getPublishableKey();
+    return key ? loadStripe(key) : Promise.resolve(null);
+  }, []);
+
+  // Stripe redirects back with ?success=true after a completed checkout.
+  const paymentSucceeded = searchParams.get('success') === 'true';
+
+  useEffect(() => {
+    if (!token) { setError('Invalid payment link'); setLoading(false); return; }
+    fetchInvoice(token)
+      .then((inv) => {
+        setInvoice(inv);
+        setLoading(false);
+        pingView(token);
+      })
+      .catch((err: Error) => {
+        setError(err.message);
+        setLoading(false);
+      });
+  }, [token]);
+
+  // P2 review fix: detect missing FRONTEND publishable key by awaiting
+  // `stripePromise`. When `loadStripe` resolves to null (or no key is
+  // configured), show the same not-configured fallback we use for the
+  // backend 503 path — otherwise <Elements> would render a permanently
+  // disabled form with no actionable message.
+  useEffect(() => {
+    let cancelled = false;
+    stripePromise.then((stripe) => {
+      if (!cancelled && !stripe) setStripeNotConfigured(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // After the invoice loads, request a PaymentIntent client_secret for
+  // payable invoices. Skip when already paid or success-redirect.
+  useEffect(() => {
+    if (!invoice || !token) return;
+    if (invoice.isPaid || invoice.amountDueCents <= 0 || paymentSucceeded) return;
+    if (stripeNotConfigured) return;
+    let cancelled = false;
+    createPaymentIntent(invoice.id, token)
+      .then((secret) => { if (!cancelled) setClientSecret(secret); })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        if (err.message === 'STRIPE_NOT_CONFIGURED') {
+          setStripeNotConfigured(true);
+        } else {
+          setIntentError(err.message);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [invoice, token, paymentSucceeded, stripeNotConfigured]);
+
+  const elementsOptions = useMemo(
+    () => (clientSecret ? { clientSecret, appearance: { theme: 'stripe' as const } } : undefined),
+    [clientSecret],
+  );
+
+  // P5-018 — Poll the public status endpoint while an async payment
+  // is settling. Stop polling as soon as the status flips to `paid`.
+  // We need to disable polling on BOTH the initial server-fetched
+  // invoice.isPaid (page loaded after a previous redirect) AND on
+  // polledStatus.status === 'paid' (the hook itself reported paid in a
+  // prior tick). Without the second clause the hook keeps firing 5s
+  // requests on the success screen forever.
+  const [polledPaid, setPolledPaid] = useState(false);
+  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid && !polledPaid;
+  const { status: polledStatus } = useInvoiceStatus(
+    invoice?.id ?? null,
+    token ?? null,
+    { enabled: pollEnabled, intervalMs: 5_000 },
+  );
+  useEffect(() => {
+    if (polledStatus?.status === 'paid' && !polledPaid) setPolledPaid(true);
+  }, [polledStatus?.status, polledPaid]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <span className="size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
+      </div>
+    );
+  }
+
+  if (error && !invoice) {
+    return (
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center px-6 text-center gap-4">
+        <AlertCircle size={40} className="text-slate-300" />
+        <h1 className="text-slate-900">Invoice not found</h1>
+        <p className="text-sm text-slate-500">This payment link may have expired or been removed.</p>
+      </div>
+    );
+  }
+
+  const inv = invoice!;
+  const isOverdue = inv.dueDate ? new Date(inv.dueDate) < new Date() && !inv.isPaid : false;
+  const visItems = showAll ? inv.lineItems : inv.lineItems.slice(0, 3);
+
+  // Show paid screen when:
+  //   • invoice is fully settled (isPaid or amountDueCents === 0)
+  //   • Stripe redirected back with ?success=true (webhook may not have fired yet)
+  //   • P5-018: async polling observed the status flipping to paid
+  if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded || polledPaid) {
+    const paidAmountCents = polledPaid && polledStatus
+      ? polledStatus.amountPaidCents
+      : inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents;
+    return (
+      <PaidScreen
+        customerName={inv.customerName}
+        invoiceNumber={inv.invoiceNumber}
+        totalCents={paidAmountCents}
+        businessPhone={inv.businessPhone}
+        paidAt={polledStatus?.paidAt ?? null}
+      />
     );
   }
 
@@ -315,20 +478,23 @@ export function InvoicePaymentPage() {
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
-              <span className="text-white" style={{ fontSize: 13 }}>F</span>
+              <span className="text-white" style={{ fontSize: 13 }}>S</span>
             </div>
             <div>
-              <p className="text-sm text-slate-800">Fieldly Pro Services</p>
-              <p className="text-xs text-slate-400">Austin, TX</p>
+              <p className="text-sm text-slate-800">{inv.businessName}</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <a href="tel:5125550000" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-              <Phone size={14} className="text-slate-600" />
-            </a>
-            <a href="mailto:info@fieldly.pro" className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
-              <Mail size={14} className="text-slate-600" />
-            </a>
+            {inv.businessPhone && (
+              <a href={`tel:${inv.businessPhone}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
+                <Phone size={14} className="text-slate-600" />
+              </a>
+            )}
+            {inv.businessEmail && (
+              <a href={`mailto:${inv.businessEmail}`} className="flex size-8 items-center justify-center rounded-full bg-slate-100 hover:bg-slate-200 transition-colors">
+                <Mail size={14} className="text-slate-600" />
+              </a>
+            )}
           </div>
         </div>
       </div>
@@ -340,7 +506,7 @@ export function InvoicePaymentPage() {
             <AlertCircle size={16} className="text-red-500 shrink-0 mt-0.5" />
             <div>
               <p className="text-sm text-red-800">This invoice is overdue</p>
-              <p className="text-xs text-red-600 mt-0.5">Was due {inv.dueDate}. Please pay as soon as possible.</p>
+              <p className="text-xs text-red-600 mt-0.5">Was due {formatDate(inv.dueDate)}. Please pay as soon as possible.</p>
             </div>
           </div>
         )}
@@ -351,21 +517,21 @@ export function InvoicePaymentPage() {
           <span className="text-xs text-slate-500">{inv.invoiceNumber}</span>
         </div>
         <h1 className="text-slate-900 mb-0.5" style={{ fontSize: '1.4rem', lineHeight: 1.2 }}>
-          Hi, {inv.customer.split(' ')[0]}!
+          Hi, {(inv.customerName || 'there').split(' ')[0] || 'there'}!
         </h1>
-        <p className="text-sm text-slate-500 mb-5">{customer?.address}</p>
+        {inv.dueDate && (
+          <p className={`text-sm mb-5 ${isOverdue ? 'text-red-500' : 'text-slate-500'}`}>
+            {isOverdue ? 'Was due' : 'Due'} {formatDate(inv.dueDate)}
+          </p>
+        )}
 
-        {/* Service */}
-        <div className="bg-white rounded-2xl border border-slate-200 px-5 py-4 mb-4">
-          <p className="text-xs text-slate-400 mb-1">For</p>
-          <p className="text-sm text-slate-800">{inv.description}</p>
-          {inv.dueDate && (
-            <p className={`text-xs mt-1.5 flex items-center gap-1 ${isOverdue ? 'text-red-500' : 'text-slate-400'}`}>
-              <span className={`size-1.5 rounded-full inline-block ${isOverdue ? 'bg-red-400' : 'bg-slate-300'}`} />
-              {isOverdue ? 'Was due' : 'Due'} {inv.dueDate}
-            </p>
-          )}
-        </div>
+        {/* Customer message */}
+        {inv.customerMessage && (
+          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-4 mb-4">
+            <p className="text-xs text-slate-400 mb-1">Message from {inv.businessName}</p>
+            <p className="text-sm text-slate-700">{inv.customerMessage}</p>
+          </div>
+        )}
 
         {/* Line items */}
         <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
@@ -379,9 +545,9 @@ export function InvoicePaymentPage() {
             {visItems.map((item, i) => (
               <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
                 <p className="text-sm text-slate-800">{item.description}</p>
-                <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                <p className="text-sm text-slate-500 text-right">{item.quantity}</p>
+                <p className="text-sm text-slate-500 text-right">${formatMoney(item.unitPriceCents)}</p>
+                <p className="text-sm text-slate-800 text-right">${formatMoney(item.totalCents)}</p>
               </div>
             ))}
           </div>
@@ -393,51 +559,65 @@ export function InvoicePaymentPage() {
               {showAll ? <><ChevronUp size={12} /> Show less</> : <><ChevronDown size={12} /> {inv.lineItems.length - 3} more items</>}
             </button>
           )}
+          {/* Totals */}
+          {inv.discountCents > 0 && (
+            <div className="flex justify-between px-5 py-2 border-t border-slate-100">
+              <span className="text-sm text-slate-500">Discount</span>
+              <span className="text-sm text-slate-500">-${formatMoney(inv.discountCents)}</span>
+            </div>
+          )}
+          {inv.taxCents > 0 && (
+            <div className="flex justify-between px-5 py-2 border-t border-slate-100">
+              <span className="text-sm text-slate-500">Tax</span>
+              <span className="text-sm text-slate-500">${formatMoney(inv.taxCents)}</span>
+            </div>
+          )}
+          {inv.amountPaidCents > 0 && (
+            <div className="flex justify-between px-5 py-2 border-t border-slate-100">
+              <span className="text-sm text-slate-500">Paid</span>
+              <span className="text-sm text-green-600">-${formatMoney(inv.amountPaidCents)}</span>
+            </div>
+          )}
           <div className="flex items-center justify-between px-5 py-4 bg-slate-900 rounded-b-2xl">
             <p className="text-sm text-slate-300">Amount due</p>
-            <p className="text-white" style={{ fontSize: '1.25rem' }}>${total.toLocaleString()}</p>
+            <p className="text-white" style={{ fontSize: '1.25rem' }}>${formatMoney(inv.amountDueCents)}</p>
           </div>
         </div>
 
-        {/* Payment method selector */}
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-5">
-          <div className="px-5 py-4 border-b border-slate-100">
-            <p className="text-sm text-slate-700">Pay with</p>
+        {/* Stripe Elements payment form */}
+        {stripeNotConfigured ? (
+          <div
+            data-testid="stripe-not-configured"
+            className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4 mb-5 text-sm text-amber-800"
+          >
+            <p className="mb-1">Online payment is temporarily unavailable.</p>
+            <p className="text-xs text-amber-700">
+              Please contact {inv.businessName} {inv.businessPhone ? `at ${inv.businessPhone}` : ''} to settle this invoice.
+            </p>
           </div>
-          <div className="flex p-3 gap-2">
-            <button
-              onClick={() => setMethod('card')}
-              disabled={isSubmitting}
-              className={`flex-1 flex items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
-                method === 'card' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              <CreditCard size={15} /> Card
-            </button>
-            <button
-              onClick={() => setMethod('ach')}
-              disabled={isSubmitting}
-              className={`flex-1 flex items-center justify-center gap-2 rounded-xl border py-3 text-sm transition-all ${
-                method === 'ach' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              <Building2 size={15} /> Bank / ACH
-              {method === 'ach' && <span className="text-xs text-green-300 ml-1">lower fee</span>}
-            </button>
+        ) : intentError ? (
+          <div
+            role="alert"
+            className="rounded-2xl bg-red-50 border border-red-200 px-4 py-4 mb-5 text-sm text-red-700"
+          >
+            {intentError}
           </div>
-
-          <div className="px-5 pb-5">
-            {submitError && (
-              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                {submitError}
-              </div>
-            )}
-            {method === 'card'
-              ? <CardForm onPay={() => handlePay('card')} total={total} isSubmitting={isSubmitting} />
-              : <ACHForm onPay={() => handlePay('ach')} total={total} isSubmitting={isSubmitting} />
-            }
+        ) : !clientSecret || !elementsOptions ? (
+          <div className="bg-white rounded-2xl border border-slate-200 px-5 py-8 mb-5 flex items-center justify-center">
+            <span
+              data-testid="payment-form-loading"
+              className="size-5 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin"
+            />
           </div>
-        </div>
+        ) : (
+          <Elements stripe={stripePromise} options={elementsOptions}>
+            <PaymentForm
+              amountCents={inv.amountDueCents}
+              onSucceeded={() => setSearchParams({ success: 'true' })}
+              onProcessingAsync={() => setProcessingAsync(true)}
+            />
+          </Elements>
+        )}
 
         {/* Trust signals */}
         <div className="flex flex-col items-center gap-2 pb-8">
@@ -445,7 +625,7 @@ export function InvoicePaymentPage() {
             <span className="flex items-center gap-1"><Lock size={10} /> 256-bit SSL</span>
             <span className="flex items-center gap-1"><Shield size={10} /> Powered by Stripe</span>
           </div>
-          <p className="text-xs text-slate-400">No Fieldly account required · Your data is never stored</p>
+          <p className="text-xs text-slate-400">No account required · Your card data is never stored by us</p>
         </div>
       </div>
     </div>

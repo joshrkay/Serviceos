@@ -1,0 +1,185 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Pool, QueryResult } from 'pg';
+import { identifyCaller, normalizePhone } from '../../../src/ai/skills/identify-caller';
+import type { IdentifyCallerInput } from '../../../src/ai/skills/identify-caller';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeRow(id: string, displayName: string): { id: string; display_name: string } {
+  return { id, display_name: displayName };
+}
+
+function makePool(rows: { id: string; display_name: string }[]): Pool {
+  const query = vi.fn().mockResolvedValue({ rows } as unknown as QueryResult);
+  return { query } as unknown as Pool;
+}
+
+function makeInput(overrides: Partial<Omit<IdentifyCallerInput, 'pool'>> & { pool?: Pool }): IdentifyCallerInput {
+  return {
+    tenantId: 'tenant-abc',
+    fromPhone: '+15125550100',
+    pool: makePool([]),
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// normalizePhone unit tests
+// ---------------------------------------------------------------------------
+
+describe('normalizePhone', () => {
+  it('strips non-digit characters from E.164 number', () => {
+    expect(normalizePhone('+15125550100')).toBe('5125550100');
+  });
+
+  it('leaves local 10-digit number unchanged', () => {
+    expect(normalizePhone('5125550100')).toBe('5125550100');
+  });
+
+  it('strips dashes and parens from formatted number', () => {
+    expect(normalizePhone('(512) 555-0100')).toBe('5125550100');
+  });
+
+  it('strips leading 1 from 11-digit number', () => {
+    expect(normalizePhone('15125550100')).toBe('5125550100');
+  });
+
+  it('does not strip leading 1 from a 10-digit number starting with 1', () => {
+    expect(normalizePhone('1234567890')).toBe('1234567890');
+  });
+
+  it('returns empty string for empty input', () => {
+    expect(normalizePhone('')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// identifyCaller — matched
+// ---------------------------------------------------------------------------
+
+describe('identifyCaller — matched', () => {
+  it('E.164 number matches a single customer', async () => {
+    const pool = makePool([makeRow('cust-1', 'Alice Smith')]);
+    const result = await identifyCaller(makeInput({ fromPhone: '+15125550100', pool }));
+
+    expect(result).toEqual({
+      status: 'matched',
+      customerId: 'cust-1',
+      customerName: 'Alice Smith',
+      displayName: 'Alice Smith',
+    });
+  });
+
+  it('local 10-digit format matches the same record as E.164', async () => {
+    const pool = makePool([makeRow('cust-1', 'Alice Smith')]);
+    const result = await identifyCaller(makeInput({ fromPhone: '5125550100', pool }));
+
+    expect(result.status).toBe('matched');
+    if (result.status === 'matched') {
+      expect(result.customerId).toBe('cust-1');
+    }
+  });
+
+  it('+1 prefix stripped — 11-digit number resolves to same customer as 10-digit', async () => {
+    const pool = makePool([makeRow('cust-2', 'Bob Jones')]);
+    const result = await identifyCaller(makeInput({ fromPhone: '+15125550200', pool }));
+
+    expect(result.status).toBe('matched');
+    if (result.status === 'matched') {
+      expect(result.customerId).toBe('cust-2');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// identifyCaller — multiple
+// ---------------------------------------------------------------------------
+
+describe('identifyCaller — multiple', () => {
+  it('two customers with the same normalized phone → multiple', async () => {
+    const pool = makePool([
+      makeRow('cust-3', 'Carol White'),
+      makeRow('cust-4', 'Dave Black'),
+    ]);
+    const result = await identifyCaller(makeInput({ fromPhone: '+15125550300', pool }));
+
+    expect(result).toEqual({
+      status: 'multiple',
+      candidates: [
+        { customerId: 'cust-3', customerName: 'Carol White' },
+        { customerId: 'cust-4', customerName: 'Dave Black' },
+      ],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// identifyCaller — unknown
+// ---------------------------------------------------------------------------
+
+describe('identifyCaller — unknown', () => {
+  it('no matching customer → unknown', async () => {
+    const pool = makePool([]);
+    const result = await identifyCaller(makeInput({ fromPhone: '+15125559999', pool }));
+
+    expect(result).toEqual({ status: 'unknown' });
+  });
+
+  it('empty phone string → unknown with no query', async () => {
+    const queryFn = vi.fn();
+    const pool = { query: queryFn } as unknown as Pool;
+    const result = await identifyCaller(makeInput({ fromPhone: '', pool }));
+
+    expect(result).toEqual({ status: 'unknown' });
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+
+  it('null-ish phone (whitespace only) → unknown with no query', async () => {
+    const queryFn = vi.fn();
+    const pool = { query: queryFn } as unknown as Pool;
+    const result = await identifyCaller(makeInput({ fromPhone: '   ', pool }));
+
+    expect(result).toEqual({ status: 'unknown' });
+    expect(queryFn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tenant isolation
+// ---------------------------------------------------------------------------
+
+describe('identifyCaller — tenant isolation', () => {
+  it('query always includes tenant_id as first parameter', async () => {
+    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+
+    expect(queryFn).toHaveBeenCalledOnce();
+    const [_sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
+    expect(params[0]).toBe('tenant-xyz');
+  });
+
+  it('query uses phone_normalized column', async () => {
+    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+
+    const [sql] = queryFn.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('phone_normalized');
+  });
+
+  it('different tenants are isolated — query scoped to provided tenantId', async () => {
+    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
+    const pool = { query: queryFn } as unknown as Pool;
+
+    await identifyCaller({ tenantId: 'tenant-A', fromPhone: '+15125550100', pool });
+
+    const [_sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
+    expect(params[0]).toBe('tenant-A');
+    expect(params[0]).not.toBe('tenant-B');
+  });
+});

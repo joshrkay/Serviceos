@@ -57,11 +57,42 @@ export interface UpdateAppointmentInput {
   status?: AppointmentStatus;
 }
 
+export interface AppointmentListOptions {
+  jobId?: string;
+  technicianId?: string;
+  status?: AppointmentStatus;
+  /** Inclusive lower bound on `scheduled_start`. */
+  fromDate?: Date;
+  /** Inclusive upper bound on `scheduled_start`. */
+  toDate?: Date;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (scheduled_start). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface AppointmentListResult {
+  data: Appointment[];
+  total: number;
+}
+
+export const DEFAULT_APPOINTMENT_LIMIT = 50;
+export const MAX_APPOINTMENT_LIMIT = 200;
+
 export interface AppointmentRepository {
   create(appointment: Appointment): Promise<Appointment>;
   findById(tenantId: string, id: string): Promise<Appointment | null>;
   findByJob(tenantId: string, jobId: string): Promise<Appointment[]>;
   findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]>;
+  /**
+   * P1-018: paginated `{ data, total }` form for list UIs. Filters by date
+   * range / status / technician and supports optional `limit` / `offset`.
+   * Optional so older repos still satisfy the type — falls back to in-memory
+   * filtering through `findByDateRange`.
+   */
+  listWithMeta?(tenantId: string, options?: AppointmentListOptions): Promise<AppointmentListResult>;
   update(tenantId: string, id: string, updates: Partial<Appointment>): Promise<Appointment | null>;
 }
 
@@ -194,42 +225,36 @@ export async function listByDateRange(
   return repository.findByDateRange(tenantId, start, end);
 }
 
-export class InMemoryAppointmentRepository implements AppointmentRepository {
-  private appointments: Map<string, Appointment> = new Map();
-
-  async create(appointment: Appointment): Promise<Appointment> {
-    this.appointments.set(appointment.id, { ...appointment });
-    return { ...appointment };
+/**
+ * P1-018: paginated appointment list with `{ data, total }`. Falls back to
+ * a default-wide date range when the repo doesn't expose `listWithMeta`.
+ */
+export async function listAppointmentsWithMeta(
+  tenantId: string,
+  repository: AppointmentRepository,
+  options?: AppointmentListOptions
+): Promise<AppointmentListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
   }
-
-  async findById(tenantId: string, id: string): Promise<Appointment | null> {
-    const a = this.appointments.get(id);
-    if (!a || a.tenantId !== tenantId) return null;
-    return { ...a };
-  }
-
-  async findByJob(tenantId: string, jobId: string): Promise<Appointment[]> {
-    return Array.from(this.appointments.values())
-      .filter((a) => a.tenantId === tenantId && a.jobId === jobId)
-      .map((a) => ({ ...a }));
-  }
-
-  async findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]> {
-    return Array.from(this.appointments.values())
-      .filter(
-        (a) =>
-          a.tenantId === tenantId &&
-          a.scheduledStart >= start &&
-          a.scheduledStart <= end
-      )
-      .map((a) => ({ ...a }));
-  }
-
-  async update(tenantId: string, id: string, updates: Partial<Appointment>): Promise<Appointment | null> {
-    const a = this.appointments.get(id);
-    if (!a || a.tenantId !== tenantId) return null;
-    const updated = { ...a, ...updates };
-    this.appointments.set(id, updated);
-    return { ...updated };
-  }
+  // Fallback path: pull a date-range slice and apply remaining filters in
+  // memory. This is only used by repositories that haven't implemented
+  // `listWithMeta` yet (P1-018 ships it for InMemory + Pg).
+  const start = options?.fromDate ?? new Date('1970-01-01T00:00:00Z');
+  const end = options?.toDate ?? new Date('9999-12-31T23:59:59Z');
+  const all = await repository.findByDateRange(tenantId, start, end);
+  let filtered = all;
+  if (options?.jobId) filtered = filtered.filter((a) => a.jobId === options.jobId);
+  if (options?.status) filtered = filtered.filter((a) => a.status === options.status);
+  const sortDir = options?.sort === 'desc' ? -1 : 1;
+  filtered.sort((a, b) => sortDir * (a.scheduledStart.getTime() - b.scheduledStart.getTime()));
+  const limit = Math.min(options?.limit ?? DEFAULT_APPOINTMENT_LIMIT, MAX_APPOINTMENT_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: filtered.slice(offset, offset + limit), total: filtered.length };
 }
+
+// VQ-002 — InMemoryAppointmentRepository moved to ./in-memory-appointment.ts
+// so the in-memory and Pg variants are symmetric (each in its own file).
+// Re-exported here so existing callers that import from './appointment'
+// continue to compile.
+export { InMemoryAppointmentRepository } from './in-memory-appointment';

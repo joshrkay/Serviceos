@@ -28,20 +28,15 @@ interface InvalidRow {
 
 const EXPECTED_COLUMNS = ['name', 'description', 'unit_price', 'unit', 'category'] as const;
 const MAX_IMPORT_ROWS = 500;
-const CATEGORY_FILTERS = ['All', 'Labor', 'Parts', 'Materials'] as const;
 const CATEGORY_OPTIONS = ['Labor', 'Parts', 'Materials'] as const;
 const UNIT_OPTIONS = ['each', 'hour', 'sq ft', 'per lb', 'per gal'] as const;
-
-type CategoryFilter = typeof CATEGORY_FILTERS[number];
-type ItemCategory = typeof CATEGORY_OPTIONS[number];
-type ItemUnit = typeof UNIT_OPTIONS[number];
 
 interface PriceBookFormState {
   name: string;
   description: string;
   unitPrice: string;
-  unit: ItemUnit;
-  category: ItemCategory;
+  unit: string;
+  category: string;
 }
 
 const DEFAULT_FORM_STATE: PriceBookFormState = {
@@ -52,13 +47,6 @@ const DEFAULT_FORM_STATE: PriceBookFormState = {
   category: 'Labor',
 };
 
-function normalizeCategory(value?: string): CategoryFilter {
-  const normalized = (value ?? '').trim().toLowerCase();
-  if (normalized === 'labor') return 'Labor';
-  if (normalized === 'parts') return 'Parts';
-  if (normalized === 'materials') return 'Materials';
-  return 'All';
-}
 
 function formatPriceFromCents(value: number | undefined): string {
   if (!Number.isFinite(value)) return '$0.00';
@@ -153,7 +141,7 @@ export function PriceBookPage() {
   const [invalidRows, setInvalidRows] = useState<InvalidRow[]>([]);
   const [progressText, setProgressText] = useState<string>('');
   const [isImporting, setIsImporting] = useState(false);
-  const [category, setCategory] = useState<CategoryFilter>('All');
+  const [category, setCategory] = useState('All');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [archiveItemId, setArchiveItemId] = useState<string | null>(null);
@@ -164,11 +152,22 @@ export function PriceBookPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const sortedItems = useMemo(() => [...data].sort((a, b) => a.name.localeCompare(b.name)), [data]);
+  const categoryChips = useMemo(() => {
+    const cats = Array.from(
+      new Set(
+        data
+          .map(item => item.category)
+          .filter((c): c is string => !!c)
+          .map(c => c.charAt(0).toUpperCase() + c.slice(1))
+      )
+    ).sort();
+    return ['All', ...cats];
+  }, [data]);
   const filteredItems = useMemo(
     () =>
       category === 'All'
         ? sortedItems
-        : sortedItems.filter(item => normalizeCategory(item.category) === category),
+        : sortedItems.filter(item => (item.category ?? '').toLowerCase() === category.toLowerCase()),
     [category, sortedItems]
   );
 
@@ -186,10 +185,8 @@ export function PriceBookPage() {
       name: item.name ?? '',
       description: item.description ?? '',
       unitPrice: ((item.unitPriceCents ?? 0) / 100).toFixed(2),
-      unit: UNIT_OPTIONS.includes((item.unit ?? '') as ItemUnit) ? (item.unit as ItemUnit) : 'each',
-      category: CATEGORY_OPTIONS.includes(normalizeCategory(item.category) as ItemCategory)
-        ? (normalizeCategory(item.category) as ItemCategory)
-        : 'Labor',
+      unit: item.unit ?? '',
+      category: item.category ?? '',
     });
     setFormError(null);
     setActionError(null);
@@ -442,7 +439,7 @@ export function PriceBookPage() {
         </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-2">
-          {CATEGORY_FILTERS.map(chip => {
+          {categoryChips.map(chip => {
             const isActive = chip === category;
             return (
               <button
@@ -687,9 +684,10 @@ export function PriceBookPage() {
                 <select
                   value={formState.unit}
                   onChange={event => setFormState(prev => ({ ...prev, unit: event.target.value as ItemUnit }))}
+                  onChange={event => updateFormField('unit', event.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 >
-                  {UNIT_OPTIONS.map(option => (
+                  {(UNIT_OPTIONS.some(o => o === formState.unit) ? [...UNIT_OPTIONS] : [formState.unit, ...UNIT_OPTIONS]).map(option => (
                     <option key={option} value={option}>
                       {option}
                     </option>
@@ -702,9 +700,10 @@ export function PriceBookPage() {
                 <select
                   value={formState.category}
                   onChange={event => setFormState(prev => ({ ...prev, category: event.target.value as ItemCategory }))}
+                  onChange={event => updateFormField('category', event.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 >
-                  {CATEGORY_OPTIONS.map(option => (
+                  {(CATEGORY_OPTIONS.some(o => o === formState.category) ? [...CATEGORY_OPTIONS] : [formState.category, ...CATEGORY_OPTIONS]).map(option => (
                     <option key={option} value={option}>
                       {option}
                     </option>

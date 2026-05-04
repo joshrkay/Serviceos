@@ -12,6 +12,10 @@ import { useListQuery } from './useListQuery';
 import { useDetailQuery } from './useDetailQuery';
 import { useMutation } from './useMutation';
 
+// P0-030 note: the data hooks now read the Clerk JWT via useAuth(). The
+// global test-setup.ts installs a permissive Clerk mock so URL-construction
+// assertions in this file remain unaffected.
+
 function mockFetch(body: unknown = []) {
   return vi.spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response(JSON.stringify(body), { status: 200 })

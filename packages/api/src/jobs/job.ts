@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
 export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
@@ -16,6 +17,8 @@ export interface Job {
   status: JobStatus;
   priority: JobPriority;
   assignedTechnicianId?: string;
+  /** Inherits from `customer.originatingLeadId` at creation; preserves source attribution. */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -28,6 +31,8 @@ export interface CreateJobInput {
   summary: string;
   problemDescription?: string;
   priority?: JobPriority;
+  /** Optional explicit override; routes auto-populate from customer when omitted. */
+  originatingLeadId?: string;
   createdBy: string;
   actorRole?: string;
 }
@@ -44,12 +49,47 @@ export interface JobListOptions {
   customerId?: string;
   technicianId?: string;
   search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (created_at). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface JobListResult {
+  data: Job[];
+  total: number;
+}
+
+export const DEFAULT_JOB_LIMIT = 50;
+export const MAX_JOB_LIMIT = 200;
+
+export interface JobFindByCustomerOptions {
+  /** Cap on rows returned. Default unlimited (uses MAX_JOB_LIMIT). */
+  limit?: number;
+  /** Include canceled / completed jobs. Default false — only active. */
+  includeArchived?: boolean;
 }
 
 export interface JobRepository {
   create(job: Job): Promise<Job>;
   findById(tenantId: string, id: string): Promise<Job | null>;
   findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]>;
+  /** P1-018: paginated `{ data, total }` form for list UIs. */
+  listWithMeta?(tenantId: string, options?: JobListOptions): Promise<JobListResult>;
+  /**
+   * P11-001: tenant-scoped read of every job belonging to a customer.
+   * Used by the voice lookup skills (`lookup_appointments`, `lookup_jobs`,
+   * etc.) to fan out to per-job repos. Optional on the interface so older
+   * fakes continue to satisfy the type — implementations that don't
+   * provide it cause the lookup skills to error at the boundary.
+   */
+  findByCustomer?(
+    tenantId: string,
+    customerId: string,
+    opts?: JobFindByCustomerOptions,
+  ): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
 }
@@ -90,6 +130,7 @@ export async function createJob(
     problemDescription: input.problemDescription,
     status: 'new',
     priority: input.priority || 'normal',
+    originatingLeadId: input.originatingLeadId,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -105,6 +146,7 @@ export async function createJob(
       eventType: 'job.created',
       entityType: 'job',
       entityId: created.id,
+      metadata: buildOriginationMetadata(created.originatingLeadId),
     });
     await auditRepo.create(event);
   }
@@ -154,6 +196,24 @@ export async function listJobs(
   return repository.findByTenant(tenantId, options);
 }
 
+/**
+ * P1-018: paginated job list. Falls back to in-memory pagination over
+ * `findByTenant` when the repo doesn't implement `listWithMeta`.
+ */
+export async function listJobsWithMeta(
+  tenantId: string,
+  repository: JobRepository,
+  options?: JobListOptions
+): Promise<JobListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_JOB_LIMIT, MAX_JOB_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
+}
+
 export class InMemoryJobRepository implements JobRepository {
   private jobs: Map<string, Job> = new Map();
   private counters: Map<string, number> = new Map();
@@ -169,6 +229,24 @@ export class InMemoryJobRepository implements JobRepository {
     return { ...j };
   }
 
+  async findByCustomer(
+    tenantId: string,
+    customerId: string,
+    opts?: JobFindByCustomerOptions,
+  ): Promise<Job[]> {
+    let results = Array.from(this.jobs.values()).filter(
+      (j) => j.tenantId === tenantId && j.customerId === customerId,
+    );
+    if (!opts?.includeArchived) {
+      // Active = anything that isn't canceled. Completed jobs are kept
+      // so the voice "what jobs do I have" lookup can mention them.
+      results = results.filter((j) => j.status !== 'canceled');
+    }
+    results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const limit = Math.min(opts?.limit ?? results.length, MAX_JOB_LIMIT);
+    return results.slice(0, limit).map((j) => ({ ...j }));
+  }
+
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {
     let results = Array.from(this.jobs.values()).filter((j) => j.tenantId === tenantId);
     if (options?.status) results = results.filter((j) => j.status === options.status);
@@ -182,7 +260,27 @@ export class InMemoryJobRepository implements JobRepository {
           j.jobNumber.toLowerCase().includes(q)
       );
     }
+    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
+    const sortDir = options?.sort === 'asc' ? 1 : -1;
+    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_JOB_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
     return results.map((j) => ({ ...j }));
+  }
+
+  async listWithMeta(tenantId: string, options?: JobListOptions): Promise<JobListResult> {
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null> {

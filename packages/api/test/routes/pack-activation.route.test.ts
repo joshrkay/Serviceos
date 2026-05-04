@@ -33,11 +33,18 @@ describe('Pack activation routes', () => {
 
   beforeEach(() => {
     process.env.CLERK_SECRET_KEY = TEST_SECRET;
+    // P0-033 fallout: the new RS256 verifier is the default; legacy HMAC dev
+    // tokens (used by `createAuthToken` in this test fixture) only verify
+    // when CLERK_DEV_HMAC_TOKENS=true. The runtime gate refuses 'true' when
+    // NODE_ENV is production, but vitest defaults NODE_ENV to 'test' so the
+    // dev path is honored here.
+    process.env.CLERK_DEV_HMAC_TOKENS = 'true';
     app = createApp();
   });
 
   afterEach(() => {
     delete process.env.CLERK_SECRET_KEY;
+    delete process.env.CLERK_DEV_HMAC_TOKENS;
   });
 
   it('activates HVAC pack for the authenticated tenant', async () => {

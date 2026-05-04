@@ -148,6 +148,14 @@ export const createJobSchema = z.object({
   summary: z.string().min(1),
   problemDescription: z.string().optional(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+  /**
+   * Optional override for source attribution. Routes auto-populate this
+   * from the customer's `originatingLeadId` when omitted; pass an explicit
+   * id only when attaching a job to a lead that the customer wasn't
+   * originally created from (e.g., a returning customer who came in via
+   * a new ad campaign).
+   */
+  originatingLeadId: z.string().uuid().optional(),
 });
 
 export const createEstimateSchema = z.object({
@@ -245,6 +253,12 @@ export const updateSettingsSchema = z.object({
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),
   terminologyPreferences: z.record(z.string()).optional(),
+  // Phase 12 — supervisor backup + unsupervised proposal routing.
+  // `backupSupervisorUserId: null` explicitly clears the backup.
+  backupSupervisorUserId: z.string().uuid().nullable().optional(),
+  unsupervisedProposalRouting: z
+    .enum(['queue_and_sms', 'queue_only', 'escalate_to_oncall'])
+    .optional(),
 });
 
 export const conversationAccessSchema = z.object({

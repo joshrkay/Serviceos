@@ -27,6 +27,16 @@ export type IntentType =
   | 'add_note'
   | 'send_invoice'
   | 'record_payment'
+  | 'emergency_dispatch'
+  // P11-001: voice lookup-skill family. Read-only intents — the
+  // adapter routes these straight to the `lookup_*` skill instead
+  // of the proposal-draft path.
+  | 'lookup_appointments'
+  | 'lookup_invoices'
+  | 'lookup_balance'
+  | 'lookup_jobs'
+  | 'lookup_agreements'
+  | 'lookup_account_summary'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -44,8 +54,24 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'add_note',
   'send_invoice',
   'record_payment',
+  'emergency_dispatch',
+  'lookup_appointments',
+  'lookup_invoices',
+  'lookup_balance',
+  'lookup_jobs',
+  'lookup_agreements',
+  'lookup_account_summary',
   'unknown',
 ] as const;
+
+/**
+ * P11-001: convenience predicate the FSM adapter uses to route
+ * `lookup_*` intents to the read-only skill family instead of the
+ * proposal-draft pipeline.
+ */
+export function isLookupIntent(intent: IntentType | undefined | null): boolean {
+  return typeof intent === 'string' && intent.startsWith('lookup_');
+}
 
 export interface ExtractedEntities {
   customerName?: string;
@@ -123,6 +149,13 @@ export interface IntentClassification {
    * pipeline. Empty / undefined when every enum is valid.
    */
   invalidEnumFields?: Array<{ field: string; value: unknown }>;
+  /**
+   * Token usage from the underlying LLM call, surfaced so callers
+   * (e.g., the calling-agent adapter) can feed the SessionCostTracker
+   * and enforce per-session caps. Omitted when the classifier
+   * short-circuits without an LLM call.
+   */
+  tokenUsage?: { input: number; output: number };
 }
 
 export interface ClassifyContext {
@@ -164,9 +197,12 @@ Supported intents (return exactly ONE):
                            Examples: "Send invoice 1024 to the customer"
                                      "Issue the Acme invoice"
                                      "Send the invoice we just drafted"
-- "unknown"             — anything else: queries ("when is my next appointment"),
-                           genuinely ambiguous transcripts, or commands without
-                           a clear target.
+- "unknown"             — anything else: genuinely ambiguous transcripts,
+                           or commands without a clear target. Note that
+                           read-only queries ("when is my next appointment",
+                           "how much do I owe") now have dedicated
+                           lookup_* intents below — only fall through to
+                           "unknown" when no lookup intent matches.
 - "create_customer"     — user wants to create a NEW customer record in the CRM.
                            Trigger phrasings include "create/add/new customer".
                            Extract the customer's displayName plus any stated
@@ -226,8 +262,67 @@ Supported intents (return exactly ONE):
                            Examples: "Mark the Jones invoice paid, 450 cash"
                                      "Record a check for 200 from Smith, check 1042"
                                      "Rodriguez paid the invoice in full"
-- "unknown"             — anything else: queries ("when is my next
-                           appointment"), ambiguous transcripts, or edit
+- "emergency_dispatch"  — caller describes a life-safety or property-
+                           emergency situation requiring IMMEDIATE
+                           response: no heat/cool in extreme weather, gas
+                           smell, burning smell, smoke, sparks, flooding,
+                           burst pipe, sewage backup, no water. Skip normal
+                           intent confirmation — escalate directly to
+                           on-call dispatcher. Never auto-execute.
+                           Examples: "There's a gas smell coming from the furnace"
+                                     "My pipes burst and water is everywhere"
+                                     "No heat and it's 10 degrees outside"
+                                     "I smell burning from my AC unit"
+- "lookup_appointments" — caller is ASKING about their upcoming
+                           appointment(s). Read-only — never moves money
+                           or creates records. Routed to the
+                           lookup_appointments skill, which speaks the
+                           next visit + technician.
+                           Examples: "When is my next appointment?"
+                                     "What time are you coming on Tuesday?"
+                                     "Do I have a service call scheduled?"
+                                     "When are y'all coming out?"
+                                     "Remind me when my appointment is"
+- "lookup_invoices"     — caller is ASKING about invoices on their
+                           account. Read-only. The skill returns count
+                           + totals + per-invoice info.
+                           Examples: "Do I have any invoices outstanding?"
+                                     "What invoices do I owe?"
+                                     "Can you read me my open invoices?"
+                                     "How many bills do I have?"
+                                     "What's the latest invoice you sent me?"
+- "lookup_balance"      — caller is ASKING for the dollar total they
+                           owe right now. Read-only.
+                           Examples: "What's my balance?"
+                                     "How much do I owe?"
+                                     "What do I still owe you guys?"
+                                     "Can you tell me my account balance?"
+                                     "Total amount due on my account?"
+- "lookup_jobs"         — caller is ASKING about their recent or current
+                           jobs. Read-only.
+                           Examples: "What jobs do I have open?"
+                                     "Tell me about my last service call"
+                                     "What's the status of my repair?"
+                                     "Did you finish the work order?"
+                                     "What jobs are on my account?"
+- "lookup_agreements"   — caller is ASKING about their service plan /
+                           agreement / membership. Read-only.
+                           Examples: "When does my service plan run next?"
+                                     "Do I still have my maintenance agreement?"
+                                     "When's my next maintenance visit?"
+                                     "What's on my service contract?"
+                                     "Am I still on the membership plan?"
+- "lookup_account_summary" — caller asks an open-ended "what's on my
+                           account" / "give me an update" question.
+                           Read-only. The skill stitches the appointment,
+                           balance, and agreement summaries into a
+                           two-sentence digest.
+                           Examples: "What's on my account?"
+                                     "Give me a quick summary"
+                                     "Catch me up on my account"
+                                     "Where do I stand?"
+                                     "Tell me about my account"
+- "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
 Distinctions that matter:
@@ -447,17 +542,24 @@ export async function classifyIntent(
     metadata: { tenantId: context.tenantId },
   });
 
+  const tokenUsage = response.tokenUsage
+    ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
+    : undefined;
+
   const parsed = parseClassifierJson(response.content);
   if (!parsed) {
-    return unknownResult('could not parse classifier output', 'parse_failed');
+    const result = unknownResult('could not parse classifier output', 'parse_failed');
+    if (tokenUsage) result.tokenUsage = tokenUsage;
+    return result;
   }
+  if (tokenUsage) parsed.tokenUsage = tokenUsage;
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
   // We keep the original intent and confidence in the result so the router
   // can emit a clarification proposal that offers the low-confidence intent
   // as a suggestion ("did you mean: create invoice?") instead of dropping.
   if (parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD) {
-    return {
+    const lowConf: IntentClassification = {
       intentType: 'unknown',
       confidence: parsed.confidence,
       reasoning:
@@ -468,6 +570,8 @@ export async function classifyIntent(
       lowConfidenceIntent:
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
+    if (tokenUsage) lowConf.tokenUsage = tokenUsage;
+    return lowConf;
   }
 
   // Classifier picked 'unknown' at adequate confidence — nothing to route.
