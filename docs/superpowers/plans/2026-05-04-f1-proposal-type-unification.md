@@ -85,6 +85,9 @@ One commit per task. tsc must pass (api + web + shared) after every commit.
 export type ProposalStatus =
   | 'draft'
   | 'ready_for_review'
+export type ProposalStatus =
+  | 'draft'
+  | 'ready_for_review'
   | 'approved'
   | 'rejected'
   | 'expired'
