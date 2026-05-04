@@ -1,0 +1,54 @@
+{
+  "id": "create-appointment-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550201",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_create_appointment",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_create_appt_jane",
+        "tenantId": "t_02_create_appointment",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550201",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. I'd like to schedule a service appointment for next Tuesday at 2pm.",
+      "expected": {
+        "intent": "create_appointment",
+        "proposalType": "create_appointment",
+        "slots": {
+          "customerId": "cust_02_create_appt_jane",
+          "scheduledStart": "2026-05-12T21:00:00.000Z"
+        },
+        "spokenAnswerMatches": "I've drafted a service appointment for Tuesday May 12 at 2pm; an operator will confirm before it's booked.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}
