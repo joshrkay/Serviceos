@@ -58,10 +58,17 @@ interface TwilioMessageResponse {
   error_message?: string;
 }
 
+type InternalTwilioSmsConfig = {
+  accountSid: string;
+  authToken: string;
+  fromNumber: string;
+  apiBaseUrl: string;
+  fetchImpl: typeof fetch;
+  authTokenSecondary?: string;
+};
+
 export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<Omit<TwilioSmsConfig, 'fetchImpl'>> & {
-    fetchImpl: typeof fetch;
-  };
+  private readonly sms: InternalTwilioSmsConfig;
   private readonly email: Required<Omit<SendGridConfig, 'fetchImpl' | 'fromName' | 'replyToEmail'>> & {
     fromName?: string;
     replyToEmail?: string;
