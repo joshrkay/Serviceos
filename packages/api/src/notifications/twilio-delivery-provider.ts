@@ -27,7 +27,7 @@ import { DeliveryError } from "./notification-errors";
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
-  secondaryAuthToken?: string;
+  authTokenSecondary?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -124,7 +124,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    const response = await this.sms.fetchImpl(
+    let response = await this.sms.fetchImpl(
       `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
       {
         method: "POST",
@@ -146,6 +146,15 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
         status: response.status,
         providerBody,
       });
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      const detail = '(' + response.status + '): ' + text.slice(0, 300);
+      if (response.status === 401) {
+        throw new Error('DELIVERY_AUTH_FAILED ' + detail);
+      }
+      throw new Error('DELIVERY_PROVIDER_FAILED ' + detail);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
