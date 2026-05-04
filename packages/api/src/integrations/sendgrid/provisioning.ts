@@ -7,12 +7,12 @@ export type SendgridProvisioningResult<T> =
 function classifySendgridError(error: unknown): SendgridProvisioningResult<never>['failure'] {
   const e = error as { code?: string | number; message?: string; status?: number };
   const status = e.status ?? 0;
-  if (status === 401 || status === 403) return { code: 'AUTH', message: e.message ?? 'Unauthorized', retriable: false, providerCode: String(e.code ?? '') };
-  if (status === 404) return { code: 'NOT_FOUND', message: e.message ?? 'Resource not found', retriable: false, providerCode: String(e.code ?? '') };
-  if (status === 409) return { code: 'CONFLICT', message: e.message ?? 'Conflict', retriable: false, providerCode: String(e.code ?? '') };
-  if (status === 429) return { code: 'RATE_LIMIT', message: e.message ?? 'Rate limited', retriable: true, providerCode: String(e.code ?? '') };
-  if (status >= 400 && status < 500) return { code: 'VALIDATION', message: e.message ?? 'Validation failed', retriable: false, providerCode: String(e.code ?? '') };
-  if (status >= 500) return { code: 'NETWORK', message: e.message ?? 'Provider unavailable', retriable: true, providerCode: String(e.code ?? '') };
+  if (status === 401 || status === 403) return { code: 'AUTH', message: e.message ?? 'Unauthorized', retriable: false, providerCode: e.code ? String(e.code) : undefined };
+  if (status === 404) return { code: 'NOT_FOUND', message: e.message ?? 'Resource not found', retriable: false, providerCode: e.code ? String(e.code) : undefined };
+  if (status === 409) return { code: 'CONFLICT', message: e.message ?? 'Conflict', retriable: false, providerCode: e.code ? String(e.code) : undefined };
+  if (status === 429) return { code: 'RATE_LIMIT', message: e.message ?? 'Rate limited', retriable: true, providerCode: e.code ? String(e.code) : undefined };
+  if (status >= 400 && status < 500) return { code: 'VALIDATION', message: e.message ?? 'Validation failed', retriable: false, providerCode: e.code ? String(e.code) : undefined };
+  if (status >= 500) return { code: 'NETWORK', message: e.message ?? 'Provider unavailable', retriable: true, providerCode: e.code ? String(e.code) : undefined };
   return { code: 'UNKNOWN', message: e.message ?? 'Unknown SendGrid error', retriable: true, providerCode: e.code ? String(e.code) : undefined };
 }
 
