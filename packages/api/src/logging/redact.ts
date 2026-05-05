@@ -66,7 +66,7 @@ function walk<T>(input: T, seen: WeakSet<object>, tier: RedactionTier): T {
     }
     out[key] = walk(value, seen, tier);
   }
-  return out as T;
+  return out as unknown as T;
 }
 
 export function redactSecrets<T>(input: T): T {
