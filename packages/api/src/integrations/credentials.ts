@@ -42,7 +42,14 @@ export async function getTenantTwilioCreds(
     [tenantId]
   );
 
-  if (rows.length === 0 || rows[0].status !== 'active') {
+  // Status values per migration 071_widen_tenant_integrations_status:
+  // 'full_readiness' = fully provisioned and ready to serve traffic.
+  // 'partial_readiness' = baseline creds exist (subaccount + number) but
+  //   secondary compliance steps (e.g. 10DLC campaign, DNS) are pending —
+  //   still safe to resolve credentials for runtime calls.
+  const READY_STATUSES = new Set(['full_readiness', 'partial_readiness']);
+
+  if (rows.length === 0 || !READY_STATUSES.has(rows[0].status)) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error(`No active Twilio integration for tenant ${tenantId}`);
     }

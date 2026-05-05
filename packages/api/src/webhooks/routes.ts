@@ -138,10 +138,19 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // skips if already active, so safe to re-enqueue on webhook replay.
           if (result.created && deps.queue) {
             const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
+            // Twilio callbacks land on the API origin and signatures are
+            // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
+            // recordTwilio). Prefer that; fall back to appBaseUrl/APP_PUBLIC_URL
+            // for single-origin dev/staging deployments.
+            const callbackBaseUrl =
+              process.env.PUBLIC_API_URL ??
+              deps.appBaseUrl ??
+              process.env.APP_PUBLIC_URL ??
+              'http://localhost:3000';
             const payload: ProvisionTwilioPayload = {
               tenantId: result.tenantId,
               region: region ?? null,
-              baseUrl: deps.appBaseUrl ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+              baseUrl: callbackBaseUrl,
             };
             await deps.queue.send(
               PROVISION_TWILIO_JOB_TYPE,
