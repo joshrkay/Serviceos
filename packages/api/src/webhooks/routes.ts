@@ -10,6 +10,7 @@ import { ValidationError } from '../shared/errors';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -35,6 +36,10 @@ export interface WebhookRouterDeps {
     authTokenSecondary?: string;
     sendgridPublicKeyPem?: string;
   } | null>;
+  provisioningQueue?: {
+    send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
+  };
+  auditRepo?: AuditRepository;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -118,11 +123,74 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
             settingsRepository: deps.settingsRepo,
           });
+          const signupCorrelationId = `signup:${svixId}`;
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
             created: result.created,
             settingsSeeded: Boolean(deps.settingsRepo),
+            signupCorrelationId,
           });
+
+          if (deps.auditRepo) {
+            await deps.auditRepo.create(createAuditEvent({
+              tenantId: result.tenantId,
+              actorId: userId,
+              actorRole: 'owner',
+              eventType: 'tenant.signup.bootstrap.completed',
+              entityType: 'tenant',
+              entityId: result.tenantId,
+              correlationId: signupCorrelationId,
+              metadata: {
+                svixId,
+                clerkUserId: userId,
+                email: primaryEmail,
+                created: result.created,
+              },
+            }));
+          }
+
+          if (deps.provisioningQueue && result.created) {
+            const queuePayload = {
+              tenantId: result.tenantId,
+              ownerId: userId,
+              ownerEmail: primaryEmail,
+              signupCorrelationId,
+              webhookEventId: svixId,
+            };
+
+            void deps.provisioningQueue.send(
+              'tenant.provisioning.root.requested',
+              queuePayload,
+              `tenant-provisioning:${result.tenantId}`
+            ).then(async (queueMessageId) => {
+              if (deps.auditRepo) {
+                await deps.auditRepo.create(createAuditEvent({
+                  tenantId: result.tenantId,
+                  actorId: userId,
+                  actorRole: 'owner',
+                  eventType: 'tenant.signup.provisioning.enqueued',
+                  entityType: 'tenant',
+                  entityId: result.tenantId,
+                  correlationId: signupCorrelationId,
+                  metadata: {
+                    queueMessageId,
+                    queueType: 'tenant.provisioning.root.requested',
+                  },
+                }));
+              }
+              logger.info('Root provisioning orchestration enqueued', {
+                tenantId: result.tenantId,
+                queueMessageId,
+                signupCorrelationId,
+              });
+            }).catch((err) => {
+              logger.error('Failed to enqueue root provisioning orchestration', {
+                tenantId: result.tenantId,
+                signupCorrelationId,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              });
+            });
+          }
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
           if (config.CLERK_SECRET_KEY) {
