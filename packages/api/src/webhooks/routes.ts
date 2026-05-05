@@ -149,6 +149,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               `provision-twilio-${result.tenantId}`
             );
             logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
+          }
+
           if (deps.auditRepo) {
             await deps.auditRepo.create(createAuditEvent({
               tenantId: result.tenantId,

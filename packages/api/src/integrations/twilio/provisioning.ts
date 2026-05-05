@@ -68,7 +68,7 @@ export interface TwilioSubaccount {
   authToken: string;
 }
 
-export async function createTwilioSubaccount(
+export async function createTwilioSubaccountWithCreds(
   masterSid: string,
   masterToken: string,
   friendlyName: string
@@ -159,6 +159,8 @@ export async function attachNumberToMessagingService(
     authToken,
     new URLSearchParams({ PhoneNumberSid: phoneNumberSid })
   );
+}
+
 export type ProvisioningFailureCode =
   | 'AUTH'
   | 'RATE_LIMIT'

@@ -78,7 +78,9 @@ export async function getTenantTwilioCreds(
 
   cache.set(cacheKey, { creds, expiresAt: Date.now() + CACHE_TTL_MS });
   return creds;
-import { Client, Pool, PoolConfig } from 'pg';
+}
+
+import { Client, PoolConfig } from 'pg';
 
 const CHANNEL = 'tenant_integration_rotated';
 const DEFAULT_RECONNECT_MS = 250;

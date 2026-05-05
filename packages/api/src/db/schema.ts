@@ -1944,6 +1944,8 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
     CREATE POLICY tenant_isolation_integrations ON tenant_integrations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   '071_widen_tenant_integrations_status': `
     UPDATE tenant_integrations SET status = 't0_requested' WHERE status = 'provisioning';
     UPDATE tenant_integrations SET status = 'full_readiness' WHERE status = 'active';

@@ -474,6 +474,43 @@ export function createApp(): express.Express {
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+
+  // Resolves per-tenant integration credentials for inbound webhook signature
+  // verification. Returns null when no row exists or the integration provider
+  // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
+  const integrationResolver = pool
+    ? async (tenantId: string) => {
+        const { decrypt } = await import('./integrations/crypto');
+        const encKey = process.env.TENANT_ENCRYPTION_KEY;
+        const { rows } = await pool.query<{
+          provider: 'twilio' | 'sendgrid';
+          subaccount_sid: string | null;
+          auth_token_primary_enc: string | null;
+          auth_token_secondary_enc: string | null;
+          provider_data: Record<string, unknown>;
+        }>(
+          `SELECT provider, subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
+           FROM tenant_integrations
+           WHERE tenant_id = $1`,
+          [tenantId]
+        );
+        const twilio = rows.find((r) => r.provider === 'twilio');
+        if (!twilio || !encKey) return null;
+        return {
+          tenantId,
+          provider: 'twilio' as const,
+          subaccountSid: twilio.subaccount_sid ?? undefined,
+          authTokenPrimary: twilio.auth_token_primary_enc
+            ? decrypt(twilio.auth_token_primary_enc, encKey)
+            : undefined,
+          authTokenSecondary: twilio.auth_token_secondary_enc
+            ? decrypt(twilio.auth_token_secondary_enc, encKey)
+            : undefined,
+          sendgridPublicKeyPem: (twilio.provider_data?.sendgridPublicKeyPem as string | undefined),
+        };
+      }
+    : undefined;
+
   app.use(
     '/webhooks',
     createWebhookRouter(config, {
@@ -486,6 +523,7 @@ export function createApp(): express.Express {
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
       auditRepo: webhookAuditRepo,
       webhookEventRepo,
+      integrationResolver,
     })
   );
 

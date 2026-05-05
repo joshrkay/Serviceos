@@ -1,13 +1,18 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { Pool } from 'pg';
-import { encrypt } from '../integrations/crypto';
+import { encrypt, decrypt } from '../integrations/crypto';
 import {
-  createTwilioSubaccount,
+  createTwilioSubaccountWithCreds,
   createMessagingService,
   purchasePhoneNumber,
   attachNumberToMessagingService,
 } from '../integrations/twilio/provisioning';
+
+// Status values match migration 071_widen_tenant_integrations_status:
+// 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
+const STATUS_PROVISIONING = 't0_requested';
+const STATUS_ACTIVE = 'full_readiness';
 
 export interface ProvisionTwilioPayload {
   tenantId: string;
@@ -60,28 +65,35 @@ export function createProvisionTwilioWorker(deps: {
         [tenantId]
       );
 
-      if (rows[0]?.status === 'active') {
+      if (rows[0]?.status === STATUS_ACTIVE) {
         logger.info('Twilio subaccount already active, skipping', { tenantId });
         return;
       }
 
-      // Upsert row into provisioning state
-      await pool.query(
+      // Upsert row into provisioning state. RETURNING gives us the post-upsert
+      // row so we don't act on stale data from the initial SELECT.
+      const upserted = await pool.query<{
+        subaccount_sid: string | null;
+        auth_token_primary_enc: string | null;
+        provider_data: { messagingServiceSid?: string; phoneNumberSid?: string; phoneE164?: string };
+      }>(
         `INSERT INTO tenant_integrations (tenant_id, provider, status)
-         VALUES ($1, 'twilio', 'provisioning')
+         VALUES ($1, 'twilio', $2)
          ON CONFLICT (tenant_id, provider) DO UPDATE
-           SET status = 'provisioning', last_error = NULL, updated_at = NOW()`,
-        [tenantId]
+           SET status = $2, last_error = NULL, updated_at = NOW()
+         RETURNING subaccount_sid, auth_token_primary_enc, provider_data`,
+        [tenantId, STATUS_PROVISIONING]
       );
+      const current = upserted.rows[0];
 
       try {
         // Step 1 — create subaccount (skip if already created on a previous attempt)
-        let subaccountSid = rows[0]?.subaccount_sid ?? null;
+        let subaccountSid = current.subaccount_sid ?? null;
         let authToken: string;
 
         if (!subaccountSid) {
           logger.info('Creating Twilio subaccount', { tenantId });
-          const sub = await createTwilioSubaccount(
+          const sub = await createTwilioSubaccountWithCreds(
             masterSid,
             masterToken,
             `serviceos-tenant-${tenantId}`
@@ -96,12 +108,11 @@ export function createProvisionTwilioWorker(deps: {
           );
           logger.info('Twilio subaccount created', { tenantId, subaccountSid });
         } else {
-          const { decrypt } = await import('../integrations/crypto');
-          authToken = decrypt(rows[0].auth_token_primary_enc!, encKey);
+          authToken = decrypt(current.auth_token_primary_enc!, encKey);
           logger.info('Resuming provisioning with existing subaccount', { tenantId, subaccountSid });
         }
 
-        const providerData = rows[0]?.provider_data ?? {};
+        const providerData = current.provider_data ?? {};
 
         // Step 2 — create messaging service
         let messagingServiceSid = providerData.messagingServiceSid ?? null;
@@ -156,9 +167,9 @@ export function createProvisionTwilioWorker(deps: {
         // Step 5 — mark active
         await pool.query(
           `UPDATE tenant_integrations
-           SET status = 'active', provisioned_at = NOW(), updated_at = NOW()
+           SET status = $2, provisioned_at = NOW(), updated_at = NOW()
            WHERE tenant_id = $1 AND provider = 'twilio'`,
-          [tenantId]
+          [tenantId, STATUS_ACTIVE]
         );
 
         logger.info('Twilio provisioning complete', { tenantId, subaccountSid, phoneE164 });
