@@ -93,13 +93,19 @@ export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider 
     const start = Date.now();
     const model = request.model ?? 'gpt-4o-mini';
 
-    const completion = await this.client.chat.completions.create({
-      model,
-      messages: request.messages,
-      temperature: request.temperature ?? 0.2,
-      max_tokens: request.maxTokens,
-      response_format: request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
-    });
+    // Honor the resilience-layer signal so deadline expiry / breaker abort
+    // tears down the in-flight HTTP request instead of leaving a zombie.
+    const completion = await this.client.chat.completions.create(
+      {
+        model,
+        messages: request.messages,
+        temperature: request.temperature ?? 0.2,
+        max_tokens: request.maxTokens,
+        response_format:
+          request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
+      },
+      request.signal ? { signal: request.signal } : undefined,
+    );
 
     const choice = completion.choices[0];
     if (!choice?.message?.content) {
