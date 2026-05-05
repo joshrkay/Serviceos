@@ -58,7 +58,7 @@ import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
-import { createProposal as buildProposal } from '../proposals/proposal';
+import { createProposalDraft } from '../proposals/draft-service';
 import type { LeadRepository } from '../leads/lead';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
@@ -1532,7 +1532,7 @@ export class TwilioGatherAdapter {
         ? (fx.payload.entities as Record<string, unknown>)
         : {};
     try {
-      const proposal = buildProposal({
+      const stored = await createProposalDraft(this.deps.proposalRepo, {
         tenantId,
         proposalType: intentToProposalType(intent),
         payload: {
@@ -1552,7 +1552,6 @@ export class TwilioGatherAdapter {
           ? fx.payload.customerId
           : this.deps.systemActorId ?? 'calling-agent',
       });
-      const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
       // Advance the FSM: proposal_queued moves us into 'closing' and emits
       // a final tts_play ("Great, I've got that taken care of..."). Push
@@ -1686,7 +1685,7 @@ export class TwilioGatherAdapter {
       return;
     }
     try {
-      const proposal = buildProposal({
+      const stored = await createProposalDraft(this.deps.proposalRepo, {
         tenantId,
         // No dedicated `customer_callback_required` ProposalType
         // exists; voice_clarification is the closest existing bucket
@@ -1711,7 +1710,6 @@ export class TwilioGatherAdapter {
         aiRunId: uuidv4(),
         createdBy: this.deps.systemActorId ?? 'calling-agent',
       });
-      const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
 
       // Audit for parity with normal escalation paths: operators
