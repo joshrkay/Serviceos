@@ -458,9 +458,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       await rejectBound(tenantId, 'invalid_signature', { kind: 'sendgrid' });
       return res.status(403).json({ error: 'Forbidden' });
     }
-    const first = Array.isArray(req.body) ? req.body[0] : req.body;
+    const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
+    const first = Array.isArray(body) ? body[0] : body;
     const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
-    if (!eventId) return res.status(400).json({ error: 'Missing sg_event_id/sg_message_id' });
     if (deps.webhookEventRepo) {
       const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });
       if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
