@@ -68,6 +68,7 @@ import { maskPhone } from './twilio-call-control';
 import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
+import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -388,7 +389,7 @@ export class TwilioGatherAdapter {
     const wsBase = baseRaw
       ? baseRaw.replace(/^http(s?):\/\//, 'ws$1://')
       : 'wss://media-streams-base-url-not-configured';
-    const streamUrl = `${wsBase}/api/telephony/stream`;
+    const streamUrl = `${wsBase}${MEDIA_STREAM_PATH}`;
     return (
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
