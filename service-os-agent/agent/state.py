@@ -46,6 +46,7 @@ class Proposal(TypedDict, total=False):
 
 class AgentState(TypedDict, total=False):
     tenant_id: str
+    auth_token: str
     transcript: str
     input_method: str
     intent: Optional[str]
