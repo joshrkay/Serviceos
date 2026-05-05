@@ -1930,7 +1930,6 @@ export const MIGRATIONS = {
   `,
 
   '072_add_executing_status': `
-    ALTER TYPE proposal_status ADD VALUE IF NOT EXISTS 'executing';
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_by UUID;
     ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
     ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
