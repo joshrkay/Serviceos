@@ -64,9 +64,9 @@ export class ApiVerifier {
         artifactPath: '',
       };
       const findings = scanForSecrets(capture);
-    console.log('[qa-matrix:redaction]', { hasHeaders: !!capture.request.headers, hasRequestBody: capture.request.body !== undefined, hasResponseBody: capture.response.body !== undefined, fp: fingerprint(capture), findings: findings.length });
-    if (findings.length) throw new Error(`${opts.label}: non-redacted secrets detected (${findings.map((f) => f.name).join(', ')})`);
-    capture.artifactPath = writeJsonArtifact(this.evidence.apiDir(), opts.label, capture);
+      console.log('[qa-matrix:redaction]', { hasHeaders: !!capture.request.headers, hasRequestBody: capture.request.body !== undefined, hasResponseBody: capture.response.body !== undefined, fp: fingerprint(capture), findings: findings.length });
+      if (findings.length) throw new Error(opts.label + ": non-redacted secrets detected (" + findings.map((f) => f.name).join(', ') + ")");
+      capture.artifactPath = writeJsonArtifact(this.evidence.apiDir(), opts.label, capture);
       this.evidence.addArtifact({
         kind: 'api',
         path: capture.artifactPath,
