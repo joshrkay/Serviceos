@@ -440,9 +440,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     }
     return res.status(200).json({ received: true });
   };
-  router.post('/twilio/voice/:tenantId', (req, res) => void recordTwilio('voice', req, res));
-  router.post('/twilio/sms/:tenantId', (req, res) => void recordTwilio('sms', req, res));
-  router.post('/twilio/status/:tenantId', (req, res) => void recordTwilio('status', req, res));
+  router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
+  router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
+  router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
