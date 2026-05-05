@@ -21,7 +21,7 @@ import type { Pool } from 'pg';
 import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
-import { createProposal as buildProposal } from '../../../proposals/proposal';
+import { createProposalDraft } from '../../../proposals/draft-service';
 import type { ProposalType } from '../../../proposals/proposal';
 import type { AuditRepository } from '../../../audit/audit';
 import { createAuditEvent } from '../../../audit/audit';
@@ -498,15 +498,13 @@ export class InAppVoiceAdapter {
     const summary = summaryFor(intent, entities);
 
     try {
-      const proposal = buildProposal({
+      const stored = await createProposalDraft(this.deps.proposalRepo, {
         tenantId: session.tenantId,
         proposalType,
-        payload: {
-          intent,
-          entities,
+        payload: proposalPayloadForType(proposalType, intent, entities, {
           sessionId: session.id,
           conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
-        },
+        }),
         summary,
         sourceContext: {
           source: 'calling-agent',
@@ -518,7 +516,6 @@ export class InAppVoiceAdapter {
           ? payload.customerId
           : this.deps.systemActorId ?? 'calling-agent',
       });
-      const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
       session.events.emit('voice-event', { type: 'proposal_created', proposalId: stored.id });
       return stored.id;

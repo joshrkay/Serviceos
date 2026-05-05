@@ -92,6 +92,7 @@ describe('voice-action-router worker', () => {
     const byTenant = await proposalRepo.findByTenant('t-1');
     expect(byTenant).toHaveLength(1);
     expect(byTenant[0].proposalType).toBe('draft_invoice');
+    expect(byTenant[0].status).toBe('draft');
   });
 
   it('classifies "schedule follow-up" and persists a create_appointment proposal', async () => {
