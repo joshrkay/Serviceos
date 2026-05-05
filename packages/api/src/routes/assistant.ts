@@ -281,15 +281,17 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
 
           const content = result.message.content;
           const chunks = content.match(/.{1,18}(\s|$)/g) ?? [content];
-          // Mirror the SSE token stream onto the client WS gateway when
-          // any clients are subscribed to assistant events for this user.
+          // Mirror the SSE token stream onto the client WS gateway,
+          // scoped to the user-specific target so concurrent operators
+          // in the same tenant don't see each other's tokens.
           const { publish } = await import('../ws/client-gateway');
-          const correlationId = `assistant-${req.auth!.userId}-${Date.now()}`;
+          const userTarget = req.auth!.userId;
+          const correlationId = `assistant-${userTarget}-${Date.now()}`;
           for (const chunk of chunks) {
             writeSse(res, 'token', { delta: chunk });
             publish(
               'assistant',
-              undefined,
+              userTarget,
               {
                 kind: 'assistant.token',
                 channel: 'assistant',
@@ -303,7 +305,7 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
           writeSse(res, 'done', result);
           publish(
             'assistant',
-            undefined,
+            userTarget,
             {
               kind: 'assistant.done',
               channel: 'assistant',

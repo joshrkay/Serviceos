@@ -171,10 +171,18 @@ export class ClientGatewayConnection {
     return accepted;
   }
 
-  /** True when the connection is subscribed to the given channel/target. */
+  /**
+   * True when the connection is subscribed to the given channel/target.
+   *
+   * Exact match only — a `subscribe` with no targetId does NOT receive
+   * frames broadcast to a specific target, and a per-target subscription
+   * does not receive untargeted frames. This prevents cross-user
+   * leakage on the assistant channel where tokens are published per
+   * userId.
+   */
   isSubscribed(channel: 'assistant' | 'voice', targetId?: string): boolean {
     const key = `${channel}:${targetId ?? '*'}`;
-    return this.subscriptions.has(key) || this.subscriptions.has(`${channel}:*`);
+    return this.subscriptions.has(key);
   }
 
   channels(): string[] {
@@ -183,7 +191,9 @@ export class ClientGatewayConnection {
 
   terminate(reason: string, code: number = WS_CLOSE_CODE.policy_violation): void {
     if (this.closed) return;
-    wsDisconnectTotal.inc({ surface: SURFACE, reason });
+    // Disconnect counter is incremented inside onClose() to avoid
+    // double-counting server-initiated closes (idle timeout, slow
+    // consumer, shutdown).
     try {
       this.ws.close(code, reason);
     } catch {
