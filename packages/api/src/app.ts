@@ -373,6 +373,11 @@ export function createApp(): express.Express {
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
 
+  // Twilio posts application/x-www-form-urlencoded — mount the matching parser
+  // before global express.json() so /webhooks/twilio/* routes get populated
+  // req.body fields (used for signature verification + AccountSid match).
+  app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
+
   // Body parsing for all other routes
   app.use(express.json());
 
@@ -479,34 +484,33 @@ export function createApp(): express.Express {
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
   const integrationResolver = pool
-    ? async (tenantId: string) => {
+    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
         const { decrypt } = await import('./integrations/crypto');
         const encKey = process.env.TENANT_ENCRYPTION_KEY;
         const { rows } = await pool.query<{
-          provider: 'twilio' | 'sendgrid';
           subaccount_sid: string | null;
           auth_token_primary_enc: string | null;
           auth_token_secondary_enc: string | null;
           provider_data: Record<string, unknown>;
         }>(
-          `SELECT provider, subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
+          `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
            FROM tenant_integrations
-           WHERE tenant_id = $1`,
-          [tenantId]
+           WHERE tenant_id = $1 AND provider = $2`,
+          [tenantId, provider]
         );
-        const twilio = rows.find((r) => r.provider === 'twilio');
-        if (!twilio || !encKey) return null;
+        const row = rows[0];
+        if (!row || !encKey) return null;
         return {
           tenantId,
-          provider: 'twilio' as const,
-          subaccountSid: twilio.subaccount_sid ?? undefined,
-          authTokenPrimary: twilio.auth_token_primary_enc
-            ? decrypt(twilio.auth_token_primary_enc, encKey)
+          provider,
+          subaccountSid: row.subaccount_sid ?? undefined,
+          authTokenPrimary: row.auth_token_primary_enc
+            ? decrypt(row.auth_token_primary_enc, encKey)
             : undefined,
-          authTokenSecondary: twilio.auth_token_secondary_enc
-            ? decrypt(twilio.auth_token_secondary_enc, encKey)
+          authTokenSecondary: row.auth_token_secondary_enc
+            ? decrypt(row.auth_token_secondary_enc, encKey)
             : undefined,
-          sendgridPublicKeyPem: (twilio.provider_data?.sendgridPublicKeyPem as string | undefined),
+          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
         };
       }
     : undefined;

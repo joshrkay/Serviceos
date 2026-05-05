@@ -31,7 +31,7 @@ export interface WebhookRouterDeps {
     markProcessed(provider: string, eventId: string): Promise<void>;
   };
   auditRepo?: AuditRepository;
-  integrationResolver?: (tenantId: string) => Promise<{
+  integrationResolver?: (tenantId: string, provider: 'twilio' | 'sendgrid') => Promise<{
     tenantId: string;
     provider: 'twilio' | 'sendgrid';
     subaccountSid?: string;
@@ -438,7 +438,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   };
   const recordTwilio = async (kind: string, req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
-    const integration = await deps.integrationResolver?.(tenantId);
+    const integration = await deps.integrationResolver?.(tenantId, 'twilio');
     if (!integration || integration.provider !== 'twilio' || integration.tenantId !== tenantId) {
       await rejectBound(tenantId, 'tenant_mismatch', { kind });
       return res.status(403).json({ error: 'Forbidden' });
@@ -475,7 +475,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
-    const integration = await deps.integrationResolver?.(tenantId);
+    const integration = await deps.integrationResolver?.(tenantId, 'sendgrid');
     if (!integration || integration.provider !== 'sendgrid' || integration.tenantId !== tenantId) {
       await rejectBound(tenantId, 'tenant_mismatch', { kind: 'sendgrid' });
       return res.status(403).json({ error: 'Forbidden' });
