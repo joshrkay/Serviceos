@@ -55,17 +55,7 @@ export function initSentry(config: SentryConfig): SentryClient {
     release: config.release,
     tracesSampleRate: config.tracesSampleRate ?? (config.environment === 'production' ? 0.1 : 1.0),
     beforeSend(event) {
-      const redactedEvent = redactByTier(event, 'strict');
-      if (redactedEvent && typeof redactedEvent === 'object' && 'request' in redactedEvent) {
-        const req = (redactedEvent as Record<string, any>).request;
-        if (req?.data) req.data = redactByTier(req.data, 'strict');
-      }
-      if (redactedEvent && typeof redactedEvent === 'object' && 'user' in redactedEvent) {
-        (redactedEvent as Record<string, unknown>).user = redactSentryUser(
-          (redactedEvent as Record<string, unknown>).user as Record<string, unknown>
-        ) as unknown;
-      }
-      return redactedEvent as any;
+      return redactByTier(event, 'strict') as any;
     },
     beforeBreadcrumb(breadcrumb) {
       return redactByTier(breadcrumb, 'strict') as any;
