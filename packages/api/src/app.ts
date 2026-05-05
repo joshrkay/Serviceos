@@ -240,6 +240,7 @@ import {
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
+import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
   createDelayNotificationWorker,
   DelayNotificationCoordinator,
@@ -397,6 +398,12 @@ export function createApp(): express.Express {
     windowMs: 60 * 1000,      // 1 minute
     max: 30,                  // per IP
   }));
+
+  const requestLogger = createLogger({
+    service: 'api-http',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  app.use(createRequestLoggingMiddleware(requestLogger));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
@@ -1595,6 +1602,8 @@ export function createApp(): express.Express {
   // that a flag reads as disabled for a few ms.
   void hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
   app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+
+  app.use(captureRequestError());
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
