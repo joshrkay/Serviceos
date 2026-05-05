@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Queue, QueueConfig, QueueMessage, DeadLetterEntry } from './queue';
+import { Queue, QueueConfig, QueueMessage, DeadLetterEntry, redactForSink, toEnvelopeMeta } from './queue';
 import { randomUUID } from 'crypto';
 
 /**
@@ -143,7 +143,15 @@ export class PgQueue extends PgBaseRepository implements Queue {
           [
             message.id,
             message.type,
-            JSON.stringify(message.payload),
+            JSON.stringify(
+              redactForSink(
+                {
+                  envelope: toEnvelopeMeta(message),
+                  payload: message.payload,
+                },
+                'dlq'
+              )
+            ),
             message.attempts,
             message.idempotencyKey,
             error,
