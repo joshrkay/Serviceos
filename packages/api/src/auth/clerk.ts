@@ -479,6 +479,33 @@ export interface TenantBootstrapDeps {
    * invoice because no settings row existed yet.
    */
   settingsRepository?: import('../settings/settings').SettingsRepository;
+  /**
+   * Optional onboarding metadata used by integration provisioning
+   * eligibility checks in Phase A.
+   */
+  onboardingLocation?: {
+    country?: string;
+    region?: string;
+    locale?: string;
+  };
+  /**
+   * When true, validates that location prerequisites needed for
+   * provisioning are present. Provisioning handlers are intentionally
+   * out of scope for this phase.
+   */
+  provisioningRequested?: boolean;
+}
+
+function assertProvisioningPrerequisites(deps: TenantBootstrapDeps): void {
+  if (!deps.provisioningRequested) return;
+  const country = deps.onboardingLocation?.country?.trim().toUpperCase();
+  if (!country) {
+    throw new Error('Country is required before provisioning can start');
+  }
+  const region = (deps.onboardingLocation?.region ?? '').trim();
+  if (country === 'US' && !region) {
+    throw new Error('Region (US state) is required before provisioning can start');
+  }
 }
 
 export async function bootstrapTenant(
@@ -490,6 +517,7 @@ export async function bootstrapTenant(
   if (!userId || !email) {
     throw new Error('userId and email are required for tenant bootstrap');
   }
+  assertProvisioningPrerequisites(deps);
 
   const existing = await tenantRepository.findByOwner(userId);
   if (existing) {

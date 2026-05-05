@@ -157,19 +157,21 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     ws.inboundJson({
       event: 'start',
       streamSid: 'MZ-A',
-      start: { callSid: 'CA-A', accountSid: 'AC1', streamSid: 'MZ-A', tracks: ['inbound'] },
+      start: {
+        callSid: 'CA-A',
+        accountSid: 'AC1',
+        streamSid: 'MZ-A',
+        tracks: ['inbound'],
+        customParameters: { tenantId: 'tenant-B' },
+      },
     });
     await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toContain(1008);
 
-    // The adapter resolved to tenant A's session — verify by sending a
-    // final transcript and inspecting the speechTurn call.
-    const { handle } = (() => {
-      // Reach into the adapter — easier: rerun with a captured handle.
-      return { handle: null as never };
-    })();
-    void handle;
+    // Reconnect without spoofed customParameters: the adapter should
+    // resolve tenant from trusted store state keyed by CallSid.
 
-    // Re-build with a fresh handle so we can fire a transcript event.
     const wsA = new FakeWs();
     const { provider: providerA, handle: handleA } = makeStreamingProvider();
     const speechTurnA = vi.fn().mockResolvedValue([] as SideEffect[]);
@@ -348,5 +350,25 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     // Not JSON.
     ws.fire('message', Buffer.from('this is not json'));
     expect(ws.closed).toBe(false);
+  });
+
+  it('malformed start payload closes WS', async () => {
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-bad',
+      start: { callSid: '', accountSid: 'AC', streamSid: 'MZ-bad', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toContain(1008);
   });
 });

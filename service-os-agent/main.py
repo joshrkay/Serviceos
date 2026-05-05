@@ -26,6 +26,7 @@ agent = build_graph()
 
 class ProcessRequest(BaseModel):
     tenant_id: str
+    auth_token: str
     transcript: str
     input_method: str = "text"
 
@@ -40,6 +41,7 @@ async def process(req: ProcessRequest):
     try:
         result = agent.invoke({
             "tenant_id": req.tenant_id,
+            "auth_token": req.auth_token,
             "transcript": req.transcript,
             "input_method": req.input_method,
         })

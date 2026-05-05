@@ -1,6 +1,7 @@
 import type { APIRequestContext, APIResponse } from '@playwright/test';
 import { basename } from 'node:path';
 import { RowEvidence, writeJsonArtifact } from './evidence';
+import { redactHeaders, redactUnknown, scanForSecrets, fingerprint } from './redaction';
 
 export interface ApiCallOptions {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -52,16 +53,19 @@ export class ApiVerifier {
       });
     } catch (err) {
       const capture: CapturedCall = {
-        request: { method: opts.method, url, headers: redact(headers), body: opts.body },
+        request: { method: opts.method, url, headers: redactHeaders(headers), body: redactUnknown(opts.body) },
         response: {
           status: 0,
           ok: false,
-          body: { networkError: (err as Error).message },
+          body: redactUnknown({ networkError: (err as Error).message }),
           durationMs: Date.now() - started,
           timestamp: new Date().toISOString(),
         },
         artifactPath: '',
       };
+      const findings = scanForSecrets(capture);
+      console.log('[qa-matrix:redaction]', { hasHeaders: !!capture.request.headers, hasRequestBody: capture.request.body !== undefined, hasResponseBody: capture.response.body !== undefined, fp: fingerprint(capture), findings: findings.length });
+      if (findings.length) throw new Error(opts.label + ": non-redacted secrets detected (" + findings.map((f) => f.name).join(', ') + ")");
       capture.artifactPath = writeJsonArtifact(this.evidence.apiDir(), opts.label, capture);
       this.evidence.addArtifact({
         kind: 'api',
@@ -81,16 +85,19 @@ export class ApiVerifier {
     }
 
     const capture: CapturedCall = {
-      request: { method: opts.method, url, headers: redact(headers), body: opts.body },
+      request: { method: opts.method, url, headers: redactHeaders(headers), body: redactUnknown(opts.body) },
       response: {
         status,
         ok: res.ok(),
-        body: parsedBody,
+        body: redactUnknown(parsedBody),
         durationMs: Date.now() - started,
         timestamp: new Date().toISOString(),
       },
       artifactPath: '',
     };
+    const findings = scanForSecrets(capture);
+    console.log('[qa-matrix:redaction]', { hasHeaders: !!capture.request.headers, hasRequestBody: capture.request.body !== undefined, hasResponseBody: capture.response.body !== undefined, fp: fingerprint(capture), findings: findings.length });
+    if (findings.length) throw new Error(`${opts.label}: non-redacted secrets detected (${findings.map((f) => f.name).join(', ')})`);
     capture.artifactPath = writeJsonArtifact(this.evidence.apiDir(), opts.label, capture);
     this.evidence.addArtifact({
       kind: 'api',
@@ -110,12 +117,4 @@ export class ApiVerifier {
     }
     return capture;
   }
-}
-
-function redact(headers: Record<string, string>): Record<string, string> {
-  const copy: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    copy[k] = k.toLowerCase() === 'authorization' ? 'Bearer <redacted>' : v;
-  }
-  return copy;
 }

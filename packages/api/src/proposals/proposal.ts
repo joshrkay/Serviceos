@@ -11,6 +11,7 @@ export type ProposalStatus =
   | 'draft'
   | 'ready_for_review'
   | 'approved'
+  | 'executing'
   | 'rejected'
   | 'expired'
   | 'executed'
@@ -81,6 +82,9 @@ export interface Proposal {
   approvedAt?: Date;
   executedAt?: Date;
   executedBy?: string;
+  claimedBy?: string;
+  claimedAt?: Date;
+  executionRetryCount?: number;
   /**
    * Stamped when a proposal transitions to 'undone'. Distinct from
    * rejection: rejection means "never execute"; undo means "we
@@ -352,6 +356,11 @@ export interface ProposalRepository {
    * are included — they have no window and should execute immediately.
    */
   findReadyForExecution(windowMs: number): Promise<Proposal[]>;
+  claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null>;
+  resetStaleExecuting(
+    staleMinutes: number,
+    maxRetries: number
+  ): Promise<{ resetToApproved: number; movedToFailed: number }>;
 }
 
 export function validateProposalInput(input: CreateProposalInput): string[] {
@@ -528,5 +537,44 @@ export class InMemoryProposalRepository implements ProposalRepository {
         return now - p.approvedAt.getTime() >= windowMs;
       })
       .map((p) => ({ ...p }));
+  }
+
+  async claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null> {
+    const proposal = this.proposals.get(proposalId);
+    if (!proposal || proposal.status !== 'approved') return null;
+    proposal.status = 'executing';
+    proposal.claimedBy = workerId;
+    proposal.claimedAt = new Date();
+    proposal.updatedAt = new Date();
+    this.proposals.set(proposalId, proposal);
+    return { ...proposal };
+  }
+
+  async resetStaleExecuting(
+    staleMinutes: number,
+    maxRetries: number
+  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+    const now = Date.now();
+    let resetToApproved = 0;
+    let movedToFailed = 0;
+    for (const [id, proposal] of this.proposals.entries()) {
+      if (proposal.status !== 'executing' || !proposal.claimedAt) continue;
+      const ageMinutes = (now - proposal.claimedAt.getTime()) / 60000;
+      if (ageMinutes < staleMinutes) continue;
+      const retries = proposal.executionRetryCount ?? 0;
+      if (retries >= maxRetries) {
+        proposal.status = 'execution_failed';
+        movedToFailed++;
+      } else {
+        proposal.status = 'approved';
+        proposal.executionRetryCount = retries + 1;
+        proposal.claimedAt = undefined;
+        proposal.claimedBy = undefined;
+        resetToApproved++;
+      }
+      proposal.updatedAt = new Date();
+      this.proposals.set(id, proposal);
+    }
+    return { resetToApproved, movedToFailed };
   }
 }
