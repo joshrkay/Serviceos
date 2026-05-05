@@ -10,7 +10,6 @@ import { ValidationError } from '../shared/errors';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -39,7 +38,6 @@ export interface WebhookRouterDeps {
   provisioningQueue?: {
     send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   };
-  auditRepo?: AuditRepository;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -461,7 +459,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
     const first = Array.isArray(body) ? body[0] : body;
     const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
-    if (deps.webhookEventRepo) {
+    if (deps.webhookEventRepo && eventId) {
       const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });
       if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
       await deps.webhookEventRepo.markProcessed('sendgrid', eventId);
