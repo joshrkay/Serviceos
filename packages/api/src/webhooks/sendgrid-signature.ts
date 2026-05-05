@@ -11,7 +11,7 @@ export function verifySendGridSignature(params: {
   try {
     const verifier = crypto.createVerify('sha256');
     verifier.update(timestamp);
-    verifier.update(typeof payload === 'string' ? payload : payload.toString('utf8'));
+    verifier.update(payload);
     verifier.end();
     return verifier.verify(publicKeyPem, Buffer.from(signatureBase64, 'base64'));
   } catch {
