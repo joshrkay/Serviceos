@@ -501,12 +501,10 @@ export class InAppVoiceAdapter {
       const stored = await createProposalDraft(this.deps.proposalRepo, {
         tenantId: session.tenantId,
         proposalType,
-        payload: {
-          intent,
-          entities,
+        payload: proposalPayloadForType(proposalType, intent, entities, {
           sessionId: session.id,
           conversationId: typeof payload.conversationId === 'string' ? payload.conversationId : undefined,
-        },
+        }),
         summary,
         sourceContext: {
           source: 'calling-agent',

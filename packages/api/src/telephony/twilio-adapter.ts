@@ -1536,12 +1536,10 @@ export class TwilioGatherAdapter {
       const stored = await createProposalDraft(this.deps.proposalRepo, {
         tenantId,
         proposalType: intentToProposalType(intent),
-        payload: {
-          intent,
-          entities,
+        payload: proposalPayloadForType(intentToProposalType(intent), intent, entities, {
           sessionId: session.id,
           callSid: session.callSid,
-        },
+        }),
         summary: intent ? `Voice intent: ${intent}` : 'Voice clarification needed',
         sourceContext: {
           source: 'calling-agent',
