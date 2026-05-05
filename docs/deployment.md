@@ -41,3 +41,15 @@ Do not reintroduce migration-gated startup.
 ## Horizontal scaling note
 
 Now safe to scale beyond single dyno.
+
+## Observability sink validation (post-deploy)
+
+After each deploy in `dev`, `staging`, and `production`, validate that redaction processors are active on every sink.
+
+1. Trigger a synthetic error with known sensitive fields in `extra`, request body, and user context (email/phone/name).
+2. Confirm Sentry event payload has masked/redacted values only (`[REDACTED]` or masked forms).
+3. Confirm breadcrumbs on the same event are redacted.
+4. Confirm CloudWatch log lines do not contain unredacted secret or PII values.
+5. If any sink receives raw values, rollback and treat as Sev-1 data leak risk.
+
+Validation should include at least one request path that logs through transport adapters and one path that throws to Sentry.
