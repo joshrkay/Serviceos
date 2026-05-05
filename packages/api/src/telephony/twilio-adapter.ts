@@ -68,6 +68,7 @@ import { maskPhone } from './twilio-call-control';
 import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
+import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
