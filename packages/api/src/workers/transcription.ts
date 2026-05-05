@@ -36,6 +36,30 @@ export interface TranscriptionGlossaryProvider {
   termsForTenant(tenantId: string): Promise<string[]>;
 }
 
+
+
+export const TRANSCRIPT_SANITIZATION_VERSION = 'v1';
+
+/**
+ * Removes control characters, normalizes whitespace/newlines, and trims
+ * transcript text so downstream prompts receive a stable canonical string.
+ */
+export function sanitizeTranscript(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  const noControlChars = raw.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ');
+  const normalizedNewlines = noControlChars.replace(/\r\n?/g, '\n');
+  const collapsed = normalizedNewlines
+    .split('\n')
+    .map((line) => line.replace(/[\t ]+/g, ' ').trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
+  return collapsed.trim();
+}
+
+function encodeEncryptedRawTranscriptPlaceholder(raw: string): string {
+  return Buffer.from(raw, 'utf8').toString('base64');
+}
+
 export interface CreateTranscriptionWorkerOptions {
   /**
    * Fired after a successful transcription is persisted. Used to hand
@@ -154,27 +178,45 @@ export function createTranscriptionWorker(
         // corrected version becomes the canonical transcript the
         // router sees. This closes the biggest quality gap: trade
         // terms and customer names that Whisper alone gets wrong.
-        let finalTranscript = result.transcript;
+        const providerTranscript = result.transcript ?? '';
+        const sanitizedProviderTranscript = sanitizeTranscript(providerTranscript);
+        let correctedTranscript = sanitizedProviderTranscript;
         let correctionMetadata: Record<string, unknown> = {};
-        if (options.gateway && result.transcript && result.transcript.trim().length > 0) {
+        if (options.gateway && providerTranscript.trim().length > 0) {
           const { corrected, glossary } = await correctTranscript({
-            raw: result.transcript,
+            raw: sanitizedProviderTranscript,
             tenantId,
             gateway: options.gateway,
             glossary: options.glossary,
             logger,
           });
-          finalTranscript = corrected;
+          correctedTranscript = corrected;
           correctionMetadata = {
-            rawTranscript: result.transcript,
-            correctionApplied: corrected !== result.transcript,
+            correctionApplied: corrected !== sanitizedProviderTranscript,
             glossaryTerms: glossary.length,
           };
         }
 
+        const sanitizedTranscript = sanitizeTranscript(correctedTranscript);
+
         await voiceRepository.updateStatus(tenantId, recordingId, 'completed', {
-          transcript: finalTranscript,
-          metadata: { ...result.metadata, ...correctionMetadata },
+          transcript: sanitizedTranscript,
+          metadata: {
+            ...result.metadata,
+            ...correctionMetadata,
+            sanitization_version: TRANSCRIPT_SANITIZATION_VERSION,
+            canonical_transcript_field: 'transcript',
+            prompt_rehydration_policy: 'sanitized_only',
+            raw_transcript_retention: providerTranscript
+              ? {
+                  encryptedBlob: encodeEncryptedRawTranscriptPlaceholder(sanitizedProviderTranscript),
+                  encryption: 'pending-kms-integration',
+                  ttl: 'P7D',
+                  accessRole: 'voice_transcript_raw_reader',
+                  auditLogRequired: true,
+                }
+              : null,
+          },
         });
 
         logger.info('Transcription completed', {
@@ -182,13 +224,13 @@ export function createTranscriptionWorker(
           correctionApplied: correctionMetadata.correctionApplied ?? false,
         });
 
-        if (options.onTranscribed && finalTranscript) {
+        if (options.onTranscribed && sanitizedTranscript) {
           try {
             await options.onTranscribed(
               {
                 tenantId,
                 recordingId,
-                transcript: finalTranscript,
+                transcript: sanitizedTranscript,
                 conversationId,
                 userId,
               },
