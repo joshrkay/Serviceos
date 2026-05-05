@@ -1,4 +1,3 @@
-import type * as SentryTypes from '@sentry/node';
 import { redactByTier, redactSentryUser } from '../logging/redact';
 
 export interface SentryConfig {
@@ -21,10 +20,14 @@ export interface SentryTransaction {
   setStatus(status: string): void;
 }
 
-type SentryModule = Pick<
-  typeof SentryTypes,
-  'init' | 'captureException' | 'captureMessage' | 'setTag' | 'setUser'
->;
+interface SentryModule {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  init(options: any): void;
+  captureException(exception: unknown, hint?: { extra?: Record<string, unknown> }): string;
+  captureMessage(message: string, captureContext?: string): string;
+  setTag(key: string, value: unknown): void;
+  setUser(user: unknown): void;
+}
 
 let redactionProcessorsInstalled = false;
 
@@ -54,10 +57,10 @@ export function initSentry(config: SentryConfig): SentryClient {
     environment: config.environment,
     release: config.release,
     tracesSampleRate: config.tracesSampleRate ?? (config.environment === 'production' ? 0.1 : 1.0),
-    beforeSend(event) {
+    beforeSend(event: unknown) {
       return redactByTier(event, 'strict') as any;
     },
-    beforeBreadcrumb(breadcrumb) {
+    beforeBreadcrumb(breadcrumb: unknown) {
       return redactByTier(breadcrumb, 'strict') as any;
     },
   } as any);
