@@ -8,6 +8,7 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createCredentialResolver } from './integrations/credentials';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { attachMediaStreamServer } from './telephony/media-streams';
@@ -362,6 +363,10 @@ export function createApp(): express.Express {
   // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+  // SendGrid signed webhook verification needs the exact raw body bytes.
+  app.use('/webhooks/sendgrid', express.raw({ type: 'application/json', limit: '1mb' }));
+  // Twilio webhooks are form-encoded by default.
+  app.use('/webhooks/twilio', express.urlencoded({ extended: true, limit: '1mb' }));
 
   // Body parsing for all other routes
   app.use(express.json());
@@ -439,6 +444,7 @@ export function createApp(): express.Express {
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+  const credentialResolver = pool ? createCredentialResolver({ pool }) : undefined;
   app.use(
     '/webhooks',
     createWebhookRouter(config, {
@@ -449,6 +455,30 @@ export function createApp(): express.Express {
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
       auditRepo: webhookAuditRepo,
       webhookEventRepo,
+      integrationResolver: async (tenantId: string) => {
+        if (!credentialResolver) return null;
+        const twilio = await credentialResolver.getCredential(tenantId, 'twilio');
+        if (twilio) {
+          const c = twilio.credentials ?? {};
+          return {
+            tenantId,
+            provider: 'twilio' as const,
+            subaccountSid: (c.subaccountSid as string | undefined) ?? (c.subaccount_sid as string | undefined),
+            authTokenPrimary: c.authTokenPrimary as string | undefined,
+            authTokenSecondary: c.authTokenSecondary as string | undefined,
+          };
+        }
+        const sendgrid = await credentialResolver.getCredential(tenantId, 'sendgrid');
+        if (sendgrid) {
+          const c = sendgrid.credentials ?? {};
+          return {
+            tenantId,
+            provider: 'sendgrid' as const,
+            sendgridPublicKeyPem: c.webhookPublicKeyPem as string | undefined,
+          };
+        }
+        return null;
+      },
     })
   );
 

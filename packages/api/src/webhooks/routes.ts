@@ -372,9 +372,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     }
     return res.status(200).json({ received: true });
   };
-  router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
-  router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
-  router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
+  router.post('/twilio/voice/:tenantId', async (req: Request, res: Response) => {
+    await recordTwilio('voice', req, res);
+  });
+  router.post('/twilio/sms/:tenantId', async (req: Request, res: Response) => {
+    await recordTwilio('sms', req, res);
+  });
+  router.post('/twilio/status/:tenantId', async (req: Request, res: Response) => {
+    await recordTwilio('status', req, res);
+  });
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
@@ -385,7 +391,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     }
     const sig = req.header('x-twilio-email-event-webhook-signature');
     const ts = req.header('x-twilio-email-event-webhook-timestamp');
-    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body ?? {}));
+    const raw = Buffer.isBuffer(req.body)
+      ? req.body
+      : Buffer.from((req as Request & { rawBody?: string | Buffer }).rawBody ?? '', 'utf8');
     if (!verifySendGridSignature({ publicKeyPem: integration.sendgridPublicKeyPem ?? '', payload: raw, signatureBase64: sig, timestamp: ts })) {
       await rejectBound(tenantId, 'invalid_signature', { kind: 'sendgrid' });
       return res.status(403).json({ error: 'Forbidden' });
