@@ -5,7 +5,7 @@ tracks follow-ups surfaced during /review that were intentionally not fixed.
 
 ---
 
-## Executor double-execution on multi-instance deploys
+## Executor double-execution on multi-instance deploys ✅ CLOSED
 
 `packages/api/src/proposals/execution/executor.ts:17-72` checks
 `proposal.status === 'approved'` from the in-memory object returned by

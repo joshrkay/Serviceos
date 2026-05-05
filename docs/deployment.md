@@ -36,3 +36,8 @@ If deployment flow changes in the future, keep these invariants:
 3. `healthcheckPath` remains `/ready`.
 
 Do not reintroduce migration-gated startup.
+
+
+## Horizontal scaling note
+
+Now safe to scale beyond single dyno.

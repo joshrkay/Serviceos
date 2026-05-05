@@ -1928,6 +1928,19 @@ export const MIGRATIONS = {
         'releasing'
       ));
   `,
+
+  '072_add_executing_status': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_by UUID;
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+    ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
+    ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+  `,
+
+  '073_add_execution_retry_count': `
+    ALTER TABLE proposals
+      ADD COLUMN IF NOT EXISTS execution_retry_count INTEGER NOT NULL DEFAULT 0;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
