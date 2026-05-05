@@ -11,11 +11,12 @@ import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { attachMediaStreamServer } from './telephony/media-streams';
-import { attachClientGateway } from './ws/client-gateway';
+import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import {
   decodeClerkToken,
   verifyRs256Token,
 } from './auth/clerk';
+import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
 
@@ -102,6 +103,7 @@ import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
   hydrateStoreFromRepository,
+  isFeatureEnabled,
   FeatureFlagRepository,
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
@@ -1688,6 +1690,22 @@ export function createApp(): express.Express {
     await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
   })();
   app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+
+  // Wire the WS publish-side kill switches: every call to publish()
+  // consults the feature flag store at runtime, so flipping
+  // ws.assistant_stream_enabled / ws.voice_events_enabled off
+  // immediately stops mirroring without redeploy.
+  const wsEnv = process.env.NODE_ENV ?? 'development';
+  setChannelGate((channel, tenantId) => {
+    const flag =
+      channel === 'assistant'
+        ? RESILIENCE_FLAG_NAMES.assistantStreamEnabled
+        : RESILIENCE_FLAG_NAMES.voiceEventsEnabled;
+    return isFeatureEnabled(featureFlagStore, flag, {
+      environment: wsEnv,
+      tenantId,
+    });
+  });
 
   app.use(captureRequestError());
 

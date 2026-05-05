@@ -255,6 +255,18 @@ export class ClientGatewayConnection {
 
     switch (parsed.kind) {
       case 'subscribe': {
+        // Authorize the subscription target. Without this, any tenant
+        // member could subscribe to assistant:<otherUserId> and harvest
+        // another operator's token stream.
+        const reason = this.authorizeSubscribe(parsed.channel, parsed.targetId);
+        if (reason) {
+          this.send({
+            kind: 'error',
+            code: 'SUBSCRIBE_FORBIDDEN',
+            message: reason,
+          });
+          return;
+        }
         const key = `${parsed.channel}:${parsed.targetId ?? '*'}`;
         this.subscriptions.add(key);
         this.send({ kind: 'subscribed', channel: parsed.channel });
@@ -270,6 +282,31 @@ export class ClientGatewayConnection {
         return;
       }
     }
+  }
+
+  /**
+   * Returns null when the subscription is allowed, or a reason string
+   * to refuse. The assistant channel is per-user; voice subscriptions
+   * must specify a session id (tenant filter on broadcast prevents
+   * cross-tenant leakage). Untargeted subscriptions are not honored —
+   * see isSubscribed for the matching policy.
+   */
+  private authorizeSubscribe(
+    channel: 'assistant' | 'voice',
+    targetId: string | undefined,
+  ): string | null {
+    if (channel === 'assistant') {
+      if (!targetId) return 'assistant subscriptions require a targetId';
+      if (!this.userId || targetId !== this.userId) {
+        return 'assistant target must match the authenticated user';
+      }
+      return null;
+    }
+    if (channel === 'voice') {
+      if (!targetId) return 'voice subscriptions require a session id';
+      return null;
+    }
+    return 'unsupported channel';
   }
 
   private onClose(reason: string): void {
@@ -315,8 +352,15 @@ export interface ClientGatewayHandle {
  * here at attach time; routes call `publish(...)` without needing a
  * direct reference to the gateway handle. When the gateway is disabled,
  * `publish` is a no-op.
+ *
+ * Operators can additionally gate per-channel mirroring by setting a
+ * `channelGate` — used by app.ts to honor the
+ * `ws.assistant_stream_enabled` / `ws.voice_events_enabled` kill
+ * switches at runtime so flipping a flag immediately stops
+ * publishing without a redeploy.
  */
 let activePublisher: ClientGatewayHandle['broadcast'] | null = null;
+let channelGate: ((channel: 'assistant' | 'voice', tenantId?: string) => boolean) | null = null;
 
 export function publish(
   channel: 'assistant' | 'voice',
@@ -325,7 +369,14 @@ export function publish(
   tenantId?: string,
 ): number {
   if (!activePublisher) return 0;
+  if (channelGate && !channelGate(channel, tenantId)) return 0;
   return activePublisher(channel, targetId, frame, tenantId);
+}
+
+export function setChannelGate(
+  gate: ((channel: 'assistant' | 'voice', tenantId?: string) => boolean) | null,
+): void {
+  channelGate = gate;
 }
 
 export function isClientGatewayEnabled(): boolean {
