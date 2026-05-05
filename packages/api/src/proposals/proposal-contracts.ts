@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const proposalFilterSchema = z.object({
-  status: z.enum(['draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed']).optional(),
+  status: z.enum(['draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed']).optional(),
   proposalType: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),

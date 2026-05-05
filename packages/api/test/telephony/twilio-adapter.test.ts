@@ -14,6 +14,7 @@ import {
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
+import { MEDIA_STREAM_PATH } from '../../src/telephony/media-streams/twilio-mediastream-server';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -151,6 +152,16 @@ describe('buildTwiML', () => {
       );
       expect(xml).toContain('a=1&amp;b=2');
     });
+  });
+});
+
+
+
+describe('TwilioGatherAdapter.buildStreamTwiML', () => {
+  it('uses the canonical MEDIA_STREAM_PATH for the <Stream> URL', () => {
+    const { adapter } = makeAdapter();
+    const xml = adapter.buildStreamTwiML({ sessionId: 's-1', callSid: 'CA-1' });
+    expect(xml).toContain(`wss://example.com${MEDIA_STREAM_PATH}`);
   });
 });
 

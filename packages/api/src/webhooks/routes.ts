@@ -7,6 +7,9 @@ import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { ValidationError } from '../shared/errors';
+import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
+import { verifySendGridSignature } from './sendgrid-signature';
+import { createAuditEvent, AuditRepository } from '../audit/audit';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -19,6 +22,22 @@ export interface WebhookRouterDeps {
   invoiceRepo?: InvoiceRepository;
   paymentRepo?: PaymentRepository;
   stripeWebhookSecret?: string;
+  webhookEventRepo?: {
+    recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean }>;
+    markProcessed(provider: string, eventId: string): Promise<void>;
+  };
+  auditRepo?: AuditRepository;
+  integrationResolver?: (tenantId: string) => Promise<{
+    tenantId: string;
+    provider: 'twilio' | 'sendgrid';
+    subaccountSid?: string;
+    authTokenPrimary?: string;
+    authTokenSecondary?: string;
+    sendgridPublicKeyPem?: string;
+  } | null>;
+  provisioningQueue?: {
+    send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
+  };
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -102,11 +121,74 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
             settingsRepository: deps.settingsRepo,
           });
+          const signupCorrelationId = `signup:${svixId}`;
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
             created: result.created,
             settingsSeeded: Boolean(deps.settingsRepo),
+            signupCorrelationId,
           });
+
+          if (deps.auditRepo) {
+            await deps.auditRepo.create(createAuditEvent({
+              tenantId: result.tenantId,
+              actorId: userId,
+              actorRole: 'owner',
+              eventType: 'tenant.signup.bootstrap.completed',
+              entityType: 'tenant',
+              entityId: result.tenantId,
+              correlationId: signupCorrelationId,
+              metadata: {
+                svixId,
+                clerkUserId: userId,
+                email: primaryEmail,
+                created: result.created,
+              },
+            }));
+          }
+
+          if (deps.provisioningQueue && result.created) {
+            const queuePayload = {
+              tenantId: result.tenantId,
+              ownerId: userId,
+              ownerEmail: primaryEmail,
+              signupCorrelationId,
+              webhookEventId: svixId,
+            };
+
+            void deps.provisioningQueue.send(
+              'tenant.provisioning.root.requested',
+              queuePayload,
+              `tenant-provisioning:${result.tenantId}`
+            ).then(async (queueMessageId) => {
+              if (deps.auditRepo) {
+                await deps.auditRepo.create(createAuditEvent({
+                  tenantId: result.tenantId,
+                  actorId: userId,
+                  actorRole: 'owner',
+                  eventType: 'tenant.signup.provisioning.enqueued',
+                  entityType: 'tenant',
+                  entityId: result.tenantId,
+                  correlationId: signupCorrelationId,
+                  metadata: {
+                    queueMessageId,
+                    queueType: 'tenant.provisioning.root.requested',
+                  },
+                }));
+              }
+              logger.info('Root provisioning orchestration enqueued', {
+                tenantId: result.tenantId,
+                queueMessageId,
+                signupCorrelationId,
+              });
+            }).catch((err) => {
+              logger.error('Failed to enqueue root provisioning orchestration', {
+                tenantId: result.tenantId,
+                signupCorrelationId,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              });
+            });
+          }
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
           if (config.CLERK_SECRET_KEY) {
@@ -308,6 +390,81 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       await webhookRepo.updateStatus(event.id, 'failed', message);
       return res.status(500).json({ error: 'Processing failed' });
     }
+  });
+
+  const rejectBound = async (tenantId: string, reason: string, meta: Record<string, unknown>) => {
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(createAuditEvent({
+        tenantId,
+        actorId: 'system:webhook',
+        actorRole: 'system',
+        eventType: 'webhook.auth_failed',
+        entityType: 'webhook',
+        entityId: reason,
+        metadata: meta,
+      }));
+    }
+  };
+  const recordTwilio = async (kind: string, req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    const integration = await deps.integrationResolver?.(tenantId);
+    if (!integration || integration.provider !== 'twilio' || integration.tenantId !== tenantId) {
+      await rejectBound(tenantId, 'tenant_mismatch', { kind });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const params = Object.fromEntries(Object.entries((req.body ?? {}) as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+    const url = reconstructWebhookUrl(req, process.env.PUBLIC_API_URL);
+    const sig = req.header('x-twilio-signature');
+    const validPrimary = integration.authTokenPrimary
+      ? verifyTwilioSignature(sig, url, params, integration.authTokenPrimary)
+      : false;
+    const validSecondary = !validPrimary && integration.authTokenSecondary
+      ? verifyTwilioSignature(sig, url, params, integration.authTokenSecondary)
+      : false;
+    if (!validPrimary && !validSecondary) {
+      await rejectBound(tenantId, 'invalid_signature', { kind });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if ((req.body?.AccountSid as string | undefined) !== integration.subaccountSid) {
+      await rejectBound(tenantId, 'account_sid_mismatch', { kind, accountSid: req.body?.AccountSid });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const eventId = (req.body?.MessageSid as string | undefined) ?? (req.body?.CallSid as string | undefined);
+    if (!eventId) return res.status(400).json({ error: 'Missing MessageSid/CallSid' });
+    if (deps.webhookEventRepo) {
+      const rec = await deps.webhookEventRepo.recordReceipt('twilio', eventId, kind, req.body ?? {});
+      if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
+      await deps.webhookEventRepo.markProcessed('twilio', eventId);
+    }
+    return res.status(200).json({ received: true });
+  };
+  router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
+  router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
+  router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
+
+  router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    const integration = await deps.integrationResolver?.(tenantId);
+    if (!integration || integration.provider !== 'sendgrid' || integration.tenantId !== tenantId) {
+      await rejectBound(tenantId, 'tenant_mismatch', { kind: 'sendgrid' });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const sig = req.header('x-twilio-email-event-webhook-signature');
+    const ts = req.header('x-twilio-email-event-webhook-timestamp');
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body ?? {}));
+    if (!verifySendGridSignature({ publicKeyPem: integration.sendgridPublicKeyPem ?? '', payload: raw, signatureBase64: sig, timestamp: ts })) {
+      await rejectBound(tenantId, 'invalid_signature', { kind: 'sendgrid' });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
+    const first = Array.isArray(body) ? body[0] : body;
+    const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
+    if (deps.webhookEventRepo && eventId) {
+      const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });
+      if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
+      await deps.webhookEventRepo.markProcessed('sendgrid', eventId);
+    }
+    return res.status(200).json({ received: true });
   });
 
   return router;

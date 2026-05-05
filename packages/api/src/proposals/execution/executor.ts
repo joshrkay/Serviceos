@@ -67,7 +67,7 @@ export class ProposalExecutor {
     proposal: Proposal,
     context: ExecutionContext
   ): Promise<{ proposal: Proposal; result: ExecutionResult; alreadyExecuted?: boolean }> {
-    if (proposal.status !== 'approved') {
+    if (proposal.status !== 'approved' && proposal.status !== 'executing') {
       throw new AppError(
         'INVALID_STATUS',
         `Proposal must be in 'approved' status to execute, but is '${proposal.status}'`,
@@ -81,7 +81,7 @@ export class ProposalExecutor {
     // proposals without `approvedAt` are treated as past-window
     // (backward compatible — existing tests and pre-slice approved
     // proposals execute normally).
-    if (isInUndoWindow(proposal)) {
+    if (proposal.status === 'approved' && isInUndoWindow(proposal)) {
       const elapsed = Date.now() - (proposal.approvedAt?.getTime() ?? Date.now());
       const remaining = Math.max(0, UNDO_WINDOW_MS - elapsed);
       throw new AppError(

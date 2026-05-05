@@ -178,6 +178,14 @@ export const MATRIX: MatrixRow[] = [
     expected: 'fail',
     expectedReason: 'No proposal chaining or multi-turn orchestration in codebase.',
   },
+
+  {
+    id: 'AST-08',
+    module: 'AST',
+    feature: 'Proposal execution claim lock (multi-instance)',
+    passCriteria: 'Parallel execution sweeps claim each approved proposal once; no duplicate side effects',
+    expected: 'pass',
+  },
 ];
 
 export function findRow(id: string): MatrixRow | undefined {

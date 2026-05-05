@@ -81,6 +81,7 @@ describe('P12-001 — /api/me', () => {
       mode_changed_at: null,
       backup_supervisor_user_id: null,
       unsupervised_proposal_routing: 'queue_and_sms',
+      integration_statuses: [],
     });
     // Permissions sourced from rbac.ts — read-only verification.
     expect(Array.isArray(res.body.permissions)).toBe(true);

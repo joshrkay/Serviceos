@@ -257,6 +257,7 @@ import {
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
 import { withTenantTransaction } from './middleware/tenant-context';
+import type { TenantIntegrationStatus } from './integrations/status-machine';
 
 /**
  * In-memory dev fallback for the WebhookEvent idempotency repo.
@@ -437,6 +438,8 @@ export function createApp(): express.Express {
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
+  const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
+  const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
   app.use(
     '/webhooks',
     createWebhookRouter(config, {
@@ -445,6 +448,8 @@ export function createApp(): express.Express {
       invoiceRepo: webhookInvoiceRepo,
       paymentRepo: webhookPaymentRepo,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+      auditRepo: webhookAuditRepo,
+      webhookEventRepo,
     })
   );
 
@@ -481,7 +486,7 @@ export function createApp(): express.Express {
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
-  const auditRepo          = pool ? new PgAuditRepository(pool)          : new InMemoryAuditRepository();
+  const auditRepo          = webhookAuditRepo;
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter
   // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
@@ -530,11 +535,11 @@ export function createApp(): express.Express {
   // wiring without re-instantiating. The webhooks/routes.ts router still
   // uses its own InMemoryWebhookRepository for the legacy
   // (provider/event/svix-id) shape — that one is unchanged.
-  const webhookEventRepo   = pool ? new PgWebhookEventRepository(pool)    : new InMemoryWebhookEventRepository();
+  const webhookEventRepo2   = webhookEventRepo;
   const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
   // Reference the variable so TS doesn't drop it; downstream consumers will
   // attach in a follow-up PR.
-  void webhookEventRepo;
+  void webhookEventRepo2;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -1380,6 +1385,19 @@ export function createApp(): express.Express {
             unsupervised_proposal_routing:
               row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
           };
+        },
+        async getTenantIntegrationStatuses(tenantId) {
+          const r = await pool.query(
+            `SELECT provider, status, updated_at
+             FROM tenant_integrations
+             WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          return r.rows.map((row) => ({
+            provider: String(row.provider),
+            status: String(row.status) as TenantIntegrationStatus,
+            updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
+          }));
         },
         async setMode(tenantId, userId, mode) {
           // P12-001 review fix — `userId` is the Clerk subject; match

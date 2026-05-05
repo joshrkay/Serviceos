@@ -3,7 +3,8 @@ import {
   EmailMessage,
   MessageDeliveryProvider,
   SmsMessage,
-} from './delivery-provider';
+} from "./delivery-provider";
+import { DeliveryError } from "./notification-errors";
 
 /**
  * Production message delivery via Twilio.
@@ -26,6 +27,7 @@ import {
 export interface TwilioSmsConfig {
   accountSid: string;
   authToken: string;
+  secondaryAuthToken?: string;
   fromNumber: string;
   /** Override for tests. Defaults to Twilio's REST API host. */
   apiBaseUrl?: string;
@@ -58,29 +60,93 @@ interface TwilioMessageResponse {
   error_message?: string;
 }
 
-export class TwilioDeliveryProvider implements MessageDeliveryProvider {
-  private readonly sms: Required<Omit<TwilioSmsConfig, 'fetchImpl'>> & {
-    fetchImpl: typeof fetch;
+interface NormalizedProviderFailure {
+  code: "AUTH_FAILED" | "PROVIDER_FAILED";
+  message: string;
+  status?: number;
+  providerBody?: string;
+  providerCode?: string;
+  retriable: boolean;
+  retryAfterSeconds?: number;
+  providerRequestId?: string;
+}
+
+function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number.parseInt(value, 10);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+function classifyTwilioError(response: Response, providerBody: string): NormalizedProviderFailure {
+  const providerCode = response.headers.get("twilio-error-code") ?? undefined;
+  const requestId =
+    response.headers.get("twilio-request-id") ?? response.headers.get("x-request-id") ?? undefined;
+  const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+  const code = response.status === 401 ? "AUTH_FAILED" : "PROVIDER_FAILED";
+  const message = response.status === 401 ? "SMS authentication failed" : "SMS provider failed";
+  return {
+    code,
+    message,
+    status: response.status,
+    providerBody,
+    providerCode,
+    retriable: response.status === 429 || response.status >= 500,
+    retryAfterSeconds,
+    providerRequestId: requestId,
   };
-  private readonly email: Required<Omit<SendGridConfig, 'fetchImpl' | 'fromName' | 'replyToEmail'>> & {
+}
+
+function classifySendgridError(response: Response, providerBody: string): NormalizedProviderFailure {
+  const providerCode = response.headers.get("x-sendgrid-error-code") ?? undefined;
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+  const code = response.status === 401 ? "AUTH_FAILED" : "PROVIDER_FAILED";
+  const message = response.status === 401 ? "Email authentication failed" : "Email provider failed";
+  return {
+    code,
+    message,
+    status: response.status,
+    providerBody,
+    providerCode,
+    retriable: response.status === 429 || response.status >= 500,
+    retryAfterSeconds,
+    providerRequestId: requestId,
+  };
+}
+
+export class TwilioDeliveryProvider implements MessageDeliveryProvider {
+  private readonly sms: Required<
+    Omit<TwilioSmsConfig, "fetchImpl" | "secondaryAuthToken">
+  > & {
+    fetchImpl: typeof fetch;
+    secondaryAuthToken?: string;
+  };
+  private readonly email: Required<
+    Omit<SendGridConfig, "fetchImpl" | "fromName" | "replyToEmail">
+  > & {
     fromName?: string;
     replyToEmail?: string;
     fetchImpl: typeof fetch;
   };
 
   constructor(config: TwilioDeliveryProviderConfig) {
-    if (!config.sms.accountSid || !config.sms.authToken || !config.sms.fromNumber) {
-      throw new Error('TwilioDeliveryProvider: missing SMS credentials');
+    if (
+      !config.sms.accountSid ||
+      !config.sms.authToken ||
+      !config.sms.fromNumber
+    ) {
+      throw new Error("TwilioDeliveryProvider: missing SMS credentials");
     }
     if (!config.email.apiKey || !config.email.fromEmail) {
-      throw new Error('TwilioDeliveryProvider: missing SendGrid credentials');
+      throw new Error("TwilioDeliveryProvider: missing SendGrid credentials");
     }
 
     this.sms = {
       accountSid: config.sms.accountSid,
       authToken: config.sms.authToken,
+      secondaryAuthToken: config.sms.secondaryAuthToken,
       fromNumber: config.sms.fromNumber,
-      apiBaseUrl: config.sms.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01',
+      apiBaseUrl: config.sms.apiBaseUrl ?? "https://api.twilio.com/2010-04-01",
       fetchImpl: config.sms.fetchImpl ?? fetch,
     };
     this.email = {
@@ -88,7 +154,7 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       fromEmail: config.email.fromEmail,
       fromName: config.email.fromName,
       replyToEmail: config.email.replyToEmail,
-      apiBaseUrl: config.email.apiBaseUrl ?? 'https://api.sendgrid.com/v3',
+      apiBaseUrl: config.email.apiBaseUrl ?? "https://api.sendgrid.com/v3",
       fetchImpl: config.email.fetchImpl ?? fetch,
     };
   }
@@ -100,39 +166,55 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
       Body: message.body,
     });
 
-    const auth = Buffer.from(`${this.sms.accountSid}:${this.sms.authToken}`).toString('base64');
+    const auth = Buffer.from(
+      `${this.sms.accountSid}:${this.sms.authToken}`,
+    ).toString("base64");
     const headers: Record<string, string> = {
       Authorization: `Basic ${auth}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
+      "Content-Type": "application/x-www-form-urlencoded",
     };
     if (message.idempotencyKey) {
       // Twilio accepts an Idempotency-Key header on Messages.json
-      headers['Idempotency-Key'] = message.idempotencyKey;
+      headers["Idempotency-Key"] = message.idempotencyKey;
     }
 
-    const response = await this.sms.fetchImpl(
+    let response = await this.sms.fetchImpl(
       `${this.sms.apiBaseUrl}/Accounts/${this.sms.accountSid}/Messages.json`,
       {
-        method: 'POST',
+        method: "POST",
         headers,
         body: body.toString(),
-      }
+      },
     );
 
     if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      const providerBody = text.slice(0, 300);
+      const failure = classifyTwilioError(response, providerBody);
+      throw new DeliveryError(failure.code, failure.message, failure);
+    }
+
+    if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new Error(`Twilio SMS send failed (${response.status}): ${text.slice(0, 300)}`);
+      const detail = '(' + response.status + '): ' + text.slice(0, 300);
+      if (response.status === 401) {
+        throw new Error('DELIVERY_AUTH_FAILED ' + detail);
+      }
+      throw new Error('DELIVERY_PROVIDER_FAILED ' + detail);
     }
 
     const data = (await response.json()) as TwilioMessageResponse;
     if (data.error_code) {
-      throw new Error(`Twilio SMS rejected: ${data.error_code} ${data.error_message ?? ''}`);
+      throw new DeliveryError("PROVIDER_FAILED", "SMS provider rejected", {
+        status: response.status,
+        providerBody: `${data.error_code} ${data.error_message ?? ""}`.trim(),
+      });
     }
 
     return {
       providerMessageId: data.sid,
-      provider: 'twilio-sms',
-      channel: 'sms',
+      provider: "sms-gateway",
+      channel: "sms",
     };
   }
 
@@ -140,9 +222,11 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
     const fromEmail = message.from ?? this.email.fromEmail;
     const replyToEmail = message.replyTo ?? this.email.replyToEmail;
 
-    const content: Array<{ type: string; value: string }> = [{ type: 'text/plain', value: message.text }];
+    const content: Array<{ type: string; value: string }> = [
+      { type: "text/plain", value: message.text },
+    ];
     if (message.html) {
-      content.push({ type: 'text/html', value: message.html });
+      content.push({ type: "text/html", value: message.html });
     }
 
     const payload: Record<string, unknown> = {
@@ -162,34 +246,37 @@ export class TwilioDeliveryProvider implements MessageDeliveryProvider {
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.email.apiKey}`,
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     };
     if (message.idempotencyKey) {
       // SendGrid honours `X-Message-Id` for idempotent semantics on retries.
-      headers['X-Message-Id'] = message.idempotencyKey;
+      headers["X-Message-Id"] = message.idempotencyKey;
     }
 
-    const response = await this.email.fetchImpl(`${this.email.apiBaseUrl}/mail/send`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
+    const response = await this.email.fetchImpl(
+      `${this.email.apiBaseUrl}/mail/send`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      },
+    );
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(
-        `SendGrid email send failed (${response.status}): ${text.slice(0, 300)}`
-      );
+      const text = await response.text().catch(() => "");
+      const providerBody = text.slice(0, 300);
+      const failure = classifySendgridError(response, providerBody);
+      throw new DeliveryError(failure.code, failure.message, failure);
     }
 
     // SendGrid returns 202 Accepted with the message ID in `X-Message-Id`.
     const providerMessageId =
-      response.headers.get('x-message-id') ?? `sg-${Date.now()}`;
+      response.headers.get("x-message-id") ?? `sg-${Date.now()}`;
 
     return {
       providerMessageId,
-      provider: 'twilio-sendgrid',
-      channel: 'email',
+      provider: "email-gateway",
+      channel: "email",
     };
   }
 }

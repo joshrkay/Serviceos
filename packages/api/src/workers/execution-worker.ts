@@ -31,6 +31,9 @@ export interface ExecutionWorkerDeps {
   executor: ProposalExecutor;
   logger: Logger;
   windowMs?: number;
+  workerId?: string;
+  staleMinutes?: number;
+  maxRetries?: number;
 }
 
 export async function runExecutionSweep(deps: ExecutionWorkerDeps): Promise<{
@@ -38,11 +41,18 @@ export async function runExecutionSweep(deps: ExecutionWorkerDeps): Promise<{
   failed: number;
 }> {
   const windowMs = deps.windowMs ?? UNDO_WINDOW_MS;
+  const workerId = deps.workerId ?? 'execution-worker';
+  const staleMinutes = deps.staleMinutes ?? 10;
+  const maxRetries = deps.maxRetries ?? 3;
   let executed = 0;
   let failed = 0;
 
   let ready: Proposal[];
   try {
+    const recovered = await deps.proposalRepo.resetStaleExecuting(staleMinutes, maxRetries);
+    if (recovered.resetToApproved > 0 || recovered.movedToFailed > 0) {
+      deps.logger.warn('Execution sweep: recovered stale executing proposals', recovered);
+    }
     ready = await deps.proposalRepo.findReadyForExecution(windowMs);
   } catch (err) {
     deps.logger.error('Execution sweep: failed to query ready proposals', {
@@ -53,7 +63,16 @@ export async function runExecutionSweep(deps: ExecutionWorkerDeps): Promise<{
 
   for (const proposal of ready) {
     try {
-      await deps.executor.execute(proposal, {
+      const claimed = await deps.proposalRepo.claimForExecution(proposal.id, workerId);
+      if (!claimed) {
+        deps.logger.info('Proposal safely claimed for execution – only one worker will act.', {
+          proposalId: proposal.id,
+          tenantId: proposal.tenantId,
+          claimed: false,
+        });
+        continue;
+      }
+      await deps.executor.execute(claimed, {
         tenantId: proposal.tenantId,
         executedBy: proposal.createdBy,
       });
