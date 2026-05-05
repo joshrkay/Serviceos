@@ -63,7 +63,6 @@ export function initSentry(config: SentryConfig): SentryClient {
   } as any);
 
   redactionProcessorsInstalled = true;
-  assertSentryRedactionProcessors(config.environment);
   return createRealSentryClient(sentry);
 }
 
