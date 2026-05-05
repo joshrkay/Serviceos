@@ -1908,6 +1908,26 @@ export const MIGRATIONS = {
     ALTER TABLE leads ADD CONSTRAINT leads_source_check
       CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
   `,
+
+  '071_widen_tenant_integrations_status': `
+    UPDATE tenant_integrations SET status = 't0_requested' WHERE status = 'provisioning';
+    UPDATE tenant_integrations SET status = 'full_readiness' WHERE status = 'active';
+    ALTER TABLE tenant_integrations ALTER COLUMN status SET DEFAULT 't0_requested';
+    ALTER TABLE tenant_integrations DROP CONSTRAINT IF EXISTS tenant_integrations_status_check;
+    ALTER TABLE tenant_integrations ADD CONSTRAINT tenant_integrations_status_check
+      CHECK (status IN (
+        't0_requested',
+        'partial_readiness',
+        'pending_compliance_dns',
+        'full_readiness',
+        'failed',
+        'failed_compensated',
+        'compensating',
+        'suspended',
+        'terminated',
+        'releasing'
+      ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

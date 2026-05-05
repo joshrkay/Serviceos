@@ -17,14 +17,22 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createWebhookRouter } from '../../src/webhooks/routes';
 import { Tenant, TenantRepository } from '../../src/auth/clerk';
 import type { AppConfig } from '../../src/shared/config';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ='; // base64("test-secret")
 
-function buildTestApp(tenantRepo?: TenantRepository, secret: string = WEBHOOK_SECRET) {
+function buildTestApp(
+  tenantRepo?: TenantRepository,
+  secret: string = WEBHOOK_SECRET,
+  extras: {
+    provisioningQueue?: { send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string> };
+    auditRepo?: InMemoryAuditRepository;
+  } = {}
+) {
   const app = express();
   app.use(express.json());
   const config = { CLERK_WEBHOOK_SECRET: secret, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
-  app.use('/webhooks', createWebhookRouter(config, { tenantRepo }));
+  app.use('/webhooks', createWebhookRouter(config, { tenantRepo, ...extras }));
   return app;
 }
 
@@ -204,5 +212,50 @@ describe('EXP-3 — Clerk webhook → tenant bootstrap integration', () => {
     expect(res.status).toBe(200);
     // Still only the pre-seeded create; the webhook path hit findByOwner short-circuit.
     expect(tenantRepo.created).toHaveLength(1);
+  });
+
+  it('returns signup response without waiting for downstream provisioning enqueue', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    let releaseEnqueue: (() => void) | undefined;
+    const enqueueStarted = new Promise<void>((resolve) => {
+      releaseEnqueue = resolve;
+    });
+    const provisioningQueue = {
+      send: async () => {
+        await enqueueStarted;
+        return 'msg-tenant-provisioning-1';
+      },
+    };
+    const appWithQueue = buildTestApp(tenantRepo, WEBHOOK_SECRET, { provisioningQueue, auditRepo });
+
+    const svixId = 'evt_async_queue_1';
+    const svixTimestamp = String(Math.floor(Date.now() / 1000));
+    const payload = userCreatedPayload('user_async_1', 'async@example.com');
+    const { signature } = signSvixPayload(payload, svixId, svixTimestamp, WEBHOOK_SECRET);
+
+    const responsePromise = request(appWithQueue)
+      .post('/webhooks/clerk')
+      .set('svix-id', svixId)
+      .set('svix-timestamp', svixTimestamp)
+      .set('svix-signature', signature)
+      .send(payload);
+
+    const res = await responsePromise;
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ received: true });
+
+    const bootstrapEvents = auditRepo.getAll().filter((e) => e.eventType === 'tenant.signup.bootstrap.completed');
+    expect(bootstrapEvents).toHaveLength(1);
+    expect(bootstrapEvents[0].correlationId).toBe(`signup:${svixId}`);
+
+    // Unblock enqueue completion after HTTP response has already returned.
+    releaseEnqueue?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const allEvents = auditRepo.getAll();
+    const queuedEvent = allEvents.find((e) => e.eventType === 'tenant.signup.provisioning.enqueued');
+    expect(queuedEvent).toBeTruthy();
+    expect(queuedEvent?.correlationId).toBe(`signup:${svixId}`);
+    expect(queuedEvent?.metadata?.queueMessageId).toBe('msg-tenant-provisioning-1');
   });
 });
