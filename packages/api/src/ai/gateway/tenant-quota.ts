@@ -73,7 +73,13 @@ interface TenantState {
   bucketTokens: number;
   lastRefillMs: number;
   totalReservedTokens: number;
+  lastTouchedMs: number;
 }
+
+/** States older than this with zero in-flight requests are pruned. */
+const TENANT_STATE_IDLE_TTL_MS = 30 * 60 * 1000;
+/** Cap on tracked tenants — after this, prune the oldest idle entries. */
+const TENANT_STATE_MAX_ENTRIES = 10_000;
 
 function nowMs(): number {
   const [s, ns] = process.hrtime();
@@ -98,15 +104,39 @@ export class TenantQuotaRegistry {
   private stateFor(tenantId: string, cfg: TenantQuotaTierConfig): TenantState {
     let s = this.states.get(tenantId);
     if (!s) {
+      this.maybePrune();
       s = {
         inFlight: 0,
         bucketTokens: cfg.bucketCapacity,
         lastRefillMs: nowMs(),
         totalReservedTokens: 0,
+        lastTouchedMs: nowMs(),
       };
       this.states.set(tenantId, s);
+    } else {
+      s.lastTouchedMs = nowMs();
     }
     return s;
+  }
+
+  /**
+   * Best-effort pruning: drop idle entries past the TTL when the table
+   * grows large. Called from the cold path (state creation) so the hot
+   * path never pays for the scan.
+   */
+  private maybePrune(): void {
+    if (this.states.size < TENANT_STATE_MAX_ENTRIES) return;
+    const cutoff = nowMs() - TENANT_STATE_IDLE_TTL_MS;
+    for (const [id, s] of this.states) {
+      if (s.inFlight === 0 && s.lastTouchedMs < cutoff) {
+        this.states.delete(id);
+      }
+    }
+  }
+
+  /** Test-only: count tracked tenants. */
+  trackedTenantCount(): number {
+    return this.states.size;
   }
 
   private refill(state: TenantState, cfg: TenantQuotaTierConfig): void {

@@ -72,6 +72,11 @@ export function createDeadlineContext(totalMs: number): DeadlineContext {
 /**
  * Adopt an externally supplied signal: returns a context that fires when the
  * caller signal aborts OR when the local timer elapses (whichever first).
+ *
+ * If the local context aborts first, we proactively detach the listener
+ * from the parent signal so a long-lived parent (e.g. a request-scoped
+ * AbortController) doesn't retain references to every short-lived child
+ * deadline that ever attached to it.
  */
 export function adoptDeadline(
   totalMs: number,
@@ -84,6 +89,13 @@ export function adoptDeadline(
     } else {
       const onAbort = () => ctx.abort(parentSignal.reason);
       parentSignal.addEventListener('abort', onAbort, { once: true });
+      // If the local ctx aborts first, remove the listener from the
+      // parent so the closure (and the ctx it captures) can be GC'd.
+      ctx.signal.addEventListener(
+        'abort',
+        () => parentSignal.removeEventListener('abort', onAbort),
+        { once: true },
+      );
     }
   }
   return ctx;

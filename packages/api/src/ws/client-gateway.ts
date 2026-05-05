@@ -351,6 +351,11 @@ export function attachClientGateway(
   const guard = deps.reconnectGuard ?? new ReconnectGuard();
   const wss = new WebSocketServer({ noServer: true });
   const conns: Set<ClientGatewayConnection> = new Set();
+  // Indexed by tenantId so per-tenant broadcast (the hot path for
+  // assistant token streaming) is O(subscribers) rather than O(total
+  // connections). Without this index, a 1000-connection process pays
+  // 1000 iterations per token frame across all tenants.
+  const byTenant: Map<string, Set<ClientGatewayConnection>> = new Map();
 
   const cfg = {
     heartbeatIntervalMs: deps.heartbeatIntervalMs ?? WS_HEARTBEAT_INTERVAL_MS,
@@ -394,7 +399,20 @@ export function attachClientGateway(
         wss.handleUpgrade(req, socket, head, (ws) => {
           const conn = new ClientGatewayConnection(ws, auth, registry, cfg);
           conns.add(conn);
-          ws.once('close', () => conns.delete(conn));
+          let bucket = byTenant.get(auth.tenantId);
+          if (!bucket) {
+            bucket = new Set();
+            byTenant.set(auth.tenantId, bucket);
+          }
+          bucket.add(conn);
+          ws.once('close', () => {
+            conns.delete(conn);
+            const b = byTenant.get(auth.tenantId);
+            if (b) {
+              b.delete(conn);
+              if (b.size === 0) byTenant.delete(auth.tenantId);
+            }
+          });
         });
       })
       .catch((err) => {
@@ -415,7 +433,12 @@ export function attachClientGateway(
     tenantId,
   ) => {
     let n = 0;
-    for (const conn of conns) {
+    // Tenant-scoped broadcasts (the common case) walk only that
+    // tenant's bucket. Cross-tenant broadcasts (rare; admin/system
+    // surfaces) fall through to the full set.
+    const pool = tenantId ? byTenant.get(tenantId) : conns;
+    if (!pool) return 0;
+    for (const conn of pool) {
       if (conn.isClosed()) continue;
       if (tenantId && conn.tenantId !== tenantId) continue;
       if (!conn.isSubscribed(channel, targetId)) continue;
@@ -430,6 +453,7 @@ export function attachClientGateway(
       httpServer.off('upgrade', upgradeHandler);
       for (const conn of conns) conn.terminate('server_shutdown', WS_CLOSE_CODE.going_away);
       conns.clear();
+      byTenant.clear();
       wss.close();
       if (activePublisher === broadcast) activePublisher = null;
     },

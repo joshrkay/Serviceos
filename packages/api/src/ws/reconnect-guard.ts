@@ -62,11 +62,20 @@ export class ReconnectGuard {
   }
 }
 
-/** Returns true when process RSS exceeds 80% of the OS-reported max. */
+/**
+ * Returns true when V8 heap usage approaches the process's hard heap
+ * limit (set by --max-old-space-size or the platform default). We
+ * intentionally compare against `heap_size_limit` (V8) and not
+ * `heapTotal` (currently allocated): the latter grows lazily, so the
+ * ratio reads low even moments before an OOM crash.
+ */
 export function isMemoryWatermarkHigh(thresholdRatio = 0.85): boolean {
   const usage = process.memoryUsage();
-  // Heuristic: use heapTotal as the upper bound proxy.
-  if (usage.heapTotal === 0) return false;
-  const ratio = usage.heapUsed / usage.heapTotal;
-  return ratio > thresholdRatio;
+  // Lazy require so this module doesn't pull v8 at import time in
+  // contexts that don't need it.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const v8 = require('v8') as typeof import('v8');
+  const heapLimit = v8.getHeapStatistics().heap_size_limit;
+  if (!heapLimit || heapLimit <= 0) return false;
+  return usage.heapUsed / heapLimit > thresholdRatio;
 }

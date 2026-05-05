@@ -247,7 +247,13 @@ export class CircuitBreakerRegistry {
     return cell;
   }
 
-  /** Wrap an op with breaker enforcement. Throws BreakerOpenError when open. */
+  /**
+   * Wrap an op with breaker enforcement. Throws BreakerOpenError when open.
+   *
+   * Permanent client errors (4xx other than 429) are NOT counted as
+   * failures: they reflect bad input, not provider health. Counting them
+   * would let a poison-pill caller trip the breaker for everyone else.
+   */
   async run<T>(parts: BreakerKeyParts, op: () => Promise<T>): Promise<T> {
     const cell = this.cell(parts);
     if (!cell.canPass()) {
@@ -258,8 +264,20 @@ export class CircuitBreakerRegistry {
       cell.onResult(true);
       return result;
     } catch (err) {
-      cell.onResult(false);
+      if (!isPermanentClientError(err)) {
+        cell.onResult(false);
+      }
       throw err;
     }
   }
+}
+
+function isPermanentClientError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const status =
+    (err as { status?: number }).status ??
+    (err as { statusCode?: number }).statusCode;
+  if (typeof status !== 'number') return false;
+  // 4xx except 429 (rate limits are transient health signals).
+  return status >= 400 && status < 500 && status !== 429;
 }
