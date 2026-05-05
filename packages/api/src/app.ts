@@ -1291,6 +1291,17 @@ export function createApp(): express.Express {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const server = (origListen as any)(...args);
       attachClientGateway(server, {
+        // Runtime kill switch: consult the persisted feature flag on
+        // every upgrade so flipping ws.client_gateway_enabled off
+        // immediately disables /api/ws without redeploy. The env-var
+        // gate above only controls whether the upgrade handler is
+        // attached at boot; this controls per-request acceptance.
+        isEnabled: () =>
+          isFeatureEnabled(
+            featureFlagStore,
+            RESILIENCE_FLAG_NAMES.clientGatewayEnabled,
+            { environment: process.env.NODE_ENV ?? 'development' },
+          ),
         auth: {
           authenticate: async (req) => {
             // Token via Authorization header (rare for WS), Sec-WebSocket-Protocol,

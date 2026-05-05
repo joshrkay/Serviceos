@@ -87,6 +87,12 @@ class BreakerCell {
   private currentCooldownMs: number;
   private halfOpenProbes = 0;
   private halfOpenSuccesses = 0;
+  /**
+   * Slots reserved by `canPass()` while a probe is in flight. Without
+   * this, concurrent callers all see `halfOpenProbes < N` and bypass
+   * the probe cap, flooding a recovering backend.
+   */
+  private halfOpenReserved = 0;
   private reopenStreak = 0;
 
   constructor(
@@ -97,11 +103,36 @@ class BreakerCell {
     breakerState.set({ key }, STATE_VALUE.closed);
   }
 
+  /**
+   * Read-only check: would a request be admitted right now? Does NOT
+   * mutate state. Use `tryReserve()` from the run() path to atomically
+   * reserve a half-open probe slot.
+   */
   canPass(): boolean {
     this.refreshState();
     if (this.state === 'open') return false;
     if (this.state === 'half-open') {
-      return this.halfOpenProbes < this.cfg.halfOpenProbeCount;
+      return this.halfOpenProbes + this.halfOpenReserved < this.cfg.halfOpenProbeCount;
+    }
+    return true;
+  }
+
+  /**
+   * Atomic gate used by CircuitBreakerRegistry.run(): returns true if
+   * the request may proceed, and reserves a half-open probe slot when
+   * applicable. Without this reservation, concurrent half-open callers
+   * all see `halfOpenProbes < N` and bypass the probe cap, flooding a
+   * recovering backend.
+   */
+  tryReserve(): boolean {
+    this.refreshState();
+    if (this.state === 'open') return false;
+    if (this.state === 'half-open') {
+      if (this.halfOpenProbes + this.halfOpenReserved >= this.cfg.halfOpenProbeCount) {
+        return false;
+      }
+      this.halfOpenReserved++;
+      return true;
     }
     return true;
   }
@@ -112,8 +143,18 @@ class BreakerCell {
     return Math.max(0, this.currentCooldownMs - elapsed);
   }
 
+  /** Release a probe reservation without recording a result (e.g.
+   *  caller short-circuited before invoking the wrapped op, or chose
+   *  not to count the outcome — see CircuitBreakerRegistry.run()). */
+  releaseReservation(): void {
+    if (this.state === 'half-open' && this.halfOpenReserved > 0) {
+      this.halfOpenReserved--;
+    }
+  }
+
   onResult(success: boolean): void {
     if (this.state === 'half-open') {
+      if (this.halfOpenReserved > 0) this.halfOpenReserved--;
       this.halfOpenProbes++;
       if (success) this.halfOpenSuccesses++;
       const ratio = this.halfOpenProbes === 0
@@ -194,15 +235,18 @@ class BreakerCell {
       this.openedAtMs = nowMs();
       this.halfOpenProbes = 0;
       this.halfOpenSuccesses = 0;
+      this.halfOpenReserved = 0;
     } else if (to === 'half-open') {
       this.halfOpenProbes = 0;
       this.halfOpenSuccesses = 0;
+      this.halfOpenReserved = 0;
     } else {
       // closed: reset everything, decay reopen streak.
       this.samples = [];
       this.consecutiveFailures = 0;
       this.halfOpenProbes = 0;
       this.halfOpenSuccesses = 0;
+      this.halfOpenReserved = 0;
       this.reopenStreak = 0;
       this.currentCooldownMs = this.cfg.cooldownMs;
     }
@@ -266,6 +310,10 @@ export class CircuitBreakerRegistry {
     } catch (err) {
       if (!isPermanentClientError(err)) {
         cell.onResult(false);
+      } else {
+        // Permanent client error doesn't reflect provider health.
+        // Release the half-open reservation so the slot doesn't leak.
+        cell.releaseReservation();
       }
       throw err;
     }
