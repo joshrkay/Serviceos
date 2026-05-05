@@ -72,6 +72,13 @@ export interface ClientGatewayDeps {
   /** Per-connection queue caps. */
   queueMaxMsgs?: number;
   queueMaxBytes?: number;
+  /**
+   * Runtime kill switch — consulted on every upgrade. When this returns
+   * false, the upgrade is rejected with 503 even if the gateway was
+   * attached on boot. Lets operators disable the gateway via the
+   * persisted feature flag without a redeploy.
+   */
+  isEnabled?: () => boolean;
 }
 
 export interface AttachClientGatewayOptions {
@@ -420,6 +427,14 @@ export function attachClientGateway(
     const pathOnly = url.split('?')[0];
     if (pathOnly !== CLIENT_GATEWAY_PATH) return;
 
+    // Runtime kill switch: if the operator has flipped
+    // ws.client_gateway_enabled off, reject the upgrade. We still own
+    // the path (don't delegate), so a stale client can't slip past us.
+    if (deps.isEnabled && !deps.isEnabled()) {
+      rejectUpgrade(socket, 503);
+      return;
+    }
+
     const ip =
       (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||
       req.socket.remoteAddress ||
@@ -516,11 +531,21 @@ export function attachClientGateway(
   };
 }
 
-function rejectUpgrade(socket: Socket, code: 401 | 429 | 500, retryAfterMs?: number): void {
+function rejectUpgrade(
+  socket: Socket,
+  code: 401 | 429 | 500 | 503,
+  retryAfterMs?: number,
+): void {
   const reason =
-    code === 401 ? 'Unauthorized' : code === 429 ? 'Too Many Requests' : 'Internal Server Error';
+    code === 401
+      ? 'Unauthorized'
+      : code === 429
+        ? 'Too Many Requests'
+        : code === 503
+          ? 'Service Unavailable'
+          : 'Internal Server Error';
   const headers = ['Connection: close'];
-  if (code === 429 && retryAfterMs) {
+  if ((code === 429 || code === 503) && retryAfterMs) {
     headers.push(`Retry-After: ${Math.ceil(retryAfterMs / 1000)}`);
   }
   socket.write(`HTTP/1.1 ${code} ${reason}\r\n${headers.join('\r\n')}\r\n\r\n`);
