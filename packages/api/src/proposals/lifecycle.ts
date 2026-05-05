@@ -8,6 +8,7 @@ const VALID_TRANSITIONS: Record<ProposalStatus, ProposalStatus[]> = {
   // 'undone' within UNDO_WINDOW_MS. After the window passes, the
   // only valid next states are 'executed' / 'execution_failed'.
   approved: ['executed', 'execution_failed', 'undone'],
+  executing: ['executed', 'execution_failed'],
   rejected: ['draft'],
   expired: [],
   executed: [],

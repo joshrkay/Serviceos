@@ -971,12 +971,15 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS executed_by TEXT,
+      ADD COLUMN IF NOT EXISTS claimed_by UUID,
+      ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS execution_retry_count INTEGER NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS undone_by TEXT;
     ALTER TABLE proposals ALTER COLUMN idempotency_key DROP NOT NULL;
     ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
     ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
-      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
   `,
 
   '040_create_technician_location_pings': `
