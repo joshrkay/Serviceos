@@ -7,11 +7,18 @@ export type ProvisioningFailureCode =
   | 'NOT_FOUND'
   | 'UNKNOWN';
 
+export type ProvisioningFailure = {
+  code: ProvisioningFailureCode;
+  message: string;
+  retriable: boolean;
+  providerCode?: string;
+};
+
 export type ProvisioningResult<T> =
   | { ok: true; value: T }
-  | { ok: false; failure: { code: ProvisioningFailureCode; message: string; retriable: boolean; providerCode?: string } };
+  | { ok: false; failure: ProvisioningFailure };
 
-function classifyTwilioError(error: unknown): ProvisioningResult<never>['failure'] {
+function classifyTwilioError(error: unknown): ProvisioningFailure {
   const e = error as { code?: number; message?: string; status?: number };
   const status = e.status ?? 0;
   const code = e.code ?? 0;

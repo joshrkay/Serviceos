@@ -257,6 +257,7 @@ import {
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
 import { withTenantTransaction } from './middleware/tenant-context';
+import type { TenantIntegrationStatus } from './integrations/status-machine';
 
 /**
  * In-memory dev fallback for the WebhookEvent idempotency repo.
@@ -1390,7 +1391,7 @@ export function createApp(): express.Express {
           );
           return r.rows.map((row) => ({
             provider: String(row.provider),
-            status: String(row.status),
+            status: String(row.status) as TenantIntegrationStatus,
             updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
           }));
         },
