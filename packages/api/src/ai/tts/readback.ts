@@ -1,4 +1,5 @@
 import { Proposal, ProposalType, actionClassForProposalType } from '../../proposals/proposal';
+import { VOICE_PROMPTS } from '../../../../shared/src/voice-prompts';
 
 /**
  * Build the short readback script the TTS provider reads to the
@@ -56,7 +57,7 @@ export function buildReadbackScript(proposal: Proposal): string {
     case 'cancel_appointment':
       // Irreversible — voice-approvable is already false, but make
       // the cue explicit so operators don't try.
-      return `Cancellation requested: ${summaryFor(proposal)}. Tap to confirm on screen.`;
+      return `Cancellation requested: ${summaryFor(proposal)}. ${VOICE_PROMPTS.TAP_TO_CONFIRM_ON_SCREEN}`;
     case 'reassign_appointment':
       return `Reassignment: ${summaryFor(proposal)}. ${cueFor(proposal)}`;
     case 'create_customer':
@@ -69,10 +70,10 @@ export function buildReadbackScript(proposal: Proposal): string {
       return `Adding a note: ${summaryFor(proposal)}. ${cueFor(proposal)}`;
     case 'send_invoice':
       // Comms — explicitly require screen-tap.
-      return `Ready to send an invoice: ${summaryFor(proposal)}. Tap to confirm on screen.`;
+      return `Ready to send an invoice: ${summaryFor(proposal)}. ${VOICE_PROMPTS.TAP_TO_CONFIRM_ON_SCREEN}`;
     case 'record_payment':
       // Money — explicitly require screen-tap.
-      return `Ready to record a payment: ${summaryFor(proposal)}. Tap to confirm on screen.`;
+      return `Ready to record a payment: ${summaryFor(proposal)}. ${VOICE_PROMPTS.TAP_TO_CONFIRM_ON_SCREEN}`;
     case 'voice_clarification':
       return `Didn't catch that. ${summaryFor(proposal)} Try again when ready.`;
     default:

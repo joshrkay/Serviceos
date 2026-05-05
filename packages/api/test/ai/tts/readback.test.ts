@@ -13,6 +13,7 @@ import {
   classifyVoiceApproval,
 } from '../../../src/ai/tts/readback';
 import { Proposal, ProposalType } from '../../../src/proposals/proposal';
+import { VOICE_PROMPTS } from '../../../../shared/src/voice-prompts';
 
 function fakeProposal(partial: Partial<Proposal> & { proposalType: ProposalType }): Proposal {
   const now = new Date();
@@ -53,19 +54,19 @@ describe('readback — buildReadbackScript', () => {
   it('forces screen-tap cue on money proposals even if payload looks harmless', () => {
     const s = buildReadbackScript(fakeProposal({ proposalType: 'record_payment' }));
     expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
+    expect(s).toContain(VOICE_PROMPTS.TAP_TO_CONFIRM_ON_SCREEN);
   });
 
   it('forces screen-tap cue on comms proposals (send_invoice)', () => {
     const s = buildReadbackScript(fakeProposal({ proposalType: 'send_invoice' }));
     expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
+    expect(s).toContain(VOICE_PROMPTS.TAP_TO_CONFIRM_ON_SCREEN);
   });
 
   it('forces screen-tap cue on irreversible proposals (cancel_appointment)', () => {
     const s = buildReadbackScript(fakeProposal({ proposalType: 'cancel_appointment' }));
     expect(s).not.toContain('Say approve');
-    expect(s.toLowerCase()).toContain('tap to confirm on screen');
+    expect(s).toContain(VOICE_PROMPTS.TAP_TO_CONFIRM_ON_SCREEN);
   });
 
   it('truncates overlong summaries with an ellipsis to keep the readback short', () => {
