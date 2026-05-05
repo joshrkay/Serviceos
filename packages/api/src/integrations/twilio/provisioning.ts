@@ -161,6 +161,24 @@ export async function attachNumberToMessagingService(
   );
 }
 
+// Lists all phone numbers owned by a Twilio subaccount. Used to recover from
+// crash-after-purchase-before-persist: if the worker bought a number on a
+// previous attempt but failed to persist the SID, calling this on retry finds
+// the orphaned number so we don't buy another one.
+export async function listSubaccountPhoneNumbers(
+  subaccountSid: string,
+  authToken: string
+): Promise<PurchasedNumber[]> {
+  const result = await twilioGet<{
+    incoming_phone_numbers: Array<{ sid: string; phone_number: string }>;
+  }>(
+    `${TWILIO_BASE}/Accounts/${subaccountSid}/IncomingPhoneNumbers.json`,
+    subaccountSid,
+    authToken
+  );
+  return result.incoming_phone_numbers.map((n) => ({ sid: n.sid, phoneNumber: n.phone_number }));
+}
+
 export type ProvisioningFailureCode =
   | 'AUTH'
   | 'RATE_LIMIT'

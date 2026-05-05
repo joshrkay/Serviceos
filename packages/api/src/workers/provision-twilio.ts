@@ -8,6 +8,7 @@ import {
   createMessagingService,
   purchasePhoneNumber,
   attachNumberToMessagingService,
+  listSubaccountPhoneNumbers,
 } from '../integrations/twilio/provisioning';
 
 // Status values match migration 071_widen_tenant_integrations_status:
@@ -167,20 +168,35 @@ export function createProvisionTwilioWorker(deps: {
           );
         }
 
-        // Step 3 — purchase phone number
+        // Step 3 — purchase phone number.
+        // Idempotency: if we have a SID persisted, reuse it. Otherwise list
+        // any numbers already owned by this subaccount before buying — this
+        // recovers from crash-after-purchase-before-persist (see PR review).
+        // Subaccounts are tenant-scoped, so the only numbers there are ones
+        // we previously purchased for this tenant.
         let phoneNumberSid = providerData.phoneNumberSid ?? null;
         let phoneE164 = providerData.phoneE164 ?? null;
         if (!phoneNumberSid) {
-          logger.info('Purchasing phone number', { tenantId, region });
-          const number = await purchasePhoneNumber(
-            subaccountSid,
-            authToken,
-            region,
-            `${baseUrl}/webhooks/twilio/voice/${tenantId}`,
-            `${baseUrl}/webhooks/twilio/status/${tenantId}`
-          );
-          phoneNumberSid = number.sid;
-          phoneE164 = number.phoneNumber;
+          const existing = await listSubaccountPhoneNumbers(subaccountSid, authToken);
+          if (existing.length > 0) {
+            phoneNumberSid = existing[0].sid;
+            phoneE164 = existing[0].phoneNumber;
+            logger.info('Recovered orphaned phone number from previous attempt', {
+              tenantId, phoneE164,
+            });
+          } else {
+            logger.info('Purchasing phone number', { tenantId, region });
+            const number = await purchasePhoneNumber(
+              subaccountSid,
+              authToken,
+              region,
+              `${baseUrl}/webhooks/twilio/voice/${tenantId}`,
+              `${baseUrl}/webhooks/twilio/status/${tenantId}`
+            );
+            phoneNumberSid = number.sid;
+            phoneE164 = number.phoneNumber;
+            logger.info('Phone number purchased', { tenantId, phoneE164 });
+          }
           await tenantQuery(
             pool,
             tenantId,
@@ -189,17 +205,29 @@ export function createProvisionTwilioWorker(deps: {
              WHERE tenant_id = $2 AND provider = 'twilio'`,
             [JSON.stringify({ phoneNumberSid, phoneE164 }), tenantId]
           );
-          logger.info('Phone number purchased', { tenantId, phoneE164 });
         }
 
-        // Step 4 — attach number to messaging service
-        logger.info('Attaching number to messaging service', { tenantId });
-        await attachNumberToMessagingService(
-          subaccountSid,
-          authToken,
-          messagingServiceSid,
-          phoneNumberSid
-        );
+        // Step 4 — attach number to messaging service. Skip when a previous
+        // attempt already attached: Twilio rejects duplicate associations,
+        // which would otherwise stick the job in a retry loop.
+        const numberAttached = (providerData as { numberAttached?: boolean }).numberAttached === true;
+        if (!numberAttached) {
+          logger.info('Attaching number to messaging service', { tenantId });
+          await attachNumberToMessagingService(
+            subaccountSid,
+            authToken,
+            messagingServiceSid,
+            phoneNumberSid
+          );
+          await tenantQuery(
+            pool,
+            tenantId,
+            `UPDATE tenant_integrations
+             SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
+             WHERE tenant_id = $2 AND provider = 'twilio'`,
+            [JSON.stringify({ numberAttached: true }), tenantId]
+          );
+        }
 
         // Step 5 — mark active
         await tenantQuery(
