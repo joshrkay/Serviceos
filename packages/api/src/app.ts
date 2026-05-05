@@ -11,6 +11,12 @@ import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import {
+  decodeClerkToken,
+  verifyRs256Token,
+} from './auth/clerk';
+import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
 
@@ -97,6 +103,7 @@ import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
   hydrateStoreFromRepository,
+  isFeatureEnabled,
   FeatureFlagRepository,
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
@@ -431,6 +438,22 @@ export function createApp(): express.Express {
   }
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
+
+  // Prometheus metrics. Mounted on the public surface deliberately —
+  // production should rely on network-level allowlist (ingress / VPC).
+  app.get('/metrics', async (_req, res) => {
+    try {
+      const { renderMetrics } = await import('./monitoring/metrics');
+      const { contentType, body } = await renderMetrics();
+      res.setHeader('Content-Type', contentType);
+      res.send(body);
+    } catch (err) {
+      res.status(500).json({
+        error: 'METRICS_RENDER_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
 
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
@@ -1244,6 +1267,63 @@ export function createApp(): express.Express {
     }
   }
 
+  // Client WebSocket gateway (subsumes SSE token streams for assistant
+  // chat + voice events, behind feature flags). Gated by
+  // CLIENT_WS_GATEWAY_ENABLED so production stays SSE-only until ramp.
+  const clientWsEnabled = process.env.CLIENT_WS_GATEWAY_ENABLED === 'true';
+  if (clientWsEnabled) {
+    const origListen = app.listen.bind(app);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    app.listen = ((...args: unknown[]) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const server = (origListen as any)(...args);
+      attachClientGateway(server, {
+        auth: {
+          authenticate: async (req) => {
+            // Token via Authorization header (rare for WS), Sec-WebSocket-Protocol,
+            // or ?token=...
+            const authHeader = req.headers.authorization;
+            const proto = (req.headers['sec-websocket-protocol'] as string | undefined) ?? '';
+            const url = new URL(req.url ?? '/', 'http://localhost');
+            const queryToken = url.searchParams.get('token') ?? undefined;
+            const headerToken =
+              authHeader && authHeader.startsWith('Bearer ')
+                ? authHeader.substring(7)
+                : undefined;
+            const protoToken = proto
+              .split(',')
+              .map((s) => s.trim())
+              .find((s) => s.startsWith('bearer.'))
+              ?.substring('bearer.'.length);
+            const token = headerToken || queryToken || protoToken;
+            if (!token) return null;
+
+            try {
+              const isHmacDev =
+                process.env.NODE_ENV !== 'production' &&
+                process.env.NODE_ENV !== 'prod' &&
+                process.env.CLERK_DEV_HMAC_TOKENS === 'true';
+              const payload = isHmacDev
+                ? decodeClerkToken(token, process.env.CLERK_SECRET_KEY ?? '')
+                : await verifyRs256Token(token, {
+                    pubKey: process.env.CLERK_PUBLISHABLE_KEY ?? '',
+                  });
+              if (!payload?.tenant_id) return null;
+              return {
+                tenantId: payload.tenant_id,
+                userId: payload.sub,
+              };
+            } catch {
+              return null;
+            }
+          },
+        },
+      });
+      return server;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+  }
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -1600,8 +1680,32 @@ export function createApp(): express.Express {
   // refilled from the repo asynchronously. isFeatureEnabled returns false
   // for missing flags, so the worst case during the hydration window is
   // that a flag reads as disabled for a few ms.
-  void hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  void (async () => {
+    const { seedResilienceFlags } = await import('./flags/resilience-flags');
+    try {
+      await seedResilienceFlags(featureFlagRepo);
+    } catch {
+      /* fire-and-forget — admin flags surface via the admin API */
+    }
+    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  })();
   app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+
+  // Wire the WS publish-side kill switches: every call to publish()
+  // consults the feature flag store at runtime, so flipping
+  // ws.assistant_stream_enabled / ws.voice_events_enabled off
+  // immediately stops mirroring without redeploy.
+  const wsEnv = process.env.NODE_ENV ?? 'development';
+  setChannelGate((channel, tenantId) => {
+    const flag =
+      channel === 'assistant'
+        ? RESILIENCE_FLAG_NAMES.assistantStreamEnabled
+        : RESILIENCE_FLAG_NAMES.voiceEventsEnabled;
+    return isFeatureEnabled(featureFlagStore, flag, {
+      environment: wsEnv,
+      tenantId,
+    });
+  });
 
   app.use(captureRequestError());
 

@@ -126,6 +126,24 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
 
       const onEvent = (event: VoiceSessionEvent) => {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
+        // Mirror SSE events onto the client WS gateway. publish() is a
+        // no-op when the gateway is disabled, so SSE remains the source
+        // of truth during ramp.
+        void import('../ws/client-gateway').then(({ publish }) => {
+          publish(
+            'voice',
+            session.id,
+            {
+              kind: 'voice.event',
+              channel: 'voice',
+              sessionId: session.id,
+              event: event.type,
+              state: 'state' in event ? (event as { state?: string }).state : undefined,
+              payload: event as unknown as Record<string, unknown>,
+            },
+            session.tenantId,
+          );
+        });
         if (event.type === 'ended') {
           res.end();
         }
