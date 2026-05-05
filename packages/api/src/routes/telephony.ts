@@ -31,6 +31,7 @@ import type { StorageProvider } from '../files/file-service';
 import { createLogger } from '../logging/logger';
 import { escalateToHuman } from '../ai/skills/escalate-to-human';
 import { maskPhone } from '../telephony/twilio-call-control';
+import { VOICE_PROMPTS, renderCallbackUnavailablePrompt } from '../../../shared/src/voice-prompts';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -183,7 +184,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .status(200)
         .type('text/xml')
         .send(
-          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${VOICE_PROMPTS.TECHNICAL_DIFFICULTIES}</Say><Hangup/></Response>`
         );
     }
   });
@@ -237,7 +238,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .status(200)
         .type('text/xml')
         .send(
-          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
+          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${VOICE_PROMPTS.TECHNICAL_DIFFICULTIES}</Say><Hangup/></Response>`
         );
     }
   });
@@ -391,10 +392,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     const businessName = deps.businessName ?? 'our team';
     const safeName = xmlEscape(businessName);
-    const message =
-      `I'm sorry, no one is available right now. ` +
-      `${safeName} will call you back as soon as possible. ` +
-      `Thank you for calling.`;
+    const message = renderCallbackUnavailablePrompt(safeName);
 
     session.ended = true;
     res

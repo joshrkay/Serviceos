@@ -65,6 +65,7 @@ import { createAuditEvent } from '../audit/audit';
 import type { OnCallRepository } from '../oncall/rotation';
 import type { TwilioCallControl } from './twilio-call-control';
 import { maskPhone } from './twilio-call-control';
+import { renderCallbackUnavailablePrompt } from '../../../shared/src/voice-prompts';
 import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
@@ -1637,7 +1638,7 @@ export class TwilioGatherAdapter {
           session.id,
           `<?xml version="1.0" encoding="UTF-8"?>` +
             `<Response>` +
-            `<Say voice="Polly.Joanna">I'm sorry, no one is available right now. ${safeName} will call you back as soon as possible. Thank you for calling.</Say>` +
+            `<Say voice="Polly.Joanna">${renderCallbackUnavailablePrompt(safeName)}</Say>` +
             `<Hangup/>` +
             `</Response>`,
         );
