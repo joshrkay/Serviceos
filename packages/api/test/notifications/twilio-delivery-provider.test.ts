@@ -97,6 +97,26 @@ describe('TwilioDeliveryProvider — SMS', () => {
       providerBody: 'Unauthorized',
     });
   });
+
+  it('maps 429 Retry-After to retryAfterSeconds for SMS failures', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('Rate limited', {
+          status: 429,
+          headers: {
+            'retry-after': '17',
+            'twilio-request-id': 'tw-req-429',
+          },
+        })
+    );
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+    await expect(provider.sendSms({ to: '+15555550199', body: 'oops' })).rejects.toMatchObject({
+      code: 'PROVIDER_FAILED',
+      status: 429,
+      retryAfterSeconds: 17,
+      providerRequestId: 'tw-req-429',
+    });
+  });
 });
 
 describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
@@ -164,6 +184,26 @@ describe('TwilioDeliveryProvider — Email (SendGrid)', () => {
     await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toBeInstanceOf(
       DeliveryError
     );
+  });
+
+  it('maps 429 Retry-After to retryAfterSeconds for SendGrid failures', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('Too many requests', {
+          status: 429,
+          headers: {
+            'retry-after': '9',
+            'x-request-id': 'sg-req-429',
+          },
+        })
+    );
+    const provider = makeProvider(fetchImpl as unknown as typeof fetch);
+    await expect(provider.sendEmail({ to: 'a@b.c', subject: 's', text: 't' })).rejects.toMatchObject({
+      code: 'PROVIDER_FAILED',
+      status: 429,
+      retryAfterSeconds: 9,
+      providerRequestId: 'sg-req-429',
+    });
   });
 });
 
