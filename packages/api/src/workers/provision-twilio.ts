@@ -1,7 +1,8 @@
 import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
-import { Pool } from 'pg';
+import { Pool, QueryResult, QueryResultRow } from 'pg';
 import { encrypt, decrypt } from '../integrations/crypto';
+import { setTenantContext } from '../db/schema';
 import {
   createTwilioSubaccountWithCreds,
   createMessagingService,
@@ -13,6 +14,32 @@ import {
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
 const STATUS_PROVISIONING = 't0_requested';
 const STATUS_ACTIVE = 'full_readiness';
+
+// tenant_integrations is FORCE ROW LEVEL SECURITY with a policy on
+// app.current_tenant_id. Background workers run outside withTenantTransaction,
+// so every DB op against this table must run in a transaction that sets the
+// GUC first. Twilio HTTP calls happen between these blocks — we don't hold
+// a DB transaction open across network I/O.
+async function tenantQuery<R extends QueryResultRow = QueryResultRow>(
+  pool: Pool,
+  tenantId: string,
+  sql: string,
+  params: unknown[] = []
+): Promise<QueryResult<R>> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(setTenantContext(tenantId));
+    const result = await client.query<R>(sql, params);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 export interface ProvisionTwilioPayload {
   tenantId: string;
@@ -53,12 +80,14 @@ export function createProvisionTwilioWorker(deps: {
       }
 
       // Check current state — idempotent: skip if already active
-      const { rows } = await pool.query<{
+      const { rows } = await tenantQuery<{
         status: string;
         subaccount_sid: string | null;
         auth_token_primary_enc: string | null;
         provider_data: { messagingServiceSid?: string; phoneNumberSid?: string; phoneE164?: string };
       }>(
+        pool,
+        tenantId,
         `SELECT status, subaccount_sid, auth_token_primary_enc, provider_data
          FROM tenant_integrations
          WHERE tenant_id = $1 AND provider = 'twilio'`,
@@ -72,11 +101,13 @@ export function createProvisionTwilioWorker(deps: {
 
       // Upsert row into provisioning state. RETURNING gives us the post-upsert
       // row so we don't act on stale data from the initial SELECT.
-      const upserted = await pool.query<{
+      const upserted = await tenantQuery<{
         subaccount_sid: string | null;
         auth_token_primary_enc: string | null;
         provider_data: { messagingServiceSid?: string; phoneNumberSid?: string; phoneE164?: string };
       }>(
+        pool,
+        tenantId,
         `INSERT INTO tenant_integrations (tenant_id, provider, status)
          VALUES ($1, 'twilio', $2)
          ON CONFLICT (tenant_id, provider) DO UPDATE
@@ -100,7 +131,9 @@ export function createProvisionTwilioWorker(deps: {
           );
           subaccountSid = sub.sid;
           authToken = sub.authToken;
-          await pool.query(
+          await tenantQuery(
+            pool,
+            tenantId,
             `UPDATE tenant_integrations
              SET subaccount_sid = $1, auth_token_primary_enc = $2, updated_at = NOW()
              WHERE tenant_id = $3 AND provider = 'twilio'`,
@@ -124,7 +157,9 @@ export function createProvisionTwilioWorker(deps: {
             `serviceos-${tenantId}`,
             `${baseUrl}/webhooks/twilio/sms/${tenantId}`
           );
-          await pool.query(
+          await tenantQuery(
+            pool,
+            tenantId,
             `UPDATE tenant_integrations
              SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
              WHERE tenant_id = $2 AND provider = 'twilio'`,
@@ -146,7 +181,9 @@ export function createProvisionTwilioWorker(deps: {
           );
           phoneNumberSid = number.sid;
           phoneE164 = number.phoneNumber;
-          await pool.query(
+          await tenantQuery(
+            pool,
+            tenantId,
             `UPDATE tenant_integrations
              SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
              WHERE tenant_id = $2 AND provider = 'twilio'`,
@@ -165,7 +202,9 @@ export function createProvisionTwilioWorker(deps: {
         );
 
         // Step 5 — mark active
-        await pool.query(
+        await tenantQuery(
+          pool,
+          tenantId,
           `UPDATE tenant_integrations
            SET status = $2, provisioned_at = NOW(), updated_at = NOW()
            WHERE tenant_id = $1 AND provider = 'twilio'`,
@@ -176,12 +215,14 @@ export function createProvisionTwilioWorker(deps: {
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         logger.error('Twilio provisioning failed', { tenantId, error });
-        await pool.query(
+        await tenantQuery(
+          pool,
+          tenantId,
           `UPDATE tenant_integrations
            SET status = 'failed', last_error = $1, updated_at = NOW()
            WHERE tenant_id = $2 AND provider = 'twilio'`,
           [error, tenantId]
-        );
+        ).catch(() => {});
         throw err;
       }
     },

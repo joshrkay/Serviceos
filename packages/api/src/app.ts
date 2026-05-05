@@ -486,18 +486,41 @@ export function createApp(): express.Express {
   const integrationResolver = pool
     ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
         const { decrypt } = await import('./integrations/crypto');
+        const { setTenantContext } = await import('./db/schema');
         const encKey = process.env.TENANT_ENCRYPTION_KEY;
-        const { rows } = await pool.query<{
+
+        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
+        // GUC on a dedicated client/transaction. Webhook handlers run outside
+        // withTenantTransaction so we open one here.
+        const client = await pool.connect();
+        let rows: Array<{
           subaccount_sid: string | null;
           auth_token_primary_enc: string | null;
           auth_token_secondary_enc: string | null;
           provider_data: Record<string, unknown>;
-        }>(
-          `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
-           FROM tenant_integrations
-           WHERE tenant_id = $1 AND provider = $2`,
-          [tenantId, provider]
-        );
+        }> = [];
+        try {
+          await client.query('BEGIN');
+          await client.query(setTenantContext(tenantId));
+          const result = await client.query<{
+            subaccount_sid: string | null;
+            auth_token_primary_enc: string | null;
+            auth_token_secondary_enc: string | null;
+            provider_data: Record<string, unknown>;
+          }>(
+            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
+             FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = $2`,
+            [tenantId, provider]
+          );
+          rows = result.rows;
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
         const row = rows[0];
         if (!row || !encKey) return null;
         return {
