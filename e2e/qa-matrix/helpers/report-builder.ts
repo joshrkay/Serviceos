@@ -3,6 +3,7 @@ import { execSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { MATRIX, type MatrixRow } from '../matrix';
 import { artifactRoot, runRoot, type RowManifest, type Verdict } from './evidence';
+import { redactUnknown, scanForSecrets, fingerprint } from './redaction';
 
 /**
  * Agent D — Evidence Assembler.
@@ -76,7 +77,8 @@ function renderReport(rows: AssembledRow[], runDir: string, artDir: string): str
   lines.push(`- Env: ${process.env.E2E_BASE_URL ?? '(local)'} (API: ${process.env.E2E_API_URL ?? '(local)'})`);
   lines.push(`- Branch: ${branch ?? '(unknown)'}`);
   lines.push(`- Commit: ${commit ?? '(unknown)'}`);
-  lines.push(`- Tenants: A=${redact(process.env.E2E_TENANT_A_ID)}, B=${redact(process.env.E2E_TENANT_B_ID)}`);
+  const tenantMeta = redactUnknown({ a: process.env.E2E_TENANT_A_ID, b: process.env.E2E_TENANT_B_ID }) as { a?: string; b?: string };
+  lines.push(`- Tenants: A=${tenantMeta.a ?? '(unset)'}, B=${tenantMeta.b ?? '(unset)'}`);
   lines.push('');
   lines.push(`## Summary — ${counts.pass} pass · ${counts.partial} partial · ${counts.fail} fail · ${counts.na} n/a`);
   lines.push('');
@@ -123,7 +125,11 @@ function renderReport(rows: AssembledRow[], runDir: string, artDir: string): str
 
   lines.push('---');
   lines.push(`Artifacts root: \`${relative(runDir, artDir)}/\``);
-  return lines.join('\n');
+  const report = lines.join('\n');
+  const findings = scanForSecrets(report);
+  console.log('[qa-matrix:redaction]', { hasReport: true, fp: fingerprint(report), findings: findings.length });
+  if (findings.length) throw new Error(`QA report contains non-redacted secrets: ${findings.map((f) => f.name).join(', ')}`);
+  return report;
 }
 
 function badge(v: Verdict): string {
@@ -143,10 +149,6 @@ function escape(s: string): string {
   return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
-function redact(v: string | undefined): string {
-  if (!v) return '(unset)';
-  return v.length > 12 ? `${v.slice(0, 8)}…` : v;
-}
 
 function safe<T>(fn: () => T): T | undefined {
   try {

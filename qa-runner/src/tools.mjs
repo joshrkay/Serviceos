@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { redactHeaders, redactUnknown, scanForSecrets, fingerprint } from './redaction.mjs';
 
 const execAsync = promisify(exec);
 
@@ -55,11 +56,15 @@ export async function runApiCheck({ apiUrl, testId, check, artifactDir }) {
     await writeJson(artifactPath, {
       url,
       method,
-      headers,
-      requestBody,
+      headers: redactHeaders(headers),
+      requestBody: redactUnknown(requestBody),
       status: res.status,
-      body: text,
+      body: redactUnknown(text),
     });
+
+    const findings = scanForSecrets({ url, method, headers: redactHeaders(headers), requestBody: redactUnknown(requestBody), body: redactUnknown(text) });
+    console.log('[qa-runner:redaction]', { hasHeaders: Object.keys(headers).length > 0, hasRequestBody: requestBody !== undefined, hasResponseBody: text.length > 0, fp: fingerprint({ url, method, status: res.status }), findings: findings.length });
+    if (findings.length) throw new Error(`Non-redacted secrets detected in API artifact: ${findings.map((f) => f.name).join(', ')}`);
 
     const expected = check.expect_statuses || (check.expect_status ? [check.expect_status] : [200]);
 
@@ -72,7 +77,7 @@ export async function runApiCheck({ apiUrl, testId, check, artifactDir }) {
     };
   } catch (error) {
     const artifactPath = path.join(artifactDir, `${testId}-${ts()}-error.json`);
-    await writeJson(artifactPath, { url, method, headers, requestBody, error: String(error) });
+    await writeJson(artifactPath, { url, method, headers: redactHeaders(headers), requestBody: redactUnknown(requestBody), error: redactUnknown(String(error)) });
     return {
       status: 'blocked',
       status_code: null,
