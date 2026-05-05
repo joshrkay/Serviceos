@@ -1,5 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AppError, ValidationError } from '../../shared/errors';
+import {
+  gatewayRequestLatencyMs,
+  gatewayRequestsTotal,
+} from '../../monitoring/metrics';
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
@@ -14,6 +18,14 @@ export interface LLMRequest {
   maxTokens?: number;
   responseFormat?: 'text' | 'json';
   metadata?: Record<string, unknown>;
+  /** Per-request end-to-end budget in ms. Honored by the resilience layer. */
+  deadlineMs?: number;
+  /** AbortSignal injected by the resilience layer for cooperative cancellation. */
+  signal?: AbortSignal;
+  /** Tenant tier (free|standard|premium) — drives quota + breaker cell. */
+  tenantTier?: string;
+  /** Tenant id; usually populated from tenantContextStore on the gateway side. */
+  tenantId?: string;
 }
 
 export interface LLMResponse {
@@ -23,6 +35,14 @@ export interface LLMResponse {
   tokenUsage: { input: number; output: number; total: number };
   latencyMs: number;
   cached?: boolean;
+  /** True when the response was served via a fallback path or coalesced. */
+  degraded?: boolean;
+  /** Stage that produced this response: 'primary' | 'cheaper-model' | 'fallback-provider' | 'cached' | 'error-envelope'. */
+  fallbackStage?: string;
+  /** Ordered list of provider attempts (provider/model) for tracing. */
+  providerPath?: string[];
+  /** Hint to clients when degraded; ms until they should retry. */
+  retryAfterMs?: number;
 }
 
 export interface LLMProvider {
@@ -93,6 +113,8 @@ export class LLMGateway {
 
     const startTime = Date.now();
 
+    const tier = request.tenantTier ?? 'standard';
+
     try {
       const response = await provider.complete(resolvedRequest);
       const latencyMs = Date.now() - startTime;
@@ -102,17 +124,44 @@ export class LLMGateway {
         latencyMs,
       };
 
+      const labels = {
+        tenant_tier: tier,
+        model: resolvedModel,
+        provider: providerName,
+        outcome: result.degraded ? 'degraded' : 'success',
+      };
+      gatewayRequestsTotal.inc(labels);
+      gatewayRequestLatencyMs.observe(labels, latencyMs);
+
       this.logger?.info('LLM completion succeeded', {
         taskType: request.taskType,
         provider: providerName,
         model: resolvedModel,
         latencyMs,
         tokenUsage: result.tokenUsage,
+        degraded: result.degraded ?? false,
+        fallbackStage: result.fallbackStage,
+        providerPath: result.providerPath,
       });
 
       return result;
     } catch (err) {
       const latencyMs = Date.now() - startTime;
+      gatewayRequestsTotal.inc({
+        tenant_tier: tier,
+        model: resolvedModel,
+        provider: providerName,
+        outcome: 'error',
+      });
+      gatewayRequestLatencyMs.observe(
+        {
+          tenant_tier: tier,
+          model: resolvedModel,
+          provider: providerName,
+          outcome: 'error',
+        },
+        latencyMs,
+      );
       this.logger?.error('LLM completion failed', {
         taskType: request.taskType,
         provider: providerName,

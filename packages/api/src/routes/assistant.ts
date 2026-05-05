@@ -226,6 +226,8 @@ async function generateAssistantReply(
       taskType,
       model: response.model,
       usage: response.tokenUsage,
+      degraded: response.degraded ?? false,
+      fallbackStage: response.fallbackStage,
       message: {
         role: 'assistant' as const,
         ...parsed,
@@ -237,6 +239,8 @@ async function generateAssistantReply(
       taskType,
       model: 'fallback',
       usage: { input: 0, output: 0, total: 0 },
+      degraded: true,
+      fallbackStage: 'error-envelope',
       message: {
         role: 'assistant' as const,
         content: 'I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.',
@@ -277,10 +281,41 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
 
           const content = result.message.content;
           const chunks = content.match(/.{1,18}(\s|$)/g) ?? [content];
+          // Mirror the SSE token stream onto the client WS gateway,
+          // scoped to the user-specific target so concurrent operators
+          // in the same tenant don't see each other's tokens.
+          const { publish } = await import('../ws/client-gateway');
+          const userTarget = req.auth!.userId;
+          const correlationId = `assistant-${userTarget}-${Date.now()}`;
           for (const chunk of chunks) {
             writeSse(res, 'token', { delta: chunk });
+            publish(
+              'assistant',
+              userTarget,
+              {
+                kind: 'assistant.token',
+                channel: 'assistant',
+                delta: chunk,
+                correlationId,
+                degraded: result.degraded ?? false,
+              },
+              req.auth!.tenantId,
+            );
           }
           writeSse(res, 'done', result);
+          publish(
+            'assistant',
+            userTarget,
+            {
+              kind: 'assistant.done',
+              channel: 'assistant',
+              finalText: content,
+              correlationId,
+              degraded: result.degraded ?? false,
+              fallbackStage: result.fallbackStage,
+            },
+            req.auth!.tenantId,
+          );
           res.end();
           return;
         }

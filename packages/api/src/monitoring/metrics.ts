@@ -1,0 +1,172 @@
+/**
+ * Prometheus metrics registry for the resilience layer.
+ *
+ * Centralised so callers always touch the same registry and label set.
+ * `prom-client` default-metrics (event-loop lag, RSS, GC) are enabled here
+ * so the /metrics endpoint exposes them alongside our domain counters.
+ */
+import {
+  Registry,
+  Counter,
+  Gauge,
+  Histogram,
+  collectDefaultMetrics,
+} from 'prom-client';
+
+export const metricsRegistry = new Registry();
+
+collectDefaultMetrics({ register: metricsRegistry });
+
+// ---------- Gateway ----------
+
+export const gatewayRequestsTotal = new Counter({
+  name: 'gateway_requests_total',
+  help: 'LLM gateway requests, partitioned by outcome',
+  labelNames: ['tenant_tier', 'model', 'provider', 'outcome'],
+  registers: [metricsRegistry],
+});
+
+export const gatewayRequestLatencyMs = new Histogram({
+  name: 'gateway_request_latency_ms',
+  help: 'End-to-end LLM gateway request latency in ms',
+  labelNames: ['tenant_tier', 'model', 'provider', 'outcome'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10_000, 25_000, 60_000],
+  registers: [metricsRegistry],
+});
+
+export const gatewayRetryAttemptsTotal = new Counter({
+  name: 'gateway_retry_attempts_total',
+  help: 'Retry attempts issued by the gateway',
+  labelNames: ['provider', 'reason'],
+  registers: [metricsRegistry],
+});
+
+export const gatewayFallbackActivationsTotal = new Counter({
+  name: 'gateway_fallback_activations_total',
+  help: 'Fallback path activations',
+  labelNames: ['stage'],
+  registers: [metricsRegistry],
+});
+
+export const gatewayDeadlineExceededTotal = new Counter({
+  name: 'gateway_deadline_exceeded_total',
+  help: 'Requests aborted because the deadline elapsed',
+  labelNames: ['stage'],
+  registers: [metricsRegistry],
+});
+
+// ---------- Tenant fairness ----------
+
+export const tenantConcurrencyRejectTotal = new Counter({
+  name: 'tenant_concurrency_reject_total',
+  help: 'Requests rejected because the per-tenant concurrency cap was full',
+  labelNames: ['tenant_tier'],
+  registers: [metricsRegistry],
+});
+
+export const tenantTokenBudgetExceededTotal = new Counter({
+  name: 'tenant_token_budget_exceeded_total',
+  help: 'Requests rejected because the per-tenant token bucket was empty',
+  labelNames: ['tenant_tier'],
+  registers: [metricsRegistry],
+});
+
+export const tenantConcurrencyInFlight = new Gauge({
+  name: 'tenant_concurrency_in_flight',
+  help: 'Per-tenant in-flight request count',
+  labelNames: ['tenant_tier'],
+  registers: [metricsRegistry],
+});
+
+// ---------- Circuit breaker ----------
+
+/** 0 = closed, 1 = half-open, 2 = open. */
+export const breakerState = new Gauge({
+  name: 'breaker_state',
+  help: 'Circuit breaker state (0=closed, 1=half-open, 2=open)',
+  labelNames: ['key'],
+  registers: [metricsRegistry],
+});
+
+export const breakerTransitionsTotal = new Counter({
+  name: 'breaker_transitions_total',
+  help: 'Circuit breaker state transitions',
+  labelNames: ['key', 'from', 'to'],
+  registers: [metricsRegistry],
+});
+
+export const breakerOpenSecondsTotal = new Counter({
+  name: 'breaker_open_seconds_total',
+  help: 'Total seconds spent in the open state per breaker key',
+  labelNames: ['key'],
+  registers: [metricsRegistry],
+});
+
+export const breakerHalfOpenProbeSuccessRatio = new Gauge({
+  name: 'breaker_half_open_probe_success_ratio',
+  help: 'Last observed half-open probe success ratio per breaker key',
+  labelNames: ['key'],
+  registers: [metricsRegistry],
+});
+
+// ---------- WebSocket ----------
+
+export const wsConnections = new Gauge({
+  name: 'ws_connections',
+  help: 'Open WebSocket connections',
+  labelNames: ['surface', 'tenant_tier'],
+  registers: [metricsRegistry],
+});
+
+export const wsQueueDepthMsgs = new Gauge({
+  name: 'ws_queue_depth_msgs',
+  help: 'Outbound WS queue depth in messages (per connection sample)',
+  labelNames: ['surface'],
+  registers: [metricsRegistry],
+});
+
+export const wsQueueDepthBytes = new Gauge({
+  name: 'ws_queue_depth_bytes',
+  help: 'Outbound WS queue depth in bytes (per connection sample)',
+  labelNames: ['surface'],
+  registers: [metricsRegistry],
+});
+
+export const wsDropTotal = new Counter({
+  name: 'ws_drop_total',
+  help: 'WS frames dropped from the outbound queue',
+  labelNames: ['surface', 'reason', 'priority'],
+  registers: [metricsRegistry],
+});
+
+export const wsDisconnectTotal = new Counter({
+  name: 'ws_disconnect_total',
+  help: 'WS connection terminations',
+  labelNames: ['surface', 'reason'],
+  registers: [metricsRegistry],
+});
+
+export const wsSendLatencyMs = new Histogram({
+  name: 'ws_send_latency_ms',
+  help: 'Per-frame WS send latency in ms',
+  labelNames: ['surface'],
+  buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000],
+  registers: [metricsRegistry],
+});
+
+export const wsReconnectRejectTotal = new Counter({
+  name: 'ws_reconnect_reject_total',
+  help: 'WS upgrade requests rejected by the reconnect-storm guard',
+  labelNames: ['surface', 'reason'],
+  registers: [metricsRegistry],
+});
+
+export async function renderMetrics(): Promise<{
+  contentType: string;
+  body: string;
+}> {
+  return {
+    contentType: metricsRegistry.contentType,
+    body: await metricsRegistry.metrics(),
+  };
+}
