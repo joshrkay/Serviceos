@@ -74,6 +74,7 @@ export type TwilioInboundFrame =
         accountSid: string;
         streamSid: string;
         tracks: string[];
+        customParameters?: Record<string, string | undefined>;
         mediaFormat?: { encoding: string; sampleRate: number; channels: number };
       };
     }
@@ -214,13 +215,37 @@ export class TwilioMediaStreamAdapter {
   }
 
   private async handleStart(frame: Extract<TwilioInboundFrame, { event: 'start' }>): Promise<void> {
+    if (!isValidStartFrame(frame)) {
+      this.logSecurityEvent('invalid_start_payload', {
+        streamSid: frame.streamSid,
+        hasStart: typeof frame.start === 'object' && frame.start !== null,
+      });
+      this.closeWs(1008, 'invalid_start_payload');
+      return;
+    }
+
     const callSid = frame.start.callSid;
     const session = this.deps.store.findByCallSid(callSid);
     if (!session) {
-      logger.warn('mediastream start: unknown CallSid — closing WS', { callSid });
+      this.logSecurityEvent('tenant_resolution_failed', {
+        reason: 'unknown_callsid',
+        callSid,
+      });
       this.closeWs(1008, 'unknown_callsid');
       return;
     }
+
+    const claimedTenant = frame.start.customParameters?.tenantId;
+    if (claimedTenant && claimedTenant !== session.tenantId) {
+      this.logSecurityEvent('tenant_mismatch', {
+        callSid,
+        claimedTenant,
+        resolvedTenant: session.tenantId,
+      });
+      this.closeWs(1008, 'tenant_mismatch');
+      return;
+    }
+
     this.state.streamSid = frame.start.streamSid;
     this.state.callSid = callSid;
     this.state.session = session;
@@ -467,6 +492,15 @@ export class TwilioMediaStreamAdapter {
     }
   }
 
+  private logSecurityEvent(action: string, details: Record<string, unknown>): void {
+    logger.warn('mediastream security event', {
+      action,
+      ...details,
+      security: true,
+      component: 'twilio_media_stream_adapter',
+    });
+  }
+
   // ─── Test hooks (intentionally minimal) ────────────────────────────────────
 
   /**
@@ -487,6 +521,14 @@ export class TwilioMediaStreamAdapter {
       closed: this.state.closed,
     };
   }
+}
+
+function isValidStartFrame(frame: Extract<TwilioInboundFrame, { event: 'start' }>): boolean {
+  const start = frame.start;
+  if (!start || typeof start !== 'object') return false;
+  if (typeof start.callSid !== 'string' || start.callSid.trim().length === 0) return false;
+  if (typeof start.streamSid !== 'string' || start.streamSid.trim().length === 0) return false;
+  return true;
 }
 
 /**
