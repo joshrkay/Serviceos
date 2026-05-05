@@ -107,6 +107,7 @@ import {
   PgTechnicianLocationAuthorizer,
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
+import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -437,6 +438,9 @@ export function createApp(): express.Express {
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
+  // Queue constructed here (before webhook router) so new-tenant webhooks can
+  // enqueue provisioning jobs synchronously during the request.
+  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   app.use(
     '/webhooks',
     createWebhookRouter(config, {
@@ -445,6 +449,8 @@ export function createApp(): express.Express {
       invoiceRepo: webhookInvoiceRepo,
       paymentRepo: webhookPaymentRepo,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+      queue,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     })
   );
 
@@ -505,7 +511,6 @@ export function createApp(): express.Express {
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
@@ -931,6 +936,14 @@ export function createApp(): express.Express {
     feedbackSendWorker.type,
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+
+  if (pool) {
+    const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
+    workerRegistry.set(
+      provisionTwilioWorker.type,
+      provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
 
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the

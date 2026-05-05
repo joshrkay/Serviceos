@@ -1853,6 +1853,43 @@ export const MIGRATIONS = {
     ALTER TABLE leads ADD CONSTRAINT leads_source_check
       CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
   `,
+
+  // Twilio per-tenant subaccount model.
+  // Adds country/region to tenant_settings (US-only at launch; column is
+  // forward-compatible for future international expansion).
+  // Creates tenant_integrations to track Twilio subaccount + SendGrid subuser
+  // provisioning state per tenant. Auth tokens are stored AES-256-GCM
+  // encrypted (app-level key) — never plaintext.
+  '070_tenant_integrations': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
+      ADD COLUMN IF NOT EXISTS region TEXT;
+
+    CREATE TABLE IF NOT EXISTS tenant_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      status TEXT NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'active', 'suspended', 'terminated', 'releasing', 'failed')),
+      subaccount_sid TEXT,
+      subuser_username TEXT,
+      auth_token_primary_enc TEXT,
+      auth_token_secondary_enc TEXT,
+      credential_version INTEGER NOT NULL DEFAULT 1,
+      provider_data JSONB NOT NULL DEFAULT '{}',
+      last_error TEXT,
+      provisioned_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, provider)
+    );
+
+    ALTER TABLE tenant_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_integrations ON tenant_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

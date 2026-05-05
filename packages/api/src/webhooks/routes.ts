@@ -7,6 +7,8 @@ import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { ValidationError } from '../shared/errors';
+import { Queue } from '../queues/queue';
+import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -19,6 +21,8 @@ export interface WebhookRouterDeps {
   invoiceRepo?: InvoiceRepository;
   paymentRepo?: PaymentRepository;
   stripeWebhookSecret?: string;
+  queue?: Queue;
+  appBaseUrl?: string;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -107,6 +111,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             created: result.created,
             settingsSeeded: Boolean(deps.settingsRepo),
           });
+
+          // Enqueue Twilio subaccount provisioning for new tenants only.
+          // Idempotent — the worker checks tenant_integrations.status and
+          // skips if already active, so safe to re-enqueue on webhook replay.
+          if (result.created && deps.queue) {
+            const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
+            const payload: ProvisionTwilioPayload = {
+              tenantId: result.tenantId,
+              region: region ?? null,
+              baseUrl: deps.appBaseUrl ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+            };
+            await deps.queue.send(
+              PROVISION_TWILIO_JOB_TYPE,
+              payload,
+              `provision-twilio-${result.tenantId}`
+            );
+            logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
+          }
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
           if (config.CLERK_SECRET_KEY) {
