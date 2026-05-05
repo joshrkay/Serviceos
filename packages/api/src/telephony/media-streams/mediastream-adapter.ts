@@ -633,10 +633,8 @@ export class TwilioMediaStreamAdapter {
           now.consecutiveOverWatermarkMs > TWILIO_SLOW_CONSUMER_GRACE_MS ||
           now.ewmaSendLatencyMs > TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS
         ) {
-          wsDisconnectTotal.inc({
-            surface: 'twilio_media_streams',
-            reason: 'slow_consumer',
-          });
+          // wsDisconnectTotal is incremented inside handleClose() to
+          // avoid double-counting; just log and tear down.
           logger.warn('mediastream: slow consumer detected, disconnecting', {
             callSid: this.state.callSid,
             ewmaSendLatencyMs: now.ewmaSendLatencyMs,
