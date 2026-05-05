@@ -215,7 +215,7 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
       expect(updated!.transcript).toBe('yes');
     });
 
-    it('keeps a valid correction and preserves raw under transcriptMetadata', async () => {
+    it('keeps a valid correction and preserves raw-retention metadata + sanitization guardrails', async () => {
       const voiceRepo = new InMemoryVoiceRepository();
       const recording = createVoiceRecording({
         tenantId: 'tenant-1',
@@ -256,7 +256,11 @@ describe('P0-012 — Voice ingestion and transcription pipeline', () => {
       await worker.handle(msg, logger);
       const updated = await voiceRepo.findById('tenant-1', recording.id);
       expect(updated!.transcript).toBe(corrected);
-      expect(updated!.transcriptMetadata?.rawTranscript).toBe(raw);
+      expect(updated!.transcriptMetadata?.sanitization_version).toBe('v1');
+      expect(updated!.transcriptMetadata?.canonical_transcript_field).toBe('transcript');
+      expect(updated!.transcriptMetadata?.prompt_rehydration_policy).toBe('sanitized_only');
+      expect((updated!.transcriptMetadata?.raw_transcript_retention as any)?.ttl).toBe('P7D');
+      expect((updated!.transcriptMetadata?.raw_transcript_retention as any)?.accessRole).toBe('voice_transcript_raw_reader');
       expect(updated!.transcriptMetadata?.correctionApplied).toBe(true);
       expect(updated!.transcriptMetadata?.glossaryTerms).toBe(1);
     });
