@@ -118,6 +118,7 @@ import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './worker
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
+import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
@@ -1191,6 +1192,12 @@ export function createApp(): express.Express {
   // side effect) and the in-app adapter (escalation) share a single
   // implementation. The in-app block below reuses this same instance.
   const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  // §3B: shared vertical-prompt resolver injected into both calling-agent
+  // adapters so per-tenant equipment terminology reaches the classifier.
+  const verticalPromptResolver = buildVerticalPromptResolver({
+    packActivationRepo,
+    canonicalPackRegistry,
+  });
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1216,6 +1223,7 @@ export function createApp(): express.Express {
     // Twilio asynchronously records the entire call and POSTs metadata
     // to /api/telephony/recording on completion.
     recordingCallbackPath: '/api/telephony/recording',
+    verticalPromptResolver,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1838,6 +1846,7 @@ export function createApp(): express.Express {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    verticalPromptResolver,
   });
   app.use(
     '/api/voice/sessions',

@@ -164,4 +164,76 @@ describe('InAppVoiceAdapter', () => {
     });
     await expect(adapter.handleInput('does-not-exist', 'hi')).rejects.toThrow(/not found/i);
   });
+
+  describe('§3B verticalPromptResolver wire-up', () => {
+    it('passes the resolved vertical section through to classifyIntent', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const verticalPromptResolver = vi.fn(async (tenantId: string) => {
+        expect(tenantId).toBe(TENANT);
+        return 'Service vertical: HVAC Professional\nEquipment: Furnace (heater)';
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        verticalPromptResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'invoice Acme');
+
+      expect(verticalPromptResolver).toHaveBeenCalledWith(TENANT);
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Service vertical: HVAC Professional');
+    });
+
+    it('falls back to base prompt when resolver throws', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const verticalPromptResolver = vi.fn(async () => {
+        throw new Error('pack lookup blew up');
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        verticalPromptResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Must not throw — turn proceeds without the vertical context.
+      await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+
+    it('omits the vertical message when resolver returns undefined', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const verticalPromptResolver = vi.fn(async () => undefined);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        verticalPromptResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'invoice Acme');
+
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+  });
 });

@@ -54,6 +54,15 @@ export interface InAppAdapterDeps {
   pool?: Pool;
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
+  /**
+   * §3B vertical-aware classifier prompt. Resolves the tenant's active
+   * vertical pack and returns a prompt-shaped section (see
+   * `formatVerticalForCallerPrompt` in `verticals/context-assembly.ts`).
+   * Pluggable so app.ts can wire in its own pack lookup and tests can
+   * stub a fixed string. Returns undefined when the tenant has no
+   * active pack — the classifier falls back to its base prompt.
+   */
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
 }
 
 export interface StartSessionResult {
@@ -231,6 +240,19 @@ export class InAppVoiceAdapter {
 
     session.transcript.push(`caller: ${text}`);
 
+    // §3B: load the tenant's vertical prompt section before classifying
+    // so per-tenant equipment terminology reaches the LLM. Best-effort:
+    // if the resolver fails, we proceed without the vertical block
+    // rather than failing the turn.
+    let verticalPromptSection: string | undefined;
+    if (this.deps.verticalPromptResolver) {
+      try {
+        verticalPromptSection = await this.deps.verticalPromptResolver(session.tenantId);
+      } catch {
+        verticalPromptSection = undefined;
+      }
+    }
+
     // Classify intent. Failures fall back to a low-confidence event so
     // the FSM still progresses (and the operator gets a clarification
     // prompt) instead of silently dropping the turn.
@@ -239,7 +261,7 @@ export class InAppVoiceAdapter {
     try {
       const classification = await classifyIntent(
         text,
-        { tenantId: session.tenantId },
+        { tenantId: session.tenantId, verticalPromptSection },
         this.deps.gateway
       );
       classifierUsage = classification.tokenUsage

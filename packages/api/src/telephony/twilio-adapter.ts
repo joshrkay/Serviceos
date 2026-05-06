@@ -152,6 +152,14 @@ export interface TwilioAdapterDeps {
    * use it for tenant-specific Twilio auth outside this gather loop.
    */
   credentialResolver?: TenantCredentialResolver;
+  /**
+   * §3B vertical-aware classifier prompt. Same shape as the in-app
+   * adapter's `verticalPromptResolver` — resolves the tenant's active
+   * vertical pack into a prompt-shaped section that gets appended as
+   * a system message to `classifyIntent`. Optional: returning undefined
+   * (or omitting the dep) leaves the classifier on its base prompt.
+   */
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -340,6 +348,21 @@ export class TwilioGatherAdapter {
   constructor(private deps: TwilioAdapterDeps) {}
 
   /**
+   * §3B helper. Best-effort vertical-prompt lookup. Returns undefined
+   * when the resolver is missing, throws, or the tenant has no active
+   * pack — callers proceed with the base classifier prompt rather than
+   * failing the turn.
+   */
+  private async resolveVerticalPromptSection(tenantId: string): Promise<string | undefined> {
+    if (!this.deps.verticalPromptResolver) return undefined;
+    try {
+      return await this.deps.verticalPromptResolver(tenantId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * P8-012 — Initial /voice handler when Media Streams is enabled.
    *
    * Creates (or replays) the session, then returns a
@@ -490,10 +513,11 @@ export class TwilioGatherAdapter {
       }
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
       let classifierEvent: CallingAgentEvent | null = null;
+      const verticalPromptSection = await this.resolveVerticalPromptSection(opts.tenantId);
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          { tenantId: opts.tenantId },
+          { tenantId: opts.tenantId, verticalPromptSection },
           this.deps.gateway,
         );
         // VQ-003: surface the classifier outcome for the harness.
@@ -864,10 +888,11 @@ export class TwilioGatherAdapter {
       //    (which would hang the caller mid-call).
       let classifierEvent: CallingAgentEvent | null = null;
       let classifiedIntentType: string | undefined;
+      const verticalPromptSection = await this.resolveVerticalPromptSection(opts.tenantId);
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          { tenantId: opts.tenantId },
+          { tenantId: opts.tenantId, verticalPromptSection },
           this.deps.gateway,
         );
         // VQ-003: surface the classifier outcome for the harness.
