@@ -120,8 +120,13 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
       depositFixedCents = Math.round(dollars * 100);
     }
 
+    // Codex P2 (PR #316): when strategy is 'none' the threshold is
+    // meaningless — force it to null regardless of stale state in the
+    // (hidden) input. Otherwise switching from percentage→none with a
+    // previously-set threshold leaves a hidden value persisted that
+    // silently re-applies if the strategy is turned back on later.
     let depositRequiredAboveCents: number | null = null;
-    if (fields.requiredAboveDollars.trim().length > 0) {
+    if (fields.strategy !== 'none' && fields.requiredAboveDollars.trim().length > 0) {
       const dollars = parsePositiveNumber(fields.requiredAboveDollars);
       if (dollars === null) {
         setError('Threshold amount must be a positive number.');

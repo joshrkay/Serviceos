@@ -23,10 +23,12 @@ export interface TechnicianLaneProps {
    */
   onReorderWithinLane?: (appointmentId: string, fromIndex: number, toIndex: number) => void;
   /**
-   * P6-026 — set of appointment ids that overlap another booking
-   * (same technician or same customer). Computed by the DispatchBoard
+   * P6-026 — set of appointment ids that overlap another booking on
+   * the same technician's lane. Computed by the DispatchBoard
    * parent and forwarded to each AppointmentCard so the conflict
    * badge renders. Optional — omitting it leaves cards quiet.
+   * Cross-lane same-customer detection is tracked as a follow-up
+   * (Codex PR #316 review).
    */
   conflictIds?: ReadonlySet<string>;
 }

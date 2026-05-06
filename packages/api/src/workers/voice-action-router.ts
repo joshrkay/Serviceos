@@ -178,9 +178,17 @@ class IssueInvoiceTaskHandler implements TaskHandler {
       }
     }
 
-    const tenantThresholdOverride = this.thresholdResolver
-      ? await this.thresholdResolver(context.tenantId).catch(() => undefined)
-      : undefined;
+    // Codex P2 (PR #316): prefer the override the router already
+    // resolved at request entry. Re-resolving here means a transient
+    // failure on this single handler can desync issue_invoice from
+    // the rest of the request's intents (which use context). Fall
+    // back to the resolver only when context didn't carry one (e.g.
+    // legacy callers that don't go through voice-action-router).
+    const tenantThresholdOverride =
+      context.tenantThresholdOverride
+      ?? (this.thresholdResolver
+        ? await this.thresholdResolver(context.tenantId).catch(() => undefined)
+        : undefined);
 
     const input: CreateProposalInput = {
       tenantId: context.tenantId,

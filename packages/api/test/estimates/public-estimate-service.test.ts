@@ -319,3 +319,150 @@ describe('PublicEstimateService.decline', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 });
+
+describe('PublicEstimateService.approve — Tier 4 deposit hook (PR 2)', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  async function seedEstimateWithTotal(totalCents: number): Promise<Estimate> {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      totals: {
+        subtotalCents: totalCents,
+        taxableSubtotalCents: totalCents,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxCents: 0,
+        totalCents,
+      },
+      lineItems: [
+        {
+          id: uuidv4(),
+          description: 'Service',
+          quantity: 1,
+          unitPriceCents: totalCents,
+          totalCents,
+          sortOrder: 0,
+          taxable: true,
+        },
+      ],
+    });
+    await h.estimate.create(est);
+    return est;
+  }
+
+  it('writes the computed deposit onto the linked job for a percentage rule', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500, // 25%
+    });
+    const est = await seedEstimateWithTotal(100000); // $1,000
+    await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    const job = (await h.job.findByTenant(TENANT))[0];
+    expect(job.depositRequiredCents).toBe(25000); // $250 = 25% of $1000
+    expect(job.depositPaidCents).toBe(0);
+    expect(job.depositStatus).toBe('pending');
+  });
+
+  it('writes the computed deposit for a fixed-amount rule', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'fixed',
+      depositFixedCents: 50000, // $500
+    });
+    const est = await seedEstimateWithTotal(100000);
+    await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    const job = (await h.job.findByTenant(TENANT))[0];
+    expect(job.depositRequiredCents).toBe(50000);
+    expect(job.depositStatus).toBe('pending');
+  });
+
+  it('leaves the job at default deposit (0) when no rule is configured', async () => {
+    const est = await seedEstimateWithTotal(100000);
+    await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    const job = (await h.job.findByTenant(TENANT))[0];
+    expect(job.depositRequiredCents ?? 0).toBe(0);
+    // Status defaults to 'not_required' (or undefined for legacy rows).
+    expect(job.depositStatus ?? 'not_required').toBe('not_required');
+  });
+
+  it('skips the deposit write when total is below the threshold', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositRequiredAboveCents: 200000, // $2,000 threshold
+    });
+    const est = await seedEstimateWithTotal(100000); // below threshold
+    await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    const job = (await h.job.findByTenant(TENANT))[0];
+    expect(job.depositRequiredCents ?? 0).toBe(0);
+  });
+
+  it('does not block approval if the deposit hook throws', async () => {
+    // Force jobRepo.update to throw — approval must still succeed.
+    const originalUpdate = h.job.update.bind(h.job);
+    h.job.update = async () => {
+      throw new Error('simulated DB outage');
+    };
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+    });
+    const est = await seedEstimateWithTotal(100000);
+
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    expect(view.status).toBe('accepted');
+    h.job.update = originalUpdate;
+  });
+
+  it('PR 3a — surfaces the deposit context on the public view after approval', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    expect(view.depositRequiredCents).toBe(25000);
+    expect(view.depositPaidCents).toBe(0);
+    expect(view.depositStatus).toBe('pending');
+  });
+
+  it('PR 3a — surfaces zero deposit on a getByToken view when no rule applies', async () => {
+    const est = await seedEstimateWithTotal(100000);
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.depositRequiredCents).toBe(0);
+    expect(view.depositPaidCents).toBe(0);
+    expect(view.depositStatus).toBe('not_required');
+  });
+});

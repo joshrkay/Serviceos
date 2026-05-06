@@ -26,8 +26,13 @@ export interface TenantSettings {
   id: string;
   tenantId: string;
   businessName: string;
-  businessPhone?: string;
-  businessEmail?: string;
+  // Codex P2 (PR #316): allow null on optional string fields so the
+  // update path can carry "clear this column" through the type system.
+  // Reads from PgSettings always normalize NULL → undefined via mapRow,
+  // so callers consuming TenantSettings rows in normal flows will see
+  // undefined; null only appears transiently in update inputs.
+  businessPhone?: string | null;
+  businessEmail?: string | null;
   timezone: string;
   estimatePrefix: string;
   invoicePrefix: string;
@@ -113,9 +118,12 @@ export interface CreateSettingsInput {
 
 export interface UpdateSettingsInput {
   businessName?: string;
-  businessPhone?: string;
-  businessEmail?: string;
-  timezone?: string;
+  // Codex P2 (PR #316): explicit null = clear field. Sending `undefined`
+  // means "don't touch" because JSON.stringify drops it; sending null
+  // routes through PgSettings.update's `value ?? null` to a SQL NULL.
+  businessPhone?: string | null;
+  businessEmail?: string | null;
+  timezone?: string | null;
   estimatePrefix?: string;
   invoicePrefix?: string;
   defaultPaymentTermDays?: number;
@@ -181,7 +189,12 @@ export function validateUpdateSettingsInput(
 }
 
 function validateCommonSettingsFields(
-  input: Pick<CreateSettingsInput, 'timezone' | 'estimatePrefix' | 'invoicePrefix' | 'defaultPaymentTermDays'>
+  input: {
+    timezone?: string | null;
+    estimatePrefix?: string;
+    invoicePrefix?: string;
+    defaultPaymentTermDays?: number;
+  }
 ): string[] {
   const errors: string[] = [];
   if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
@@ -336,7 +349,16 @@ export async function updateSettings(
     throw new Error(`Validation failed: ${errors.join('; ')}`);
   }
 
-  return repository.update(tenantId, { ...normalizedInput, updatedAt: new Date() });
+  // Codex P2 (PR #316): UpdateSettingsInput allows null on optional
+  // string fields so callers can clear them. Repos accept null at
+  // runtime (Pg's `value ?? null` becomes a SQL NULL; InMemory just
+  // stores the null). The type cast bridges the gap without widening
+  // every TenantSettings consumer to handle null reads — those still
+  // see undefined because mapRow normalizes NULL → undefined.
+  return repository.update(
+    tenantId,
+    { ...normalizedInput, updatedAt: new Date() } as Partial<TenantSettings>,
+  );
 }
 
 /**

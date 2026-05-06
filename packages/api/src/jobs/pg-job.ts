@@ -23,6 +23,12 @@ function mapRow(row: Record<string, unknown>): Job {
     priority: row.priority as Job['priority'],
     assignedTechnicianId: (row.assigned_technician_id as string) ?? undefined,
     originatingLeadId: (row.originating_lead_id as string) ?? undefined,
+    // Tier 4 (Deposit rules — PR 2). Migration 078 columns; default to
+    // 0 / 'not_required' for legacy rows via the column DEFAULT.
+    depositRequiredCents: (row.deposit_required_cents as number | null) ?? 0,
+    depositPaidCents: (row.deposit_paid_cents as number | null) ?? 0,
+    depositStatus:
+      (row.deposit_status as 'not_required' | 'pending' | 'paid' | null) ?? 'not_required',
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -196,6 +202,10 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         priority: 'priority',
         assignedTechnicianId: 'assigned_technician_id',
         originatingLeadId: 'originating_lead_id',
+        // Tier 4 (Deposit rules — PR 2). Migration 078.
+        depositRequiredCents: 'deposit_required_cents',
+        depositPaidCents: 'deposit_paid_cents',
+        depositStatus: 'deposit_status',
         updatedAt: 'updated_at',
       };
 

@@ -34,6 +34,16 @@ interface PublicEstimateView {
   rejectedAt?: string;
   rejectedReason?: string;
   isExpired: boolean;
+  /**
+   * Tier 4 (Deposit rules — PR 3a). Required deposit cents derived
+   * from the linked job. 0 when no rule applies; >0 means the
+   * customer must pay this much before work begins. The UI surfaces
+   * the figure on the approval card today; PR 3b adds the
+   * "Pay deposit" CTA + Stripe link.
+   */
+  depositRequiredCents?: number;
+  depositPaidCents?: number;
+  depositStatus?: 'not_required' | 'pending' | 'paid';
 }
 
 // ─── Signature canvas ─────────────────────────────────────────────────────
@@ -651,6 +661,38 @@ export function EstimateApprovalPage() {
               <p className="text-white" style={{ fontSize: '1.15rem' }}>${total.toLocaleString()}</p>
             </div>
           </div>
+
+          {/* Deposit notice — Tier 4 (Deposit rules — PR 3a). When the
+              tenant has a deposit rule and the estimate qualifies, the
+              backend writes depositRequiredCents onto the linked job;
+              the public view surfaces it. PR 3b adds the actual
+              Stripe payment-link CTA. */}
+          {apiView && (apiView.depositRequiredCents ?? 0) > 0 && (
+            <div
+              data-testid="estimate-deposit-notice"
+              className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3"
+            >
+              <p className="text-sm text-amber-900">
+                Deposit required to confirm:{' '}
+                <span className="font-medium">
+                  ${((apiView.depositRequiredCents ?? 0) / 100).toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+                {apiView.depositStatus === 'paid' && (
+                  <span className="ml-2 inline-flex items-center rounded-full bg-green-100 text-green-800 px-2 py-0.5 text-xs">
+                    Paid
+                  </span>
+                )}
+              </p>
+              <p className="text-xs text-amber-800 mt-1">
+                {apiView.depositStatus === 'paid'
+                  ? 'Thanks — your deposit is on file. We\'ll be in touch to schedule the work.'
+                  : 'You\'ll be prompted to pay the deposit after approving this estimate.'}
+              </p>
+            </div>
+          )}
 
           {/* Notes */}
           <p className="text-xs text-slate-400 text-center px-4 mb-6 leading-relaxed">

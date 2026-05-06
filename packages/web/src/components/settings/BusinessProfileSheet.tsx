@@ -82,14 +82,19 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
     }
     setSaving(true);
     try {
+      // Codex P2 (PR #316): send explicit `null` for cleared optional
+      // fields. Sending `undefined` causes JSON.stringify to drop the
+      // key, and the PUT /api/settings update treats omitted keys as
+      // no-op — so a user couldn't actually delete a previously-saved
+      // phone/email/timezone. Null lets the repo write NULL to the DB.
       const res = await apiFetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           businessName: fields.businessName.trim(),
-          businessPhone: fields.businessPhone.trim() || undefined,
-          businessEmail: fields.businessEmail.trim() || undefined,
-          timezone: fields.timezone || undefined,
+          businessPhone: fields.businessPhone.trim() || null,
+          businessEmail: fields.businessEmail.trim() || null,
+          timezone: fields.timezone || null,
         }),
       });
       if (!res.ok) {

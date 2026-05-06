@@ -2,6 +2,7 @@ import { Estimate, EstimateRepository } from './estimate';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
+import { evaluateDepositRule, deriveDepositStatus } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 
 /**
@@ -47,6 +48,20 @@ export interface PublicEstimateView {
   rejectedReason?: string;
   /** Set when token is past expiry. */
   isExpired: boolean;
+  /**
+   * Tier 4 (Deposit rules — PR 3a). Deposit context surfaced from
+   * the linked job. Customers see the required amount on the
+   * approval page before they accept; PR 3b will mint the Stripe
+   * payment link and PR 3c will credit the eventual invoice.
+   *
+   * `depositRequiredCents` is 0 when the tenant has no rule
+   * configured, the estimate total is below the threshold, or no
+   * estimate has been approved yet (the rule writes onto the job at
+   * approval time).
+   */
+  depositRequiredCents: number;
+  depositPaidCents: number;
+  depositStatus: 'not_required' | 'pending' | 'paid';
 }
 
 export interface ApproveEstimateInput {
@@ -131,6 +146,32 @@ export class PublicEstimateService {
     if (!updated) {
       throw new NotFoundError('Estimate', estimate.id);
     }
+
+    // Tier 4 (Deposit rules — PR 2). Evaluate the tenant's deposit
+    // rule against the estimate total and write the required deposit
+    // onto the linked job. Best-effort: a settings/job lookup hiccup
+    // must not block customer-side approval — they've already
+    // committed in the UI. PR 3 will surface the deposit on the
+    // payment flow; if this hook fails, the deposit defaults to 0
+    // (no charge) which is the safe-for-customer outcome.
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
+      if (settings) {
+        const required = evaluateDepositRule(settings, updated.totals.totalCents);
+        if (required > 0) {
+          const status = deriveDepositStatus(required, 0);
+          await this.deps.jobRepo.update(estimate.tenantId, estimate.jobId, {
+            depositRequiredCents: required,
+            depositPaidCents: 0,
+            depositStatus: status,
+            updatedAt: now,
+          });
+        }
+      }
+    } catch {
+      // Approval already succeeded; deposit population is best-effort.
+    }
+
     return this.toView(updated);
   }
 
@@ -199,8 +240,12 @@ export class PublicEstimateService {
       status: estimate.status,
       customerName: customer?.displayName ?? 'Customer',
       businessName: settings?.businessName ?? 'Service team',
-      businessPhone: settings?.businessPhone,
-      businessEmail: settings?.businessEmail,
+      // Settings types now allow null on optional string columns
+      // (Codex P2 PR #316). mapRow normalizes NULL→undefined for Pg
+      // reads; this `?? undefined` covers any other code path
+      // that surfaces a null value.
+      businessPhone: settings?.businessPhone ?? undefined,
+      businessEmail: settings?.businessEmail ?? undefined,
       lineItems: estimate.lineItems.map((li) => ({
         description: li.description,
         quantity: li.quantity,
@@ -219,6 +264,13 @@ export class PublicEstimateService {
       rejectedAt: estimate.rejectedAt?.toISOString(),
       rejectedReason: estimate.rejectedReason,
       isExpired,
+      // Tier 4 (Deposit rules — PR 3a). Surface the deposit context
+      // from the linked job. Defaults cover legacy jobs created
+      // before migration 078 (the columns DEFAULT to 0 / 'not_required'
+      // there too).
+      depositRequiredCents: job?.depositRequiredCents ?? 0,
+      depositPaidCents: job?.depositPaidCents ?? 0,
+      depositStatus: job?.depositStatus ?? 'not_required',
     };
   }
 }
