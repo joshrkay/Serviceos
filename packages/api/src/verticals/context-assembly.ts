@@ -130,6 +130,61 @@ function getMissingItemRules(verticalType?: VerticalType): MissingItemRule[] {
   }
 }
 
+/**
+ * Build a prompt section the calling agent can inject into its system
+ * prompt for the `intent_capture` and downstream states. Closes §3B from
+ * `docs/remaining-features.md`: without this, the agent receives the
+ * VerticalContext as raw structure with no instructions on how to use it.
+ *
+ * The output is plain text shaped for an LLM:
+ *   Service vertical: <name>
+ *   Industry context: <description>
+ *   Equipment and terminology recognized:
+ *     - <DisplayLabel> (alias, alias)
+ *     ...
+ *   Service types offered:
+ *     - <Category name>: <description>
+ *
+ * Returns an empty string when no pack is provided so callers can
+ * unconditionally concatenate the result.
+ *
+ * Emergency indicators, intake disambiguation questions, and objection
+ * scripts (§3D / §3E) are tracked separately — their data shape isn't
+ * on `VerticalPack` yet. Once those fields land, extend this formatter
+ * with additional sections.
+ */
+export function formatVerticalForCallerPrompt(
+  pack: import('./registry').VerticalPack | null | undefined,
+): string {
+  if (!pack) return '';
+
+  const lines: string[] = [];
+  const displayName = pack.displayName ?? pack.name;
+  if (displayName) lines.push(`Service vertical: ${displayName}`);
+  if (pack.description) lines.push(`Industry context: ${pack.description}`);
+
+  const terminology = pack.terminology ?? {};
+  const equipmentLines = Object.values(terminology).map((entry) => {
+    const aliases = entry.aliases.length > 0 ? ` (${entry.aliases.join(', ')})` : '';
+    return `  - ${entry.displayName}${aliases}`;
+  });
+  if (equipmentLines.length > 0) {
+    lines.push('Equipment and terminology recognized:');
+    lines.push(...equipmentLines);
+  }
+
+  const categories = pack.categories ?? [];
+  if (categories.length > 0) {
+    lines.push('Service types offered:');
+    for (const cat of categories) {
+      const desc = cat.description ? `: ${cat.description}` : '';
+      lines.push(`  - ${cat.name}${desc}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export function buildContextPromptSection(context: VerticalContext): string {
   const sections: string[] = [];
 

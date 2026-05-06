@@ -1,6 +1,7 @@
 import {
   assembleVerticalContext,
   buildContextPromptSection,
+  formatVerticalForCallerPrompt,
   ContextAssemblyDependencies,
 } from '../../src/verticals/context-assembly';
 import { InMemoryVerticalPackRepository } from '../../src/verticals/registry';
@@ -178,5 +179,62 @@ describe('P4-009 — Vertical-Aware Context Assembly', () => {
     expect(context.matchedTemplate).toBeNull(); // tenant-scoped
     expect(context.matchedBundles).toHaveLength(0); // tenant-scoped
     expect(context.wordingGuidelines).toBe(''); // tenant-scoped
+  });
+});
+
+describe('formatVerticalForCallerPrompt — §3B caller-prompt section', () => {
+  it('returns empty string when pack is null', () => {
+    expect(formatVerticalForCallerPrompt(null)).toBe('');
+    expect(formatVerticalForCallerPrompt(undefined)).toBe('');
+  });
+
+  it('emits vertical name + industry context for a real pack', () => {
+    const pack = createHvacPack();
+    const out = formatVerticalForCallerPrompt(pack);
+    expect(out).toContain('Service vertical: HVAC Professional');
+    expect(out).toContain('Industry context: Heating, ventilation');
+  });
+
+  it('lists equipment terminology with aliases', () => {
+    const pack = createHvacPack();
+    const out = formatVerticalForCallerPrompt(pack);
+    expect(out).toContain('Equipment and terminology recognized:');
+    // Furnace + its aliases — caller may say "heater" or "heating unit".
+    expect(out).toMatch(/Furnace.*heater.*heating unit/);
+    // Air Conditioner + its colloquial names — "central air", "a/c", etc.
+    expect(out).toMatch(/Air Conditioner.*air conditioner.*central air/);
+    // Thermostat + smart-home synonyms.
+    expect(out).toMatch(/Thermostat.*smart thermostat/);
+  });
+
+  it('lists service categories', () => {
+    const pack = createHvacPack();
+    const out = formatVerticalForCallerPrompt(pack);
+    expect(out).toContain('Service types offered:');
+    expect(out).toContain('Installation');
+    expect(out).toContain('Repair');
+    expect(out).toContain('Maintenance');
+  });
+
+  it('omits sections cleanly when terminology or categories are empty', () => {
+    const pack = createHvacPack();
+    const stripped = { ...pack, terminology: {}, categories: [] };
+    const out = formatVerticalForCallerPrompt(stripped);
+    expect(out).toContain('Service vertical: HVAC Professional');
+    expect(out).not.toContain('Equipment and terminology recognized:');
+    expect(out).not.toContain('Service types offered:');
+  });
+
+  it('handles a terminology entry with no aliases without producing dangling parens', () => {
+    const pack = createHvacPack();
+    const noAliases = {
+      ...pack,
+      terminology: {
+        widget: { displayName: 'Widget', aliases: [], description: 'A widget' },
+      },
+    };
+    const out = formatVerticalForCallerPrompt(noAliases);
+    expect(out).toContain('  - Widget');
+    expect(out).not.toContain('Widget ()');
   });
 });
