@@ -1,25 +1,117 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
+import { BusinessProfileSheet } from './BusinessProfileSheet';
+import { TerminologySheet } from './TerminologySheet';
+import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
+import { DepositRulesSheet } from './DepositRulesSheet';
+import {
+  fetchLanguageSettings,
+  updateLanguageSettings,
+} from '../../api/settings';
 
 export function SettingsPage() {
   const navigate = useNavigate();
   const { me } = useMe();
-  const [aiAuto, setAiAuto]         = useState(true);
+  // Tier 4 — Quick toggles: load from backend on mount, persist on
+  // toggle. aiAuto + reminders live on /api/settings (migration 075).
+  // spanishMode derives from /api/settings/language (P11-002).
+  const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings');
+        if (cancelled || !res.ok) return;
+        const data = (await res.json()) as {
+          autoApplyInternalUpdates?: boolean;
+          autoSendAppointmentReminders?: boolean;
+        };
+        if (typeof data.autoApplyInternalUpdates === 'boolean') {
+          setAiAuto(data.autoApplyInternalUpdates);
+        }
+        if (typeof data.autoSendAppointmentReminders === 'boolean') {
+          setReminders(data.autoSendAppointmentReminders);
+        }
+      } catch {
+        /* network hiccup — defaults remain */
+      }
+    })();
+    (async () => {
+      try {
+        const lang = await fetchLanguageSettings();
+        if (cancelled) return;
+        setSpanishMode(lang.defaultLanguage === 'es');
+      } catch {
+        /* language settings missing — default to English */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function persistToggle(field: 'aiAuto' | 'reminders' | 'spanishMode', value: boolean) {
+    if (field === 'spanishMode') {
+      try {
+        await updateLanguageSettings({ defaultLanguage: value ? 'es' : 'en' });
+      } catch {
+        toast.error('Could not save language preference');
+        setSpanishMode(!value); // revert
+      }
+      return;
+    }
+    const body =
+      field === 'aiAuto'
+        ? { autoApplyInternalUpdates: value }
+        : { autoSendAppointmentReminders: value };
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      // revert on failure
+      if (field === 'aiAuto') setAiAuto(!value);
+      else setReminders(!value);
+    }
+  }
+
+  function toggleAiAuto(value: boolean) {
+    setAiAuto(value);
+    void persistToggle('aiAuto', value);
+  }
+  function toggleReminders(value: boolean) {
+    setReminders(value);
+    void persistToggle('reminders', value);
+  }
+  function toggleSpanishMode(value: boolean) {
+    setSpanishMode(value);
+    void persistToggle('spanishMode', value);
+  }
   const [qbOpen, setQbOpen]         = useState(false);
   const [qbConnected, setQbConnected] = useState(false);
   const [suppliersOpen, setSuppliersOpen] = useState(false);
+  const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
+  const [terminologyOpen, setTerminologyOpen] = useState(false);
+  const [aiRulesOpen, setAiRulesOpen] = useState(false);
+  const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -60,9 +152,9 @@ export function SettingsPage() {
     {
       title: 'Business',
       items: [
-        { icon: Building2, label: 'Business profile',    description: 'Name, logo, address, phone',                      action: () => {} },
-        { icon: Globe,     label: 'Language & region',   description: 'English / Español, timezone',                     action: () => {} },
-        { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => {} },
+        { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
+        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
+        { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
       ],
     },
@@ -76,9 +168,9 @@ export function SettingsPage() {
     {
       title: 'AI & Automation',
       items: [
-        { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => {} },
+        { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
-        { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => {} },
+        { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
       ],
     },
     {
@@ -91,7 +183,7 @@ export function SettingsPage() {
       title: 'Payments & billing',
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Card, ACH · Stripe connected',  action: () => {} },
-        { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => {} },
+        { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: CreditCard, label: 'Fieldly subscription',   description: 'Pro plan · $79/mo',             action: () => {} },
       ],
     },
@@ -260,17 +352,17 @@ export function SettingsPage() {
             {
               label: 'AI auto-apply for internal updates',
               description: 'Let the assistant apply safe internal changes without asking',
-              value: aiAuto, onChange: setAiAuto,
+              value: aiAuto, onChange: toggleAiAuto,
             },
             {
               label: 'Auto send appointment reminders',
               description: 'Text customers 2 hours before scheduled jobs',
-              value: reminders, onChange: setReminders,
+              value: reminders, onChange: toggleReminders,
             },
             {
               label: 'Spanish language mode',
               description: 'Interface and customer communications in Español',
-              value: spanishMode, onChange: setSpanishMode,
+              value: spanishMode, onChange: toggleSpanishMode,
             },
           ].map(({ label, description, value, onChange }) => (
             <div key={label} className="flex items-start justify-between gap-3 px-4 py-3.5">
@@ -457,6 +549,26 @@ export function SettingsPage() {
       {/* Suppliers sheet */}
       {suppliersOpen && (
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
+      )}
+
+      {/* Business profile sheet — closes the first of the 13 settings stubs. */}
+      {businessProfileOpen && (
+        <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
+      )}
+
+      {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
+      {terminologyOpen && (
+        <TerminologySheet onClose={() => setTerminologyOpen(false)} />
+      )}
+
+      {/* AI approval rules sheet — per-mode auto-approve threshold overrides. */}
+      {aiRulesOpen && (
+        <AIApprovalRulesSheet onClose={() => setAiRulesOpen(false)} />
+      )}
+
+      {/* Deposit rules sheet — strategy + amount + optional threshold. */}
+      {depositRulesOpen && (
+        <DepositRulesSheet onClose={() => setDepositRulesOpen(false)} />
       )}
     </div>
   );

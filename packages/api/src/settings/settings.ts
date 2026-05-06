@@ -49,6 +49,51 @@ export interface TenantSettings {
    * worker (follow-up). Default `'queue_and_sms'`.
    */
   unsupervisedProposalRouting?: UnsupervisedProposalRouting;
+  /**
+   * Tier 4 (Settings stubs) — when true, low-risk internal updates
+   * the AI proposes are applied automatically. When false, every
+   * change requires a human tap. Default false (stricter).
+   */
+  autoApplyInternalUpdates?: boolean;
+  /**
+   * Tier 4 (Settings stubs) — when true, the system text-messages
+   * customers ~2h before scheduled appointments. Default true.
+   */
+  autoSendAppointmentReminders?: boolean;
+  /**
+   * Tier 4 (AI approval rules) — per-mode override of the proposal
+   * auto-approve threshold. Consumed by
+   * `proposals/auto-approve.ts:resolveAutoApproveThreshold` via the
+   * `tenantOverride` field. A missing key (or `undefined` value)
+   * falls through to `DEFAULT_AUTO_APPROVE_THRESHOLDS`. Each value is
+   * a confidence threshold in `[0, 1]`.
+   *
+   * Wiring this map into the actual proposal-creation hot path is
+   * tracked separately (PR B) — this PR persists the value
+   * end-to-end (Settings UI ↔ DB) without yet feeding it to
+   * `createProposal`. Behavior unchanged until the wire-up lands.
+   */
+  autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /**
+   * Tier 4 (Deposit rules — PR 1: data plane only). Strategy + amount
+   * for requiring a deposit before work begins. Consumed by the
+   * estimate-flow integration that lands in PR 2; this PR persists
+   * the settings end-to-end without changing behavior.
+   *
+   * Field correlation rules (mirrored by the migration's CHECK):
+   *   - When `depositStrategy` is null/undefined, no deposit applies.
+   *   - When `depositStrategy === 'percentage'`, `depositPercentageBps`
+   *     must be set (0–10000 = 0%–100%).
+   *   - When `depositStrategy === 'fixed'`, `depositFixedCents` must
+   *     be set (non-negative integer).
+   *   - `depositRequiredAboveCents` is an optional threshold: when
+   *     null, the rule applies to every estimate; otherwise only
+   *     estimates whose total `>=` this amount require a deposit.
+   */
+  depositStrategy?: 'percentage' | 'fixed' | null;
+  depositPercentageBps?: number | null;
+  depositFixedCents?: number | null;
+  depositRequiredAboveCents?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -80,6 +125,17 @@ export interface UpdateSettingsInput {
   backupSupervisorUserId?: string | null;
   /** Phase 12 — see `UnsupervisedProposalRouting` for accepted values. */
   unsupervisedProposalRouting?: UnsupervisedProposalRouting;
+  /** Tier 4 — auto-apply low-risk internal AI updates without asking. */
+  autoApplyInternalUpdates?: boolean;
+  /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
+  autoSendAppointmentReminders?: boolean;
+  /** Tier 4 — per-mode override of the proposal auto-approve threshold. */
+  autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /** Tier 4 (Deposit rules) — see TenantSettings doc for correlation rules. */
+  depositStrategy?: 'percentage' | 'fixed' | null;
+  depositPercentageBps?: number | null;
+  depositFixedCents?: number | null;
+  depositRequiredAboveCents?: number | null;
 }
 
 export interface SettingsRepository {
@@ -359,6 +415,31 @@ export async function getNextInvoiceNumber(
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
 }
 
+/**
+ * Tier 4 — entity-label keys the Terminology sheet edits.
+ * These describe how the tenant wants ServiceOS to refer to common
+ * CRM entities (e.g. "Quote" instead of "Estimate", "Project" instead
+ * of "Job"). Distinct from per-vertical equipment terminology keys
+ * which come from the active pack at runtime.
+ *
+ * Used by `validateTerminologyPreferences` so a PUT /api/settings can
+ * persist these regardless of which vertical packs are active. The
+ * onboarding route already writes these keys directly through the
+ * repo; this allowlist makes them editable through the API too.
+ */
+export const ENTITY_LABEL_TERMINOLOGY_KEYS = [
+  'jobTerm',
+  'estimateTerm',
+  'invoiceTerm',
+  'customerTerm',
+  'appointmentTerm',
+  'workerTerm',
+  // Onboarding seeds these too — included here so a re-save of the
+  // existing payload doesn't accidentally fail validation.
+  'teamSize',
+  'ownerName',
+] as const;
+
 export function validateTerminologyPreferences(
   preferences: Record<string, string>,
   validKeys?: string[]
@@ -368,6 +449,9 @@ export function validateTerminologyPreferences(
     errors.push('terminologyPreferences must be an object');
     return errors;
   }
+  const allowed = validKeys
+    ? new Set([...validKeys, ...ENTITY_LABEL_TERMINOLOGY_KEYS])
+    : null;
   for (const [key, value] of Object.entries(preferences)) {
     if (!key || key.trim().length === 0) {
       errors.push('terminologyPreferences key must not be empty');
@@ -375,7 +459,7 @@ export function validateTerminologyPreferences(
     if (typeof value !== 'string' || value.trim().length === 0) {
       errors.push(`terminologyPreferences value for "${key}" must be a non-empty string`);
     }
-    if (validKeys && !validKeys.includes(key)) {
+    if (allowed && !allowed.has(key)) {
       errors.push(`terminologyPreferences key "${key}" is not a recognized term for the active vertical`);
     }
   }

@@ -54,21 +54,26 @@ export function createSettingsRouter(
         const parsed = updateSettingsSchema.parse(req.body);
 
         if (parsed.terminologyPreferences) {
-          if (!deps) {
-            throw new ValidationError('Unable to validate terminologyPreferences without vertical configuration');
+          // Tier 4 — when deps are wired, validate against the union of
+          // pack-derived equipment terms + ENTITY_LABEL_TERMINOLOGY_KEYS.
+          // When deps aren't wired (legacy app boot, tests), fall back
+          // to the entity-label allowlist baked into the validator —
+          // this keeps the Terminology sheet functional without forcing
+          // every test harness to wire pack-config plumbing.
+          let validTermKeys: string[] | undefined;
+          if (deps) {
+            const activePackConfigs = await loadActivePackConfigs(
+              req.auth!.tenantId,
+              deps.activationRepo,
+              deps.verticalPackRegistry
+            );
+            validTermKeys = activePackConfigs.flatMap((config) =>
+              Object.keys(config.terminology),
+            );
           }
-
-          const activePackConfigs = await loadActivePackConfigs(
-            req.auth!.tenantId,
-            deps.activationRepo,
-            deps.verticalPackRegistry
-          );
-          const validTermKeys = new Set(
-            activePackConfigs.flatMap((config) => Object.keys(config.terminology))
-          );
           const validationErrors = validateTerminologyPreferences(
             parsed.terminologyPreferences,
-            Array.from(validTermKeys)
+            validTermKeys ?? [],
           );
 
           if (validationErrors.length > 0) {

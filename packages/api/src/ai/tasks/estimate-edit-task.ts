@@ -120,6 +120,10 @@ export class EstimateEditTaskHandler implements TaskHandler {
       // statuses (draft / ready_for_review). Sent estimates are locked
       // at execute time. Classified as `capture`, same as draft_estimate.
       sourceTrustTier: 'autonomous',
+      // PR B — propagate tenant override from context.
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

@@ -131,6 +131,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['072_add_executing_status', 'cccb33af535e3d99643c7d0de588afb78fe39af2759132d9d126e9f4f022a357'],
   ['073_add_execution_retry_count', '061fc84a465b30151cd19619172d0dc5b3e01676272adada9488f4a635c09b22'],
   ['074_tenant_integrations_system_lookup', '3832dcf271a018e9a6d9d66c3ebba87c82ad3b910ff1e7debce83dbce870bd0d'],
+  ['075_tenant_settings_quick_toggles', '66b5bde61e7778e6ac8f76e49097bff708ea5137ccdb52d0816496b2380bbcb6'],
+  ['076_tenant_settings_auto_approve_threshold', 'f1bdefbaa0c21afb4f7ddf11e1c2f8da528ff38ed54fc97595f9a0425d7ade89'],
+  ['077_tenant_settings_deposit_rules', 'a3a600e39f688c733850d6baec9e6aa163e730f999b00200cce8d0f7f5179163'],
 ];
 
 function hashMigration(value: string): string {

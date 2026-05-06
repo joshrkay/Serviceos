@@ -291,6 +291,57 @@ describe('InAppVoiceAdapter', () => {
       expect(systemMessages[1].content).toContain('Gold Membership');
     });
 
+    it('PR B — passes resolved tenant threshold override through to createProposal', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_invoice',
+          confidence: 0.94,
+          extractedEntities: { customerName: 'Acme', amount: 45000 },
+        }),
+      ]);
+      const thresholdResolver = vi.fn(async (tenantId: string) => {
+        expect(tenantId).toBe(TENANT);
+        return { supervisor: 0.85, both: 0.88, tech: 0.92 };
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        thresholdResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+      expect(thresholdResolver).toHaveBeenCalledWith(TENANT);
+      // Without going through the full proposal-status decision, the
+      // smoke test is: the resolver was called and a proposal was
+      // persisted. Behavior coverage of the auto-approve threshold
+      // decision lives in proposals/auto-approve tests.
+      const proposals = await proposalRepo.findByTenant(TENANT);
+      expect(proposals.length).toBe(1);
+    });
+
+    it('PR B — degrades gracefully when the threshold resolver throws', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.94 }),
+      ]);
+      const thresholdResolver = vi.fn(async () => {
+        throw new Error('simulated DB outage');
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        thresholdResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Must not throw — falls through to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+      await expect(adapter.handleInput(sessionId, 'Invoice Acme')).resolves.toBeDefined();
+    });
+
     it('falls back gracefully when the plan resolver throws', async () => {
       const gateway = scriptedGateway([
         JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),

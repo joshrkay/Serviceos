@@ -114,6 +114,10 @@ export class EstimateTaskHandler implements TaskHandler {
       // when the LLM's confidence is ≥ 0.9; lower confidence still lands
       // in 'draft' for operator review.
       sourceTrustTier: 'autonomous',
+      // PR B — propagate tenant override from context.
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     const proposal = createProposal(input);

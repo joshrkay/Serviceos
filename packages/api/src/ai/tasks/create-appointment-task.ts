@@ -266,6 +266,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // Appointments are capture-class — schedule changes are reversible
       // and the undo window provides the human-in-the-loop check. See D3.
       sourceTrustTier: 'autonomous',
+      // PR B — propagate tenant override from context.
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

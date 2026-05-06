@@ -47,7 +47,7 @@ domain knowledge** in agent prompts, and a finite list of UI polish items
 | **P1 — Core Business Entities** | 24 | 24/24 | ~22/24 | Settings save (1B/1C) |
 | **P2 — Proposal Engine + AI Safety** | 27 | 27/27 | ~25/27 | inbox refresh, eval polish |
 | **P3 — Conversation + Voice** | 15 | 15/15 | ~12/15 | streaming providers (1A/1B) |
-| **P4 — Vertical Packs + Estimate Intelligence** | 26 | 26/26 | ~25/26 | Template management UI |
+| **P4 — Vertical Packs + Estimate Intelligence** | 26 | 26/26 | 26/26 | — |
 | **P5 — Invoice Intelligence + Payments** | 29 | 28/29 | ~26/29 | invoice delivery notif |
 | **P6 — Dispatch Board + Scheduling** | 27 | 24/27 | ~20/27 | conflict badges, refresh |
 | **P7 — Integrations + Beta Hardening** | 18 | 8/18 | ~5/18 | QuickBooks, Zapier, runbook |
@@ -156,13 +156,14 @@ it knows home services. From `remaining-features.md` §3.
 
 ### Tier 4 — Finite UI polish
 
-| Item | Location |
+| Item | Status |
 |---|---|
-| 13 settings page handlers still `action: () => {}` | `components/settings/SettingsPage.tsx:63-73,…` |
-| Conflict-visibility badges on appointment cards (P6-026) | `components/dispatch/AppointmentCard.tsx` |
-| Board refresh after proposal execution (P6-027) | `pages/dispatch/DispatchBoard.tsx` |
-| Template management UI in settings (P4-014) | `components/settings/` |
-| Conversation state persistence across navigation (P3-019) | `web/.../conversations` |
+| 13 settings page handlers still `action: () => {}` | **5/13 closed** end-to-end (Business profile, Language & region, Estimate & invoice templates, Terminology, AI approval rules — both data plane + actually-affects-routing wire-up). 8 remain: Reminders & follow-ups (timing knob), Team members, Roles & permissions, Payment methods, Deposit rules, Fieldly subscription, Calendar sync, Zapier. Several need backend extensions or external OAuth. |
+| Conflict-visibility badges on appointment cards (P6-026) | **DONE** — `AppointmentCard` accepts `hasConflict?` and renders an aria-labeled "Conflict" badge; `DispatchBoard` computes overlap pairwise per technician lane and threads the set through `TechnicianLane`/`UnassignedQueue`. |
+| Board refresh after proposal execution (P6-027) | **DONE** — `DispatchBoard` calls `refetch()` after a successful proposal POST, plus on `visibilitychange` and `window.focus` so cross-tab approvals show without a manual reload. |
+| Template management UI in settings (P4-014) | **DONE** — `TemplatesPage.tsx` (961 lines) at `/settings/templates` ships an AI-suggestion review flow, accept/skip controls, weekly digest settings, per-template editing. The settings-page entry that pointed at this destination as a stub now navigates correctly. |
+| Conversation state persistence across navigation (P3-019) | **DONE** — `AssistantPage.tsx` reads `conversationId` from URL searchParams or localStorage on mount; writes it on creation; clears it on explicit reset. URL + storage both hydrate. |
+| Quick-settings toggle persistence | **DONE** (bonus) — `autoApplyInternalUpdates` and `autoSendAppointmentReminders` columns added (migration 075); spanish-mode toggle bound to `/api/settings/language`; failed PUT reverts the local toggle and shows a Sonner toast. |
 
 ### Tier 5 — Operational / hardening backlog
 
@@ -293,9 +294,12 @@ under load.
 latency.
 
 ### Then — Sprint C
-**Tier 4 — UI polish** — Close the 13 settings stubs, conflict-visibility
-badges, board-refresh-after-execution, conversation persistence across
-navigation, template management UI.
+**Tier 4 — UI polish** — Mostly shipped: 5/13 settings stubs closed
+end-to-end, Quick-toggle persistence wired, conflict-visibility badges
+live, board-refresh-after-execution + on-focus live, conversation state
+persistence across navigation verified, Templates page already
+shipping. Remaining: 8 settings stubs (most need backend extension or
+external OAuth), Reminders timing knob, optional polish items.
 
 ### Polish — Sprint D
 **Tier 5 — Operational hardening** — dependency audit, rollback runbook,

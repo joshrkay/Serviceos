@@ -123,6 +123,7 @@ import {
   buildCallerPlanContext,
   formatCallerPlanForPrompt,
 } from './ai/orchestration/caller-plan-context';
+import { createThresholdResolver } from './proposals/threshold-resolver';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
@@ -595,6 +596,12 @@ export function createApp(): express.Express {
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
+  // PR B (Tier 4 / AI approval rules) — shared per-tenant
+  // auto-approve threshold resolver. One cached instance for all
+  // entry points (twilio adapter, inapp adapter, voice-action-router
+  // worker) so settings hits the DB at most once per tenant per TTL
+  // window across the whole process.
+  const thresholdResolver = createThresholdResolver(settingsRepo);
   const auditRepo          = webhookAuditRepo;
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter
@@ -1030,6 +1037,7 @@ export function createApp(): express.Express {
     proposalRepo,
     slotConflictChecker,
     availabilityFinder,
+    thresholdResolver,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1240,6 +1248,7 @@ export function createApp(): express.Express {
     recordingCallbackPath: '/api/telephony/recording',
     verticalPromptResolver,
     callerPlanResolver,
+    thresholdResolver,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1714,7 +1723,13 @@ export function createApp(): express.Express {
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
-  app.use('/api/settings', createSettingsRouter(settingsRepo));
+  app.use(
+    '/api/settings',
+    createSettingsRouter(settingsRepo, {
+      activationRepo: packActivationRepo,
+      verticalPackRegistry: canonicalPackRegistry,
+    }),
+  );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/templates', createTemplateRouter(templateRepo));
@@ -1864,6 +1879,7 @@ export function createApp(): express.Express {
     ...(pool ? { pool } : {}),
     verticalPromptResolver,
     callerPlanResolver,
+    thresholdResolver,
   });
   app.use(
     '/api/voice/sessions',

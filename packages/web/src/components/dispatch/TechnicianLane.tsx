@@ -22,6 +22,13 @@ export interface TechnicianLaneProps {
    * reschedule_appointment proposal via useCreateScheduleProposal.
    */
   onReorderWithinLane?: (appointmentId: string, fromIndex: number, toIndex: number) => void;
+  /**
+   * P6-026 — set of appointment ids that overlap another booking
+   * (same technician or same customer). Computed by the DispatchBoard
+   * parent and forwarded to each AppointmentCard so the conflict
+   * badge renders. Optional — omitting it leaves cards quiet.
+   */
+  conflictIds?: ReadonlySet<string>;
 }
 
 export function TechnicianLane({
@@ -33,6 +40,7 @@ export function TechnicianLane({
   onDragLeave,
   onDrop,
   onReorderWithinLane,
+  conflictIds,
 }: TechnicianLaneProps) {
   const sortedAppointments = [...appointments].sort(
     (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime()
@@ -70,6 +78,7 @@ export function TechnicianLane({
                 appointment={appointment}
                 draggable={true}
                 onDragStart={onDragStart}
+                hasConflict={conflictIds?.has(appointment.id) ?? false}
               />
               {onReorderWithinLane && (
                 <div

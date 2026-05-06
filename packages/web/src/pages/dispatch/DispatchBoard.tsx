@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { toast } from 'sonner';
 import { DateNavigation } from '../../components/dispatch/DateNavigation';
 import { SummaryStrip } from '../../components/dispatch/SummaryStrip';
@@ -51,6 +51,27 @@ export function DispatchBoard() {
   const [pendingDrop, setPendingDrop] = useState<PendingDrop | null>(null);
   const [isSubmittingProposal, setIsSubmittingProposal] = useState(false);
 
+  // P6-027 — refetch when the tab regains focus or the document
+  // becomes visible. Catches the case where a dispatcher approves a
+  // proposal in another tab (the proposals review screen) and
+  // returns to the board expecting the updated lane state.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refetch();
+      }
+    };
+    const onFocus = () => {
+      void refetch();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refetch]);
+
   const handleDateChange = useCallback((date: Date) => {
     setSelectedDate(date);
   }, []);
@@ -64,6 +85,41 @@ export function DispatchBoard() {
     if (!data) return [];
     const fromLanes = data.technicianLanes.flatMap((lane) => lane.appointments);
     return [...data.unassignedAppointments, ...fromLanes];
+  }, [data]);
+
+  /**
+   * P6-026 — set of appointment ids whose time range overlaps another
+   * booking on the same technician's lane. Pairwise scan within each
+   * lane (O(n²) per lane, but lanes are small in practice — typically
+   * < 12 appointments per technician per day). Unassigned appointments
+   * don't conflict among themselves because no technician owns them.
+   * Two appointments overlap iff a.start < b.end AND b.start < a.end
+   * (strict inequality so back-to-back bookings don't flag).
+   */
+  const conflictIds = useMemo<ReadonlySet<string>>(() => {
+    if (!data) return new Set<string>();
+    const conflicts = new Set<string>();
+    for (const lane of data.technicianLanes) {
+      const sorted = [...lane.appointments].sort(
+        (a, b) =>
+          new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+      );
+      for (let i = 0; i < sorted.length; i++) {
+        for (let j = i + 1; j < sorted.length; j++) {
+          const a = sorted[i];
+          const b = sorted[j];
+          const aStart = new Date(a.scheduledStart).getTime();
+          const aEnd = new Date(a.scheduledEnd).getTime();
+          const bStart = new Date(b.scheduledStart).getTime();
+          const bEnd = new Date(b.scheduledEnd).getTime();
+          if (aStart < bEnd && bStart < aEnd) {
+            conflicts.add(a.id);
+            conflicts.add(b.id);
+          }
+        }
+      }
+    }
+    return conflicts;
   }, [data]);
 
   const findAppointment = useCallback(
@@ -292,6 +348,14 @@ export function DispatchBoard() {
           },
         },
       });
+      // P6-027 — refetch the board after a successful proposal POST.
+      // Auto-approved proposals (high-confidence schedule changes that
+      // clear the auto-approve threshold) execute immediately upstream,
+      // so the next refetch picks up the new state. Proposals that
+      // queue for human review return unchanged data — refetch is a
+      // no-op in that case but keeps the UI consistent if the proposal
+      // gets approved+executed in another tab while this one is open.
+      void refetch();
       // Only dismiss the dialog on success. On error we keep `pendingDrop`
       // so the user can retry without re-performing the drag.
       setPendingDrop(null);
@@ -364,6 +428,7 @@ export function DispatchBoard() {
               onDragOver={handleDragOverTarget('__unassigned__')}
               onDragLeave={handleDragLeaveTarget()}
               onDrop={handleDropOnUnassigned}
+              conflictIds={conflictIds}
             />
           </div>
 
@@ -381,6 +446,7 @@ export function DispatchBoard() {
                 onDragOver={handleDragOverTarget(lane.technicianId)}
                 onDragLeave={handleDragLeaveTarget()}
                 onDrop={handleDropOnLane(lane.technicianId)}
+                conflictIds={conflictIds}
               />
             ))}
             {filteredLanes.length === 0 && (

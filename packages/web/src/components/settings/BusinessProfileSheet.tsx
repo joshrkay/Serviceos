@@ -1,0 +1,232 @@
+/**
+ * Tier 4 (Settings stubs) — Business Profile editor.
+ *
+ * Closes the first of the 13 `action: () => {}` stubs in SettingsPage:
+ * Business profile (Name, phone, email, timezone). The fields here
+ * mirror what the backend already accepts at PUT /api/settings — name,
+ * phone, email, timezone. Address + logo are tracked as a follow-up
+ * because they need a backend schema extension first.
+ *
+ * Pattern: GET on open, PUT on save, Sonner toast on success/failure.
+ */
+import { useEffect, useState } from 'react';
+import { X, Building2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { apiFetch } from '../../utils/api-fetch';
+
+interface BusinessProfileFields {
+  businessName: string;
+  businessPhone: string;
+  businessEmail: string;
+  timezone: string;
+}
+
+const EMPTY: BusinessProfileFields = {
+  businessName: '',
+  businessPhone: '',
+  businessEmail: '',
+  timezone: '',
+};
+
+const TIMEZONE_OPTIONS = [
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'America/Phoenix',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+];
+
+interface BusinessProfileSheetProps {
+  onClose: () => void;
+}
+
+export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
+  const [fields, setFields] = useState<BusinessProfileFields>(EMPTY);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings');
+        if (!res.ok) throw new Error(`Load failed (${res.status})`);
+        const data = (await res.json()) as Partial<BusinessProfileFields>;
+        if (cancelled) return;
+        setFields({
+          businessName: data.businessName ?? '',
+          businessPhone: data.businessPhone ?? '',
+          businessEmail: data.businessEmail ?? '',
+          timezone: data.timezone ?? '',
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Could not load settings');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function save() {
+    setError('');
+    if (!fields.businessName.trim()) {
+      setError('Business name is required.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          businessName: fields.businessName.trim(),
+          businessPhone: fields.businessPhone.trim() || undefined,
+          businessEmail: fields.businessEmail.trim() || undefined,
+          timezone: fields.timezone || undefined,
+        }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON */
+        }
+        throw new Error(detail || `Save failed (${res.status})`);
+      }
+      toast.success('Business profile saved');
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not save';
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center"
+      onClick={onClose}
+      role="dialog"
+      aria-labelledby="business-profile-title"
+      aria-modal="true"
+    >
+      <div
+        className="w-full max-w-md rounded-t-2xl bg-white shadow-xl md:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-4">
+          <span className="flex size-9 items-center justify-center rounded-xl bg-slate-100">
+            <Building2 size={16} className="text-slate-700" />
+          </span>
+          <h2 id="business-profile-title" className="flex-1 text-base text-slate-900">
+            Business profile
+          </h2>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-5 space-y-4">
+          {loading ? (
+            <p className="text-sm text-slate-500">Loading…</p>
+          ) : (
+            <>
+              <label htmlFor="bp-name" className="block">
+                <span className="text-sm text-slate-700">Business name</span>
+                <input
+                  id="bp-name"
+                  type="text"
+                  value={fields.businessName}
+                  onChange={(e) => setFields((f) => ({ ...f, businessName: e.target.value }))}
+                  placeholder="Ortega HVAC & Services"
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  required
+                />
+              </label>
+
+              <label htmlFor="bp-phone" className="block">
+                <span className="text-sm text-slate-700">Phone</span>
+                <input
+                  id="bp-phone"
+                  type="tel"
+                  value={fields.businessPhone}
+                  onChange={(e) => setFields((f) => ({ ...f, businessPhone: e.target.value }))}
+                  placeholder="+1 (555) 123-4567"
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                />
+              </label>
+
+              <label htmlFor="bp-email" className="block">
+                <span className="text-sm text-slate-700">Email</span>
+                <input
+                  id="bp-email"
+                  type="email"
+                  value={fields.businessEmail}
+                  onChange={(e) => setFields((f) => ({ ...f, businessEmail: e.target.value }))}
+                  placeholder="hello@ortega-hvac.com"
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                />
+              </label>
+
+              <label htmlFor="bp-timezone" className="block">
+                <span className="text-sm text-slate-700">Timezone</span>
+                <select
+                  id="bp-timezone"
+                  value={fields.timezone}
+                  onChange={(e) => setFields((f) => ({ ...f, timezone: e.target.value }))}
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
+                >
+                  <option value="">Select a timezone…</option>
+                  {TIMEZONE_OPTIONS.map((tz) => (
+                    <option key={tz} value={tz}>
+                      {tz}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {error && (
+                <p className="text-sm text-red-600" role="alert">
+                  {error}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            disabled={saving || loading}
+            className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

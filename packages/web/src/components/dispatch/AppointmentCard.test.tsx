@@ -70,4 +70,35 @@ describe('P6-002 — Appointment card model', () => {
     render(<AppointmentCard appointment={inProgress} />);
     expect(screen.getByTestId('appointment-status')).toHaveTextContent('in progress');
   });
+
+  describe('P6-026 — conflict badge', () => {
+    it('does not render the badge when hasConflict is omitted', () => {
+      render(<AppointmentCard appointment={mockAppointment} />);
+      expect(screen.queryByTestId('appointment-conflict-badge')).not.toBeInTheDocument();
+    });
+
+    it('does not render the badge when hasConflict is false', () => {
+      render(<AppointmentCard appointment={mockAppointment} hasConflict={false} />);
+      expect(screen.queryByTestId('appointment-conflict-badge')).not.toBeInTheDocument();
+      expect(screen.getByTestId('appointment-card')).toHaveAttribute(
+        'data-has-conflict',
+        'false',
+      );
+    });
+
+    it('renders an accessible "Conflict" badge when hasConflict is true', () => {
+      render(<AppointmentCard appointment={mockAppointment} hasConflict={true} />);
+      const badge = screen.getByTestId('appointment-conflict-badge');
+      expect(badge).toBeInTheDocument();
+      expect(badge).toHaveTextContent('Conflict');
+      expect(badge).toHaveAttribute('aria-label', 'Scheduling conflict');
+      expect(screen.getByTestId('appointment-card')).toHaveAttribute(
+        'data-has-conflict',
+        'true',
+      );
+      expect(screen.getByTestId('appointment-card').className).toContain(
+        'appointment-card--conflict',
+      );
+    });
+  });
 });
