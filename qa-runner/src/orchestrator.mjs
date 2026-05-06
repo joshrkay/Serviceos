@@ -7,6 +7,7 @@ import {
   writeJson,
   missingEnvVars,
 } from './tools.mjs';
+import { scanForSecrets, fingerprint } from './redaction.mjs';
 
 const root = path.resolve('qa-runner');
 const planPath = path.join(root, 'config', 'test-plan.json');
@@ -127,6 +128,9 @@ async function run() {
     }
   }
 
+  const findings = scanForSecrets(rows);
+  console.log('[qa-runner:redaction]', { hasRows: rows.length > 0, fp: fingerprint(rows), findings: findings.length });
+  if (findings.length) throw new Error(`QA report generation failed: non-redacted secrets detected (${findings.map((f) => f.name).join(', ')})`);
   await writeJson(reportPath, rows);
   console.log(`\nReport written: ${reportPath}`);
 }

@@ -12,23 +12,36 @@ const SECRET_KEY_PATTERNS = [
   /stripe/i,
 ];
 
+const PII_KEY_PATTERNS = [/email/i, /phone/i, /name/i, /address/i, /user/i, /tenant/i];
+
 const REDACTED = '[REDACTED]';
 const CIRCULAR = '[Circular]';
+
+export type RedactionTier = 'strict' | 'standard';
 
 export function isSecretKey(key: string): boolean {
   return SECRET_KEY_PATTERNS.some((re) => re.test(key));
 }
 
+function isPiiKey(key: string): boolean {
+  return PII_KEY_PATTERNS.some((re) => re.test(key));
+}
+
 function shouldRedactValue(value: unknown): boolean {
-  // Empty strings stay untouched — intentionally-blank secrets (e.g. in test
-  // fixtures) shouldn't flip to '[REDACTED]' and mask the fact that nothing
-  // was actually set.
   if (typeof value === 'string' && value.length === 0) return false;
   if (value === undefined || value === null) return false;
   return true;
 }
 
-function walk<T>(input: T, seen: WeakSet<object>): T {
+function maskValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    if (value.length <= 4) return REDACTED;
+    return `${value.slice(0, 2)}***${value.slice(-2)}`;
+  }
+  return REDACTED;
+}
+
+function walk<T>(input: T, seen: WeakSet<object>, tier: RedactionTier): T {
   if (input === null || input === undefined) return input;
   if (typeof input !== 'object') return input;
 
@@ -38,22 +51,37 @@ function walk<T>(input: T, seen: WeakSet<object>): T {
   seen.add(input as object);
 
   if (Array.isArray(input)) {
-    return input.map((v) => walk(v, seen)) as unknown as T;
+    return input.map((v) => walk(v, seen, tier)) as unknown as T;
   }
 
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
     if (isSecretKey(key) && shouldRedactValue(value)) {
-      // Redact the entire value regardless of its type — object/array/number
-      // values under a secret-like key could still leak sensitive data.
       out[key] = REDACTED;
-    } else {
-      out[key] = walk(value, seen);
+      continue;
     }
+    if (tier === 'strict' && isPiiKey(key) && shouldRedactValue(value)) {
+      out[key] = maskValue(value);
+      continue;
+    }
+    out[key] = walk(value, seen, tier);
   }
-  return out as T;
+  return out as unknown as T;
 }
 
 export function redactSecrets<T>(input: T): T {
-  return walk(input, new WeakSet<object>());
+  return walk(input, new WeakSet<object>(), 'standard');
+}
+
+export function redactByTier<T>(input: T, tier: RedactionTier): T {
+  return walk(input, new WeakSet<object>(), tier);
+}
+
+export function redactSentryUser(user: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!user) return user;
+  return redactByTier(user, 'strict');
+}
+
+export function serializeRedacted(input: unknown, tier: RedactionTier = 'standard'): string {
+  return JSON.stringify(redactByTier(input, tier));
 }

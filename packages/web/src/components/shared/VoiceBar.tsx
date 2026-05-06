@@ -1,10 +1,18 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
+import { useTTS } from '../../hooks/useTTS';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
 
+export interface VoiceBarHandle {
+  /** Programmatically start listening (e.g. from a keyboard shortcut) */
+  activate: () => void;
+}
+
+// ─── Compact waveform ─────────────────────────────────────────────
 function Waveform() {
   const heights = [0.45, 0.75, 1, 0.6, 0.85, 0.5, 0.8, 0.55, 0.9, 0.4];
   return (
@@ -112,7 +120,7 @@ interface VoiceBarProps {
   variant?: 'mobile' | 'desktop';
 }
 
-export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
+export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
   const navigate = useNavigate();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
@@ -122,6 +130,12 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const { speak } = useTTS({ rate: 1.05 });
+
+  // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
+  useImperativeHandle(ref, () => ({
+    activate: () => { if (phase === 'idle') startListening(); },
+  }), [phase]);
   const stoppingRef = useRef(false);
 
   const stopStream = useCallback(() => {
@@ -275,6 +289,21 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
 
   function handleSend() {
     if (!transcript.trim()) return;
+
+    // Check for voice navigation commands first
+    const command = matchVoiceCommand(transcript.trim());
+    if (command) {
+      setPhase('sending');
+      speak(command.label);
+      setTimeout(() => {
+        navigate(command.route);
+        setPhase('idle');
+        setTranscript('');
+      }, 420);
+      return;
+    }
+
+    // Fall through to assistant
     setPhase('sending');
     setTimeout(() => {
       navigate(`/assistant?q=${encodeURIComponent(transcript.trim())}`);
@@ -441,4 +470,4 @@ export function VoiceBar({ variant = 'mobile' }: VoiceBarProps) {
       )}
     </div>
   );
-}
+});

@@ -1909,6 +1909,43 @@ export const MIGRATIONS = {
       CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
   `,
 
+  // Twilio per-tenant subaccount model.
+  // Adds country/region to tenant_settings (US-only at launch; column is
+  // forward-compatible for future international expansion).
+  // Creates tenant_integrations to track Twilio subaccount + SendGrid subuser
+  // provisioning state per tenant. Auth tokens are stored AES-256-GCM
+  // encrypted (app-level key) — never plaintext.
+  '070_tenant_integrations': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
+      ADD COLUMN IF NOT EXISTS region TEXT;
+
+    CREATE TABLE IF NOT EXISTS tenant_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      status TEXT NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'active', 'suspended', 'terminated', 'releasing', 'failed')),
+      subaccount_sid TEXT,
+      subuser_username TEXT,
+      auth_token_primary_enc TEXT,
+      auth_token_secondary_enc TEXT,
+      credential_version INTEGER NOT NULL DEFAULT 1,
+      provider_data JSONB NOT NULL DEFAULT '{}',
+      last_error TEXT,
+      provisioned_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, provider)
+    );
+
+    ALTER TABLE tenant_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_integrations ON tenant_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   '071_widen_tenant_integrations_status': `
     UPDATE tenant_integrations SET status = 't0_requested' WHERE status = 'provisioning';
     UPDATE tenant_integrations SET status = 'full_readiness' WHERE status = 'active';
@@ -1940,6 +1977,27 @@ export const MIGRATIONS = {
   '073_add_execution_retry_count': `
     ALTER TABLE proposals
       ADD COLUMN IF NOT EXISTS execution_retry_count INTEGER NOT NULL DEFAULT 0;
+  `,
+
+  // Inbound Twilio webhooks (voice/SMS/recording) need to look up
+  // tenant_integrations BEFORE a tenant is known — to find:
+  //   1. the tenant_id given an incoming `to` number
+  //   2. the subaccount auth token given the AccountSid in the webhook body
+  // Both lookups are inherently cross-tenant. The existing FORCE RLS
+  // policy on tenant_integrations blocks them. Add a permissive read
+  // policy that activates only when app.system_lookup = 'true' is set
+  // on the connection — set inside short-lived transactions in
+  // app.ts's resolveTwilioAuthTokenForSubaccount /
+  // resolveTenantIdByPhoneNumber helpers. Writes still require
+  // app.current_tenant_id (the original tenant_isolation_integrations
+  // policy stays in force for INSERT/UPDATE/DELETE).
+  '074_tenant_integrations_system_lookup': `
+    DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_integrations ON tenant_integrations
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
   `,
 };
 

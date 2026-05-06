@@ -14,12 +14,13 @@
     "voice-quality:watch": "vitest -c vitest.voice-quality.config.ts",
     "voice-quality:record": "VOICE_QUALITY_CASSETTE_MODE=record vitest run -c vitest.voice-quality.config.ts",
     "voice-quality:refresh": "VOICE_QUALITY_CASSETTE_MODE=refresh vitest run -c vitest.voice-quality.config.ts",
-    "lint": "tsc --noEmit -p tsconfig.lint.json",
+    "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
     "migrate:apply": "ts-node src/db/migrate.ts",
-    "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\""
+    "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
+    "lint:log-safety": "node scripts/check-log-safety.js"
   },
   "dependencies": {
     "@sentry/node": "^10.45.0",
@@ -29,6 +30,7 @@
     "franc-min": "^6.2.0",
     "openai": "^4.0.0",
     "pg": "^8.20.0",
+    "prom-client": "^15.1.3",
     "swagger-ui-express": "^5.0.1",
     "twilio": "^6.0.0",
     "uuid": "^9.0.0",

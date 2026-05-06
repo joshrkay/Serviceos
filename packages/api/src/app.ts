@@ -11,6 +11,12 @@ import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import {
+  decodeClerkToken,
+  verifyRs256Token,
+} from './auth/clerk';
+import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
 
@@ -44,6 +50,7 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -90,13 +97,14 @@ import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryVoiceRepository } from './voice/voice-service';
+import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
   hydrateStoreFromRepository,
+  isFeatureEnabled,
   FeatureFlagRepository,
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
@@ -107,6 +115,7 @@ import {
   PgTechnicianLocationAuthorizer,
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
+import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -240,6 +249,7 @@ import {
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
+import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
 import {
   createDelayNotificationWorker,
   DelayNotificationCoordinator,
@@ -364,6 +374,11 @@ export function createApp(): express.Express {
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
 
+  // Twilio posts application/x-www-form-urlencoded — mount the matching parser
+  // before global express.json() so /webhooks/twilio/* routes get populated
+  // req.body fields (used for signature verification + AccountSid match).
+  app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
+
   // Body parsing for all other routes
   app.use(express.json());
 
@@ -398,6 +413,12 @@ export function createApp(): express.Express {
     max: 30,                  // per IP
   }));
 
+  const requestLogger = createLogger({
+    service: 'api-http',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  app.use(createRequestLoggingMiddleware(requestLogger));
+
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
   const pool = process.env.DATABASE_URL ? createPool() : undefined;
@@ -425,6 +446,22 @@ export function createApp(): express.Express {
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
+  // Prometheus metrics. Mounted on the public surface deliberately —
+  // production should rely on network-level allowlist (ingress / VPC).
+  app.get('/metrics', async (_req, res) => {
+    try {
+      const { renderMetrics } = await import('./monitoring/metrics');
+      const { contentType, body } = await renderMetrics();
+      res.setHeader('Content-Type', contentType);
+      res.send(body);
+    } catch (err) {
+      res.status(500).json({
+        error: 'METRICS_RENDER_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
   // The settings repo is constructed early so the Clerk webhook tenant
@@ -438,8 +475,76 @@ export function createApp(): express.Express {
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
+  // Queue constructed here (before webhook router) so new-tenant webhooks can
+  // enqueue provisioning jobs synchronously during the request.
+  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+
+  // Resolves per-tenant integration credentials for inbound webhook signature
+  // verification. Returns null when no row exists or the integration provider
+  // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
+  const integrationResolver = pool
+    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
+        const { decrypt } = await import('./integrations/crypto');
+        const { setTenantContext } = await import('./db/schema');
+        const encKey = process.env.TENANT_ENCRYPTION_KEY;
+
+        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
+        // GUC on a dedicated client/transaction. Webhook handlers run outside
+        // withTenantTransaction so we open one here.
+        const client = await pool.connect();
+        let rows: Array<{
+          subaccount_sid: string | null;
+          auth_token_primary_enc: string | null;
+          auth_token_secondary_enc: string | null;
+          provider_data: Record<string, unknown>;
+        }> = [];
+        try {
+          await client.query('BEGIN');
+          await client.query(setTenantContext(tenantId));
+          const result = await client.query<{
+            subaccount_sid: string | null;
+            auth_token_primary_enc: string | null;
+            auth_token_secondary_enc: string | null;
+            provider_data: Record<string, unknown>;
+          }>(
+            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
+             FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = $2`,
+            [tenantId, provider]
+          );
+          rows = result.rows;
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+        const row = rows[0];
+        if (!row) return null;
+        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
+        // store a public verification key (not encrypted) in provider_data, so
+        // the resolver shouldn't 403 valid SendGrid webhooks just because
+        // TENANT_ENCRYPTION_KEY isn't configured.
+        const canDecrypt = Boolean(encKey);
+        if (provider === 'twilio' && !canDecrypt) return null;
+        return {
+          tenantId,
+          provider,
+          subaccountSid: row.subaccount_sid ?? undefined,
+          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
+            ? decrypt(row.auth_token_primary_enc, encKey!)
+            : undefined,
+          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
+            ? decrypt(row.auth_token_secondary_enc, encKey!)
+            : undefined,
+          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
+        };
+      }
+    : undefined;
+
   app.use(
     '/webhooks',
     createWebhookRouter(config, {
@@ -448,8 +553,11 @@ export function createApp(): express.Express {
       invoiceRepo: webhookInvoiceRepo,
       paymentRepo: webhookPaymentRepo,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+      queue,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
       auditRepo: webhookAuditRepo,
       webhookEventRepo,
+      integrationResolver,
     })
   );
 
@@ -510,7 +618,6 @@ export function createApp(): express.Express {
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
@@ -550,6 +657,10 @@ export function createApp(): express.Express {
     : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
+  // Synchronous transcription function — used by POST /api/voice/transcribe.
+  const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
+
+  // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
@@ -937,6 +1048,14 @@ export function createApp(): express.Express {
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  if (pool) {
+    const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
+    workerRegistry.set(
+      provisionTwilioWorker.type,
+      provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
@@ -1107,14 +1226,81 @@ export function createApp(): express.Express {
   // telephony surface. When on, /voice returns a <Connect><Stream/>
   // TwiML and audio flows over the WebSocket attached below.
   const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+
+  // Per-tenant Twilio token + tenant-id resolvers, keyed off
+  // tenant_integrations. Falls back to the legacy single-account env
+  // vars when no row matches — preserves the in-production single-tenant
+  // flow while unblocking inbound calls on provisioned subaccounts.
+  // Reads the table outside withTenantTransaction (FORCE RLS) using a
+  // dedicated transaction with set_config('app.current_tenant_id', ...).
+  // Both helpers issue cross-tenant lookups against tenant_integrations
+  // (we don't know the tenant yet — that's what we're looking up).
+  // Migration 074 added a permissive read policy gated on
+  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
+  // transaction; SET LOCAL drops on COMMIT and the connection returns
+  // to the pool clean.
+  const resolveTwilioAuthTokenForSubaccount = async (
+    accountSid: string | undefined,
+  ): Promise<string | undefined> => {
+    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
+    const encKey = process.env.TENANT_ENCRYPTION_KEY;
+    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
+    try {
+      const { decrypt } = await import('./integrations/crypto');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query<{ auth_token_primary_enc: string | null }>(
+          `SELECT auth_token_primary_enc FROM tenant_integrations
+           WHERE provider = 'twilio' AND subaccount_sid = $1
+           LIMIT 1`,
+          [accountSid],
+        );
+        await client.query('COMMIT');
+        const enc = result.rows[0]?.auth_token_primary_enc;
+        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } finally {
+        client.release();
+      }
+    } catch {
+      return process.env.TWILIO_AUTH_TOKEN;
+    }
+  };
+
+  const resolveTenantIdByPhoneNumber = async (
+    to: string,
+  ): Promise<string | undefined> => {
+    if (!to || !pool) return process.env.TWILIO_DEFAULT_TENANT_ID;
+    try {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query<{ tenant_id: string }>(
+          `SELECT tenant_id FROM tenant_integrations
+           WHERE provider = 'twilio'
+             AND provider_data->>'phoneE164' = $1
+           LIMIT 1`,
+          [to],
+        );
+        await client.query('COMMIT');
+        return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } finally {
+        client.release();
+      }
+    } catch {
+      return process.env.TWILIO_DEFAULT_TENANT_ID;
+    }
+  };
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
-      authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
       publicBaseUrl: process.env.PUBLIC_API_URL,
-      // Single-tenant fallback. TODO: replace with phone-number → tenant lookup.
-      resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
+      resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
       mediaStreamsEnabled,
       // P8-014: mount the recording webhook in production. Without this
       // block the route is unreachable and Twilio's recordingStatusCallback
@@ -1227,6 +1413,9 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
+            // WS upgrades don't carry AccountSid; fall back to the master
+            // token. Per-tenant subaccount auth for media streams is a
+            // future-phase change (auth at first `start` message).
             authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
           },
@@ -1235,6 +1424,74 @@ export function createApp(): express.Express {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }) as any;
     }
+  }
+
+  // Client WebSocket gateway (subsumes SSE token streams for assistant
+  // chat + voice events, behind feature flags). Gated by
+  // CLIENT_WS_GATEWAY_ENABLED so production stays SSE-only until ramp.
+  const clientWsEnabled = process.env.CLIENT_WS_GATEWAY_ENABLED === 'true';
+  if (clientWsEnabled) {
+    const origListen = app.listen.bind(app);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    app.listen = ((...args: unknown[]) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const server = (origListen as any)(...args);
+      attachClientGateway(server, {
+        // Runtime kill switch: consult the persisted feature flag on
+        // every upgrade so flipping ws.client_gateway_enabled off
+        // immediately disables /api/ws without redeploy. The env-var
+        // gate above only controls whether the upgrade handler is
+        // attached at boot; this controls per-request acceptance.
+        isEnabled: () =>
+          isFeatureEnabled(
+            featureFlagStore,
+            RESILIENCE_FLAG_NAMES.clientGatewayEnabled,
+            { environment: process.env.NODE_ENV ?? 'development' },
+          ),
+        auth: {
+          authenticate: async (req) => {
+            // Token via Authorization header (rare for WS), Sec-WebSocket-Protocol,
+            // or ?token=...
+            const authHeader = req.headers.authorization;
+            const proto = (req.headers['sec-websocket-protocol'] as string | undefined) ?? '';
+            const url = new URL(req.url ?? '/', 'http://localhost');
+            const queryToken = url.searchParams.get('token') ?? undefined;
+            const headerToken =
+              authHeader && authHeader.startsWith('Bearer ')
+                ? authHeader.substring(7)
+                : undefined;
+            const protoToken = proto
+              .split(',')
+              .map((s) => s.trim())
+              .find((s) => s.startsWith('bearer.'))
+              ?.substring('bearer.'.length);
+            const token = headerToken || queryToken || protoToken;
+            if (!token) return null;
+
+            try {
+              const isHmacDev =
+                process.env.NODE_ENV !== 'production' &&
+                process.env.NODE_ENV !== 'prod' &&
+                process.env.CLERK_DEV_HMAC_TOKENS === 'true';
+              const payload = isHmacDev
+                ? decodeClerkToken(token, process.env.CLERK_SECRET_KEY ?? '')
+                : await verifyRs256Token(token, {
+                    pubKey: process.env.CLERK_PUBLISHABLE_KEY ?? '',
+                  });
+              if (!payload?.tenant_id) return null;
+              return {
+                tenantId: payload.tenant_id,
+                userId: payload.sub,
+              };
+            } catch {
+              return null;
+            }
+          },
+        },
+      });
+      return server;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
   }
 
   // Auth middleware for API routes
@@ -1443,7 +1700,13 @@ export function createApp(): express.Express {
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  const voiceLogger = createLogger({
+    service: 'voice',
+    environment: process.env.NODE_ENV || 'development',
+    level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
+  });
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
+  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
@@ -1593,8 +1856,34 @@ export function createApp(): express.Express {
   // refilled from the repo asynchronously. isFeatureEnabled returns false
   // for missing flags, so the worst case during the hydration window is
   // that a flag reads as disabled for a few ms.
-  void hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  void (async () => {
+    const { seedResilienceFlags } = await import('./flags/resilience-flags');
+    try {
+      await seedResilienceFlags(featureFlagRepo);
+    } catch {
+      /* fire-and-forget — admin flags surface via the admin API */
+    }
+    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  })();
   app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+
+  // Wire the WS publish-side kill switches: every call to publish()
+  // consults the feature flag store at runtime, so flipping
+  // ws.assistant_stream_enabled / ws.voice_events_enabled off
+  // immediately stops mirroring without redeploy.
+  const wsEnv = process.env.NODE_ENV ?? 'development';
+  setChannelGate((channel, tenantId) => {
+    const flag =
+      channel === 'assistant'
+        ? RESILIENCE_FLAG_NAMES.assistantStreamEnabled
+        : RESILIENCE_FLAG_NAMES.voiceEventsEnabled;
+    return isFeatureEnabled(featureFlagStore, flag, {
+      environment: wsEnv,
+      tenantId,
+    });
+  });
+
+  app.use(captureRequestError());
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
