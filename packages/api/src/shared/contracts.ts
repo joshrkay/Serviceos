@@ -262,6 +262,17 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  // Tier 4 — AI approval rules: per-mode auto-approve threshold override.
+  // Each entry is a confidence in [0, 1]. Missing keys fall back to
+  // DEFAULT_AUTO_APPROVE_THRESHOLDS in proposals/auto-approve.ts.
+  autoApproveThreshold: z
+    .object({
+      supervisor: z.number().min(0).max(1).optional(),
+      tech: z.number().min(0).max(1).optional(),
+      both: z.number().min(0).max(1).optional(),
+    })
+    .strict()
+    .optional(),
 });
 
 export const conversationAccessSchema = z.object({

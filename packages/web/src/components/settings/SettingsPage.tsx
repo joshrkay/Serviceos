@@ -13,6 +13,7 @@ import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TerminologySheet } from './TerminologySheet';
+import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -108,6 +109,7 @@ export function SettingsPage() {
   const [suppliersOpen, setSuppliersOpen] = useState(false);
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
+  const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -164,7 +166,7 @@ export function SettingsPage() {
     {
       title: 'AI & Automation',
       items: [
-        { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => {} },
+        { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
       ],
@@ -555,6 +557,11 @@ export function SettingsPage() {
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
       {terminologyOpen && (
         <TerminologySheet onClose={() => setTerminologyOpen(false)} />
+      )}
+
+      {/* AI approval rules sheet — per-mode auto-approve threshold overrides. */}
+      {aiRulesOpen && (
+        <AIApprovalRulesSheet onClose={() => setAiRulesOpen(false)} />
       )}
     </div>
   );

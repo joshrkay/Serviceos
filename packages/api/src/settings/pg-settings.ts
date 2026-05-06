@@ -44,6 +44,18 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // DEFAULT value.
     autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
     autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    // Tier 4 — migration 076. JSONB column; pg returns the parsed
+    // object directly. Empty object means "no overrides" — surface as
+    // undefined so consumers can rely on the same shape across both
+    // repositories.
+    autoApproveThreshold: (() => {
+      const raw = row.auto_approve_threshold as
+        | Partial<Record<'supervisor' | 'tech' | 'both', number>>
+        | null
+        | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
+      return raw;
+    })(),
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -173,6 +185,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
 
       for (const [key, value] of Object.entries(updates)) {
         if (key === 'terminologyPreferences' || key === 'activeVerticalPacks') continue;
+        // Tier 4 — auto_approve_threshold is JSONB; pg expects a string
+        // for parameterized JSONB writes. Pass `'{}'` for cleared
+        // (undefined / empty object) so the column matches its DEFAULT
+        // and downstream reads surface as undefined per mapRow.
+        if (key === 'autoApproveThreshold') {
+          setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
+          const v = value as Record<string, number> | undefined | null;
+          params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
         const column = fieldMap[key];
         if (column) {
           setClauses.push(`${column} = $${paramIndex}`);

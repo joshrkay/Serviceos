@@ -2009,6 +2009,20 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auto_apply_internal_updates BOOLEAN NOT NULL DEFAULT false,
       ADD COLUMN IF NOT EXISTS auto_send_appointment_reminders BOOLEAN NOT NULL DEFAULT true;
   `,
+
+  '076_tenant_settings_auto_approve_threshold': `
+    -- Tier 4 (AI approval rules) — per-tenant per-mode override map for
+    -- the proposal auto-approve threshold. JSONB shape matches the
+    -- Partial<Record<'supervisor'|'tech'|'both', number>> consumed by
+    -- packages/api/src/proposals/auto-approve.ts:resolveAutoApproveThreshold.
+    -- A missing key falls through to DEFAULT_AUTO_APPROVE_THRESHOLDS
+    -- (locked product values: supervisor 0.9, both 0.92, tech 0.95).
+    --
+    -- Empty object default ('{}') means "no overrides" — preserves
+    -- existing behavior for every tenant on the day this migration runs.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS auto_approve_threshold JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

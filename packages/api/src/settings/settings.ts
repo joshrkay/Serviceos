@@ -60,6 +60,20 @@ export interface TenantSettings {
    * customers ~2h before scheduled appointments. Default true.
    */
   autoSendAppointmentReminders?: boolean;
+  /**
+   * Tier 4 (AI approval rules) — per-mode override of the proposal
+   * auto-approve threshold. Consumed by
+   * `proposals/auto-approve.ts:resolveAutoApproveThreshold` via the
+   * `tenantOverride` field. A missing key (or `undefined` value)
+   * falls through to `DEFAULT_AUTO_APPROVE_THRESHOLDS`. Each value is
+   * a confidence threshold in `[0, 1]`.
+   *
+   * Wiring this map into the actual proposal-creation hot path is
+   * tracked separately (PR B) — this PR persists the value
+   * end-to-end (Settings UI ↔ DB) without yet feeding it to
+   * `createProposal`. Behavior unchanged until the wire-up lands.
+   */
+  autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -95,6 +109,8 @@ export interface UpdateSettingsInput {
   autoApplyInternalUpdates?: boolean;
   /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
   autoSendAppointmentReminders?: boolean;
+  /** Tier 4 — per-mode override of the proposal auto-approve threshold. */
+  autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
 }
 
 export interface SettingsRepository {
