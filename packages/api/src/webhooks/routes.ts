@@ -9,6 +9,7 @@ import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
+import { BillingService } from '../billing/subscription';
 import { ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
@@ -40,6 +41,13 @@ export interface WebhookRouterDeps {
    * a brand-new one. Optional so legacy harnesses keep working.
    */
   pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Tier 4 (Subscription — Fieldly billing). When wired, the Stripe
+   * webhook applies customer.subscription.* events onto tenants
+   * (cached subscription_status). Optional so legacy harnesses
+   * without Stripe configured still build the router.
+   */
+  billingService?: BillingService;
   /**
    * Pg pool for the invitee join-tenant path (writes a users row
    * directly because we don't have an InsertUser repo yet — the
@@ -147,50 +155,89 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         logger.info('user.created webhook received', { userId, email: primaryEmail });
 
         // Tier 4 (Team members — PR 3). Invitation acceptance path.
-        // If this email has a pending invitation, JOIN them to the
+        // If this user has a pending invitation, JOIN them to the
         // inviting tenant with the invited role rather than
-        // bootstrapping a brand-new tenant. The pending_invitations
-        // table's partial unique index on (LOWER(email))
-        // WHERE accepted_at IS NULL guarantees at most one match.
+        // bootstrapping a brand-new tenant.
+        //
+        // Lookup order (PR 319 review P1):
+        //   1. By invitation id from Clerk's public_metadata (set by
+        //      the invite route) — uniquely identifies the invitation
+        //      even if two tenants invited the same email.
+        //   2. By email — fallback for invitations created without
+        //      Clerk integration (no clerk_invitation_id) or when the
+        //      metadata didn't round-trip for any reason.
         if (deps.pendingInvitationRepo && primaryEmail) {
-          const pending = await deps.pendingInvitationRepo.findPendingByEmail(primaryEmail).catch(() => null);
+          const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
+          const invitationId = publicMeta?.invitation_id as string | undefined;
+          let pending = null;
+          if (invitationId && deps.pendingInvitationRepo.findById) {
+            pending = await deps.pendingInvitationRepo
+              .findById(invitationId)
+              .catch(() => null);
+            // Sanity check: id-matched invitation MUST also match email
+            // (defense against a replay where the metadata is forged).
+            if (pending && pending.email.toLowerCase() !== primaryEmail.toLowerCase()) {
+              logger.warn('Pending invitation id+email mismatch — refusing join', {
+                userId, invitationId, expected: pending.email, got: primaryEmail,
+              });
+              pending = null;
+            }
+            // Already-accepted invitations are ignored.
+            if (pending && pending.acceptedAt) pending = null;
+          }
+          if (!pending) {
+            pending = await deps.pendingInvitationRepo
+              .findPendingByEmail(primaryEmail)
+              .catch(() => null);
+          }
+
           if (pending) {
             logger.info('Pending invitation found for new user', {
               userId, email: primaryEmail, tenantId: pending.tenantId, role: pending.role,
+              matchedBy: invitationId ? 'id' : 'email',
             });
             try {
-              if (deps.pool) {
-                // Insert the users row directly. RLS is bypassed here
-                // because we set the tenant context explicitly. The
-                // existing tenant context pattern (current_setting
-                // 'app.current_tenant_id') is set by the Pg base repo's
-                // withTenant; for this raw insert we set it inline.
-                const client = await deps.pool.connect();
-                try {
-                  await client.query(
-                    `SET LOCAL app.current_tenant_id = '${pending.tenantId.replace(/'/g, "''")}'`,
-                  );
-                  await client.query(
-                    `INSERT INTO users (
-                       id, tenant_id, clerk_user_id, email, role,
-                       first_name, last_name, created_at, updated_at
-                     ) VALUES (
-                       gen_random_uuid(), $1, $2, $3, $4,
-                       $5, $6, NOW(), NOW()
-                     )
-                     ON CONFLICT DO NOTHING`,
-                    [
-                      pending.tenantId,
-                      userId,
-                      primaryEmail,
-                      pending.role,
-                      (userData.first_name as string | null) ?? null,
-                      (userData.last_name as string | null) ?? null,
-                    ],
-                  );
-                } finally {
-                  client.release();
-                }
+              // PR 319 review (P2): only markAccepted AFTER the join
+              // write succeeded. Without this guard, a deps.pool=null
+              // configuration would consume the invitation without
+              // ever inserting the users row, and the invitee would
+              // have no access despite Clerk reporting acceptance.
+              if (!deps.pool) {
+                logger.error('pendingInvitation found but pool not wired — cannot join user', {
+                  userId, tenantId: pending.tenantId,
+                });
+                throw new Error('pool not configured for invitee join');
+              }
+              // Insert the users row directly. RLS is bypassed here
+              // because we set the tenant context explicitly. The
+              // existing tenant context pattern (current_setting
+              // 'app.current_tenant_id') is set by the Pg base repo's
+              // withTenant; for this raw insert we set it inline.
+              const client = await deps.pool.connect();
+              try {
+                await client.query(
+                  `SET LOCAL app.current_tenant_id = '${pending.tenantId.replace(/'/g, "''")}'`,
+                );
+                await client.query(
+                  `INSERT INTO users (
+                     id, tenant_id, clerk_user_id, email, role,
+                     first_name, last_name, created_at, updated_at
+                   ) VALUES (
+                     gen_random_uuid(), $1, $2, $3, $4,
+                     $5, $6, NOW(), NOW()
+                   )
+                   ON CONFLICT DO NOTHING`,
+                  [
+                    pending.tenantId,
+                    userId,
+                    primaryEmail,
+                    pending.role,
+                    (userData.first_name as string | null) ?? null,
+                    (userData.last_name as string | null) ?? null,
+                  ],
+                );
+              } finally {
+                client.release();
               }
               await deps.pendingInvitationRepo.markAccepted(pending.id);
 
@@ -584,6 +631,40 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           } else {
             throw payErr;
           }
+        }
+      }
+
+      // Tier 4 (Subscription — Fieldly billing). customer.subscription.*
+      // events update the tenant's cached subscription status. Match
+      // by stripe_customer_id (the BillingService persists it on
+      // first portal-open). Idempotent — we just write the latest
+      // snapshot. created/updated/deleted all share the same handler;
+      // 'deleted' typically arrives with status='canceled' so the
+      // mirror naturally reflects the lifecycle end.
+      if (
+        deps.billingService &&
+        (event.type === 'customer.subscription.created' ||
+          event.type === 'customer.subscription.updated' ||
+          event.type === 'customer.subscription.deleted')
+      ) {
+        const sub = event.data.object as {
+          id?: string;
+          customer?: string;
+          status?: string;
+        };
+        if (sub.id && sub.customer && sub.status) {
+          await deps.billingService.applySubscriptionEvent({
+            customerId: sub.customer,
+            subscriptionId: sub.id,
+            status: sub.status,
+          });
+          logger.info('Subscription status mirrored from Stripe', {
+            customerId: sub.customer, subscriptionId: sub.id, status: sub.status,
+          });
+        } else {
+          logger.warn('customer.subscription.* missing fields', {
+            eventId: event.id, type: event.type,
+          });
         }
       }
 

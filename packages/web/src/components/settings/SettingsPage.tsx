@@ -121,6 +121,41 @@ export function SettingsPage() {
   const [reviewsSaved, setReviewsSaved]       = useState(false);
   const [reviewsError, setReviewsError]       = useState('');
 
+  /**
+   * Tier 4 (Subscription — Fieldly billing). POST /api/billing/portal-session
+   * and redirect the operator to the Stripe-hosted portal where they can
+   * manage card, plan, view invoices, etc. Returns to /settings on close.
+   */
+  async function openBillingPortal() {
+    try {
+      const returnUrl = `${window.location.origin}/settings`;
+      const res = await apiFetch('/api/billing/portal-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ returnUrl }),
+      });
+      if (res.status === 503) {
+        toast.error('Subscription billing is not configured for this tenant');
+        return;
+      }
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON */
+        }
+        throw new Error(detail || `Portal failed (${res.status})`);
+      }
+      const data = (await res.json()) as { url: string };
+      window.location.assign(data.url);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not open billing portal';
+      toast.error(msg);
+    }
+  }
+
   async function saveReviewUrls() {
     setSavingReviews(true);
     setReviewsError('');
@@ -186,7 +221,7 @@ export function SettingsPage() {
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Card, ACH · Stripe connected',  action: () => {} },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
-        { icon: CreditCard, label: 'Fieldly subscription',   description: 'Pro plan · $79/mo',             action: () => {} },
+        { icon: CreditCard, label: 'Fieldly subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
       ],
     },
     {

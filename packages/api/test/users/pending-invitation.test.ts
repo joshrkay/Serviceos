@@ -85,6 +85,17 @@ describe('PendingInvitationRepository — Tier 4 Team members (PR 3)', () => {
     expect(found).toBeNull();
   });
 
+  it('findById allows webhook lookup by unique id (PR 319 P1)', async () => {
+    const inv = await repo.create({
+      tenantId: TENANT, email: 'jane@example.com',
+      role: 'technician', invitedBy: 'user-owner',
+    });
+    const found = await repo.findById!(inv.id);
+    expect(found?.id).toBe(inv.id);
+    const missing = await repo.findById!('00000000-0000-0000-0000-000000000000');
+    expect(missing).toBeNull();
+  });
+
   it('validateInvitationInput catches malformed inputs', () => {
     expect(validateInvitationInput({
       tenantId: '', email: 'bad', role: 'technician', invitedBy: 'u',

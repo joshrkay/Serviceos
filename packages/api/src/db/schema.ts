@@ -2200,6 +2200,30 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_pending_invitations ON pending_invitations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '083_tenants_stripe_subscription': `
+    -- Tier 4 (Subscription — Fieldly billing). Tracks the Stripe
+    -- Customer + Subscription tied to this tenant for the SaaS
+    -- subscription Fieldly bills them for. Distinct from
+    -- tenant_settings.depositStrategy etc. which govern how the
+    -- tenant bills THEIR customers (Stripe Connect path).
+    --
+    --   stripe_customer_id     : created on first portal-open;
+    --                            populated by the billing-portal
+    --                            route. Nullable so existing tenants
+    --                            don't need a backfill.
+    --   stripe_subscription_id : populated by the Stripe webhook on
+    --                            customer.subscription.created.
+    --   subscription_status    : mirror of Stripe's subscription.status
+    --                            so the UI doesn't have to round-trip
+    --                            Stripe on every render.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT,
+      ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT,
+      ADD COLUMN IF NOT EXISTS subscription_status TEXT;
+    CREATE INDEX IF NOT EXISTS idx_tenants_stripe_customer
+      ON tenants(stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

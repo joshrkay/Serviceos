@@ -115,6 +115,22 @@ export class PgPendingInvitationRepository
       : null;
   }
 
+  /**
+   * Cross-tenant lookup by id. Used by the Clerk webhook when
+   * public_metadata.invitation_id is present (preferred over the
+   * email-only lookup, which is ambiguous when two tenants invite
+   * the same address simultaneously — PR 319 review P1).
+   */
+  async findById(id: string): Promise<PendingInvitation | null> {
+    const result = await this.pool.query(
+      `SELECT * FROM pending_invitations WHERE id = $1`,
+      [id],
+    );
+    return result.rows.length > 0
+      ? mapRow(result.rows[0] as Record<string, unknown>)
+      : null;
+  }
+
   async markAccepted(id: string): Promise<PendingInvitation | null> {
     // Same cross-tenant case as findPendingByEmail — the webhook
     // identifies the row by id, doesn't have a tenant context.

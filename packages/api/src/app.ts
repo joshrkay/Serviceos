@@ -33,6 +33,8 @@ import { PgUserRepository } from './users/pg-user';
 import { InMemoryUserRepository } from './users/user';
 import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
 import { InMemoryPendingInvitationRepository } from './users/pending-invitation';
+import { createBillingRouter } from './routes/billing';
+import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import {
@@ -496,6 +498,21 @@ export function createApp(): express.Express {
   const pendingInvitationRepo = pool
     ? new PgPendingInvitationRepository(pool)
     : new InMemoryPendingInvitationRepository();
+  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // webhook can update the cached subscription status when
+  // customer.subscription.* events arrive. Single instance shared
+  // with the /api/billing route. Requires both Pg pool + Stripe key
+  // to instantiate — InMemory tests skip the subscription mirror
+  // (the route surfaces 503 / null fields gracefully).
+  const billingService = pool && process.env.STRIPE_SECRET_KEY
+    ? new BillingService({
+        pool,
+        config: {
+          apiKey: process.env.STRIPE_SECRET_KEY,
+          portalConfigurationId: process.env.STRIPE_BILLING_PORTAL_CONFIGURATION,
+        },
+      })
+    : undefined;
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
@@ -580,6 +597,11 @@ export function createApp(): express.Express {
       // the route is found by the webhook on accept.
       pendingInvitationRepo,
       pool: pool ?? undefined,
+      // Tier 4 (Subscription — PR 1). Same instance the route uses,
+      // so a customer.subscription.* webhook updates the cached
+      // status the GET /api/billing/subscription endpoint reads.
+      // Wired only when both pool and STRIPE_SECRET_KEY exist.
+      billingService,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
       queue,
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
@@ -1655,6 +1677,10 @@ export function createApp(): express.Express {
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     }),
   );
+
+  // billingService is hoisted earlier so the Stripe webhook can use
+  // the same instance.
+  app.use('/api/billing', createBillingRouter({ billingService }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).
   const revenueBySourceRepo = pool

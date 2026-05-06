@@ -48,8 +48,21 @@ export interface PendingInvitationRepository {
     tenantId: string,
     options?: PendingInvitationListOptions,
   ): Promise<PendingInvitation[]>;
-  /** Used by the Clerk webhook to attach a sign-up to its invitation. */
+  /**
+   * Used by the Clerk webhook to attach a sign-up to its invitation.
+   * Email-only lookup is ambiguous when two tenants invite the same
+   * address simultaneously; PR 319 review (P1) flagged this. Prefer
+   * findById (when Clerk passes back the invitation id via
+   * public_metadata) and fall back to email only when the metadata
+   * is missing.
+   */
   findPendingByEmail(email: string): Promise<PendingInvitation | null>;
+  /**
+   * Lookup by the local invitation id, used by the Clerk webhook
+   * when public_metadata.invitation_id is present. Cross-tenant
+   * (the webhook arrives without a tenant context).
+   */
+  findById?(id: string): Promise<PendingInvitation | null>;
   markAccepted(id: string): Promise<PendingInvitation | null>;
   /** Optional — used by DELETE /api/users/invitations/:id (out of
    *  scope for the first PR; left here for the next slice). */
@@ -132,6 +145,11 @@ export class InMemoryPendingInvitationRepository implements PendingInvitationRep
       }
     }
     return null;
+  }
+
+  async findById(id: string): Promise<PendingInvitation | null> {
+    const row = this.rows.get(id);
+    return row ? { ...row } : null;
   }
 
   async markAccepted(id: string): Promise<PendingInvitation | null> {
