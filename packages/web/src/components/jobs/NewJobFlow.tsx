@@ -410,7 +410,7 @@ export function NewJobFlow({
     setVPhase('processing');
     recorder.onstop = async () => {
       recorder.stream.getTracks().forEach(t => t.stop());
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
       try {
         const fd = new FormData();
         fd.append('audio', audioBlob, 'recording.webm');
