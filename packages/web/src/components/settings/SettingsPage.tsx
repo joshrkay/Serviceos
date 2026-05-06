@@ -15,6 +15,7 @@ import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TerminologySheet } from './TerminologySheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
+import { TeamMembersSheet } from './TeamMembersSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -112,6 +113,7 @@ export function SettingsPage() {
   const [terminologyOpen, setTerminologyOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
+  const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -161,7 +163,7 @@ export function SettingsPage() {
     {
       title: 'Team',
       items: [
-        { icon: Users,  label: 'Team members',        description: '3 active · Add or manage technicians', action: () => {} },
+        { icon: Users,  label: 'Team members',        description: 'View the roster and roles', action: () => setTeamMembersOpen(true) },
         { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => {} },
       ],
     },
@@ -569,6 +571,11 @@ export function SettingsPage() {
       {/* Deposit rules sheet — strategy + amount + optional threshold. */}
       {depositRulesOpen && (
         <DepositRulesSheet onClose={() => setDepositRulesOpen(false)} />
+      )}
+
+      {/* Team members sheet — read-only roster (PR 1). */}
+      {teamMembersOpen && (
+        <TeamMembersSheet onClose={() => setTeamMembersOpen(false)} />
       )}
     </div>
   );

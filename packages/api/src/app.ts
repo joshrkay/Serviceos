@@ -28,6 +28,9 @@ import { createJobRouter } from './routes/jobs';
 import { createAppointmentRouter } from './routes/appointments';
 import { createEstimateRouter } from './routes/estimates';
 import { createInvoiceRouter } from './routes/invoices';
+import { createUsersRouter } from './routes/users';
+import { PgUserRepository } from './users/pg-user';
+import { InMemoryUserRepository } from './users/user';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import {
@@ -1620,6 +1623,12 @@ export function createApp(): express.Express {
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+
+  // Tier 4 (Team members — PR 1). GET /api/users for the Settings
+  // → Team members sheet. Tenant scoping is enforced by the route's
+  // requireTenant + the repo's tenant context.
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
+  app.use('/api/users', createUsersRouter(userRepo));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).
   const revenueBySourceRepo = pool
