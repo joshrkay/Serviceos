@@ -440,4 +440,29 @@ describe('PublicEstimateService.approve — Tier 4 deposit hook (PR 2)', () => {
     expect(view.status).toBe('accepted');
     h.job.update = originalUpdate;
   });
+
+  it('PR 3a — surfaces the deposit context on the public view after approval', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    expect(view.depositRequiredCents).toBe(25000);
+    expect(view.depositPaidCents).toBe(0);
+    expect(view.depositStatus).toBe('pending');
+  });
+
+  it('PR 3a — surfaces zero deposit on a getByToken view when no rule applies', async () => {
+    const est = await seedEstimateWithTotal(100000);
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.depositRequiredCents).toBe(0);
+    expect(view.depositPaidCents).toBe(0);
+    expect(view.depositStatus).toBe('not_required');
+  });
 });

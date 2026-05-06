@@ -48,6 +48,20 @@ export interface PublicEstimateView {
   rejectedReason?: string;
   /** Set when token is past expiry. */
   isExpired: boolean;
+  /**
+   * Tier 4 (Deposit rules — PR 3a). Deposit context surfaced from
+   * the linked job. Customers see the required amount on the
+   * approval page before they accept; PR 3b will mint the Stripe
+   * payment link and PR 3c will credit the eventual invoice.
+   *
+   * `depositRequiredCents` is 0 when the tenant has no rule
+   * configured, the estimate total is below the threshold, or no
+   * estimate has been approved yet (the rule writes onto the job at
+   * approval time).
+   */
+  depositRequiredCents: number;
+  depositPaidCents: number;
+  depositStatus: 'not_required' | 'pending' | 'paid';
 }
 
 export interface ApproveEstimateInput {
@@ -250,6 +264,13 @@ export class PublicEstimateService {
       rejectedAt: estimate.rejectedAt?.toISOString(),
       rejectedReason: estimate.rejectedReason,
       isExpired,
+      // Tier 4 (Deposit rules — PR 3a). Surface the deposit context
+      // from the linked job. Defaults cover legacy jobs created
+      // before migration 078 (the columns DEFAULT to 0 / 'not_required'
+      // there too).
+      depositRequiredCents: job?.depositRequiredCents ?? 0,
+      depositPaidCents: job?.depositPaidCents ?? 0,
+      depositStatus: job?.depositStatus ?? 'not_required',
     };
   }
 }
