@@ -85,7 +85,6 @@ import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
 import { InMemoryPaymentRepository } from './invoices/payment';
-import { InMemoryPaymentReadinessRepository } from './invoices/payment-readiness';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
@@ -583,10 +582,7 @@ export function createApp(): express.Express {
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
   // and emits a loud dev-mode warning when the mock is used.
-  const paymentReadinessRepo = new InMemoryPaymentReadinessRepository();
-  const paymentLinkProvider = createPaymentLinkProvider(process.env, {
-    readinessRepo: paymentReadinessRepo,
-  });
+  const paymentLinkProvider = createPaymentLinkProvider(process.env);
   // Reference the variable so TS doesn't drop it; the provider will be
   // wired into routes/workers in a follow-up. The factory call itself is
   // load-bearing — it asserts the production guard at boot time.

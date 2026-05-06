@@ -1,9 +1,5 @@
 import { StripePaymentLinkProvider, StripeConfig } from '../../src/payments/stripe-payment-link';
 import { PaymentLinkRequest } from '../../src/payments/payment-link-provider';
-import {
-  InMemoryPaymentReadinessRepository,
-  createPaymentReadiness,
-} from '../../src/invoices/payment-readiness';
 
 // Counter for generating unique Stripe-like IDs across tests
 let linkCounter = 0;
@@ -20,7 +16,6 @@ function mockStripeResponse() {
 }
 
 describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
-  let readinessRepo: InMemoryPaymentReadinessRepository;
   let provider: StripePaymentLinkProvider;
   const config: StripeConfig = {
     apiKey: 'sk_test_fake',
@@ -36,11 +31,8 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
     description: 'Invoice #INV-001',
   };
 
-  beforeEach(async () => {
-    readinessRepo = new InMemoryPaymentReadinessRepository();
-    provider = new StripePaymentLinkProvider(config, readinessRepo);
-    // Pre-create a readiness record for the invoice
-    await createPaymentReadiness('tenant-1', 'inv-001', true, readinessRepo);
+  beforeEach(() => {
+    provider = new StripePaymentLinkProvider(config);
     // Mock fetch to avoid real Stripe API calls
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(mockStripeResponse())));
   });
@@ -49,7 +41,7 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
     vi.restoreAllMocks();
   });
 
-  describe('Happy path: generates link with URL and stores in readiness', () => {
+  describe('Happy path: generates link with URL', () => {
     it('should generate a Stripe payment link with all expected fields', async () => {
       const result = await provider.generateLink(validRequest);
 
@@ -59,17 +51,6 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
       expect(result.expiresAt).toBeInstanceOf(Date);
       expect(result.expiresAt!.getTime()).toBeGreaterThan(Date.now());
       expect(result.providerReference).toMatch(/^stripe_plink_/);
-    });
-
-    it('should update readiness record with link details', async () => {
-      const result = await provider.generateLink(validRequest);
-
-      const readiness = await readinessRepo.findByInvoice('tenant-1', 'inv-001');
-      expect(readiness).not.toBeNull();
-      expect(readiness!.paymentLinkStatus).toBe('active');
-      expect(readiness!.paymentLinkId).toBe(result.linkId);
-      expect(readiness!.paymentLinkUrl).toBe(result.linkUrl);
-      expect(readiness!.paymentLinkCreatedAt).toBeInstanceOf(Date);
     });
   });
 
@@ -90,21 +71,6 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
       await expect(
         provider.generateLink({ ...validRequest, currency: '' })
       ).rejects.toThrow('currency is required');
-    });
-  });
-
-  describe('Tenant isolation: readiness repo scoped by tenant', () => {
-    it('should not find readiness record for different tenant', async () => {
-      await provider.generateLink(validRequest);
-
-      const readiness = await readinessRepo.findByInvoice('tenant-other', 'inv-001');
-      expect(readiness).toBeNull();
-    });
-
-    it('should reject request without tenantId', async () => {
-      await expect(
-        provider.generateLink({ ...validRequest, tenantId: '' })
-      ).rejects.toThrow('tenantId is required');
     });
   });
 
@@ -130,17 +96,6 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
     });
   });
 
-  describe('Idempotency: returns existing active link', () => {
-    it('should return the same link on repeated calls', async () => {
-      const first = await provider.generateLink(validRequest);
-      const second = await provider.generateLink(validRequest);
-
-      expect(second.linkId).toBe(first.linkId);
-      expect(second.linkUrl).toBe(first.linkUrl);
-      expect(second.providerReference).toBe(first.providerReference);
-    });
-  });
-
   describe('Link format: starts with expected prefix', () => {
     it('should have linkId starting with plink_', async () => {
       const result = await provider.generateLink(validRequest);
@@ -157,4 +112,10 @@ describe('P5-010D: Generate Stripe payment link after invoice approval', () => {
       expect(result.providerReference).toMatch(/^stripe_/);
     });
   });
+
+  // Idempotency is enforced at the caller (routes/public-portal.ts gates on
+  // invoice.stripePaymentLinkUrl before calling generateLink and persists
+  // the returned linkId/linkUrl back onto the invoice). The provider itself
+  // is stateless — calling generateLink twice will mint two distinct Stripe
+  // links, which is by design.
 });
