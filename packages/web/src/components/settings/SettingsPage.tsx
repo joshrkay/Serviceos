@@ -10,6 +10,7 @@ import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
+import { BusinessProfileSheet } from './BusinessProfileSheet';
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -20,6 +21,7 @@ export function SettingsPage() {
   const [qbOpen, setQbOpen]         = useState(false);
   const [qbConnected, setQbConnected] = useState(false);
   const [suppliersOpen, setSuppliersOpen] = useState(false);
+  const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -60,7 +62,7 @@ export function SettingsPage() {
     {
       title: 'Business',
       items: [
-        { icon: Building2, label: 'Business profile',    description: 'Name, logo, address, phone',                      action: () => {} },
+        { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español, timezone',                     action: () => {} },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => {} },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
@@ -457,6 +459,11 @@ export function SettingsPage() {
       {/* Suppliers sheet */}
       {suppliersOpen && (
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
+      )}
+
+      {/* Business profile sheet — closes the first of the 13 settings stubs. */}
+      {businessProfileOpen && (
+        <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
       )}
     </div>
   );
