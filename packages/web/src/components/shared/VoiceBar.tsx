@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
@@ -264,28 +264,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   useEffect(() => {
     if (phase !== 'listening') return;
 
-    recorder.onstop = async () => {
-      // Clean up media stream
-      recorder.stream.getTracks().forEach(t => t.stop());
-
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-      try {
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'recording.webm');
-        const res = await apiFetch('/api/voice/transcribe', {
-          method: 'POST',
-          body: formData,
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setTranscript(data.transcript || '(Could not transcribe)');
-        } else {
-          setTranscript('(Transcription service unavailable)');
-        }
-      } catch {
-        setTranscript('(Transcription service unavailable)');
-      }
-      setPhase('transcript');
     const onVisibilityChange = () => {
       if (!document.hidden) return;
       setError('Recording paused in background. Uploaded partial audio.');

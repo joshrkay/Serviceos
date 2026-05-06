@@ -7,7 +7,6 @@ import {
   Building2, Users, Volume2,
 } from 'lucide-react';
 import { useTTS } from '../../hooks/useTTS';
-import { apiFetch } from '../../utils/api-fetch';
 import {
   parseServices,
   parseTeamSize,

@@ -98,7 +98,6 @@ import { InMemoryEstimateTemplateRepository } from './templates/estimate-templat
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
-import { InMemoryVoiceRepository } from './voice/voice-service';
 import { createTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
@@ -658,23 +657,10 @@ export function createApp(): express.Express {
     : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
-  // Synchronous transcription function — used by POST /api/voice/transcribe
+  // Synchronous transcription function — used by POST /api/voice/transcribe.
   const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
 
-  // Async transcription provider for the queue-based worker pipeline.
-  // Wraps transcribeAudio: fetches audio from URL first, then transcribes the buffer.
-  const transcriptionProvider = {
-    async transcribe(audioUrl: string): Promise<{ transcript: string; metadata: Record<string, unknown> }> {
-      const audioResponse = await fetch(audioUrl);
-      if (!audioResponse.ok) {
-        throw new Error(`Failed to fetch audio from ${audioUrl}: ${audioResponse.status}`);
-      }
-      const arrayBuffer = await audioResponse.arrayBuffer();
-      const contentType = audioResponse.headers.get('content-type') || 'audio/webm';
-      return transcribeAudio(Buffer.from(arrayBuffer), contentType);
-    },
-  };
-  const transcriptionWorker = createTranscriptionWorker(voiceRepo, transcriptionProvider);
+  // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
@@ -1721,7 +1707,6 @@ export function createApp(): express.Express {
   });
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
   app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
