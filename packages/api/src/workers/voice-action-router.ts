@@ -100,6 +100,16 @@ export interface VoiceActionRouterDeps {
    * preserves the no-alternatives wording.
    */
   availabilityFinder?: AvailabilityFinder;
+  /**
+   * Tier 4 / PR B — per-tenant auto-approve threshold override
+   * resolver. When wired, the worker loads the override before
+   * createProposal so the persisted Settings UI value affects the
+   * threshold decision. Optional: when absent, proposals fall through
+   * to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+   */
+  thresholdResolver?: (tenantId: string) => Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  >;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -136,7 +146,12 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
 class IssueInvoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'issue_invoice';
 
-  constructor(private readonly proposalRepo: ProposalRepository) {}
+  constructor(
+    private readonly proposalRepo: ProposalRepository,
+    private readonly thresholdResolver?: (tenantId: string) => Promise<
+      Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+    >,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     let invoiceId: string | undefined;
@@ -163,6 +178,10 @@ class IssueInvoiceTaskHandler implements TaskHandler {
       }
     }
 
+    const tenantThresholdOverride = this.thresholdResolver
+      ? await this.thresholdResolver(context.tenantId).catch(() => undefined)
+      : undefined;
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: 'issue_invoice',
@@ -172,6 +191,7 @@ class IssueInvoiceTaskHandler implements TaskHandler {
         : context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     };
 
     const proposal = createProposal(input);
@@ -193,7 +213,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
-  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo));
+  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
@@ -324,6 +344,10 @@ async function emitClarification(
     ...(conversationId ? { conversationId } : {}),
   };
 
+  const tenantThresholdOverride = deps.thresholdResolver
+    ? await deps.thresholdResolver(tenantId).catch(() => undefined)
+    : undefined;
+
   const proposal = createProposal({
     tenantId,
     proposalType: 'voice_clarification',
@@ -337,6 +361,7 @@ async function emitClarification(
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
     },
+    ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     createdBy: userId,
     // Deliberately NO sourceTrustTier. decideInitialStatus will land
     // this in 'draft' regardless of reason/confidence. A clarification
@@ -452,6 +477,15 @@ export function createVoiceActionRouterWorker(
         return;
       }
 
+      // PR B — resolve the tenant's auto-approve threshold override
+      // ONCE per request and place it on the task context. Each
+      // handler picks it up and threads it through its
+      // CreateProposalInput. Best-effort: a resolver hiccup degrades
+      // to the locked product defaults rather than blocking the call.
+      const tenantThresholdOverride = deps.thresholdResolver
+        ? await deps.thresholdResolver(tenantId).catch(() => undefined)
+        : undefined;
+
       const context: TaskContext = {
         tenantId,
         userId,
@@ -464,6 +498,7 @@ export function createVoiceActionRouterWorker(
           classification.intentType,
           classification.extractedEntities
         ),
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       };
 
       const { proposal } = await handler.handle(context);

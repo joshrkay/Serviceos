@@ -169,6 +169,16 @@ export interface TwilioAdapterDeps {
     tenantId: string,
     customerId: string,
   ) => Promise<string | undefined>;
+  /**
+   * Tier 4 / PR B — per-tenant auto-approve threshold override
+   * resolver. When wired, the adapter loads the override before
+   * building each proposal and threads it through
+   * `tenantThresholdOverride`. Optional: when absent, proposals fall
+   * through to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+   */
+  thresholdResolver?: (tenantId: string) => Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  >;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -384,6 +394,23 @@ export class TwilioGatherAdapter {
     if (!this.deps.callerPlanResolver || !customerId) return undefined;
     try {
       return await this.deps.callerPlanResolver(tenantId, customerId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * PR B helper. Best-effort per-tenant auto-approve threshold lookup.
+   * Returns undefined when the resolver is missing, throws, or the
+   * tenant has no override — proposals fall through to
+   * DEFAULT_AUTO_APPROVE_THRESHOLDS (legacy behavior).
+   */
+  private async resolveThresholdOverride(
+    tenantId: string,
+  ): Promise<Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined> {
+    if (!this.deps.thresholdResolver) return undefined;
+    try {
+      return await this.deps.thresholdResolver(tenantId);
     } catch {
       return undefined;
     }
@@ -1593,6 +1620,7 @@ export class TwilioGatherAdapter {
         ? (fx.payload.entities as Record<string, unknown>)
         : {};
     try {
+      const tenantThresholdOverride = await this.resolveThresholdOverride(tenantId);
       const proposal = buildProposal({
         tenantId,
         proposalType: intentToProposalType(intent),
@@ -1612,6 +1640,7 @@ export class TwilioGatherAdapter {
         createdBy: typeof fx.payload.customerId === 'string'
           ? fx.payload.customerId
           : this.deps.systemActorId ?? 'calling-agent',
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
       const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);
@@ -1747,6 +1776,7 @@ export class TwilioGatherAdapter {
       return;
     }
     try {
+      const tenantThresholdOverride = await this.resolveThresholdOverride(tenantId);
       const proposal = buildProposal({
         tenantId,
         // No dedicated `customer_callback_required` ProposalType
@@ -1771,6 +1801,7 @@ export class TwilioGatherAdapter {
         },
         aiRunId: uuidv4(),
         createdBy: this.deps.systemActorId ?? 'calling-agent',
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
       const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);

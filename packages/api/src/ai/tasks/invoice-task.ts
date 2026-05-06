@@ -112,6 +112,10 @@ export class InvoiceTaskHandler implements TaskHandler {
       // decideInitialStatus auto-approve the DRAFT when confidence is
       // ≥ 0.9. Operator approval still required to issue/send.
       sourceTrustTier: 'autonomous',
+      // PR B — propagate tenant override from context.
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     const proposal = createProposal(input);

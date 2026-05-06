@@ -75,6 +75,17 @@ export interface InAppAdapterDeps {
     tenantId: string,
     customerId: string,
   ) => Promise<string | undefined>;
+  /**
+   * Tier 4 / PR B — per-tenant auto-approve threshold override
+   * resolver. When present, the adapter loads the override before
+   * `createProposal` and threads it through `tenantThresholdOverride`
+   * so the persisted Settings UI value actually affects the
+   * threshold decision. Optional: when absent the adapter omits the
+   * override and proposals fall back to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+   */
+  thresholdResolver?: (tenantId: string) => Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  >;
 }
 
 export interface StartSessionResult {
@@ -549,6 +560,19 @@ export class InAppVoiceAdapter {
     const summary = summaryFor(intent, entities);
 
     try {
+      // PR B — load tenant threshold override so the Settings UI value
+      // actually flows into the proposal's auto-approve decision.
+      // Best-effort: a resolver that throws or returns undefined falls
+      // through to DEFAULT_AUTO_APPROVE_THRESHOLDS — never blocks
+      // proposal creation on a settings-lookup hiccup.
+      let tenantThresholdOverride;
+      if (this.deps.thresholdResolver) {
+        try {
+          tenantThresholdOverride = await this.deps.thresholdResolver(session.tenantId);
+        } catch {
+          tenantThresholdOverride = undefined;
+        }
+      }
       const proposal = buildProposal({
         tenantId: session.tenantId,
         proposalType,
@@ -568,6 +592,7 @@ export class InAppVoiceAdapter {
         createdBy: typeof payload.customerId === 'string'
           ? payload.customerId
           : this.deps.systemActorId ?? 'calling-agent',
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
       const stored = await this.deps.proposalRepo.create(proposal);
       session.proposalIds.push(stored.id);

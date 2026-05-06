@@ -50,6 +50,12 @@ function inputFor(
     createdBy: context.userId,
     missingFields: missingFields.length > 0 ? missingFields : undefined,
     sourceTrustTier: opts?.trust,
+    // PR B — pass through the tenant threshold override the router
+    // resolved at request entry. All 8 voice-extended task call sites
+    // route through this helper, so this is a single touch point.
+    ...(context.tenantThresholdOverride
+      ? { tenantThresholdOverride: context.tenantThresholdOverride }
+      : {}),
   };
 }
 
