@@ -1221,14 +1221,81 @@ export function createApp(): express.Express {
   // telephony surface. When on, /voice returns a <Connect><Stream/>
   // TwiML and audio flows over the WebSocket attached below.
   const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+
+  // Per-tenant Twilio token + tenant-id resolvers, keyed off
+  // tenant_integrations. Falls back to the legacy single-account env
+  // vars when no row matches — preserves the in-production single-tenant
+  // flow while unblocking inbound calls on provisioned subaccounts.
+  // Reads the table outside withTenantTransaction (FORCE RLS) using a
+  // dedicated transaction with set_config('app.current_tenant_id', ...).
+  // Both helpers issue cross-tenant lookups against tenant_integrations
+  // (we don't know the tenant yet — that's what we're looking up).
+  // Migration 074 added a permissive read policy gated on
+  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
+  // transaction; SET LOCAL drops on COMMIT and the connection returns
+  // to the pool clean.
+  const resolveTwilioAuthTokenForSubaccount = async (
+    accountSid: string | undefined,
+  ): Promise<string | undefined> => {
+    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
+    const encKey = process.env.TENANT_ENCRYPTION_KEY;
+    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
+    try {
+      const { decrypt } = await import('./integrations/crypto');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query<{ auth_token_primary_enc: string | null }>(
+          `SELECT auth_token_primary_enc FROM tenant_integrations
+           WHERE provider = 'twilio' AND subaccount_sid = $1
+           LIMIT 1`,
+          [accountSid],
+        );
+        await client.query('COMMIT');
+        const enc = result.rows[0]?.auth_token_primary_enc;
+        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } finally {
+        client.release();
+      }
+    } catch {
+      return process.env.TWILIO_AUTH_TOKEN;
+    }
+  };
+
+  const resolveTenantIdByPhoneNumber = async (
+    to: string,
+  ): Promise<string | undefined> => {
+    if (!to || !pool) return process.env.TWILIO_DEFAULT_TENANT_ID;
+    try {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query<{ tenant_id: string }>(
+          `SELECT tenant_id FROM tenant_integrations
+           WHERE provider = 'twilio'
+             AND provider_data->>'phoneE164' = $1
+           LIMIT 1`,
+          [to],
+        );
+        await client.query('COMMIT');
+        return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } finally {
+        client.release();
+      }
+    } catch {
+      return process.env.TWILIO_DEFAULT_TENANT_ID;
+    }
+  };
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
-      authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
       publicBaseUrl: process.env.PUBLIC_API_URL,
-      // Single-tenant fallback. TODO: replace with phone-number → tenant lookup.
-      resolveTenantId: () => process.env.TWILIO_DEFAULT_TENANT_ID,
+      resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
       mediaStreamsEnabled,
       // P8-014: mount the recording webhook in production. Without this
       // block the route is unreachable and Twilio's recordingStatusCallback
@@ -1341,6 +1408,9 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
+            // WS upgrades don't carry AccountSid; fall back to the master
+            // token. Per-tenant subaccount auth for media streams is a
+            // future-phase change (auth at first `start` message).
             authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
           },

@@ -41,8 +41,14 @@ export interface MediaStreamServerDeps extends MediaStreamAdapterDeps {
    * Lazily-resolved Twilio auth token. Reads at upgrade time so the
    * server can be constructed before the env var is set (matches the
    * pattern used by `requireTwilioSignature`).
+   *
+   * Note: WS upgrades don't carry AccountSid in the request — that
+   * arrives in the first `start` message after the upgrade succeeds.
+   * Implementations that want per-tenant tokens for media streams
+   * either use a global token here OR shift signature verification
+   * to the first message handler (out of scope for now).
    */
-  authTokenGetter: () => string | undefined;
+  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
   /**
    * Public base URL we expect Twilio to have signed against
    * (e.g. wss://api.example.com or https://api.example.com — both are
@@ -82,7 +88,7 @@ export function attachMediaStreamServer(
 
   const wss = new WebSocketServer({ noServer: true });
 
-  const upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
+  const upgradeHandler = async (req: IncomingMessage, socket: Socket, head: Buffer): Promise<void> => {
     // 1. Path filter — leave other upgrade paths (if any) untouched.
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0];
@@ -96,7 +102,7 @@ export function attachMediaStreamServer(
     // 2. Signature verification. Twilio signs the WS upgrade URL the
     //    same way it signs HTTP webhooks — auth_token + URL + (no
     //    params for upgrades) → HMAC-SHA1 → base64. Reject 403 on miss.
-    const authToken = deps.authTokenGetter();
+    const authToken = await Promise.resolve(deps.authTokenGetter({}));
     if (!authToken) {
       logger.error('mediastream upgrade rejected: no auth token configured');
       rejectUpgrade(socket, 500);

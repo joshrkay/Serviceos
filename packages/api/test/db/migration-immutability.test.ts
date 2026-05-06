@@ -130,6 +130,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['071_widen_tenant_integrations_status', '00d8a500f7bf1bc64bb1f8175ff63900ee3d15effddaec6fa3ec266dbe4f1600'],
   ['072_add_executing_status', 'cccb33af535e3d99643c7d0de588afb78fe39af2759132d9d126e9f4f022a357'],
   ['073_add_execution_retry_count', '061fc84a465b30151cd19619172d0dc5b3e01676272adada9488f4a635c09b22'],
+  ['074_tenant_integrations_system_lookup', '3832dcf271a018e9a6d9d66c3ebba87c82ad3b910ff1e7debce83dbce870bd0d'],
 ];
 
 function hashMigration(value: string): string {

@@ -1978,6 +1978,27 @@ export const MIGRATIONS = {
     ALTER TABLE proposals
       ADD COLUMN IF NOT EXISTS execution_retry_count INTEGER NOT NULL DEFAULT 0;
   `,
+
+  // Inbound Twilio webhooks (voice/SMS/recording) need to look up
+  // tenant_integrations BEFORE a tenant is known — to find:
+  //   1. the tenant_id given an incoming `to` number
+  //   2. the subaccount auth token given the AccountSid in the webhook body
+  // Both lookups are inherently cross-tenant. The existing FORCE RLS
+  // policy on tenant_integrations blocks them. Add a permissive read
+  // policy that activates only when app.system_lookup = 'true' is set
+  // on the connection — set inside short-lived transactions in
+  // app.ts's resolveTwilioAuthTokenForSubaccount /
+  // resolveTenantIdByPhoneNumber helpers. Writes still require
+  // app.current_tenant_id (the original tenant_isolation_integrations
+  // policy stays in force for INSERT/UPDATE/DELETE).
+  '074_tenant_integrations_system_lookup': `
+    DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_integrations ON tenant_integrations
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
