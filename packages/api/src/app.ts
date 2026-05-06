@@ -114,6 +114,7 @@ import {
   PgTechnicianLocationAuthorizer,
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
+import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -372,6 +373,11 @@ export function createApp(): express.Express {
   // and the global json() middleware skips it (body-parser sets req._body = true).
   app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
 
+  // Twilio posts application/x-www-form-urlencoded — mount the matching parser
+  // before global express.json() so /webhooks/twilio/* routes get populated
+  // req.body fields (used for signature verification + AccountSid match).
+  app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
+
   // Body parsing for all other routes
   app.use(express.json());
 
@@ -468,8 +474,76 @@ export function createApp(): express.Express {
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
+  // Queue constructed here (before webhook router) so new-tenant webhooks can
+  // enqueue provisioning jobs synchronously during the request.
+  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+
+  // Resolves per-tenant integration credentials for inbound webhook signature
+  // verification. Returns null when no row exists or the integration provider
+  // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
+  const integrationResolver = pool
+    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
+        const { decrypt } = await import('./integrations/crypto');
+        const { setTenantContext } = await import('./db/schema');
+        const encKey = process.env.TENANT_ENCRYPTION_KEY;
+
+        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
+        // GUC on a dedicated client/transaction. Webhook handlers run outside
+        // withTenantTransaction so we open one here.
+        const client = await pool.connect();
+        let rows: Array<{
+          subaccount_sid: string | null;
+          auth_token_primary_enc: string | null;
+          auth_token_secondary_enc: string | null;
+          provider_data: Record<string, unknown>;
+        }> = [];
+        try {
+          await client.query('BEGIN');
+          await client.query(setTenantContext(tenantId));
+          const result = await client.query<{
+            subaccount_sid: string | null;
+            auth_token_primary_enc: string | null;
+            auth_token_secondary_enc: string | null;
+            provider_data: Record<string, unknown>;
+          }>(
+            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
+             FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = $2`,
+            [tenantId, provider]
+          );
+          rows = result.rows;
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+        const row = rows[0];
+        if (!row) return null;
+        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
+        // store a public verification key (not encrypted) in provider_data, so
+        // the resolver shouldn't 403 valid SendGrid webhooks just because
+        // TENANT_ENCRYPTION_KEY isn't configured.
+        const canDecrypt = Boolean(encKey);
+        if (provider === 'twilio' && !canDecrypt) return null;
+        return {
+          tenantId,
+          provider,
+          subaccountSid: row.subaccount_sid ?? undefined,
+          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
+            ? decrypt(row.auth_token_primary_enc, encKey!)
+            : undefined,
+          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
+            ? decrypt(row.auth_token_secondary_enc, encKey!)
+            : undefined,
+          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
+        };
+      }
+    : undefined;
+
   app.use(
     '/webhooks',
     createWebhookRouter(config, {
@@ -478,8 +552,11 @@ export function createApp(): express.Express {
       invoiceRepo: webhookInvoiceRepo,
       paymentRepo: webhookPaymentRepo,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+      queue,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
       auditRepo: webhookAuditRepo,
       webhookEventRepo,
+      integrationResolver,
     })
   );
 
@@ -540,7 +617,6 @@ export function createApp(): express.Express {
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
@@ -966,6 +1042,14 @@ export function createApp(): express.Express {
     feedbackSendWorker.type,
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+
+  if (pool) {
+    const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
+    workerRegistry.set(
+      provisionTwilioWorker.type,
+      provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
 
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the
