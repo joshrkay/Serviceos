@@ -99,6 +99,13 @@ export interface TenantSettings {
   depositPercentageBps?: number | null;
   depositFixedCents?: number | null;
   depositRequiredAboveCents?: number | null;
+  /**
+   * Tier 4 (Deposit rules — PR 3a-extended). Controls when the
+   * customer is prompted to pay the deposit relative to estimate
+   * approval. See migration 079 for accepted values. Default
+   * 'after_approval' (preserves existing flow).
+   */
+  depositTimingPolicy?: 'before_approval' | 'after_approval';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -144,6 +151,8 @@ export interface UpdateSettingsInput {
   depositPercentageBps?: number | null;
   depositFixedCents?: number | null;
   depositRequiredAboveCents?: number | null;
+  /** Tier 4 — when the deposit is collected relative to approval. */
+  depositTimingPolicy?: 'before_approval' | 'after_approval';
 }
 
 export interface SettingsRepository {

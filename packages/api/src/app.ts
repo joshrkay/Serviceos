@@ -480,6 +480,11 @@ export function createApp(): express.Express {
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
+  // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
+  // and the rest of the app share a single instance — InMemory repos
+  // are stateful, so two separate `new InMemoryJobRepository()` calls
+  // would diverge in tests.
+  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
@@ -557,6 +562,7 @@ export function createApp(): express.Express {
       settingsRepo: webhookSettingsRepo,
       invoiceRepo: webhookInvoiceRepo,
       paymentRepo: webhookPaymentRepo,
+      jobRepo,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
       queue,
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
@@ -577,7 +583,8 @@ export function createApp(): express.Express {
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
   const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
-  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
+  // jobRepo is hoisted earlier so the Stripe webhook + everything else
+  // share a single InMemory instance during tests.
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
@@ -1134,11 +1141,18 @@ export function createApp(): express.Express {
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
+  // STRIPE_SECRET_KEY is optional: deposit Stripe Payment Link minting
+  // (PR 3b) returns ValidationError when not configured rather than
+  // crashing — keeps the rest of the approval flow working in dev /
+  // test environments without a Stripe key.
   const publicEstimateService = new PublicEstimateService({
     estimateRepo,
     jobRepo,
     customerRepo,
     settingsRepo,
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : null,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 

@@ -19,12 +19,14 @@ import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
 
 type Strategy = 'none' | 'percentage' | 'fixed';
+type TimingPolicy = 'before_approval' | 'after_approval';
 
 interface DepositRulesFields {
   strategy: Strategy;
   percentagePercent: string;       // 0-100, surfaced as percent in UI
   fixedDollars: string;             // dollars, converted to cents on save
   requiredAboveDollars: string;     // optional threshold; empty = always
+  timingPolicy: TimingPolicy;
 }
 
 const EMPTY: DepositRulesFields = {
@@ -32,6 +34,7 @@ const EMPTY: DepositRulesFields = {
   percentagePercent: '',
   fixedDollars: '',
   requiredAboveDollars: '',
+  timingPolicy: 'after_approval',
 };
 
 interface DepositRulesSheetProps {
@@ -73,6 +76,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
           depositPercentageBps?: number | null;
           depositFixedCents?: number | null;
           depositRequiredAboveCents?: number | null;
+          depositTimingPolicy?: TimingPolicy;
         };
         if (cancelled) return;
         setFields({
@@ -80,6 +84,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
           percentagePercent: bpsToPercentString(data.depositPercentageBps),
           fixedDollars: centsToDollarsString(data.depositFixedCents),
           requiredAboveDollars: centsToDollarsString(data.depositRequiredAboveCents),
+          timingPolicy: data.depositTimingPolicy ?? 'after_approval',
         });
       } catch (err) {
         if (cancelled) return;
@@ -145,6 +150,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
           depositPercentageBps,
           depositFixedCents,
           depositRequiredAboveCents,
+          depositTimingPolicy: fields.timingPolicy,
         }),
       });
       if (!res.ok) {
@@ -291,6 +297,53 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                     />
                   </div>
                 </div>
+              )}
+
+              {fields.strategy !== 'none' && (
+                <fieldset className="space-y-2" aria-labelledby="timing-label">
+                  <legend id="timing-label" className="text-sm text-slate-700">
+                    When to collect
+                  </legend>
+                  {(
+                    [
+                      {
+                        id: 'after_approval',
+                        label: 'After the customer approves',
+                        desc: 'Customer accepts the estimate, then sees the payment link.',
+                      },
+                      {
+                        id: 'before_approval',
+                        label: 'Before the customer can approve',
+                        desc: 'Deposit must be paid first; the Approve button stays disabled until then.',
+                      },
+                    ] as Array<{ id: TimingPolicy; label: string; desc: string }>
+                  ).map((opt) => {
+                    const active = fields.timingPolicy === opt.id;
+                    return (
+                      <label
+                        key={opt.id}
+                        className={`flex w-full cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                          active ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="deposit-timing-policy"
+                          value={opt.id}
+                          checked={active}
+                          onChange={() => setFields((f) => ({ ...f, timingPolicy: opt.id }))}
+                          className="mt-0.5"
+                        />
+                        <div className="flex-1">
+                          <p className={`text-sm ${active ? 'text-indigo-900' : 'text-slate-800'}`}>
+                            {opt.label}
+                          </p>
+                          <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </fieldset>
               )}
 
               {fields.strategy !== 'none' && (

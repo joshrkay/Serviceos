@@ -6,6 +6,8 @@ import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { JobRepository } from '../jobs/job';
+import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
@@ -23,6 +25,13 @@ export interface WebhookRouterDeps {
   settingsRepo?: SettingsRepository;
   invoiceRepo?: InvoiceRepository;
   paymentRepo?: PaymentRepository;
+  /**
+   * Tier 4 (Deposit rules — PR 3b). When wired, the Stripe webhook
+   * branches on `metadata.deposit_for_job_id` to credit
+   * `depositPaidCents` on the linked job. Optional so legacy harnesses
+   * without the deposit flow keep working.
+   */
+  jobRepo?: JobRepository;
   stripeWebhookSecret?: string;
   queue?: Queue;
   appBaseUrl?: string;
@@ -330,7 +339,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     try {
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object as {
-          metadata?: { tenant_id?: string; invoice_id?: string };
+          metadata?: {
+            tenant_id?: string;
+            invoice_id?: string;
+            // Tier 4 (Deposit rules — PR 3b). When set, the session is
+            // a deposit collection rather than an invoice payment. The
+            // two metadata keys are mutually exclusive — public-estimate
+            // mints links with deposit_for_job_id only.
+            deposit_for_job_id?: string;
+          };
           amount_total?: number;
           payment_status?: string;
         };
@@ -348,7 +365,49 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
         const tenantId = session.metadata?.tenant_id;
         const invoiceId = session.metadata?.invoice_id;
+        const depositForJobId = session.metadata?.deposit_for_job_id;
         const amountTotal = session.amount_total; // already in cents
+
+        // Tier 4 (Deposit rules — PR 3b). Deposit branch: credit
+        // depositPaidCents on the linked job. Cap at depositRequiredCents
+        // (the DB CHECK enforces the same bound) so an over-tap doesn't
+        // wedge the job row. Idempotency comes from the outer
+        // handleWebhookEvent dedup; a duplicate delivery would already
+        // have returned `duplicate: true` above.
+        if (depositForJobId && tenantId && amountTotal && amountTotal > 0) {
+          if (!deps.jobRepo) {
+            logger.error('Job repo not wired to Stripe webhook handler');
+            return res.status(500).json({ error: 'Deposit processing not configured' });
+          }
+          const job = await deps.jobRepo.findById(tenantId, depositForJobId);
+          if (!job) {
+            logger.warn('Deposit checkout for unknown job', {
+              eventId: event.id, tenantId, depositForJobId,
+            });
+            await webhookRepo.updateStatus(event.id, 'processed');
+            return res.status(200).json({ received: true, skipped: true });
+          }
+          const required = job.depositRequiredCents ?? 0;
+          const previouslyPaid = job.depositPaidCents ?? 0;
+          if (required <= 0) {
+            logger.warn('Deposit paid for job with no required deposit', {
+              eventId: event.id, tenantId, depositForJobId,
+            });
+            await webhookRepo.updateStatus(event.id, 'processed');
+            return res.status(200).json({ received: true, skipped: true });
+          }
+          const newPaid = Math.min(previouslyPaid + amountTotal, required);
+          await deps.jobRepo.update(tenantId, depositForJobId, {
+            depositPaidCents: newPaid,
+            depositStatus: deriveDepositStatus(required, newPaid),
+            updatedAt: new Date(),
+          });
+          logger.info('Deposit credited via Stripe checkout', {
+            tenantId, depositForJobId, amountTotal, newPaid, required,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, deposit: true });
+        }
 
         if (!tenantId || !invoiceId || !amountTotal || amountTotal <= 0) {
           logger.warn('Stripe checkout.session.completed missing or invalid metadata', {

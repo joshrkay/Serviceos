@@ -196,6 +196,47 @@ describe('DepositRulesSheet — Tier 4 stub closure (PR 1: data plane only)', ()
     });
   });
 
+  it('hydrates depositTimingPolicy from existing settings and persists the chosen value', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        depositStrategy: 'percentage',
+        depositPercentageBps: 2500,
+        depositTimingPolicy: 'before_approval',
+      }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    const onClose = vi.fn();
+    render(<DepositRulesSheet onClose={onClose} />);
+
+    const beforeRadio = (await screen.findByLabelText(
+      /Before the customer can approve/i,
+    )) as HTMLInputElement;
+    expect(beforeRadio.checked).toBe(true);
+
+    // Switch to after_approval and save.
+    fireEvent.click(screen.getByLabelText(/After the customer approves/i));
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const putCall = apiFetchMock.mock.calls.find(
+      (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+    );
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.depositTimingPolicy).toBe('after_approval');
+  });
+
+  it('hides the timing-policy fieldset when strategy is "No deposit"', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    render(<DepositRulesSheet onClose={() => {}} />);
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/No deposit/i) as HTMLInputElement).checked,
+      ).toBe(true);
+    });
+    expect(screen.queryByLabelText(/After the customer approves/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Before the customer can approve/i)).not.toBeInTheDocument();
+  });
+
   it('surfaces server errors via toast and inline message', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
     apiFetchMock.mockResolvedValueOnce(

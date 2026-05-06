@@ -2103,6 +2103,40 @@ export const MIGRATIONS = {
       ADD CONSTRAINT jobs_deposit_paid_lte_required
         CHECK (deposit_paid_cents <= deposit_required_cents);
   `,
+
+  '079_tenant_settings_deposit_timing_policy': `
+    -- Tier 4 (Deposit rules — PR 3a-extended). Tenant-configurable
+    -- policy controlling when the customer is asked to pay the deposit:
+    --
+    --   'after_approval'  (default): customer accepts the estimate, THEN
+    --                                 sees the deposit payment link.
+    --                                 Mirrors the existing PR 3a flow.
+    --   'before_approval': customer must pay the deposit BEFORE the
+    --                      Approve button becomes active. Used by tenants
+    --                      who don't want any commitment without skin in
+    --                      the game first.
+    --
+    -- Default is 'after_approval' so existing tenants keep current
+    -- behavior on the day this migration runs.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS deposit_timing_policy TEXT NOT NULL DEFAULT 'after_approval'
+        CHECK (deposit_timing_policy IN ('before_approval', 'after_approval'));
+  `,
+
+  '080_jobs_deposit_stripe_payment_link': `
+    -- Tier 4 (Deposit rules — PR 3b). Stripe Payment Link minted for
+    -- the deposit, persisted on the job so a re-tap from the customer
+    -- portal returns the same URL (idempotency mirrors the invoice
+    -- pay-now flow). The webhook handler credits deposit_paid_cents
+    -- using metadata.deposit_for_job_id; the URL itself is
+    -- informational and visible to the customer.
+    --
+    -- Both columns are nullable: a job has no deposit link until the
+    -- customer (or the dispatcher) requests one.
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_id TEXT,
+      ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_url TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

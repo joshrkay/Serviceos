@@ -29,6 +29,12 @@ function mapRow(row: Record<string, unknown>): Job {
     depositPaidCents: (row.deposit_paid_cents as number | null) ?? 0,
     depositStatus:
       (row.deposit_status as 'not_required' | 'pending' | 'paid' | null) ?? 'not_required',
+    // Tier 4 (Deposit rules — PR 3b). Migration 080 columns. Both
+    // nullable in DB; surface as undefined when no link has been minted.
+    depositStripePaymentLinkId:
+      (row.deposit_stripe_payment_link_id as string | null) ?? undefined,
+    depositStripePaymentLinkUrl:
+      (row.deposit_stripe_payment_link_url as string | null) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -206,6 +212,9 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         depositRequiredCents: 'deposit_required_cents',
         depositPaidCents: 'deposit_paid_cents',
         depositStatus: 'deposit_status',
+        // Tier 4 (Deposit rules — PR 3b). Migration 080.
+        depositStripePaymentLinkId: 'deposit_stripe_payment_link_id',
+        depositStripePaymentLinkUrl: 'deposit_stripe_payment_link_url',
         updatedAt: 'updated_at',
       };
 

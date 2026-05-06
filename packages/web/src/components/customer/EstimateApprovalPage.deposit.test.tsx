@@ -111,3 +111,85 @@ describe('EstimateApprovalPage — Tier 4 deposit notice (PR 3a)', () => {
     expect(screen.queryByTestId('estimate-deposit-notice')).not.toBeInTheDocument();
   });
 });
+
+describe('EstimateApprovalPage — Tier 4 deposit (PR 3b: before_approval gate + Pay deposit CTA)', () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+  });
+
+  it('shows the Pay deposit CTA in place of Approve when before_approval and unpaid', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...baseView,
+          depositRequiredCents: 25000,
+          depositStatus: 'pending',
+          depositTimingPolicy: 'before_approval',
+          // Backend marks the estimate non-actionable when before_approval
+          // gates approval — page mirrors that gate.
+          isActionable: false,
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    expect(await screen.findByTestId('estimate-pay-deposit-cta')).toBeInTheDocument();
+    // The regular Accept CTA must NOT be present when blocked.
+    expect(screen.queryByText(/Accept this estimate/i)).not.toBeInTheDocument();
+    // Notice copy reflects the policy.
+    const notice = screen.getByTestId('estimate-deposit-notice');
+    expect(notice).toHaveTextContent(/pay the deposit to unlock/i);
+  });
+
+  it('clicking Pay deposit fetches the checkout URL and redirects', async () => {
+    const assignSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign: assignSpy },
+    });
+
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...baseView,
+          depositRequiredCents: 25000,
+          depositStatus: 'pending',
+          depositTimingPolicy: 'before_approval',
+          isActionable: false,
+        });
+      }
+      if (url.includes('/deposit-checkout')) {
+        return jsonResponse({ url: 'https://checkout.stripe.com/c/plink_x' });
+      }
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    const cta = await screen.findByTestId('estimate-pay-deposit-cta');
+    cta.click();
+
+    await waitFor(() =>
+      expect(assignSpy).toHaveBeenCalledWith('https://checkout.stripe.com/c/plink_x'),
+    );
+  });
+
+  it('after_approval policy keeps the Accept CTA even when a deposit is required', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (!init || init.method === undefined) {
+        return jsonResponse({
+          ...baseView,
+          depositRequiredCents: 25000,
+          depositStatus: 'pending',
+          depositTimingPolicy: 'after_approval',
+          isActionable: true,
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPageAtToken('test-token');
+
+    expect(await screen.findByText(/Accept this estimate/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('estimate-pay-deposit-cta')).not.toBeInTheDocument();
+  });
+});

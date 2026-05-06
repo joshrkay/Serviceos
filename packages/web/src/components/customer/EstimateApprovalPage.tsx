@@ -44,6 +44,20 @@ interface PublicEstimateView {
   depositRequiredCents?: number;
   depositPaidCents?: number;
   depositStatus?: 'not_required' | 'pending' | 'paid';
+  /**
+   * Tier 4 (Deposit rules — PR 3b). Tenant policy controlling whether
+   * the deposit must be paid BEFORE the customer can approve the
+   * estimate. The page replaces the Accept CTA with a Pay deposit
+   * CTA when this is `'before_approval'` and the deposit is unpaid.
+   */
+  depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /**
+   * Pre-existing Stripe Payment Link for the deposit, surfaced read-only
+   * here so a returning customer doesn't trigger a fresh mint when one
+   * already exists. The page calls POST /deposit-checkout when this is
+   * absent or expired.
+   */
+  depositCheckoutUrl?: string;
 }
 
 // ─── Signature canvas ─────────────────────────────────────────────────────
@@ -689,6 +703,8 @@ export function EstimateApprovalPage() {
               <p className="text-xs text-amber-800 mt-1">
                 {apiView.depositStatus === 'paid'
                   ? 'Thanks — your deposit is on file. We\'ll be in touch to schedule the work.'
+                  : apiView.depositTimingPolicy === 'before_approval'
+                  ? 'Please pay the deposit to unlock the Approve button below.'
                   : 'You\'ll be prompted to pay the deposit after approving this estimate.'}
               </p>
             </div>
@@ -704,27 +720,62 @@ export function EstimateApprovalPage() {
         </div>
 
         {/* Fixed CTA */}
-        {apiView?.isActionable !== false && !isExpired && !isAlreadyDeclined && (
-          <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
-            <div className="max-w-lg mx-auto">
-              <button
-                onClick={() => setAppr(true)}
-                className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
-              >
-                <Check size={16} /> Accept this estimate
-              </button>
-              {usingApi && id && (
-                <DeclineButton
-                  token={id}
-                  onDeclined={(view) => setApiView(view)}
-                />
-              )}
-              <p className="text-center text-xs text-slate-400 mt-2 pb-1">
-                No account needed · {businessName}
-              </p>
+        {(() => {
+          if (isExpired || isAlreadyDeclined) return null;
+
+          // Tier 4 (Deposit rules — PR 3b). When the tenant policy is
+          // 'before_approval' and the deposit is still pending, swap
+          // the Accept CTA for a Pay deposit CTA. The backend's
+          // approve() also enforces this gate, so this is a UI guard
+          // that prevents the customer from getting a 409 mid-flow.
+          const blockedByDeposit =
+            apiView?.depositTimingPolicy === 'before_approval' &&
+            (apiView?.depositRequiredCents ?? 0) > 0 &&
+            apiView?.depositStatus !== 'paid';
+
+          if (blockedByDeposit && usingApi && id) {
+            return (
+              <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
+                <div className="max-w-lg mx-auto">
+                  <PayDepositButton token={id} initialUrl={apiView?.depositCheckoutUrl} />
+                  {usingApi && id && (
+                    <DeclineButton
+                      token={id}
+                      onDeclined={(view) => setApiView(view)}
+                    />
+                  )}
+                  <p className="text-center text-xs text-slate-400 mt-2 pb-1">
+                    No account needed · {businessName}
+                  </p>
+                </div>
+              </div>
+            );
+          }
+
+          if (apiView?.isActionable === false) return null;
+
+          return (
+            <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
+              <div className="max-w-lg mx-auto">
+                <button
+                  onClick={() => setAppr(true)}
+                  className="w-full flex items-center justify-center gap-2 rounded-2xl bg-slate-900 text-white py-4 text-sm hover:bg-slate-700 active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
+                >
+                  <Check size={16} /> Accept this estimate
+                </button>
+                {usingApi && id && (
+                  <DeclineButton
+                    token={id}
+                    onDeclined={(view) => setApiView(view)}
+                  />
+                )}
+                <p className="text-center text-xs text-slate-400 mt-2 pb-1">
+                  No account needed · {businessName}
+                </p>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {showApproval && (
@@ -746,6 +797,64 @@ export function EstimateApprovalPage() {
 }
 
 // ─── Decline button ────────────────────────────────────────────────────────
+// Tier 4 (Deposit rules — PR 3b). Pay-deposit CTA shown when the
+// tenant policy is 'before_approval'. On click, mints (or reuses) a
+// Stripe Payment Link via POST /public/estimates/:token/deposit-checkout
+// and redirects the customer there. After payment Stripe redirects
+// back to the page and the webhook will have credited the deposit so
+// the page swaps in the regular Accept CTA on next load.
+function PayDepositButton({ token, initialUrl }: {
+  token: string;
+  initialUrl?: string;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function go() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      // Reuse a previously-minted link to avoid an unnecessary Stripe
+      // round-trip on a returning customer.
+      if (initialUrl) {
+        window.location.assign(initialUrl);
+        return;
+      }
+      const res = await apiFetch(
+        `/public/estimates/${encodeURIComponent(token)}/deposit-checkout`,
+        { method: 'POST' },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
+        throw new Error(body.message ?? `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { url: string };
+      window.location.assign(data.url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start checkout');
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        data-testid="estimate-pay-deposit-cta"
+        onClick={go}
+        disabled={submitting}
+        className="w-full flex items-center justify-center gap-2 rounded-2xl bg-amber-500 text-white py-4 text-sm hover:bg-amber-600 disabled:opacity-60 active:scale-[0.98] transition-all shadow-xl shadow-amber-500/20"
+      >
+        {submitting ? 'Redirecting…' : 'Pay deposit to continue'}
+      </button>
+      {error && (
+        <p className="text-center text-xs text-red-600 mt-2" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
 function DeclineButton({ token, onDeclined }: {
   token: string;
   onDeclined: (view: PublicEstimateView) => void;

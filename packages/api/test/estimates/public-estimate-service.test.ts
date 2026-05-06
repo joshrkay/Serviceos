@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import {
   PublicEstimateService,
@@ -19,6 +19,16 @@ import {
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 
 const TENANT = 'tenant-test-1';
+
+function jsonOk(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as unknown as Response;
+}
 
 function makeEstimate(jobId: string, overrides: Partial<Estimate> = {}): Estimate {
   return {
@@ -464,5 +474,233 @@ describe('PublicEstimateService.approve — Tier 4 deposit hook (PR 2)', () => {
     expect(view.depositRequiredCents).toBe(0);
     expect(view.depositPaidCents).toBe(0);
     expect(view.depositStatus).toBe('not_required');
+  });
+});
+
+describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate + Stripe link)', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  async function seedEstimateWithTotal(totalCents: number): Promise<Estimate> {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, {
+      totals: {
+        subtotalCents: totalCents,
+        taxableSubtotalCents: totalCents,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxCents: 0,
+        totalCents,
+      },
+      lineItems: [
+        {
+          id: uuidv4(),
+          description: 'Service',
+          quantity: 1,
+          unitPriceCents: totalCents,
+          totalCents,
+          sortOrder: 0,
+          taxable: true,
+        },
+      ],
+    });
+    await h.estimate.create(est);
+    return est;
+  }
+
+  it('surfaces depositTimingPolicy and computed required on getByToken for before_approval', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.depositTimingPolicy).toBe('before_approval');
+    expect(view.depositRequiredCents).toBe(25000);
+    expect(view.depositStatus).toBe('pending');
+    // Approve gate: page should disable Approve.
+    expect(view.isActionable).toBe(false);
+  });
+
+  it('blocks approve() when before_approval and deposit unpaid', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    await expect(
+      h.service.approve({
+        token: est.viewToken!,
+        acceptedByName: 'Sarah J',
+        ip: '203.0.113.5',
+        userAgent: 'test',
+      }),
+    ).rejects.toThrow(/Deposit must be paid/);
+  });
+
+  it('allows approve() once the deposit has been paid (before_approval)', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    // Simulate a paid deposit on the linked job.
+    const j = (await h.job.findByTenant(TENANT))[0];
+    await h.job.update(TENANT, j.id, {
+      depositRequiredCents: 25000,
+      depositPaidCents: 25000,
+      depositStatus: 'paid',
+    });
+
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    expect(view.status).toBe('accepted');
+    const after = (await h.job.findByTenant(TENANT))[0];
+    expect(after.depositPaidCents).toBe(25000);
+    expect(after.depositStatus).toBe('paid');
+  });
+
+  it('after_approval policy permits approve before any deposit is paid', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'after_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah J',
+      ip: '203.0.113.5',
+      userAgent: 'test',
+    });
+    expect(view.status).toBe('accepted');
+    expect(view.depositRequiredCents).toBe(25000);
+    expect(view.depositStatus).toBe('pending');
+  });
+
+  it('mints a Stripe Payment Link on getOrCreateDepositCheckoutUrl and persists it', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+
+    const stripeFetch = vi.fn(async () =>
+      jsonOk({ id: 'plink_test_123', url: 'https://checkout.stripe.com/c/plink_test_123' }),
+    );
+    const service = new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      stripeConfig: { apiKey: 'sk_test_xxx' },
+      stripeFetch,
+    });
+
+    const result = await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+    expect(result.url).toBe('https://checkout.stripe.com/c/plink_test_123');
+    expect(stripeFetch).toHaveBeenCalledTimes(1);
+    const callBody = stripeFetch.mock.calls[0][1] as RequestInit;
+    const params = new URLSearchParams(callBody.body as string);
+    expect(params.get('line_items[0][price_data][unit_amount]')).toBe('25000');
+    expect(params.get('metadata[deposit_for_job_id]')).toBeTruthy();
+
+    const job = (await h.job.findByTenant(TENANT))[0];
+    expect(job.depositStripePaymentLinkId).toBe('plink_test_123');
+    expect(job.depositStripePaymentLinkUrl).toBe(
+      'https://checkout.stripe.com/c/plink_test_123',
+    );
+    // Required is now locked onto the job from the rule eval.
+    expect(job.depositRequiredCents).toBe(25000);
+  });
+
+  it('returns the existing link on a second call (idempotent mint)', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'fixed',
+      depositFixedCents: 50000,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const stripeFetch = vi.fn(async () =>
+      jsonOk({ id: 'plink_a', url: 'https://checkout.stripe.com/c/plink_a' }),
+    );
+    const service = new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      stripeConfig: { apiKey: 'sk_test_xxx' },
+      stripeFetch,
+    });
+    await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+    await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+    expect(stripeFetch).toHaveBeenCalledTimes(1); // second call hits the cache
+  });
+
+  it('rejects mint when no deposit is required', async () => {
+    const est = await seedEstimateWithTotal(100000);
+    const stripeFetch = vi.fn(async () => jsonOk({ id: 'x', url: 'x' }));
+    const service = new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      stripeConfig: { apiKey: 'sk_test_xxx' },
+      stripeFetch,
+    });
+    await expect(service.getOrCreateDepositCheckoutUrl(est.viewToken!)).rejects.toThrow(
+      /No deposit is required/,
+    );
+    expect(stripeFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects mint when the deposit has already been paid in full', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'fixed',
+      depositFixedCents: 50000,
+    });
+    const est = await seedEstimateWithTotal(100000);
+    const j = (await h.job.findByTenant(TENANT))[0];
+    await h.job.update(TENANT, j.id, {
+      depositRequiredCents: 50000,
+      depositPaidCents: 50000,
+      depositStatus: 'paid',
+    });
+    const service = new PublicEstimateService({
+      estimateRepo: h.estimate,
+      customerRepo: h.customer,
+      jobRepo: h.job,
+      settingsRepo: h.settings,
+      stripeConfig: { apiKey: 'sk_test_xxx' },
+      stripeFetch: vi.fn(),
+    });
+    await expect(service.getOrCreateDepositCheckoutUrl(est.viewToken!)).rejects.toThrow(
+      /already been paid/,
+    );
+  });
+
+  it('rejects mint when Stripe is not configured', async () => {
+    await h.settings.update(TENANT, {
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    const est = await seedEstimateWithTotal(100000);
+    // Default harness has no stripeConfig — service must surface a clean
+    // ValidationError rather than crashing on a missing apiKey.
+    await expect(h.service.getOrCreateDepositCheckoutUrl(est.viewToken!)).rejects.toThrow(
+      /not configured/,
+    );
   });
 });

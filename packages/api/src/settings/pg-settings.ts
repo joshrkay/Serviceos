@@ -65,6 +65,11 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     depositFixedCents: (row.deposit_fixed_cents as number | null) ?? undefined,
     depositRequiredAboveCents:
       (row.deposit_required_above_cents as number | null) ?? undefined,
+    // Tier 4 — migration 079. Default 'after_approval' applies at the
+    // column level so any row written before this migration reads as
+    // the safe pre-existing flow.
+    depositTimingPolicy:
+      (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -192,6 +197,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositPercentageBps: 'deposit_percentage_bps',
         depositFixedCents: 'deposit_fixed_cents',
         depositRequiredAboveCents: 'deposit_required_above_cents',
+        // Tier 4 — migration 079.
+        depositTimingPolicy: 'deposit_timing_policy',
         updatedAt: 'updated_at',
       };
 
