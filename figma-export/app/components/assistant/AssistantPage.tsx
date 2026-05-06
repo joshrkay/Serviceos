@@ -133,12 +133,12 @@ const AI_REPLIES: Record<string, { content: string; reasoning?: string; proposal
 function getReply(text: string, hasAttachment?: boolean) {
   if (hasAttachment) return AI_REPLIES.photo;
   const t = text.toLowerCase();
+  if (t.includes('overdue') || t.includes('paid'))      return AI_REPLIES.overdue;
   if (t.includes('invoice') || t.includes('rodriguez')) return AI_REPLIES.invoice;
   if (t.includes('schedule') || t.includes('thompson')) return AI_REPLIES.schedule;
   if (t.includes('follow') || t.includes('davis'))      return AI_REPLIES.followup;
   if (t.includes('tomorrow'))                           return AI_REPLIES.tomorrow;
   if (t.includes('free') || t.includes('thursday'))     return AI_REPLIES.free;
-  if (t.includes('overdue') || t.includes('invoice') || t.includes('paid')) return AI_REPLIES.overdue;
   return AI_REPLIES.default;
 }
 
