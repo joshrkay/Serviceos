@@ -382,4 +382,214 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     // Dialog STAYS open so the user can retry without re-performing the drag.
     expect(screen.queryByTestId('confirm-proposal-dialog')).not.toBeNull();
   });
+
+  it('P6-027 — refetches the board after a successful proposal POST', async () => {
+    const refetchMock = vi.fn();
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: mockBoardData,
+      isLoading: false,
+      error: null,
+      refetch: refetchMock,
+    });
+
+    render(<DispatchBoard />);
+    const lanes = screen.getAllByTestId('technician-lane');
+    const sourceLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
+    const targetLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-2')!;
+    const card = sourceLane.querySelector('[data-appointment-id="assigned-1"]') as HTMLElement;
+
+    // Baseline: useEffect on mount may already trigger one refetch via
+    // the visibility/focus handlers depending on jsdom. Capture the
+    // current count so we can assert ONE additional call after the POST.
+    const before = refetchMock.mock.calls.length;
+
+    fireDragSequence(card, targetLane, 'assigned-1');
+    fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
+
+    await waitFor(() =>
+      expect(refetchMock.mock.calls.length).toBeGreaterThan(before),
+    );
+  });
+
+  it('P6-027 — does NOT refetch when the POST fails (error handler returns early)', async () => {
+    const refetchMock = vi.fn();
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: mockBoardData,
+      isLoading: false,
+      error: null,
+      refetch: refetchMock,
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      json: () => Promise.resolve({}),
+      text: () => Promise.resolve('boom'),
+    }) as unknown as typeof fetch;
+
+    render(<DispatchBoard />);
+    const lanes = screen.getAllByTestId('technician-lane');
+    const sourceLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
+    const targetLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-2')!;
+    const card = sourceLane.querySelector('[data-appointment-id="assigned-1"]') as HTMLElement;
+
+    const before = refetchMock.mock.calls.length;
+    fireDragSequence(card, targetLane, 'assigned-1');
+    fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    // The success path's `void refetch()` is gated behind the !response.ok
+    // early return, so the count should still match the baseline.
+    expect(refetchMock.mock.calls.length).toBe(before);
+  });
+});
+
+describe('P6-026 — Conflict-visibility badges on appointment cards', () => {
+  it('flags appointments whose times overlap on the same technician lane', () => {
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: {
+        date: '2026-03-14',
+        unassignedAppointments: [],
+        technicianLanes: [
+          {
+            technicianId: 'tech-1',
+            technicianName: 'John Smith',
+            appointments: [
+              {
+                id: 'overlap-a',
+                jobId: 'job-a',
+                customerName: 'Customer A',
+                locationAddress: '1 Main',
+                jobSummary: 'A',
+                technicianName: 'John Smith',
+                scheduledStart: '2026-03-14T09:00:00Z',
+                scheduledEnd: '2026-03-14T11:00:00Z',
+                status: 'scheduled',
+              },
+              {
+                id: 'overlap-b',
+                jobId: 'job-b',
+                customerName: 'Customer B',
+                locationAddress: '2 Main',
+                jobSummary: 'B',
+                technicianName: 'John Smith',
+                scheduledStart: '2026-03-14T10:00:00Z',
+                scheduledEnd: '2026-03-14T12:00:00Z',
+                status: 'scheduled',
+              },
+            ],
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDispatchBoard>);
+
+    render(<DispatchBoard />);
+    const cardA = screen.getByTestId('dispatch-board-lanes').querySelector(
+      '[data-appointment-id="overlap-a"]',
+    );
+    const cardB = screen.getByTestId('dispatch-board-lanes').querySelector(
+      '[data-appointment-id="overlap-b"]',
+    );
+    expect(cardA?.getAttribute('data-has-conflict')).toBe('true');
+    expect(cardB?.getAttribute('data-has-conflict')).toBe('true');
+    // Both cards should render the badge.
+    expect(screen.getAllByTestId('appointment-conflict-badge').length).toBe(2);
+  });
+
+  it('does NOT flag appointments that are back-to-back (touching but not overlapping)', () => {
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: {
+        date: '2026-03-14',
+        unassignedAppointments: [],
+        technicianLanes: [
+          {
+            technicianId: 'tech-1',
+            technicianName: 'John Smith',
+            appointments: [
+              {
+                id: 'b2b-a',
+                jobId: 'job-a',
+                customerName: 'A',
+                locationAddress: '1 Main',
+                jobSummary: 'A',
+                technicianName: 'John',
+                scheduledStart: '2026-03-14T09:00:00Z',
+                scheduledEnd: '2026-03-14T11:00:00Z',
+                status: 'scheduled',
+              },
+              {
+                id: 'b2b-b',
+                jobId: 'job-b',
+                customerName: 'B',
+                locationAddress: '2 Main',
+                jobSummary: 'B',
+                technicianName: 'John',
+                scheduledStart: '2026-03-14T11:00:00Z',
+                scheduledEnd: '2026-03-14T13:00:00Z',
+                status: 'scheduled',
+              },
+            ],
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDispatchBoard>);
+
+    render(<DispatchBoard />);
+    expect(screen.queryByTestId('appointment-conflict-badge')).not.toBeInTheDocument();
+  });
+
+  it('does NOT flag appointments on different technician lanes that overlap in time', () => {
+    vi.mocked(useDispatchBoard).mockReturnValue({
+      data: {
+        date: '2026-03-14',
+        unassignedAppointments: [],
+        technicianLanes: [
+          {
+            technicianId: 'tech-1',
+            technicianName: 'John',
+            appointments: [
+              {
+                id: 'lane1',
+                jobId: 'job-a',
+                customerName: 'A',
+                locationAddress: '1 Main',
+                jobSummary: 'A',
+                technicianName: 'John',
+                scheduledStart: '2026-03-14T09:00:00Z',
+                scheduledEnd: '2026-03-14T11:00:00Z',
+                status: 'scheduled',
+              },
+            ],
+          },
+          {
+            technicianId: 'tech-2',
+            technicianName: 'Jane',
+            appointments: [
+              {
+                id: 'lane2',
+                jobId: 'job-b',
+                customerName: 'B',
+                locationAddress: '2 Main',
+                jobSummary: 'B',
+                technicianName: 'Jane',
+                scheduledStart: '2026-03-14T10:00:00Z',
+                scheduledEnd: '2026-03-14T12:00:00Z',
+                status: 'scheduled',
+              },
+            ],
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDispatchBoard>);
+
+    render(<DispatchBoard />);
+    expect(screen.queryByTestId('appointment-conflict-badge')).not.toBeInTheDocument();
+  });
 });

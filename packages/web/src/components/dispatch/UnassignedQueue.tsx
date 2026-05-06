@@ -9,6 +9,8 @@ export interface UnassignedQueueProps {
   onDragOver?: (e: React.DragEvent) => void;
   onDragLeave?: (e: React.DragEvent) => void;
   onDrop?: (e: React.DragEvent) => void;
+  /** P6-026 — conflicting appointment ids; forwarded to AppointmentCard. */
+  conflictIds?: ReadonlySet<string>;
 }
 
 export function UnassignedQueue({
@@ -18,6 +20,7 @@ export function UnassignedQueue({
   onDragOver,
   onDragLeave,
   onDrop,
+  conflictIds,
 }: UnassignedQueueProps) {
   return (
     <div
@@ -47,6 +50,7 @@ export function UnassignedQueue({
               appointment={appointment}
               draggable={true}
               onDragStart={onDragStart}
+              hasConflict={conflictIds?.has(appointment.id) ?? false}
             />
           ))
         )}

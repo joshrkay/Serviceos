@@ -20,6 +20,14 @@ export interface AppointmentCardProps {
   isDragging?: boolean;
   draggable?: boolean;
   onDragStart?: (e: React.DragEvent, appointmentId: string) => void;
+  /**
+   * P6-026 — when true, the card renders a "Conflict" badge to signal
+   * the appointment overlaps another booking for the same technician
+   * (or the same customer). Computed in the parent (DispatchBoard) so
+   * the card stays presentational. Optional: omitting it preserves
+   * the pre-P6-026 quiet card.
+   */
+  hasConflict?: boolean;
 }
 
 function formatTime(iso: string): string {
@@ -48,6 +56,7 @@ export function AppointmentCard({
   isDragging = false,
   draggable = false,
   onDragStart,
+  hasConflict = false,
 }: AppointmentCardProps) {
   const arrivalWindow = formatArrivalWindow(
     appointment.arrivalWindowStart,
@@ -56,9 +65,12 @@ export function AppointmentCard({
 
   return (
     <div
-      className={`appointment-card ${isDragging ? 'appointment-card--dragging' : ''}`}
+      className={`appointment-card ${isDragging ? 'appointment-card--dragging' : ''} ${
+        hasConflict ? 'appointment-card--conflict' : ''
+      }`}
       data-testid="appointment-card"
       data-appointment-id={appointment.id}
+      data-has-conflict={hasConflict ? 'true' : 'false'}
       draggable={draggable}
       onDragStart={(e) => onDragStart?.(e, appointment.id)}
     >
@@ -66,6 +78,17 @@ export function AppointmentCard({
         <span className="appointment-card__time" data-testid="appointment-time">
           {formatTime(appointment.scheduledStart)} - {formatTime(appointment.scheduledEnd)}
         </span>
+        {hasConflict && (
+          <span
+            className="appointment-card__badge appointment-card__badge--conflict"
+            data-testid="appointment-conflict-badge"
+            role="status"
+            aria-label="Scheduling conflict"
+            title="This appointment overlaps another booking"
+          >
+            Conflict
+          </span>
+        )}
         <span
           className={`appointment-card__status ${getStatusClass(appointment.status)}`}
           data-testid="appointment-status"
