@@ -1,5 +1,4 @@
 import { PaymentLinkProvider, PaymentLinkRequest, PaymentLinkResult, validatePaymentLinkRequest } from './payment-link-provider';
-import { PaymentReadinessRepository } from '../invoices/payment-readiness';
 
 export interface StripeConfig {
   apiKey: string;
@@ -8,35 +7,22 @@ export interface StripeConfig {
 
 export class StripePaymentLinkProvider implements PaymentLinkProvider {
   private readonly config: StripeConfig;
-  private readonly readinessRepo: PaymentReadinessRepository;
 
-  constructor(config: StripeConfig, readinessRepo: PaymentReadinessRepository) {
-    this.config = config;
-
+  constructor(config: StripeConfig) {
     if (!config.apiKey) {
       throw new Error('StripePaymentLinkProvider requires a Stripe API key. Set STRIPE_API_KEY in environment.');
     }
-
-    this.readinessRepo = readinessRepo;
+    this.config = config;
   }
 
   async generateLink(request: PaymentLinkRequest): Promise<PaymentLinkResult> {
     const errors = validatePaymentLinkRequest(request);
     if (errors.length > 0) throw new Error(`Invalid request: ${errors.join(', ')}`);
 
-    // Check idempotency - if active link already exists, return it
-    const existing = await this.readinessRepo.findByInvoice(request.tenantId, request.invoiceId);
-    if (existing && existing.paymentLinkStatus === 'active' && existing.paymentLinkId && existing.paymentLinkUrl) {
-      return {
-        linkId: existing.paymentLinkId,
-        linkUrl: existing.paymentLinkUrl,
-        providerReference: `stripe_${existing.paymentLinkId}`,
-      };
-    }
-
-    // Call Stripe API to create a payment link
-    // Uses the Stripe REST API directly to avoid adding the stripe SDK dependency.
-    // When ready, replace with: const stripe = new Stripe(this.config.apiKey);
+    // Idempotency lives at the caller: routes/public-portal.ts gates on
+    // invoice.stripePaymentLinkUrl before calling generateLink, and persists
+    // the returned linkId/linkUrl back onto the invoice. The provider stays
+    // stateless so a restart can't desync from the durable invoice row.
     const res = await fetch('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers: {
@@ -62,28 +48,22 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
     const linkId = data.id;
     const linkUrl = data.url;
     const now = new Date();
-    const expiryMs = parseInt(process.env.PAYMENT_LINK_EXPIRY_HOURS || '24', 10) * 60 * 60 * 1000;
+    // Default to 24h. Guard against missing / non-numeric / non-positive
+    // values — without this an invalid env var produces NaN ms and
+    // `expiresAt` becomes Invalid Date.
+    const parsedHours = parseInt(process.env.PAYMENT_LINK_EXPIRY_HOURS ?? '', 10);
+    const hours = Number.isFinite(parsedHours) && parsedHours > 0 ? parsedHours : 24;
+    const expiryMs = hours * 60 * 60 * 1000;
 
-    const result: PaymentLinkResult = {
+    return {
       linkId,
       linkUrl,
       expiresAt: new Date(now.getTime() + expiryMs),
       providerReference: `stripe_${linkId}`,
     };
-
-    // Update readiness record
-    await this.readinessRepo.update(request.tenantId, request.invoiceId, {
-      paymentLinkStatus: 'active',
-      paymentLinkId: linkId,
-      paymentLinkUrl: linkUrl,
-      paymentLinkCreatedAt: now,
-    });
-
-    return result;
   }
 
   async deactivateLink(linkId: string): Promise<void> {
-    // Stripe payment links can be deactivated via the API
     const res = await fetch(`https://api.stripe.com/v1/payment_links/${linkId}`, {
       method: 'POST',
       headers: {

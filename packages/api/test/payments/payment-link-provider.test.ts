@@ -4,12 +4,10 @@ import {
   MockPaymentLinkProvider,
 } from '../../src/payments/payment-link-provider';
 import { StripePaymentLinkProvider } from '../../src/payments/stripe-payment-link';
-import { InMemoryPaymentReadinessRepository } from '../../src/invoices/payment-readiness';
 
 describe('P5-017: MockPaymentLinkProvider production guard', () => {
   function makeDeps(logger?: { warn: ReturnType<typeof vi.fn> }) {
     return {
-      readinessRepo: new InMemoryPaymentReadinessRepository(),
       logger: logger ?? { warn: vi.fn() },
     };
   }
@@ -115,10 +113,7 @@ describe('P5-017: MockPaymentLinkProvider production guard', () => {
     it('falls back to console.warn when no logger is provided', () => {
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        createPaymentLinkProvider(
-          { NODE_ENV: 'development' },
-          { readinessRepo: new InMemoryPaymentReadinessRepository() },
-        );
+        createPaymentLinkProvider({ NODE_ENV: 'development' });
         expect(consoleSpy).toHaveBeenCalledTimes(1);
       } finally {
         consoleSpy.mockRestore();

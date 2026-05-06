@@ -1,6 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
 import { StripePaymentLinkProvider } from './stripe-payment-link';
-import type { PaymentReadinessRepository } from '../invoices/payment-readiness';
 
 export interface PaymentLinkRequest {
   tenantId: string;
@@ -92,7 +91,6 @@ export interface PaymentLinkProviderEnv {
 }
 
 export interface PaymentLinkProviderDeps {
-  readinessRepo: PaymentReadinessRepository;
   // Logger is optional so the factory remains usable from places that don't
   // have the structured logger wired (e.g. unit tests). Defaults to console.
   logger?: { warn: (message: string, meta?: Record<string, unknown>) => void };
@@ -124,15 +122,15 @@ function nonEmpty(value: string | undefined): string | undefined {
  */
 export function createPaymentLinkProvider(
   env: PaymentLinkProviderEnv,
-  deps: PaymentLinkProviderDeps,
+  deps: PaymentLinkProviderDeps = {},
 ): PaymentLinkProvider {
   const stripeKey = nonEmpty(env.STRIPE_SECRET_KEY) ?? nonEmpty(env.STRIPE_API_KEY);
 
   if (stripeKey) {
-    return new StripePaymentLinkProvider(
-      { apiKey: stripeKey, webhookSecret: env.STRIPE_WEBHOOK_SECRET ?? '' },
-      deps.readinessRepo,
-    );
+    return new StripePaymentLinkProvider({
+      apiKey: stripeKey,
+      webhookSecret: env.STRIPE_WEBHOOK_SECRET ?? '',
+    });
   }
 
   if (isProductionLike(env.NODE_ENV)) {
