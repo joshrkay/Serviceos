@@ -469,20 +469,137 @@ Before sending the invoice, verify the entire data trail is navigable in both di
 
 ---
 
-## Section 16 — Security & Tenant Isolation
+## Section 16 — Account Provisioning
 
-> Do not skip. A failure here is a hard stop — no beta customer goes live until this passes.
+> Verifies the full provisioning chain that runs automatically when a new tenant signs up.
+> Every step must complete before a customer can make or receive calls.
 
-- [ ] **16.1** Open a **second incognito window** and sign up with a new test email. This is Tenant B.
-- [ ] **16.2** Tenant B completes signup. Tenant B gets their own `tenantId` (different from the one recorded in Section 1).
-- [ ] **16.3** In Tenant B's session, navigate to `/customers`. The list is empty — the Section 2 customer does not appear.
-- [ ] **16.4** In Tenant B's session, attempt `GET /api/customers/<tenant-a-customer-id>` directly (use DevTools or curl). Response is **404 or 403** — not the customer record.
-- [ ] **16.5** In Tenant B's session, attempt `GET /api/estimates/<tenant-a-estimate-id>`. Response is **404 or 403**.
-- [ ] **16.6** In Tenant B's session, attempt `GET /api/invoices/<tenant-a-invoice-id>`. Response is **404 or 403**.
-- [ ] **16.7** In Tenant B's session, attempt `GET /api/jobs/<tenant-a-job-id>`. Response is **404 or 403**.
-- [ ] **16.8** In Tenant B's session, attempt `POST /api/notes` with an `entityId` belonging to Tenant A. Response is **403 or 404** — the note is not created.
-- [ ] **16.9** Stripe payment link from Section 6.12 is token-scoped and does not expose the tenant ID or any internal ID in the URL.
-- [ ] **16.10** Estimate approval link from Section 5.9 is token-scoped. Attempting to brute-force a different token returns 404.
+### 16A — Tenant bootstrap (Clerk → Postgres)
+
+- [ ] **16.1** Sign up with a fresh test email (Tenant A if not already done in Section 1).
+- [ ] **16.2** Query the `tenants` table (or hit `GET /api/me`) and confirm a row was created with a unique `tenant_id`. This row must exist before any other data can be written.
+- [ ] **16.3** Query `tenant_settings` for this `tenant_id`. A row exists with seeded defaults — business name, timezone, default vertical pack. The tenant did not have to manually configure these to get started.
+- [ ] **16.4** In the Clerk dashboard, open the user record. `public_metadata.tenant_id` matches the `tenant_id` from 16.2. This is what the JWT carries on every API request — if it is blank or wrong, every authenticated call will fail RLS.
+- [ ] **16.5** Repeat the signup with the **same email** (delete and recreate the Clerk user, or replay the `user.created` webhook). A second `bootstrapTenant` call does **not** create a duplicate tenant row — it is idempotent. The existing `tenant_id` is returned.
+
+### 16B — Twilio subaccount provisioning
+
+> Provisioning runs asynchronously in the job queue after signup. Allow up to 2 minutes.
+
+- [ ] **16.6** After signup, query `tenant_integrations` where `provider = 'twilio'` and `tenant_id = <tenant-a-id>`. A row exists.
+- [ ] **16.7** Within 2 minutes, the row's `status` transitions from `t0_requested` → `full_readiness`. If it stays at `t0_requested` or shows `failed`, the provisioning worker has an error — check the API logs.
+- [ ] **16.8** The `subaccount_sid` column is populated with a Twilio subaccount SID (starts with `AC`).
+- [ ] **16.9** `provider_data` contains `messagingServiceSid`, `phoneNumberSid`, and `phoneE164`. These are the tenant's dedicated Twilio resources — not shared with other tenants.
+- [ ] **16.10** Call the `phoneE164` number from 16.9. The call routes to this tenant's calling agent — not to another tenant's agent, not to a dead line.
+- [ ] **16.11** Send an SMS to the `phoneE164` number. The message is received and appears in this tenant's interactions log — not in Tenant B's.
+- [ ] **16.12** If the provisioning worker fails (e.g., Twilio API timeout), replaying the job does **not** purchase a second phone number. The worker checks for an existing subaccount and recovers from the last completed step.
+
+### 16C — Team member invitation & join
+
+- [ ] **16.13** As Tenant A owner, navigate to Settings → Team members → Invite. Enter a fresh test email, set role = Dispatcher. Send.
+- [ ] **16.14** The pending invitation appears in the team members list with status "Pending."
+- [ ] **16.15** The invitee receives a Clerk invitation email at the address provided.
+- [ ] **16.16** The invitee clicks the link and signs up. On `user.created`, the webhook finds the pending invitation by `invitation_id` in Clerk metadata and joins the user to Tenant A — it does **not** bootstrap a new tenant.
+- [ ] **16.17** The invitee's session shows `tenant_id` = Tenant A's ID, `role` = Dispatcher. Confirm via `GET /api/me`.
+- [ ] **16.18** The invitation row is marked accepted. Attempting to use the same invitation link again does not join a second user or create a second entry.
+- [ ] **16.19** The invitee (Dispatcher role) can view customers and jobs. They **cannot** access billing settings or invite other users — those require Owner role.
+- [ ] **16.20** Invite a second user as Technician role. Technician can access `/technician/day` and update job status. Technician **cannot** view the estimates list, invoices, or settings.
+
+### 16D — Account deprovisioning
+
+> **Known gap:** `user.deleted` webhook handling is not yet implemented. When a Clerk user
+> is deleted, the Postgres tenant data and Twilio subaccount are not automatically cleaned up.
+> Until this is built, deprovisioning is a manual process. Document the manual steps and
+> confirm they work before onboarding any paying customer.
+
+- [ ] **16.21** Document the manual deprovisioning steps for this environment and confirm they are reachable by the ops team: `___________________________`
+- [ ] **16.22** Delete a test Clerk user (not a real customer). Confirm the API returns 401 for any subsequent request using that user's token — the session is invalidated.
+- [ ] **16.23** Confirm the tenant's data in Postgres is **not** automatically deleted by the user deletion. Data must be retained for audit and billing purposes until an explicit purge is requested. *(This is expected behavior — flag if data disappears without a manual purge.)*
+- [ ] **16.24** Confirm the Twilio subaccount for the deleted tenant is **not** automatically released. A released number could be reassigned to a different party and receive calls intended for the original tenant. *(Manual deprovisioning must include an explicit Twilio subaccount suspend/close step.)*
+
+**Notes:** _______________________________________________________________
+
+---
+
+## Section 17 — Tenant Data Isolation
+
+> Every check in this section is a hard stop. A single failure means data from one
+> customer's account is visible to another. Do not onboard any beta customer until
+> all checks pass. Run with three tenants: A (from Section 1), B (a fresh signup),
+> and C (team member of A with Technician role).
+
+### 17A — Setup
+
+- [ ] **17.1** Tenant A: the account from Section 1. Has customers, jobs, estimates, invoices, appointments, notes from this runbook.
+- [ ] **17.2** Tenant B: sign up with a second fresh email in a new incognito window. Complete signup. Record tenant B's `tenant_id`: `___________________________`
+- [ ] **17.3** Tenant B creates one customer of their own (so Tenant B has non-empty data to verify it's not leaking).
+- [ ] **17.4** Tenant C: the Technician-role team member invited in Section 16C. Uses Tenant A's `tenant_id` but a restricted role.
+
+### 17B — Cross-tenant API isolation (Tenant B cannot read Tenant A)
+
+Run each of the following as Tenant B using their authenticated session token.
+
+- [ ] **17.5** `GET /api/customers` → empty list or only Tenant B's customer. Tenant A's customer ID from Section 2 is **not** present.
+- [ ] **17.6** `GET /api/customers/<tenant-a-customer-id>` → **404 or 403**.
+- [ ] **17.7** `GET /api/jobs/<tenant-a-job-id>` → **404 or 403**.
+- [ ] **17.8** `GET /api/estimates/<tenant-a-estimate-id>` → **404 or 403**.
+- [ ] **17.9** `GET /api/invoices/<tenant-a-invoice-id>` → **404 or 403**.
+- [ ] **17.10** `GET /api/appointments` → empty or only Tenant B's appointments. Tenant A's appointment from Section 7 is **not** present.
+- [ ] **17.11** `GET /api/proposals` → empty or only Tenant B's proposals.
+- [ ] **17.12** `GET /api/contracts` → empty or only Tenant B's contracts.
+- [ ] **17.13** `GET /api/settings` → returns Tenant B's settings (business name set in Section 14, if different), **not** Tenant A's.
+
+### 17C — Cross-tenant write isolation (Tenant B cannot mutate Tenant A)
+
+- [ ] **17.14** `POST /api/notes` with `entityType: 'customer'` and `entityId: <tenant-a-customer-id>` → **403 or 404**. The note is not created. Verify by checking Tenant A's customer notes — no new note exists.
+- [ ] **17.15** `PATCH /api/jobs/<tenant-a-job-id>` with `{ status: 'completed' }` → **404 or 403**. Tenant A's job status has not changed.
+- [ ] **17.16** `POST /api/appointments` with `jobId: <tenant-a-job-id>` → **400 or 403**. No appointment is created under Tenant A.
+- [ ] **17.17** `POST /api/estimates` with `jobId: <tenant-a-job-id>` → **400 or 403**. No estimate is created under Tenant A.
+
+### 17D — Role-based isolation within Tenant A (Technician cannot exceed their scope)
+
+Run as Tenant C (Technician role, same tenant as A).
+
+- [ ] **17.18** `GET /api/estimates` → **403**. Technicians cannot list estimates.
+- [ ] **17.19** `GET /api/invoices` → **403**. Technicians cannot list invoices.
+- [ ] **17.20** `GET /api/settings` → **403**. Technicians cannot read tenant settings.
+- [ ] **17.21** `POST /api/users/invitations` → **403**. Technicians cannot invite other users.
+- [ ] **17.22** `GET /api/jobs` → **200**. Technicians can read jobs.
+- [ ] **17.23** `PATCH /api/jobs/<tenant-a-job-id>` with `{ status: 'in_progress' }` → **200**. Technicians can update job status.
+- [ ] **17.24** `DELETE /api/jobs/<tenant-a-job-id>` → **403**. Technicians cannot delete jobs.
+
+### 17E — Public token isolation
+
+- [ ] **17.25** Estimate approval token from Section 5.8 (`/e/:token`): attempt to access with a manually altered token (change the last 3 characters). Response is **404** — not a different tenant's estimate.
+- [ ] **17.26** Invoice payment token from Section 6.5 (`/pay/:token`): same test — altered token returns **404**.
+- [ ] **17.27** The estimate approval page at `/e/<tenant-a-token>` does not expose Tenant A's `tenant_id`, customer ID, or any internal UUID in the page HTML or network responses. Inspect the page source and XHR calls to confirm.
+- [ ] **17.28** Opening Tenant B's payment token (if one exists) from Tenant A's authenticated browser session does not return Tenant A's data — the token is validated against the stored tenant, not the session.
+
+### 17F — Webhook routing isolation
+
+- [ ] **17.29** Send an SMS to Tenant A's Twilio number (`phoneE164` from Section 16.9). It appears in Tenant A's interactions. It does **not** appear in Tenant B's interactions.
+- [ ] **17.30** Send an SMS to Tenant B's Twilio number (if provisioned). It appears only in Tenant B's interactions.
+- [ ] **17.31** Replay a Stripe `checkout.session.completed` event using Tenant A's `invoice_id` in the metadata. The invoice in Tenant A is marked paid. Tenant B's invoices are unchanged.
+- [ ] **17.32** Replaying the same Stripe event a second time does **not** create a duplicate payment record or change the invoice total. (Webhook idempotency.)
+
+### 17G — RLS enforcement at the database layer
+
+> These checks go below the API layer. Run directly against the database using a Postgres
+> client. Set `app.current_tenant_id` to Tenant B's ID and query for Tenant A's data.
+
+- [ ] **17.33** Connect to the database. Run:
+  ```sql
+  SET app.current_tenant_id = '<tenant-b-id>';
+  SELECT * FROM customers WHERE id = '<tenant-a-customer-id>';
+  ```
+  Result: **0 rows**. The RLS policy on `customers` blocked the read entirely.
+- [ ] **17.34** Same pattern for `estimates`, `invoices`, `jobs`, `appointments`. All return **0 rows** when the GUC is set to a different tenant.
+- [ ] **17.35** Run without setting the GUC at all:
+  ```sql
+  RESET app.current_tenant_id;
+  SELECT * FROM customers LIMIT 5;
+  ```
+  Result: **error or 0 rows** — the policy requires the GUC to be set. An unset GUC must not default to returning all rows.
 
 **Notes:** _______________________________________________________________
 
@@ -507,7 +624,8 @@ Before sending the invoice, verify the entire data trail is navigable in both di
 | 13 — Maintenance Contracts | ☐ | ☐ | ☐ | ☐ | |
 | 14 — Vertical Packs & Settings | ☐ | ☐ | ☐ | ☐ | |
 | 15 — Calling Agent | ☐ | ☐ | ☐ | ☐ | |
-| 16 — Security & Tenant Isolation | ☐ | ☐ | ☐ | **Always** | |
+| 16 — Account Provisioning | ☐ | ☐ | ☐ | **Always** | |
+| 17 — Tenant Data Isolation | ☐ | ☐ | ☐ | **Always** | |
 
 **Overall verdict:** ☐ GO &nbsp; ☐ NO-GO
 
@@ -526,4 +644,4 @@ Before sending the invoice, verify the entire data trail is navigable in both di
 
 ---
 
-*Automated counterpart: `docs/beta-verify-script.md` (upcoming — maps Sections 1, 5, 6, 9, and 16 to API-driven assertions).*
+*Automated counterpart: `docs/beta-verify-script.md` (upcoming — maps Sections 1, 5, 6, 9, 16, and 17 to API-driven assertions).*
