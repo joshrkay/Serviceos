@@ -163,29 +163,40 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         //   1. By invitation id from Clerk's public_metadata (set by
         //      the invite route) — uniquely identifies the invitation
         //      even if two tenants invited the same email.
-        //   2. By email — fallback for invitations created without
-        //      Clerk integration (no clerk_invitation_id) or when the
-        //      metadata didn't round-trip for any reason.
+        //   2. By email — fallback ONLY when no invitation id was
+        //      provided. If an id was present but failed lookup or
+        //      sanity-check, we DO NOT fall back to email; that would
+        //      reintroduce the cross-tenant ambiguity the id was
+        //      meant to resolve (PR 319 review P1). Refusing the
+        //      stale/forged id falls through to the bootstrap path,
+        //      which is the safe outcome.
         if (deps.pendingInvitationRepo && primaryEmail) {
           const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
           const invitationId = publicMeta?.invitation_id as string | undefined;
           let pending = null;
-          if (invitationId && deps.pendingInvitationRepo.findById) {
-            pending = await deps.pendingInvitationRepo
-              .findById(invitationId)
-              .catch(() => null);
-            // Sanity check: id-matched invitation MUST also match email
-            // (defense against a replay where the metadata is forged).
-            if (pending && pending.email.toLowerCase() !== primaryEmail.toLowerCase()) {
-              logger.warn('Pending invitation id+email mismatch — refusing join', {
-                userId, invitationId, expected: pending.email, got: primaryEmail,
-              });
-              pending = null;
+          if (invitationId) {
+            if (deps.pendingInvitationRepo.findById) {
+              pending = await deps.pendingInvitationRepo
+                .findById(invitationId)
+                .catch(() => null);
+              // Sanity check: id-matched invitation MUST also match
+              // email (defense against a replay where the metadata
+              // is forged). Already-accepted ones are also ignored.
+              if (pending && pending.email.toLowerCase() !== primaryEmail.toLowerCase()) {
+                logger.warn('Pending invitation id+email mismatch — refusing join', {
+                  userId, invitationId, expected: pending.email, got: primaryEmail,
+                });
+                pending = null;
+              }
+              if (pending && pending.acceptedAt) pending = null;
             }
-            // Already-accepted invitations are ignored.
-            if (pending && pending.acceptedAt) pending = null;
-          }
-          if (!pending) {
+            // Deliberately NO email fallback here — see comment above.
+          } else {
+            // No id present (e.g. a tenant invited without Clerk
+            // integration) — email lookup is the only path. The
+            // single pending-per-(tenant,email) unique index is the
+            // primary defense; same-email-across-tenants remains a
+            // known edge in this fallback path.
             pending = await deps.pendingInvitationRepo
               .findPendingByEmail(primaryEmail)
               .catch(() => null);
@@ -208,15 +219,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 });
                 throw new Error('pool not configured for invitee join');
               }
-              // Insert the users row directly. RLS is bypassed here
-              // because we set the tenant context explicitly. The
-              // existing tenant context pattern (current_setting
-              // 'app.current_tenant_id') is set by the Pg base repo's
-              // withTenant; for this raw insert we set it inline.
+              // Insert the users row directly. RLS requires the
+              // tenant GUC to be set; SET LOCAL only persists inside
+              // a transaction (PR 319 review P1), so the BEGIN /
+              // COMMIT block is mandatory — without it the SET LOCAL
+              // is a no-op and the INSERT fails the RLS policy.
+              //
+              // The tenantId is also asserted to look like a UUID
+              // before being interpolated into the SET LOCAL string
+              // (parameterized binding doesn't work for SET names).
+              // The id comes from the DB row (FK-backed), so this is
+              // belt + suspenders, but explicit prevents a future
+              // change from accidentally widening the column.
+              const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+              if (!UUID_RE.test(pending.tenantId)) {
+                throw new Error(`Invalid tenantId on pending invitation: ${pending.tenantId}`);
+              }
               const client = await deps.pool.connect();
               try {
+                await client.query('BEGIN');
                 await client.query(
-                  `SET LOCAL app.current_tenant_id = '${pending.tenantId.replace(/'/g, "''")}'`,
+                  `SET LOCAL app.current_tenant_id = '${pending.tenantId}'`,
                 );
                 await client.query(
                   `INSERT INTO users (
@@ -236,6 +259,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                     (userData.last_name as string | null) ?? null,
                   ],
                 );
+                await client.query('COMMIT');
+              } catch (txErr) {
+                await client.query('ROLLBACK').catch(() => undefined);
+                throw txErr;
               } finally {
                 client.release();
               }
