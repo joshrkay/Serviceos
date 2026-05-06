@@ -190,7 +190,11 @@ export function createProvisionTwilioWorker(deps: {
               subaccountSid,
               authToken,
               region,
-              `${baseUrl}/webhooks/twilio/voice/${tenantId}`,
+              // VoiceUrl must return TwiML — point it at the existing
+              // /api/telephony/voice handler which resolves tenant from
+              // the inbound `to` number. The /webhooks/twilio/* routes only
+              // 200-ack and don't emit TwiML, so they'd break call handling.
+              `${baseUrl}/api/telephony/voice`,
               `${baseUrl}/webhooks/twilio/status/${tenantId}`
             );
             phoneNumberSid = number.sid;

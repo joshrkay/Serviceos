@@ -522,16 +522,22 @@ export function createApp(): express.Express {
           client.release();
         }
         const row = rows[0];
-        if (!row || !encKey) return null;
+        if (!row) return null;
+        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
+        // store a public verification key (not encrypted) in provider_data, so
+        // the resolver shouldn't 403 valid SendGrid webhooks just because
+        // TENANT_ENCRYPTION_KEY isn't configured.
+        const canDecrypt = Boolean(encKey);
+        if (provider === 'twilio' && !canDecrypt) return null;
         return {
           tenantId,
           provider,
           subaccountSid: row.subaccount_sid ?? undefined,
-          authTokenPrimary: row.auth_token_primary_enc
-            ? decrypt(row.auth_token_primary_enc, encKey)
+          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
+            ? decrypt(row.auth_token_primary_enc, encKey!)
             : undefined,
-          authTokenSecondary: row.auth_token_secondary_enc
-            ? decrypt(row.auth_token_secondary_enc, encKey)
+          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
+            ? decrypt(row.auth_token_secondary_enc, encKey!)
             : undefined,
           sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
         };
