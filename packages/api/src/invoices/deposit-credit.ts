@@ -77,17 +77,24 @@ export async function applyDepositCreditToInvoice(
     });
   }
 
-  // PR 319 review (P1 — Codex): the atomic claim above marks the
-  // deposit as consumed BEFORE the payment + invoice updates land.
-  // If either downstream write throws, the marker would otherwise
-  // stick and the customer's deposit becomes permanently orphaned —
-  // future invoices on the same job skip the credit because the
-  // marker is set. Roll the marker back on any failure so the
-  // deposit stays available for a retry / a different invoice.
+  // PR 319 review (P1 — Codex, two iterations): the atomic claim
+  // above marks the deposit consumed BEFORE the payment + invoice
+  // updates land. We need to be careful with rollback semantics:
   //
-  // Rollback is best-effort: if the marker reset itself fails, we
-  // re-throw the original error and an operator must reconcile via
-  // the failure audit event (see routes/invoices.ts).
+  //   - If paymentRepo.create FAILS — no payment row was written,
+  //     rolling back the marker is safe (the deposit becomes
+  //     available for a retry; no risk of double-credit).
+  //   - If paymentRepo.create SUCCEEDS but invoiceRepo.update fails,
+  //     rolling back the marker is UNSAFE: the orphan payment row
+  //     plus a re-credit on retry would credit the deposit twice
+  //     (once via the orphan, once via the retry's fresh payment).
+  //     In that case we LEAVE the marker set and let the failure
+  //     audit (in the calling route) flag it for reconciliation.
+  //
+  // Without a Pg transaction wrapping both writes, this is the
+  // smallest correct guarantee. recordPayment in payment.ts has the
+  // same pre-existing risk; closing it for both is a follow-up.
+  let paymentWritten = false;
   try {
     const now = new Date();
     const payment: Payment = {
@@ -105,6 +112,7 @@ export async function applyDepositCreditToInvoice(
       updatedAt: now,
     };
     await paymentRepo.create(payment);
+    paymentWritten = true;
 
     const newAmountPaid = invoice.amountPaidCents + credit;
     const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
@@ -125,20 +133,22 @@ export async function applyDepositCreditToInvoice(
 
     return { invoice: updatedInvoice, payment, creditCents: credit };
   } catch (err) {
-    // Roll back the consumed marker so the deposit can be re-applied
-    // to a retry. If THIS write also fails, log via the thrown error
-    // — the route's failure-audit handler will record the original.
-    try {
-      // Setting the field to undefined drops to SQL NULL via the
-      // pg-job repo's `value ?? null` translation, which is what we
-      // want — back to "deposit not yet consumed" so a retry picks
-      // it up.
-      await jobRepo.update(job.tenantId, job.id, {
-        depositCreditedToInvoiceId: undefined,
-        updatedAt: new Date(),
-      });
-    } catch {
-      // Best-effort. Original error wins.
+    // Only roll back the marker when no payment was written. See
+    // comment above for why we DON'T roll back when paymentWritten
+    // is true: the orphan payment row would let a retry double-credit.
+    if (!paymentWritten) {
+      try {
+        // Setting the field to undefined drops to SQL NULL via the
+        // pg-job repo's `value ?? null` translation, which is what we
+        // want — back to "deposit not yet consumed" so a retry picks
+        // it up.
+        await jobRepo.update(job.tenantId, job.id, {
+          depositCreditedToInvoiceId: undefined,
+          updatedAt: new Date(),
+        });
+      } catch {
+        // Best-effort. Original error wins.
+      }
     }
     throw err;
   }

@@ -219,7 +219,13 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
     paymentRepo.create = originalCreate;
   });
 
-  it('rolls back the consumed marker when invoice update returns null', async () => {
+  it('KEEPS the consumed marker when payment write succeeded but invoice update failed (PR 319 P1 v2)', async () => {
+    // Codex caught a follow-up to the rollback: if paymentRepo.create
+    // succeeded and invoiceRepo.update later failed, rolling back the
+    // marker would let a retry double-credit (the orphan Payment row
+    // + a fresh Payment row from the retry). The marker must STAY
+    // SET in that case so future credits skip; ops reconciles via
+    // the failure audit event.
     const job = await jobRepo.create!(makeJob());
     const invoice = makeInvoice(job.id, 100000);
     await invoiceRepo.create(invoice);
@@ -231,8 +237,14 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
       applyDepositCreditToInvoice(invoice, job, invoiceRepo, paymentRepo, jobRepo),
     ).rejects.toThrow(/Failed to update invoice/);
 
+    // Marker stays set so a retry can't re-credit.
     const after = await jobRepo.findById('tenant-deposit-credit', job.id);
-    expect(after?.depositCreditedToInvoiceId).toBeFalsy();
+    expect(after?.depositCreditedToInvoiceId).toBe(invoice.id);
+
+    // The orphan payment row exists for ops reconciliation.
+    const payments = await paymentRepo.findByInvoice('tenant-deposit-credit', invoice.id);
+    expect(payments).toHaveLength(1);
+    expect(payments[0].providerReference).toBe('deposit_credit');
 
     invoiceRepo.update = originalUpdate;
   });
