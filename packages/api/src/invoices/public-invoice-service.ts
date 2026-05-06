@@ -45,6 +45,21 @@ export interface PublicInvoiceView {
   depositCreditCents: number;
 }
 
+/**
+ * Tier 4 (Payment methods — PR 2). Resolves the connected Stripe
+ * Account id to route the tenant's customer payment through. When
+ * the tenant hasn't onboarded yet, returns null and the service
+ * falls back to a platform-level charge (legacy ServiceOS-Stripe
+ * path). Implementations can hit Pg directly or pull from a service
+ * cache; the service stays decoupled.
+ */
+export interface ConnectAccountResolver {
+  resolveTenantConnectAccount(tenantId: string): Promise<{
+    accountId: string;
+    chargesEnabled: boolean;
+  } | null>;
+}
+
 export interface PublicInvoiceServiceDeps {
   invoiceRepo: InvoiceRepository;
   jobRepo: JobRepository;
@@ -57,6 +72,17 @@ export interface PublicInvoiceServiceDeps {
    * surface depositCreditCents. Without it the field reads as 0.
    */
   paymentRepo?: PaymentRepository;
+  /**
+   * Tier 4 (Payment methods — PR 2). When wired, customer-facing
+   * Payment Links are minted via the tenant's Connect Account
+   * (Stripe-Account header) so funds flow directly to the tenant's
+   * bank. Falls back to platform charge when the resolver returns
+   * null (tenant hasn't onboarded yet) or the account isn't
+   * charges-enabled. Optional so legacy harnesses don't need it.
+   */
+  connectAccountResolver?: ConnectAccountResolver;
+  /** Override-able fetch for unit tests. */
+  stripeFetch?: typeof fetch;
 }
 
 export class PublicInvoiceService {
@@ -119,12 +145,35 @@ export class PublicInvoiceService {
 
     const description = `Invoice ${invoice.invoiceNumber}${customer ? ` — ${customer.displayName}` : ''}`;
 
-    const res = await fetch('https://api.stripe.com/v1/payment_links', {
+    // Tier 4 (Payment methods — PR 2). When the tenant has an active
+    // Connect Account with charges enabled, mint the Payment Link as
+    // a Direct Charge against THEIR account — funds flow into their
+    // bank, not the ServiceOS platform's. The Stripe-Account header
+    // is the only API delta; the rest of the payload is identical.
+    //
+    // Falls back to platform-level charge when the resolver returns
+    // null (tenant hasn't onboarded yet, charges not enabled, or the
+    // resolver is unwired). This keeps existing tenants on the path
+    // they're already on until they explicitly onboard.
+    const connect = this.deps.connectAccountResolver
+      ? await this.deps.connectAccountResolver
+          .resolveTenantConnectAccount(invoice.tenantId)
+          .catch(() => null)
+      : null;
+    const useConnect = connect && connect.chargesEnabled;
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.deps.stripeConfig.apiKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (useConnect && connect) {
+      headers['Stripe-Account'] = connect.accountId;
+    }
+
+    const fetchFn = this.deps.stripeFetch ?? fetch;
+    const res = await fetchFn('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.deps.stripeConfig.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
+      headers,
       body: new URLSearchParams({
         'line_items[0][price_data][currency]': 'usd',
         'line_items[0][price_data][product_data][name]': description,
@@ -156,12 +205,20 @@ export class PublicInvoiceService {
       // it (best-effort) so it isn't an orphaned charge vector, then re-throw.
       // The link ID is included in the error message so it can be recovered
       // manually if deactivation also fails.
-      await fetch(`https://api.stripe.com/v1/payment_links/${data.id}`, {
+      //
+      // PR 2: when minted via Connect, the deactivation must also
+      // carry the Stripe-Account header — Stripe scopes the link to
+      // that account.
+      const deactivateHeaders: Record<string, string> = {
+        Authorization: `Bearer ${this.deps.stripeConfig!.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+      if (useConnect && connect) {
+        deactivateHeaders['Stripe-Account'] = connect.accountId;
+      }
+      await fetchFn(`https://api.stripe.com/v1/payment_links/${data.id}`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.deps.stripeConfig!.apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+        headers: deactivateHeaders,
         body: new URLSearchParams({ active: 'false' }),
       }).catch(() => undefined); // deactivation is best-effort; don't mask the original error
 

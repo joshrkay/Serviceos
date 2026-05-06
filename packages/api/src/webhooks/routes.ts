@@ -10,6 +10,7 @@ import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { BillingService } from '../billing/subscription';
+import { StripeConnectService } from '../billing/stripe-connect';
 import { ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
@@ -48,6 +49,14 @@ export interface WebhookRouterDeps {
    * without Stripe configured still build the router.
    */
   billingService?: BillingService;
+  /**
+   * Tier 4 (Payment methods — PR 1). When wired, the Stripe webhook
+   * applies account.updated events onto tenants (cached
+   * stripe_connect_charges_enabled / payouts_enabled / status).
+   * Optional so legacy harnesses without Connect configured still
+   * build the router.
+   */
+  connectService?: StripeConnectService;
   /**
    * Pg pool for the invitee join-tenant path (writes a users row
    * directly because we don't have an InsertUser repo yet — the
@@ -692,6 +701,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('customer.subscription.* missing fields', {
             eventId: event.id, type: event.type,
           });
+        }
+      }
+
+      // Tier 4 (Payment methods — PR 1). account.updated events
+      // mirror Connect onboarding state onto the tenant's cached
+      // columns. Stripe sends these out-of-band of any user request,
+      // so the webhook is the only place we learn that KYC completed.
+      if (deps.connectService && event.type === 'account.updated') {
+        const account = event.data.object as {
+          id?: string;
+          charges_enabled?: boolean;
+          payouts_enabled?: boolean;
+        };
+        if (account.id) {
+          const result = await deps.connectService.applyAccountUpdated({
+            accountId: account.id,
+            chargesEnabled: Boolean(account.charges_enabled),
+            payoutsEnabled: Boolean(account.payouts_enabled),
+          });
+          logger.info('Connect account.updated mirrored', {
+            accountId: account.id,
+            chargesEnabled: account.charges_enabled,
+            payoutsEnabled: account.payouts_enabled,
+            updatedTenants: result.updatedTenants,
+          });
+        } else {
+          logger.warn('account.updated missing id', { eventId: event.id });
         }
       }
 

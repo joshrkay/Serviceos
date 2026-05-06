@@ -2352,6 +2352,39 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_appointment_calendar_events ON appointment_calendar_events
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '087_tenants_stripe_connect': `
+    -- Tier 4 (Payment methods — PR 1). Stripe Connect onboarding for
+    -- the tenant's OWN Stripe account. Distinct from the
+    -- 'stripe_customer_id' columns (those bill the TENANT for Fieldly
+    -- subscription); these track the connected ACCOUNT we route the
+    -- tenant's CUSTOMER payments through.
+    --
+    --   stripe_connect_account_id : 'acct_...' returned by Stripe on
+    --                                Connect Account creation.
+    --   stripe_connect_charges_enabled : mirror of account.charges_enabled
+    --                                from the account.updated webhook.
+    --                                False on day 1 (onboarding incomplete);
+    --                                flips true once Stripe verifies KYC.
+    --   stripe_connect_payouts_enabled : same shape for payouts.
+    --   stripe_connect_status     : 'pending' | 'active' | 'restricted' |
+    --                               'disconnected'. UI shorthand derived
+    --                               from charges + payouts enabled.
+    --
+    -- Nullable so existing tenants don't need a backfill. Connect
+    -- routing only kicks in when status='active' AND charges_enabled.
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS stripe_connect_account_id TEXT,
+      ADD COLUMN IF NOT EXISTS stripe_connect_charges_enabled BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS stripe_connect_payouts_enabled BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS stripe_connect_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (stripe_connect_status IN ('pending', 'active', 'restricted', 'disconnected'));
+    -- Webhook lookup index: account.updated events arrive keyed on
+    -- account id; partial keeps the index tight.
+    CREATE INDEX IF NOT EXISTS idx_tenants_stripe_connect_account
+      ON tenants(stripe_connect_account_id)
+      WHERE stripe_connect_account_id IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -49,6 +49,7 @@ import { InMemoryUserRepository } from './users/user';
 import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
 import { InMemoryPendingInvitationRepository } from './users/pending-invitation';
 import { createBillingRouter } from './routes/billing';
+import { StripeConnectService } from './billing/stripe-connect';
 import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
@@ -528,6 +529,17 @@ export function createApp(): express.Express {
         },
       })
     : undefined;
+  // Tier 4 (Payment methods — PR 1). Stripe Connect onboarding for
+  // the tenant's customer-facing payments. Same Stripe API key as
+  // BillingService (Connect operations are first-party calls
+  // authenticated with our platform secret), but a separate service
+  // because the concerns are distinct.
+  const connectService = pool && process.env.STRIPE_SECRET_KEY
+    ? new StripeConnectService({
+        pool,
+        config: { apiKey: process.env.STRIPE_SECRET_KEY },
+      })
+    : undefined;
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
@@ -617,6 +629,7 @@ export function createApp(): express.Express {
       // status the GET /api/billing/subscription endpoint reads.
       // Wired only when both pool and STRIPE_SECRET_KEY exist.
       billingService,
+      connectService,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
       queue,
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
@@ -1212,6 +1225,11 @@ export function createApp(): express.Express {
 
   // Public unauthenticated invoice payment flow (token-authenticated).
   // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
+  // Tier 4 (Payment methods — PR 2). When the connectService is
+  // wired AND the tenant has an active Connect account with charges
+  // enabled, payments route directly to the tenant's account via
+  // the Stripe-Account header. Without it, payments stay on the
+  // legacy platform path.
   const publicInvoiceService = new PublicInvoiceService({
     invoiceRepo,
     jobRepo,
@@ -1220,9 +1238,19 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
-    // Tier 4 (Deposit rules — PR 3c). Required for the public view to
-    // surface the deposit-credit line; without it the field reads 0.
     paymentRepo,
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return {
+              accountId: view.accountId,
+              chargesEnabled: view.chargesEnabled,
+            };
+          },
+        }
+      : undefined,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
@@ -1758,7 +1786,7 @@ export function createApp(): express.Express {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).
   const revenueBySourceRepo = pool
