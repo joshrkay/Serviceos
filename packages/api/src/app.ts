@@ -1225,6 +1225,11 @@ export function createApp(): express.Express {
 
   // Public unauthenticated invoice payment flow (token-authenticated).
   // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
+  // Tier 4 (Payment methods — PR 2). When the connectService is
+  // wired AND the tenant has an active Connect account with charges
+  // enabled, payments route directly to the tenant's account via
+  // the Stripe-Account header. Without it, payments stay on the
+  // legacy platform path.
   const publicInvoiceService = new PublicInvoiceService({
     invoiceRepo,
     jobRepo,
@@ -1233,9 +1238,19 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
-    // Tier 4 (Deposit rules — PR 3c). Required for the public view to
-    // surface the deposit-credit line; without it the field reads 0.
     paymentRepo,
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return {
+              accountId: view.accountId,
+              chargesEnabled: view.chargesEnabled,
+            };
+          },
+        }
+      : undefined,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
