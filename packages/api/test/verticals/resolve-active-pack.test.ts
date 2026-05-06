@@ -202,6 +202,38 @@ describe('buildVerticalPromptResolver', () => {
     expect(section).toContain('AC');
   });
 
+  it('Codex P1 — falls back to findByVertical when activation.packId is a vertical type alias (e.g. "hvac")', async () => {
+    // Onboarding activates 'hvac' directly while the canonical seed
+    // registers 'hvac-v1'. Without this fallback, getByPackId returns
+    // null and the entire vertical-context path goes dark in
+    // production.
+    await activatePack({ tenantId: 'tenant-onboarded', packId: 'hvac' }, packActivationRepo);
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+    });
+    const section = await resolve('tenant-onboarded');
+    // Resolver found `hvac-v1` via findByVertical('hvac') and rendered
+    // the section. PACK_ID was registered earlier in this suite as
+    // verticalType 'hvac', so the fallback hits it.
+    expect(section).toBeDefined();
+    expect(section).toContain('Service vertical: HVAC Professional');
+  });
+
+  it('Codex P1 — returns undefined when activation.packId is neither an exact match nor a valid vertical type', async () => {
+    await activatePack(
+      { tenantId: 'tenant-bogus', packId: 'made-up-vertical' },
+      packActivationRepo,
+    );
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 0,
+    });
+    expect(await resolve('tenant-bogus')).toBeUndefined();
+  });
+
   it('skips canonical packs whose registry status is not "active"', async () => {
     // Codex P2 — pack is deprecated upstream while activation remains
     // active. Resolver must not surface deprecated taxonomy.

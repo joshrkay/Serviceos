@@ -25,7 +25,8 @@
  */
 
 import type { PackActivationRepository } from '../settings/pack-activation';
-import type { VerticalPackRegistry } from '../shared/vertical-pack-registry';
+import type { VerticalPackRegistry, VerticalPack as CanonicalVerticalPack } from '../shared/vertical-pack-registry';
+import { isValidVerticalType } from '../shared/vertical-types';
 import {
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
@@ -88,7 +89,7 @@ export function buildVerticalPromptResolver(
 
     let section: string | undefined;
     if (active) {
-      const canonical = await deps.canonicalPackRegistry.getByPackId(active.packId);
+      const canonical = await resolveCanonicalPack(active.packId, deps.canonicalPackRegistry);
       // Codex P2 (PR #315): reject canonical packs whose registry status
       // is not 'active'. A pack can be deprecated in the registry while
       // tenant activations remain active; loadPackConfig already enforces
@@ -139,4 +140,42 @@ export function buildVerticalPromptResolver(
     }
     return section;
   };
+}
+
+/**
+ * Codex P1 (PR #315) — packId convention reconciliation.
+ *
+ * Three packId conventions exist in the codebase today:
+ *   - Onboarding (`routes/onboarding.ts`) activates 'hvac' / 'plumbing'
+ *     directly off the SERVICE_TO_PACK map.
+ *   - `seedCanonicalVerticalPacks` registers 'hvac-v1' / 'plumbing-v1'.
+ *   - `createVerticalPack` (rich pack helper) builds packId '{type}-pack'.
+ *
+ * An exact `getByPackId(activation.packId)` lookup misses any tenant
+ * onboarded through the standard flow because their activation row
+ * carries 'hvac' but the registry has 'hvac-v1'. Without this
+ * reconciliation, the resolver returned undefined for every onboarded
+ * tenant and the §3B/3D/3E classifier-context path was silently dead.
+ *
+ * Resolution order:
+ *   1. Exact packId match (fast path, also picks up custom packs).
+ *   2. If activation.packId is itself a valid VerticalType (eg 'hvac'),
+ *      fall back to findByVertical(verticalType) and pick the most
+ *      recently updated active pack — typically the canonical seed.
+ */
+async function resolveCanonicalPack(
+  activationPackId: string,
+  registry: VerticalPackRegistry,
+): Promise<CanonicalVerticalPack | null> {
+  const exact = await registry.getByPackId(activationPackId);
+  if (exact) return exact;
+
+  if (isValidVerticalType(activationPackId)) {
+    const candidates = await registry.findByVertical(activationPackId);
+    const active = candidates
+      .filter((p) => p.status === 'active')
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+    return active ?? null;
+  }
+  return null;
 }
