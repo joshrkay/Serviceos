@@ -132,16 +132,20 @@ export function SettingsPage() {
     // Connect onboarding to /settings?stripe_connect=1. Auto-open
     // the sheet so they see the freshly-mirrored status.
     const stripeReturned = params.get('stripe_connect') === '1';
+
+    let needsUrlUpdate = false;
     if (isConnected || connectionError) {
       setCalendarSyncOpen(true);
       if (connectionError) {
         toast.error(`Calendar connection failed: ${connectionError}`);
       }
+      needsUrlUpdate = true;
     }
     if (stripeReturned) {
       setPaymentMethodsOpen(true);
+      needsUrlUpdate = true;
     }
-    if (isConnected || connectionError || stripeReturned) {
+    if (needsUrlUpdate) {
       // Strip the params so a refresh doesn't re-open / re-toast.
       params.delete('calendar_connected');
       params.delete('calendar_error');

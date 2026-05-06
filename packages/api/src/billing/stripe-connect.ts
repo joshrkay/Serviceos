@@ -60,9 +60,15 @@ export interface CreateOnboardingLinkInput {
  *   - charges_enabled === true → 'active'
  *   - charges_enabled === false but account exists → 'pending'
  *     (KYC incomplete) or 'restricted' (Stripe paused them).
- * We can't distinguish pending from restricted without inspecting
- * `requirements.disabled_reason`, so for PR 1 we collapse to
- * 'pending'. PR 2 can refine.
+ *
+ * TODO(connect-restricted): we can't distinguish pending from
+ * restricted without inspecting `requirements.disabled_reason` on
+ * the Stripe Account object, which a future PR can pull from the
+ * account.updated webhook payload (`event.data.object.requirements`).
+ * Until then, both collapse to 'pending'. The 'restricted' enum
+ * value, DB CHECK, and PaymentMethodsSheet branch are kept in
+ * place so the refinement is a pure logic change with no schema
+ * or UI churn.
  */
 export function deriveConnectStatus(
   accountId: string | null,
