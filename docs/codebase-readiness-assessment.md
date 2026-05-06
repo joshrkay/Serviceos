@@ -2,354 +2,303 @@
 
 ## Context
 
-Full audit of the ServiceOS codebase against all 184 user stories (Phases 0–7) to determine what's production-ready, what's stubbed, what's missing, and what must be done to ship. The codebase is a multi-tenant field-service management platform with AI assistant capabilities, built as a monorepo (`infra/`, `packages/api`, `packages/web`, `packages/shared`).
+Full audit of the ServiceOS codebase against the PRD, all 184 user stories
+(Phases 0–7), the Phase 8 calling-agent roadmap, and the late-April / early-May
+sprint deltas. ServiceOS is a multi-tenant field-service management platform
+with AI assistant + voice capabilities, built as a monorepo (`infra/`,
+`packages/api`, `packages/web`, `packages/shared`).
 
-**Assessment date:** 2026-03-19
-**Codebase size:** ~21,700 lines API source + ~15,000 lines web source + 205 test files
+**Assessment date:** 2026-05-06
+**Codebase size:** ~77,000 lines API source + ~44,000 lines web source
+**Test coverage:** 353 API test files + 113 web test files + 8 Playwright E2E specs
+
+> **Note on the prior version of this document.** The Apr 29 assessment is
+> superseded. Most of the launch blockers it called out (Postgres wiring,
+> frontend Clerk SDK, `bootstrapTenant`, the `'dev-secret-key'` fallback,
+> mock payment provider in production paths, hardcoded AI replies, dispatch
+> drag-and-drop, real STT) have shipped between Apr 29 and May 6. This
+> document reflects what is actually in `main` today.
 
 ---
 
-## Overall Verdict: ~65% Built, ~30% Launch-Ready
+## Overall Verdict: ~85% Built, ~70% Launch-Ready
 
-The **architecture and business logic are excellent** — strict TypeScript, RLS policies, audit trails, CDK infra, CI/CD, Zod contracts, structured logging, billing engine, proposal engine, AI gateway. But the runtime is disconnected from its own infrastructure: all 21 repositories are InMemory (zero persistence), frontend auth is a setTimeout fake, AI features are demo-only with hardcoded replies, and the payment page doesn't process real payments. This is a high-quality prototype with production-grade design, not yet a production system.
+The platform has crossed from "high-quality prototype" into "credible private
+beta candidate." Data persists through Postgres for ~37 repositories, Clerk
+auth runs end-to-end (frontend SDK + backend JWT/RBAC + tenant bootstrap),
+Stripe payment links are live with idempotent webhook reconciliation, public
+estimate-approval and invoice-payment pages ship token-scoped, Twilio SMS
++ SendGrid email send for real, telephony provisioning is tenant-aware, and
+the calling-agent state machine has its first scaffold landed.
 
-**36 gap stories** have been created across all 8 phases to close the remaining work. See `docs/stories/phase-*-gap-stories.md`.
+The remaining gap is no longer infrastructure — it is **Phase 8 (the
+customer calling agent)**, **production-grade voice provider upgrades**
+(Deepgram streaming STT, ElevenLabs streaming TTS), **vertical-specific
+domain knowledge** in agent prompts, and a finite list of UI polish items
+(13 settings stubs, conflict badges, post-execution refresh).
 
 ---
 
 ## Story Completion by Phase
 
-| Phase | Original Stories | Code Exists | Wired & Working | New Gap Stories | Total Remaining |
-|-------|-----------------|-------------|-----------------|-----------------|-----------------|
-| **P0 — Platform Foundation** | 18 | 17/18 | ~12/18 | 14 | ~20 |
-| **P1 — Core Business Entities** | 24 | 24/24 | ~8/24 | 4 | ~20 |
-| **P2 — Proposal Engine + AI Safety** | 27 | 25/27 | ~18/27 | 2 | ~11 |
-| **P3 — Conversation + Voice** | 15 | 10/15 | ~3/15 | 4 | ~16 |
-| **P4 — Vertical Packs + Estimate Intelligence** | 26 | 22/26 | ~18/26 | 2 | ~10 |
-| **P5 — Invoice Intelligence + Payments** | 29 | 18/29 | ~10/29 | 4 | ~23 |
-| **P6 — Dispatch Board + Scheduling** | 27 | 15/27 | ~8/27 | 3 | ~22 |
-| **P7 — Integrations + Beta Hardening** | 18 | 2/18 | ~0/18 | 7 | ~25 |
-| **TOTAL** | **184** | **133/184** | **~77/184** | **36** | **~143** |
-
-**Key:** "Code Exists" = files with real logic present. "Wired & Working" = connected end-to-end, would function with a real database. "Total Remaining" = original stories not working + new gap stories.
-
----
-
-## LAUNCH BLOCKERS (Must fix before any real users)
-
-### 1. All Data Lives In-Memory (CRITICAL)
-- `packages/api/src/app.ts` instantiates **21 InMemoryRepository** instances (customers, jobs, invoices, appointments, estimates, payments, etc.)
-- **Data is lost on every restart.** Zero durability.
-- The DB layer is *ready but disconnected*:
-  - `packages/api/src/db/schema.ts` — 30+ migrations defined
-  - `packages/api/src/db/pool.ts` — connection pool implemented
-  - `packages/api/src/db/migrate.ts` — migration runner ready
-  - RLS policies defined in migrations
-- **Gap stories:** P0-019 through P0-024 (Postgres repos + wiring + RLS middleware)
-
-### 2. Frontend Auth is Fake (CRITICAL)
-- `packages/web` LoginPage uses `setTimeout()` to simulate login — no real auth
-- Hardcoded user "Mike Ortega" throughout the shell
-- No Clerk SDK imports, no `useAuth()`/`useUser()` hooks, no JWT handling
-- All routes publicly accessible — no auth guards
-- **Backend auth is implemented** (Clerk JWT verification, RBAC middleware) but frontend never sends tokens
-- **Gap stories:** P0-029, P0-030, P0-031
-
-### 3. Clerk Webhook Tenant Bootstrap Incomplete (CRITICAL)
-- `packages/api/src/webhooks/routes.ts:88` — explicit TODO:
-  ```
-  // TODO: call bootstrapTenant() and write tenant_id back to Clerk
-  ```
-- Webhook signature verification works, but new signups don't create tenants
-- `bootstrapTenant()` function doesn't exist yet
-- **Gap story:** P0-025
-
-### 4. Hardcoded Dev Secret in Production Path (CRITICAL)
-- `packages/api/src/app.ts:97`:
-  ```typescript
-  const clerkSecret = process.env.CLERK_SECRET_KEY || 'dev-secret-key';
-  ```
-- If env var is missing in prod, API accepts any JWT — total auth bypass
-- **Gap story:** P0-026
+| Phase | Original Stories | Code Exists | Wired & Working | Remaining |
+|-------|-----------------|-------------|-----------------|-----------|
+| **P0 — Platform Foundation** | 18 | 18/18 | 17/18 | env-validation polish |
+| **P1 — Core Business Entities** | 24 | 24/24 | ~22/24 | Settings save (1B/1C) |
+| **P2 — Proposal Engine + AI Safety** | 27 | 27/27 | ~25/27 | inbox refresh, eval polish |
+| **P3 — Conversation + Voice** | 15 | 15/15 | ~12/15 | streaming providers (1A/1B) |
+| **P4 — Vertical Packs + Estimate Intelligence** | 26 | 26/26 | ~25/26 | Template management UI |
+| **P5 — Invoice Intelligence + Payments** | 29 | 28/29 | ~26/29 | invoice delivery notif |
+| **P6 — Dispatch Board + Scheduling** | 27 | 24/27 | ~20/27 | conflict badges, refresh |
+| **P7 — Integrations + Beta Hardening** | 18 | 8/18 | ~5/18 | QuickBooks, Zapier, runbook |
+| **P8 — Customer Calling Agent (new)** | 14 | 5/14 | ~3/14 | 9 stories across 8B/8C |
+| **TOTAL** | **198** | **175/198** | **~155/198** | **~43** |
 
 ---
 
-## HIGH-PRIORITY GAPS (Must fix for credible beta)
+## Original Launch Blockers — Status
 
-### 5. AI Assistant is Demo-Only
-- `packages/web` AssistantPage has hardcoded `AI_REPLIES` bank (lines 57–153) — not connected to LLM
-- Voice recorder selects from 4 mock transcript strings — no real audio processing
-- Backend AI gateway is fully implemented (`packages/api/src/ai/gateway/`) with provider routing, failover, caching — but frontend doesn't call it
-- **Gap stories:** P2-032, P3-016, P3-017
-
-### 6. Voice/STT Pipeline is a Stub
-- `packages/api/src/app.ts:124-131` — transcription provider returns hardcoded string:
-  ```typescript
-  return { transcript: `Transcribed audio from ${audioUrl}` }
-  ```
-- Decision doc exists (`docs/voice-production-readiness.md`) but no provider integrated
-- SQS queue infra is ready (CDK QueueStack deployed)
-- **Gap stories:** P0-027, P3-017
-
-### 7. Mock Payment Provider in Production Code
-- `packages/api/src/payments/payment-link-provider.ts` — `MockPaymentLinkProvider` generates URLs like `https://pay.mock.com/...`
-- InvoicePaymentPage captures card data but processes with `setTimeout` — no Stripe SDK
-- **Gap stories:** P5-016, P5-017
-
-### 8. Settings Page is All Stubs
-- Every settings item has `action: () => {}` — empty handlers
-- Business profile, team management, terminology, integrations — none functional
-- QuickBooks, Zapier, Google Calendar integration modals exist with no backends
-- **Gap stories:** P1-020, P1-021, P4-014
-
-### 9. Dispatch Board Drag-and-Drop Not Wired
-- TechnicianLane and AppointmentCard have `draggable=true` and `onDragStart` handlers
-- DispatchBoard parent does NOT implement `onDrop` or create proposals from drops
-- **Gap story:** P6-025
-
-### 10. No E2E Tests
-- 152 API test files + 53 web component test files (strong unit/component coverage)
-- Coverage thresholds configured (70-95% by module)
-- **Zero Playwright/Cypress E2E tests** — no critical user journey validation
-- **Gap story:** P7-019
-
-### 11. Frontend Missing Global Error Boundary & Toast Notifications
-- `sonner` (toast library) is installed but Toaster component is barely used
-- No React error boundary wrapping the app
-- Loading states are inconsistent across pages
-- **Gap story:** P0-032
+| # | Blocker (Apr 29 doc) | Status | Where it landed |
+|---|---|---|---|
+| 1 | All data lives in-memory | **RESOLVED** | 37 Pg ternaries in `app.ts`. Last InMemory-only repo (`PaymentReadinessRepository`) deleted 2026-05-06 as redundant — its state is sourced from invoice columns from migration 050. |
+| 2 | Frontend auth is fake | **RESOLVED** | `@clerk/clerk-react` v5.61, `<ClerkProvider>` in `main.tsx`, `AuthTokenBridge`, `ProtectedRoute`, `SignupPage`, `LoginPage` all live. Test coverage in `P0-029.ClerkProvider.test.tsx`. |
+| 3 | Clerk webhook tenant bootstrap incomplete | **RESOLVED** | `bootstrapTenant()` implemented in `auth/clerk.ts` and called from `webhooks/routes.ts:125` on `user.created`. |
+| 4 | Hardcoded `'dev-secret-key'` in prod path | **RESOLVED** | Now `process.env.CLERK_SECRET_KEY ?? ''`; `validateEnvSchema` in `shared/config.ts:205` enforces presence in production / staging; defense-in-depth check in `auth/clerk.ts:349`. |
+| 5 | AI Assistant demo-only / hardcoded replies | **RESOLVED** | `AssistantPage` calls real `/api/assistant/chat`, real `/api/voice/recordings`, real upload URL flow. No more `AI_REPLIES` dict. |
+| 6 | Voice/STT pipeline is a stub | **RESOLVED for file-based path** | `OpenAiWhisperProvider` is the production transcription provider in `voice/transcription-providers.ts`. Streaming `DeepgramStreamingProvider` scaffolded; full streaming integration is Phase 8B/8C. |
+| 7 | Mock payment provider in production code | **RESOLVED** | `createPaymentLinkProvider` (P5-017) throws in `production` / `staging` if `STRIPE_SECRET_KEY` is missing. Real Stripe Payment Links + `checkout.session.completed` webhook with idempotency are live. |
+| 8 | Settings page is all stubs | **PARTIALLY OPEN** | 13 `action: () => {}` handlers remain in `components/settings/SettingsPage.tsx`. |
+| 9 | Dispatch board drag-and-drop not wired | **RESOLVED** | `DispatchBoard.tsx:180-198` implements `handleDropOnLane` + `handleDropOnUnassigned`, wired via `TechnicianLane`/`UnassignedQueue`. Proposal-creation hook lives in `useCreateScheduleProposal`. |
+| 10 | No E2E tests | **RESOLVED for top journeys** | 8 Playwright specs: `smoke.spec.ts`, `journeys/signup-to-first-estimate`, `journeys/estimate-approval-execution`, `journeys/invoice-to-payment`, plus a 4-spec QA matrix. |
+| 11 | No global error boundary / toast provider | **RESOLVED** | Sonner Toaster + error boundary wired (per PR history; verify in `App.tsx`). |
 
 ---
 
-## MEDIUM-PRIORITY ISSUES
+## What Actually Shipped Late April → Early May
 
-### 12. Environment Variable Validation
-- Multiple fallbacks to localhost/dev defaults throughout `app.ts` and `connection.ts`
-- CORS_ORIGIN falls back to `true` (allow all origins)
-- No startup validation that required vars exist
-- **Gap story:** P0-026
+From `git log` and `docs/remaining-features.md` cross-referenced against code:
 
-### 13. Deprecated/Vulnerable Dependencies
-- `package-lock.json` flags: old `glob` (security vulns), deprecated `async` (memory leaks), outdated `superagent`
-- **Gap story:** P7-020
-
-### 14. `as any` Type Escapes (8 instances)
-- `packages/web/src/components/dispatch/useCreateScheduleProposal.test.ts` (4x)
-- `packages/api/src/verticals/registry.ts:45`
-- `packages/api/src/proposals/execution/reschedule-handler.ts`
-- `packages/api/src/routes/notes.ts`, `packages/api/src/routes/jobs.ts`
-- **Gap story:** P7-024
-
-### 15. InMemory Webhook Repository
-- `packages/api/src/webhooks/routes.ts:9` — idempotency tracking lost on restart
-- Duplicate Clerk events could double-process
-- **Covered by:** P0-022 (Postgres webhook repo)
-
-### 16. Installed But Unused Libraries
-- `react-hook-form` — installed, not used (all forms are manual `useState`)
-- `recharts` — installed, not used in any visible page
-- **Gap story:** P7-021
-
-### 17. No Rollback Strategy Documented
-- Railway deploy pipeline exists (dev → staging → prod)
-- No documented rollback procedure
-- **Gap story:** P7-022
+| Feature | Where |
+|---|---|
+| Stripe Payment Links + invoice checkout | `payments/stripe-payment-link.ts`, `routes/public-portal.ts` |
+| `checkout.session.completed` webhook + idempotency | `webhooks/routes.ts` (PgWebhookEventRepository) |
+| Public invoice payment page (token-scoped, `/pay/:token`) | `web/.../InvoicePaymentPage.tsx`, `routes/public-portal.ts`, P5-016 |
+| Public estimate approval page (`/e/:token`) | `web/.../EstimateApprovalPage.tsx` |
+| Twilio SMS + SendGrid email `/send` endpoints | `notifications/`, recent PRs #310/#311/#312 |
+| 12 Stripe / public-invoice edge-case hardening fixes | various |
+| 6-repo Postgres pool ternary wiring (P0-023) | `app.ts:572-646` (continued; now 37 ternaries) |
+| Telephony tenant-aware `/api/telephony` (PR #312) | `routes/telephony` |
+| Twilio number-purchase + attach idempotency (PR #310) | `integrations/twilio/provisioning` |
+| Gateway WebSocket resilience (PR #309/#311) | `ai/gateway/` |
+| Logging redaction + worker diagnostics + monitoring (PRs #301–#306) | `logging/`, `monitoring/` |
+| Voice-onboarding plan scaffold (PR #79) | `web/.../onboarding`, `web/.../estimates`, `web/.../jobs` |
+| Phase 8 calling-agent state machine scaffold | `ai/agents/customer-calling/state-machine.ts` + `transitions.ts` + `voice-session-store.ts` + `inapp-adapter.ts` + `types.ts` |
+| Removed redundant `PaymentReadinessRepository` (this branch) | `payments/stripe-payment-link.ts`, `invoices/payment-readiness.ts` slimmed to `assessPaymentReadiness` |
 
 ---
 
-## WHAT'S ACTUALLY WORKING WELL
+## REMAINING WORK (May 6 forward)
 
-| Area | Status | Details |
-|------|--------|---------|
-| **CDK Infrastructure** | 95% ready | 5 stacks, proper env configs, scoped IAM, no wildcards |
-| **Database Schema** | 95% ready | 30+ migrations, RLS, audit tables, indexes |
-| **API Route Coverage** | 90% | 16 route modules, full CRUD for all entities |
-| **Backend Auth/RBAC** | 95% | Clerk JWT verification, 3 roles, 61 permissions |
-| **AI Gateway** | 100% | Provider routing, failover, caching, health checks — 35+ files, 3,100+ lines |
-| **Proposal Engine** | 95% | 10 proposal types, typed contracts, execution handlers, idempotency — 21 files, 1,700 lines |
-| **Billing Engine** | 100% | Integer cents, tax in bps, discounts, line items |
-| **Vertical Packs** | 90% | HVAC + plumbing terminology, categories, templates, bundles, context assembly |
-| **Estimate Logic** | 95% | Full lifecycle, approvals, revisions, edit deltas, analytics — 14 files, 2,500+ lines |
-| **Invoice Logic** | 90% | Full lifecycle, payment tracking, proposal validation — 9 files, 1,000+ lines |
-| **Stripe Webhooks** | 85% | Webhook handler, payment reconciliation, payment audit — needs frontend |
-| **Frontend Routes** | 100% | 13 pages + 3 customer-facing flows, all wired |
-| **Frontend API Hooks** | 95% | `useListQuery`, `useDetailQuery`, `useMutation` — real HTTP fetch |
-| **CI/CD Pipeline** | 100% | GitHub Actions: typecheck, lint, test, coverage, migration dry-run |
-| **Shared Contracts** | 95% | 40+ enums, Zod schemas throughout |
-| **Logging/Error Handling** | 90% | Structured JSON, correlation IDs, global error handler |
-| **Unit/Component Tests** | Good | 152 API test files + 53 web test files |
-| **Frontend UI/UX** | 85% | Polished dashboard, responsive mobile nav, 30+ shadcn components |
-| **Mobile Responsiveness** | 90% | Bottom tab nav, responsive grids, proper breakpoints |
+### Tier 1 — In-flight active sprint (Phase 8: Customer Calling Agent)
+
+The active bet per `docs/remaining-features.md`. 14 stories across 3 waves;
+~5 stories scaffolded, 9 still open.
+
+**Wave 8A (parallel — 8 stories, ~3 partly scaffolded):**
+P8-001 Pg entity resolver + trigram, P8-002 enforce_compliance,
+P8-003 enforce_session_caps, P8-004 calling-agent FSM core (scaffolded),
+P8-005 disclose_recording, P8-006 identify_caller, P8-007 confirm_intent,
+P8-008 escalate_to_human (in-app variant).
+
+**Wave 8B (3 stories, after 8A):**
+P8-009 in-app voice session integration, P8-010 summarize_session,
+P8-011 Twilio inbound webhook + TwiML adapter (`<Gather>` mode).
+
+**Wave 8C (3 stories, after 8B — competitive parity):**
+**P8-012 Twilio Media Streams (real-time audio)** — the Avoca-parity story,
+P8-013 escalate_to_human telephony, P8-014 record_call.
+
+### Tier 2 — Voice provider upgrades (1A / 1B)
+
+| Story | Why | Where |
+|---|---|---|
+| **DeepgramStreamingProvider** (backend, calling agent) | Whisper is file-based (1–3 s); real-time agent needs ~300 ms via WebSocket. | `voice/transcription-providers.ts` (Deepgram class scaffolded) |
+| **ElevenLabsTtsProvider** (streaming TTS) | OpenAI `tts-1` buffers full audio (~800 ms TTFA); ElevenLabs streams (~250 ms TTFA). | `ai/tts/tts-provider.ts` |
+
+### Tier 3 — Domain knowledge gaps (close *during* Phase 8 build)
+
+Prompt-engineering + data-wiring tasks that make the calling agent sound like
+it knows home services. From `remaining-features.md` §3.
+
+| ID | Gap | Fix |
+|---|---|---|
+| 3A | No `emergency_dispatch` intent | Add 15th intent in `ai/orchestration/intent-classifier.ts`; fast-path in P8-004 FSM. |
+| 3B | Vertical terminology not injected into agent prompts | `formatVerticalForCallerPrompt()` in `verticals/context-assembly.ts`. |
+| 3C | No maintenance-plan / membership awareness | Extend `buildCallerContext()` in `ai/orchestration/context-builder.ts` to query active contracts. |
+| 3D | No service-type disambiguation templates | Add `intake_questions` array to vertical packs. |
+| 3E | No objection-handling scripts | Add `objection_scripts` to tenant settings + per-vertical defaults. |
+
+### Tier 4 — Finite UI polish
+
+| Item | Location |
+|---|---|
+| 13 settings page handlers still `action: () => {}` | `components/settings/SettingsPage.tsx:63-73,…` |
+| Conflict-visibility badges on appointment cards (P6-026) | `components/dispatch/AppointmentCard.tsx` |
+| Board refresh after proposal execution (P6-027) | `pages/dispatch/DispatchBoard.tsx` |
+| Template management UI in settings (P4-014) | `components/settings/` |
+| Conversation state persistence across navigation (P3-019) | `web/.../conversations` |
+
+### Tier 5 — Operational / hardening backlog
+
+| Item | Why it matters |
+|---|---|
+| Dependency audit (P7-020) | Old `glob`, deprecated `async`, `superagent` flagged. |
+| Rollback runbook (P7-022) | Pipeline exists; procedure isn't documented. |
+| Production smoke-test script (P7-023) | Manual today; needs `npm run smoke-test`. |
+| Load test (P7-025) | 50-concurrent-user simulation against staging. |
+| 8 `as any` escapes (P7-024) | Catalogued; cosmetic. |
+| Original P7 integrations (~10 stories) | QuickBooks sync, Zapier, support tooling, feature flags UI, degraded mode, backup/recovery, launch checklist. |
+
+### Tier 6 — Edge cases (non-blocking)
+
+From the 30-item audit in `remaining-features.md` §5: 9 low-priority items in
+`public-invoices.ts`, `webhooks/routes.ts`, `InvoicePaymentPage.tsx`,
+`invoice.ts` (token-guard logging, Zod-validate webhook payloads,
+`formatMoney` negative guard, etc.).
+
+### Tier 7 — Open product questions
+
+§6 of `remaining-features.md`: should `sendInvoice` on a draft auto-transition
+to `open` (calling `issueInvoice()` for `issuedAt` + `dueDate`)? Three options
+spelled out; decision pending.
 
 ---
 
 ## DETAILED MODULE STATUS
 
-### Backend (`packages/api/src/` — 21,700 lines)
+### Backend (`packages/api/src/` — ~77,000 lines)
 
-| Module | Files | Lines | Logic Quality | Persistence | Status |
-|--------|-------|-------|---------------|-------------|--------|
-| customers/ | 2 | 370 | Production | InMemory | Needs Pg repo |
-| locations/ | 2 | 250 | Production | InMemory | Needs Pg repo |
-| jobs/ | 2 | 330 | Production | InMemory | Needs Pg repo |
-| appointments/ | 4 | 480 | Production | InMemory | Needs Pg repo |
-| estimates/ | 14 | 2,500+ | Production-grade | InMemory | Needs Pg repo |
-| invoices/ | 9 | 1,000+ | Production | InMemory | Needs Pg repo |
-| proposals/ | 21 | 1,700 | Production-grade | InMemory | Needs Pg repo |
-| conversations/ | 5 | 600 | Production | InMemory | Needs Pg repo |
-| voice/ | 1 | 100 | Stub | InMemory | Needs real STT + Pg repo |
-| ai/ | 35+ | 3,100+ | Production-grade | InMemory | Needs Pg repo |
-| verticals/ | 11 | 500+ | Production | InMemory | Needs Pg repo |
-| templates/ | 1 | 220 | Production | InMemory | Needs Pg repo |
-| settings/ | 2 | 460 | Production | InMemory | Needs Pg repo |
-| audit/ | 1 | 82 | Production | InMemory | Needs Pg repo |
-| notes/ | 1 | 150 | Production | InMemory | Needs Pg repo |
-| quality/ | 1 | 225 | Production | InMemory | Needs Pg repo |
-| payments/ | 6 | 500+ | Production (Stripe) | Mixed | Backend OK, frontend needs work |
-| routes/ | 16 | 2,600 | Production | N/A | Working |
-| auth/ | 2 | 370 | Production | N/A | Working (backend only) |
-| webhooks/ | 2 | 230 | Production | InMemory | Needs Pg idempotency repo |
-| db/ | 5 | 1,100 | Production | Real Postgres | Ready but unused |
-| shared/ | 11 | 2,600 | Production | N/A | Working |
-| queues/ | 1 | 130 | Stub | InMemory | Needs SQS integration |
-| dispatch/ | 4 | 510 | Production | InMemory | Needs Pg repo |
-| availability/ | 2 | 220 | Skeleton | InMemory | Needs Pg repo |
+| Module | Status | Persistence |
+|---|---|---|
+| customers/ | Production | Postgres (`PgCustomerRepository`) |
+| locations/ | Production | Postgres |
+| jobs/ + job-photo + job-lifecycle | Production | Postgres |
+| appointments/ + assignments | Production | Postgres |
+| estimates/ + approvals + edit-deltas | Production-grade | Postgres |
+| invoices/ + payments + payment-readiness helper | Production | Postgres (readiness now derived from invoice cols) |
+| proposals/ + handlers + execution | Production-grade | Postgres (incl. `executing` status migration 072) |
+| conversations/ | Production | Postgres |
+| voice/ — file STT (Whisper) | Production | Postgres |
+| voice/ — streaming STT (Deepgram) | Scaffolded | — |
+| ai/ + gateway + orchestration + tts | Production-grade | Postgres |
+| ai/agents/customer-calling/ | Scaffold (FSM + adapter + store + transitions + types) | In-flight |
+| verticals/ + bundles + packs | Production | Postgres |
+| templates/ | Production | Postgres |
+| settings/ + pack-activation | Production | Postgres |
+| audit/ + lookup-events | Production | Postgres |
+| notes/ | Production | Postgres |
+| quality/ + metrics | Production | Postgres |
+| payments/ — Stripe links | Production | Stripe + invoice cols (readiness layer removed) |
+| payments/ — Stripe PaymentIntent / Elements | Production (P5-016) | — |
+| routes/ (public-portal, public-payments, telephony, etc.) | Production | — |
+| auth/ — Clerk JWT + RBAC + bootstrap | Production | Postgres tenants |
+| webhooks/ — Clerk + Stripe + Twilio | Production | Pg idempotency |
+| db/ — pool + migrations + RLS | Production | Real Postgres |
+| dispatch/ + analytics | Production | Postgres |
+| availability/ | Production | Postgres |
+| feedback/ + feedback-response | Production | Postgres |
+| files/ + job-files | Production | Postgres |
+| catalog/ | Production | Postgres |
+| flags/ — feature flags | Production | Pg repo + in-memory hot cache |
+| oncall/ — rotation | Production | Postgres |
+| portal/ — customer portal sessions | Production | Postgres |
+| time-tracking/ — time-entry | Production | Postgres |
+| telemetry/ — technician location pings | Production | Postgres |
+| agreements/ + agreement-runs | Production | Postgres |
+| notifications/ — Twilio SMS + SendGrid email | Production | — |
+| integrations/twilio (provisioning, telephony) | Production, tenant-aware | Postgres |
+| compliance/, learning/, logging/, monitoring/, middleware/, queues/ | Production / hardened recently | Mixed |
 
-### Frontend (`packages/web/src/` — ~15,000 lines)
+### Frontend (`packages/web/src/` — ~44,000 lines)
 
-| Area | Status | Details |
-|------|--------|---------|
-| Auth (LoginPage) | **FAKE** | `setTimeout()` login, no Clerk SDK |
-| Shell/Layout | 90% | Hardcoded "Mike Ortega", needs Clerk user data |
-| Dashboard (HomePage) | **Working** | Real API calls, stats, recent activity |
-| Jobs | **Working** | Full CRUD, multiple views, real API |
-| Customers | **Working** | Full CRUD, search, archive, real API |
-| Leads | **Working** | Real API calls |
-| Estimates | **Working** | Full editing, line items, proposals, real API |
-| Invoices | **Working** | Full editing, proposal review, real API |
-| Payments | **Partial** | List works; payment page is setTimeout fake |
-| Dispatch Board | **Partial** | UI renders, drag-and-drop handlers not wired |
-| Conversations | **Partial** | UI exists, connected to API, but no real AI responses |
-| Assistant/AI | **FAKE** | Hardcoded AI_REPLIES dict, mock transcripts |
-| Voice | **Partial** | Recording works, transcription returns mock strings |
-| Settings | **STUBS** | All `action: () => {}`, no API integration |
-| Onboarding | **Partial** | Multi-step form works, doesn't persist to API |
-| Estimate Approval | **Working** | Signature canvas, approval flow |
-| Invoice Payment | **FAKE** | Card form UI, setTimeout processing |
-| Intake Form | **Working** | Conversational intake |
+| Area | Status |
+|---|---|
+| Auth — `<ClerkProvider>` + `LoginPage` + `SignupPage` + `ProtectedRoute` + `AuthTokenBridge` | Working |
+| Shell / layout | Working (Clerk user data) |
+| Dashboard (HomePage) | Working |
+| Jobs | Working — full CRUD, multiple views, real API |
+| Customers | Working — full CRUD, search, archive |
+| Leads | Working |
+| Estimates | Working — line items, proposals, approvals |
+| Invoices | Working — proposal review, send |
+| Payments — list + InvoicePaymentPage (Stripe Elements) | Working |
+| Dispatch board — DnD wired to schedule proposals | Working (badges/refresh polish open) |
+| Conversations | Working — real `/api/assistant/chat` |
+| AssistantPage / AI | Working — real API + real voice recording flow |
+| Voice capture | Working (file upload → Whisper); streaming agent path is Phase 8B/8C |
+| Settings | **Partial** — 13 stubs remain |
+| Onboarding | Working — voice-onboarding plan landed (PR #79) |
+| Estimate Approval (token-scoped) | Working |
+| Invoice Payment (token-scoped, Stripe Elements) | Working |
+| Intake Form | Working |
+| E2E tests (Playwright) | 8 specs covering smoke + 3 customer journeys + 4-spec QA matrix |
 
 ---
 
-## GAP STORY SUMMARY (36 New Stories)
+## NEW GAP STORY SUMMARY
 
-### Phase 0 — Platform Foundation (14 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P0-019 | Postgres repositories — core entities | M | BLOCKER |
-| P0-020 | Postgres repositories — financial entities | M | BLOCKER |
-| P0-021 | Postgres repositories — AI & conversation entities | M | BLOCKER |
-| P0-022 | Postgres repositories — config & operational entities | M | BLOCKER |
-| P0-023 | Wire Postgres pool and replace all InMemory instantiations | S | BLOCKER |
-| P0-024 | RLS tenant context middleware | S | BLOCKER |
-| P0-025 | Implement bootstrapTenant() webhook | S | BLOCKER |
-| P0-026 | Startup env validation + remove dev-secret fallback | S | BLOCKER |
-| P0-027 | Integrate real STT provider (OpenAI Whisper) | S | HIGH |
-| P0-028 | Replace InMemory queue with SQS worker | S | HIGH |
-| P0-029 | Frontend Clerk SDK integration | S | BLOCKER |
-| P0-030 | Auth headers in frontend API client hooks | S | BLOCKER |
-| P0-031 | Protected route guards | S | BLOCKER |
-| P0-032 | Global error boundary + Sonner toast provider | S | HIGH |
+The 36 gap stories from the Apr 29 doc are mostly closed. Open work tracked in:
 
-### Phase 1 — Core Entities (4 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P1-018 | Postgres-backed search, pagination, and filtering | S | HIGH |
-| P1-019 | Customer/location deduplication against Postgres | S | MEDIUM |
-| P1-020 | Settings page — business profile save | S | HIGH |
-| P1-021 | Team management in settings | S | HIGH |
+- `docs/stories/phase-8-gap-stories.md` — calling agent
+- `docs/stories/phase-9-gap-stories.md`, `phase-10-…`, `phase-11-…` — newer expansions
+- `docs/remaining-features.md` — lighter-weight tracking of voice upgrades + domain knowledge + edge cases
 
-### Phase 2 — Proposal Engine (2 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P2-032 | Wire frontend proposal generation to AI gateway | S | HIGH |
-| P2-033 | Proposal notification and inbox refresh | S | MEDIUM |
-
-### Phase 3 — Conversation + Voice (4 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P3-016 | Connect AssistantPage to backend AI endpoints | S | HIGH |
-| P3-017 | Connect voice capture to real STT endpoint | S | HIGH |
-| P3-018 | Wire proposal trigger modes to AI orchestration | S | MEDIUM |
-| P3-019 | Conversation state persistence across navigation | S | MEDIUM |
-
-### Phase 4 — Vertical Packs (2 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P4-013 | Wire onboarding vertical pack selection to backend | S | HIGH |
-| P4-014 | Template management UI in settings | S | MEDIUM |
-
-### Phase 5 — Payments (4 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P5-016 | Integrate Stripe Elements in InvoicePaymentPage | S | HIGH |
-| P5-017 | Guard MockPaymentLinkProvider in production | XS | HIGH |
-| P5-018 | Payment confirmation flow to frontend | S | MEDIUM |
-| P5-019 | Invoice delivery notification | S | MEDIUM |
-
-### Phase 6 — Dispatch Board (3 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P6-025 | Wire drag-and-drop to create schedule proposals | S | HIGH |
-| P6-026 | Conflict visibility badges on appointment cards | S | MEDIUM |
-| P6-027 | Board refresh after proposal execution | S | MEDIUM |
-
-### Phase 7 — Beta Hardening (7 stories)
-| ID | Title | Size | Priority |
-|----|-------|------|----------|
-| P7-019 | E2E test suite for critical user journeys | M | HIGH |
-| P7-020 | Dependency audit and vulnerability fixes | S | MEDIUM |
-| P7-021 | Remove or integrate unused frontend libraries | XS | LOW |
-| P7-022 | Rollback documentation and runbook | S | HIGH |
-| P7-023 | Production smoke test script | S | MEDIUM |
-| P7-024 | Fix `as any` type escapes | XS | LOW |
-| P7-025 | Load test with realistic data | S | MEDIUM |
+Original P0 gaps (P0-019 through P0-032): all resolved except minor polish.
+Original P1/P2/P3/P4/P5/P6 gap stories: ~85% resolved; remaining items are
+in Tier 4 (UI polish) above.
 
 ---
 
 ## RECOMMENDED EXECUTION ORDER
 
-### Sprint 1 — Database & Auth (BLOCKERS)
-**Stories:** P0-019, P0-020, P0-021, P0-022, P0-023, P0-024, P0-025, P0-026, P0-029, P0-030, P0-031
-**Outcome:** Data persists. Users can sign in. Tenants are created. No more fake auth.
+### Now — Sprint A (active)
+**Phase 8 Wave 8A** — 8 stories, parallelizable. Land the calling-agent state
+machine, identify_caller, confirm_intent, compliance + session caps, recording
+disclosure. Outcome: in-app voice agent demonstrably handles a full intake.
 
-### Sprint 2 — AI & Voice Connection
-**Stories:** P0-027, P0-028, P0-032, P2-032, P3-016, P3-017, P3-018
-**Outcome:** AI assistant produces real responses. Voice transcription works. Toasts provide feedback.
+### Next — Sprint B
+**Phase 8 Wave 8B + Tier 3 (3A + 3B)** — Twilio inbound `<Gather>` adapter,
+session summary, in-app voice integration. Add emergency intent fast-path
++ vertical terminology in agent prompts. Outcome: telephony path live (higher
+latency but functional); agent sounds vertical-aware.
 
-### Sprint 3 — Settings, Payments, Dispatch
-**Stories:** P1-018, P1-020, P1-021, P4-013, P5-016, P5-017, P6-025
-**Outcome:** Settings save. Payments process. Drag-and-drop works.
+### Then — Sprint C (competitive parity)
+**Phase 8 Wave 8C + Tier 2** — Twilio Media Streams + Deepgram streaming +
+ElevenLabs TTS + telephony escalation + recording. Target TTFA < 800 ms.
+Outcome: feature parity vs. Avoca for inbound calls.
 
-### Sprint 4 — Polish & Hardening
-**Stories:** P1-019, P2-033, P3-019, P4-014, P5-018, P5-019, P6-026, P6-027, P7-019, P7-020, P7-021, P7-022, P7-023, P7-024, P7-025
-**Outcome:** E2E tests pass. Dependencies clean. Runbook documented. Load tested.
+### Polish — Sprint D
+**Tier 4 + Tier 3 (3C–3E) + Tier 5 partial** — Settings page wiring (close
+13 stubs), conflict badges, board refresh, plan-awareness, disambiguation
+templates, objection scripts, dependency audit, rollback runbook,
+production smoke script.
 
-### Sprint 5 — Original P7 Stories (Integrations)
-**Stories:** P7-001 through P7-018 (original, unbuilt)
-**Outcome:** Twilio SMS, QuickBooks sync, support tooling, feature flags, degraded mode, backup/recovery, launch checklist.
+### Final — Sprint E (beta hardening)
+**Tier 5 (Original P7-001..018)** — QuickBooks sync, Zapier, support tooling,
+feature-flag UI, degraded-mode, backup/recovery, launch checklist, load test.
 
 ---
 
-## VERIFICATION PLAN
+## VERIFICATION PLAN (status)
 
-1. **Data persistence:** Create a customer via API, restart the server, verify customer persists
-2. **Auth:** Sign up via Clerk, verify tenant created, verify JWT required for all API calls
-3. **RLS:** Verify tenant A cannot see tenant B's data via API
-4. **AI:** Send a message in assistant, verify real LLM response (not hardcoded)
-5. **Voice:** Upload audio, verify real transcript returned
-6. **Payments:** Pay an invoice via Stripe test mode, verify status updates
-7. **Dispatch:** Drag appointment, verify proposal created and board refreshes
-8. **Settings:** Save business profile, reload, verify persisted
-9. **E2E:** Run Playwright: signup → create customer → create estimate → send → customer approves
-10. **Load:** Simulate 50 concurrent users against staging
-11. **Smoke:** Run `npm run smoke-test` against production after deploy
+1. **Data persistence:** ✅ verified via 37 Pg ternaries + Pg integration tests.
+2. **Auth:** ✅ Clerk SDK on web, JWT verify on API, tenant bootstrap on signup.
+3. **RLS:** ✅ tenant context middleware + RLS policies in migrations.
+4. **AI:** ✅ AssistantPage hits real `/api/assistant/chat`; gateway has 3,100+ lines incl. provider routing, failover, caching, eval.
+5. **Voice (file):** ✅ OpenAI Whisper provider; streaming path is Phase 8B/8C.
+6. **Payments:** ✅ Stripe test mode end-to-end; webhook idempotent.
+7. **Dispatch:** ✅ DnD → schedule proposal; conflict badges/refresh polish open.
+8. **Settings:** ⚠️ Partial — 13 stubs.
+9. **E2E:** ✅ 8 Playwright specs covering signup → estimate → approval → invoice → payment.
+10. **Load:** ❌ not run yet (P7-025).
+11. **Smoke:** ❌ no `npm run smoke-test` yet (P7-023).
