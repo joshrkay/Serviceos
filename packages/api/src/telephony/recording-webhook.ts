@@ -53,8 +53,12 @@ export interface RecordingWebhookDeps {
   /** Twilio account credentials for the signed RecordingUrl fetch. */
   twilioAccountSid?: string;
   twilioAuthToken?: string;
-  /** Auth token getter used by the signature middleware (lazy). */
-  authTokenGetter: () => string | undefined;
+  /**
+   * Auth token getter used by the signature middleware. Receives the
+   * AccountSid from the Twilio webhook body so per-tenant subaccount
+   * tokens can be looked up; legacy callers may ignore it.
+   */
+  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
   /** Optional public base URL used to reconstruct the signed URL. */
   publicBaseUrl?: string;
   /**
@@ -72,7 +76,7 @@ export interface RecordingWebhookDeps {
   resolveTenantIdFallback?: (opts: {
     to: string;
     from: string;
-  }) => string | undefined;
+  }) => Promise<string | undefined> | string | undefined;
 }
 
 /**
@@ -229,7 +233,7 @@ export function createRecordingRouter(
     if (!tenantId && deps.resolveTenantIdFallback) {
       const to = body.Called ?? body.To ?? '';
       const from = body.Caller ?? body.From ?? '';
-      tenantId = deps.resolveTenantIdFallback({ to, from });
+      tenantId = await Promise.resolve(deps.resolveTenantIdFallback({ to, from }));
       if (tenantId) {
         logger.info('recording: tenant resolved via fallback (no in-process session)', {
           callSid,

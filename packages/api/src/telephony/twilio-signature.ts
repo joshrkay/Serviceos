@@ -70,16 +70,23 @@ export function reconstructWebhookUrl(
  * Express middleware factory that rejects requests with an invalid
  * `X-Twilio-Signature` header. Returns `403` on failure.
  *
- * The factory takes a getter so the auth token can be read lazily —
- * useful in test environments where we want to construct the router
- * before the env var is set.
+ * The factory takes an async getter so the auth token can be resolved
+ * per-request — needed for per-tenant subaccount tokens, where the
+ * caller looks up the token in `tenant_integrations` keyed by the
+ * `AccountSid` Twilio sends in the request body. The legacy
+ * single-account flow passes a getter that ignores its argument and
+ * returns the global `TWILIO_AUTH_TOKEN`.
  */
 export function requireTwilioSignature(
-  authTokenGetter: () => string | undefined,
+  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined,
   options: { publicBaseUrl?: string | (() => string | undefined) } = {},
-): (req: Request, res: Response, next: NextFunction) => void {
-  return (req: Request, res: Response, next: NextFunction) => {
-    const authToken = authTokenGetter();
+): (req: Request, res: Response, next: NextFunction) => Promise<void> {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const accountSid = (req.body && typeof req.body === 'object'
+      ? (req.body as Record<string, unknown>).AccountSid
+      : undefined) as string | undefined;
+
+    const authToken = await Promise.resolve(authTokenGetter({ accountSid }));
     if (!authToken) {
       // Fail-closed: never accept Twilio webhooks if the token is unset.
       // This mirrors how the Stripe webhook route 500s when its secret is
