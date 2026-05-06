@@ -48,7 +48,12 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
     const linkId = data.id;
     const linkUrl = data.url;
     const now = new Date();
-    const expiryMs = parseInt(process.env.PAYMENT_LINK_EXPIRY_HOURS || '24', 10) * 60 * 60 * 1000;
+    // Default to 24h. Guard against missing / non-numeric / non-positive
+    // values — without this an invalid env var produces NaN ms and
+    // `expiresAt` becomes Invalid Date.
+    const parsedHours = parseInt(process.env.PAYMENT_LINK_EXPIRY_HOURS ?? '', 10);
+    const hours = Number.isFinite(parsedHours) && parsedHours > 0 ? parsedHours : 24;
+    const expiryMs = hours * 60 * 60 * 1000;
 
     return {
       linkId,
