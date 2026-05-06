@@ -5,6 +5,7 @@ import {
   ServiceCategory,
   TerminologyMap,
   IntakeQuestion,
+  ObjectionScript,
   createVerticalPack,
 } from '../registry';
 
@@ -149,6 +150,37 @@ const PLUMBING_INTAKE_QUESTIONS: readonly IntakeQuestion[] = [
   },
 ];
 
+/**
+ * §3E — default objection-handling reframes for plumbing. Tuned for
+ * common urgency framings ("just a slow drain") and cost objections.
+ */
+const PLUMBING_OBJECTION_SCRIPTS: readonly ObjectionScript[] = [
+  {
+    id: 'price',
+    patterns: ['too expensive', 'that\'s expensive', 'can\'t afford', 'pricey', 'cost too much'],
+    reframe:
+      'We carry common fittings and fixtures on the truck so you typically won\'t pay extra for a return trip.',
+  },
+  {
+    id: 'dispatch_fee',
+    patterns: ['dispatch fee', 'service call fee', 'why do I need to pay just to come out', 'trip charge'],
+    reframe:
+      'The diagnostic fee credits toward your repair if you proceed today — it\'s not on top of the work.',
+  },
+  {
+    id: 'phone_quote',
+    patterns: ['just tell me over the phone', 'how much would it cost', 'ballpark', 'estimate over the phone'],
+    reframe:
+      'Plumbing issues usually need eyes on the leak — pictures and videos help, but we won\'t guess at what\'s behind a wall and quote you wrong.',
+  },
+  {
+    id: 'minor_issue',
+    patterns: ['it\'s just a slow drain', 'it\'s only a small leak', 'it\'s not that bad'],
+    reframe:
+      'A slow drain or small leak today is often a clog or seal failing — catching it now is usually a fraction of the cost of catching it after a backup.',
+  },
+];
+
 export function createPlumbingPack(): VerticalPack {
   return createVerticalPack(
     'plumbing',
@@ -157,7 +189,8 @@ export function createPlumbingPack(): VerticalPack {
     'Plumbing service pack for residential and light commercial',
     PLUMBING_CATEGORIES,
     PLUMBING_TERMINOLOGY,
-    PLUMBING_INTAKE_QUESTIONS
+    PLUMBING_INTAKE_QUESTIONS,
+    PLUMBING_OBJECTION_SCRIPTS
   );
 }
 

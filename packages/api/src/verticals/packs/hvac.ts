@@ -4,6 +4,7 @@ import {
   VerticalPack,
   ServiceCategory,
   IntakeQuestion,
+  ObjectionScript,
   TerminologyMap,
   createVerticalPack,
 } from '../registry';
@@ -146,6 +147,40 @@ const HVAC_INTAKE_QUESTIONS: readonly IntakeQuestion[] = [
   },
 ];
 
+/**
+ * §3E — default objection-handling reframes the calling agent uses
+ * when the classifier flags an objection_detected signal. Tenants can
+ * override individual entries via tenant settings; the `id` is the
+ * override key. Defaults are starter copy meant to be tuned, not
+ * pulled from any vendor or training corpus.
+ */
+const HVAC_OBJECTION_SCRIPTS: readonly ObjectionScript[] = [
+  {
+    id: 'price',
+    patterns: ['too expensive', 'that\'s expensive', 'can\'t afford', 'pricey', 'cost too much'],
+    reframe:
+      'Our technicians carry common parts on the truck, so you typically won\'t pay for a second trip if a repair is needed.',
+  },
+  {
+    id: 'dispatch_fee',
+    patterns: ['dispatch fee', 'service call fee', 'why do I need to pay just to come out', 'trip charge'],
+    reframe:
+      'The diagnostic fee goes toward your repair if you proceed today — so it\'s not on top of the work, it\'s part of it.',
+  },
+  {
+    id: 'phone_quote',
+    patterns: ['just tell me over the phone', 'give me a quote on the phone', 'how much would it cost', 'ballpark price'],
+    reframe:
+      'Most heating and cooling issues need eyes on the system before we can give you an honest number — we don\'t want to guess wrong on something this important.',
+  },
+  {
+    id: 'hesitation',
+    patterns: ['I\'ll think about it', 'let me think on it', 'I need to talk to my spouse', 'call you back'],
+    reframe:
+      'Of course. Want me to hold a slot in case you decide to move forward, or call you back tomorrow morning?',
+  },
+];
+
 export function createHvacPack(): VerticalPack {
   return createVerticalPack(
     'hvac',
@@ -154,7 +189,8 @@ export function createHvacPack(): VerticalPack {
     'Heating, ventilation, and air conditioning service pack for residential and light commercial',
     HVAC_CATEGORIES,
     HVAC_TERMINOLOGY,
-    HVAC_INTAKE_QUESTIONS
+    HVAC_INTAKE_QUESTIONS,
+    HVAC_OBJECTION_SCRIPTS
   );
 }
 

@@ -3,6 +3,7 @@ import {
   buildContextPromptSection,
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
+  formatObjectionScriptsForPrompt,
   ContextAssemblyDependencies,
 } from '../../src/verticals/context-assembly';
 import { InMemoryVerticalPackRepository } from '../../src/verticals/registry';
@@ -270,5 +271,48 @@ describe('formatIntakeQuestionsForPrompt — §3D disambiguation block', () => {
     const out = formatIntakeQuestionsForPrompt(stripped);
     expect(out).toContain('"Plain question?"');
     expect(out).not.toContain('[intent:');
+  });
+});
+
+describe('formatObjectionScriptsForPrompt — §3E objection-handling block', () => {
+  it('returns empty string when pack is null/undefined', () => {
+    expect(formatObjectionScriptsForPrompt(null)).toBe('');
+    expect(formatObjectionScriptsForPrompt(undefined)).toBe('');
+  });
+
+  it('returns empty string when pack has no objectionScripts', () => {
+    const pack = createHvacPack();
+    const stripped = { ...pack, objectionScripts: [] };
+    expect(formatObjectionScriptsForPrompt(stripped)).toBe('');
+  });
+
+  it('renders id, triggers, and reframe for each script in the HVAC default pack', () => {
+    const pack = createHvacPack();
+    const out = formatObjectionScriptsForPrompt(pack);
+    expect(out).toContain('Objection-handling scripts');
+    expect(out).toContain('id: price');
+    expect(out).toContain('triggers:');
+    expect(out).toContain('too expensive');
+    expect(out).toContain('reframe:');
+    expect(out).toContain('carry common parts on the truck');
+    expect(out).toContain('id: dispatch_fee');
+    expect(out).toContain('id: phone_quote');
+    expect(out).toContain('id: hesitation');
+  });
+
+  it('quotes the reframe so the LLM treats it as verbatim copy', () => {
+    const pack = createHvacPack();
+    const stripped = {
+      ...pack,
+      objectionScripts: [
+        {
+          id: 'test',
+          patterns: ['p1'],
+          reframe: 'Some response text.',
+        },
+      ],
+    };
+    const out = formatObjectionScriptsForPrompt(stripped);
+    expect(out).toContain('reframe: "Some response text."');
   });
 });

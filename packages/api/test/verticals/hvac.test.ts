@@ -49,4 +49,17 @@ describe('P4-002 — HVAC Vertical Pack', () => {
     // Mirrored to canonical metadata for round-trip through the registry.
     expect((pack.metadata as Record<string, unknown>).intake_questions).toBeDefined();
   });
+
+  it('§3E — ships default objection_scripts for the calling agent', () => {
+    expect(pack.objectionScripts).toBeDefined();
+    expect((pack.objectionScripts ?? []).length).toBeGreaterThan(0);
+    const ids = (pack.objectionScripts ?? []).map((s) => s.id);
+    expect(ids).toEqual(expect.arrayContaining(['price', 'dispatch_fee', 'phone_quote', 'hesitation']));
+    // Each entry has at least one trigger pattern + a non-empty reframe.
+    for (const s of pack.objectionScripts ?? []) {
+      expect(s.patterns.length).toBeGreaterThan(0);
+      expect(s.reframe.length).toBeGreaterThan(0);
+    }
+    expect((pack.metadata as Record<string, unknown>).objection_scripts).toBeDefined();
+  });
 });

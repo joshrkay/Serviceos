@@ -29,9 +29,11 @@ import type { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import {
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
+  formatObjectionScriptsForPrompt,
 } from './context-assembly';
 import type {
   IntakeQuestionList,
+  ObjectionScriptList,
   ServiceCategory,
   TerminologyMap,
   VerticalPack,
@@ -99,6 +101,8 @@ export function buildVerticalPromptResolver(
         // §3D — surface intake_questions onto the rich pack so the
         // formatter (or downstream consumers) can render them.
         const intakeQuestions = (metadata.intake_questions as IntakeQuestionList | undefined);
+        // §3E — surface objection_scripts onto the rich pack.
+        const objectionScripts = (metadata.objection_scripts as ObjectionScriptList | undefined);
 
         const richPack: VerticalPack = {
           ...canonical,
@@ -110,16 +114,22 @@ export function buildVerticalPromptResolver(
           ...(intakeQuestions && intakeQuestions.length > 0
             ? { intakeQuestions }
             : {}),
+          ...(objectionScripts && objectionScripts.length > 0
+            ? { objectionScripts }
+            : {}),
         };
 
-        // §3B + §3D combined: render the vertical block AND intake
-        // questions as one section. Both come from the same pack so we
-        // emit them together in a single classifier system message
-        // rather than splitting across two; the model sees them as one
-        // coherent tenant-vertical context.
+        // §3B + §3D + §3E combined: render the vertical block, intake
+        // questions, and objection scripts as one section. All three
+        // come from the same pack so we emit them together in a single
+        // classifier system message rather than splitting; the model
+        // sees them as one coherent tenant-vertical context.
         const verticalBlock = formatVerticalForCallerPrompt(richPack);
         const intakeBlock = formatIntakeQuestionsForPrompt(richPack);
-        const formatted = [verticalBlock, intakeBlock].filter((s) => s.length > 0).join('\n\n');
+        const objectionBlock = formatObjectionScriptsForPrompt(richPack);
+        const formatted = [verticalBlock, intakeBlock, objectionBlock]
+          .filter((s) => s.length > 0)
+          .join('\n\n');
         section = formatted.length > 0 ? formatted : undefined;
       }
     }

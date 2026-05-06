@@ -44,6 +44,30 @@ export interface IntakeQuestion {
 
 export type IntakeQuestionList = readonly IntakeQuestion[];
 
+/**
+ * §3E — Scripted reframes for common customer objections. Each entry
+ * names a class of objection ('price', 'dispatch_fee', 'phone_quote',
+ * 'hesitation', etc.) plus example trigger phrases the LLM uses for
+ * fuzzy detection and a `reframe` string the agent speaks back when
+ * the objection is detected.
+ *
+ * Defaults ship per vertical; tenants override via tenant settings
+ * (Path B of the terminology-expansion model — see remaining-features
+ * §3E and the answer in the conversation thread). The defaults are
+ * starter copy meant to be tuned, not pulled from any vendor or
+ * training corpus.
+ */
+export interface ObjectionScript {
+  /** Semantic identifier. Used as the override key in tenant settings. */
+  id: string;
+  /** Trigger phrases the classifier matches against (fuzzy, not regex). */
+  patterns: readonly string[];
+  /** The scripted response the agent speaks. */
+  reframe: string;
+}
+
+export type ObjectionScriptList = readonly ObjectionScript[];
+
 export interface VerticalPack extends CanonicalVerticalPack {
   type: VerticalType;
   name: string;
@@ -52,6 +76,8 @@ export interface VerticalPack extends CanonicalVerticalPack {
   terminology: TerminologyMap;
   /** §3D — Optional. Packs without intake questions still load. */
   intakeQuestions?: IntakeQuestionList;
+  /** §3E — Optional. Packs without objection scripts still load. */
+  objectionScripts?: ObjectionScriptList;
 }
 
 export interface VerticalPackRepository {
@@ -70,10 +96,11 @@ export function createVerticalPack(
   description: string,
   categories: ServiceCategory[],
   terminology: TerminologyMap,
-  intakeQuestions: IntakeQuestionList = []
+  intakeQuestions: IntakeQuestionList = [],
+  objectionScripts: ObjectionScriptList = []
 ): VerticalPack {
   const now = new Date();
-  // Mirror intakeQuestions in metadata so the canonical (non-rich)
+  // Mirror collection fields in metadata so the canonical (non-rich)
   // VerticalPack carries the same data when stored / retrieved
   // through the registry, matching the existing pattern for
   // categories + terminology.
@@ -83,6 +110,9 @@ export function createVerticalPack(
   };
   if (intakeQuestions.length > 0) {
     metadata.intake_questions = intakeQuestions;
+  }
+  if (objectionScripts.length > 0) {
+    metadata.objection_scripts = objectionScripts;
   }
   const pack: VerticalPack = {
     id: randomUUID(),
@@ -103,6 +133,9 @@ export function createVerticalPack(
   };
   if (intakeQuestions.length > 0) {
     pack.intakeQuestions = intakeQuestions;
+  }
+  if (objectionScripts.length > 0) {
+    pack.objectionScripts = objectionScripts;
   }
   return pack;
 }
@@ -153,6 +186,21 @@ export function readIntakeQuestions(
   const metadataIntake = (pack.metadata as Record<string, unknown> | undefined)
     ?.intake_questions as IntakeQuestionList | undefined;
   return metadataIntake ?? [];
+}
+
+/**
+ * §3E — read objection scripts from the rich pack OR fall back to
+ * `metadata.objection_scripts` on the canonical pack.
+ */
+export function readObjectionScripts(
+  pack: Pick<VerticalPack, 'objectionScripts' | 'metadata'>,
+): ObjectionScriptList {
+  if (pack.objectionScripts && pack.objectionScripts.length > 0) {
+    return pack.objectionScripts;
+  }
+  const metadataScripts = (pack.metadata as Record<string, unknown> | undefined)
+    ?.objection_scripts as ObjectionScriptList | undefined;
+  return metadataScripts ?? [];
 }
 
 export function resolveTerminology(

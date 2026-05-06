@@ -131,6 +131,35 @@ function getMissingItemRules(verticalType?: VerticalType): MissingItemRule[] {
 }
 
 /**
+ * §3E — render the pack's `objectionScripts` as a prompt-shaped block.
+ * Two distinct uses:
+ *   1. Detection — the classifier sees the trigger patterns and learns
+ *      which utterances should fire `objection_detected`.
+ *   2. Reframe — when an objection is detected, the agent reads off
+ *      the matching `reframe` string verbatim before continuing.
+ *
+ * Returns '' for null/empty pack so callers can unconditionally
+ * concatenate. Mirrors the §3B/§3C/§3D formatter shapes.
+ */
+export function formatObjectionScriptsForPrompt(
+  pack: import('./registry').VerticalPack | null | undefined,
+): string {
+  if (!pack) return '';
+  const scripts = pack.objectionScripts ?? [];
+  if (scripts.length === 0) return '';
+
+  const lines: string[] = [
+    'Objection-handling scripts (use the matching reframe verbatim when caller says something matching the trigger patterns):',
+  ];
+  for (const s of scripts) {
+    lines.push(`  - id: ${s.id}`);
+    lines.push(`    triggers: ${s.patterns.join(', ')}`);
+    lines.push(`    reframe: "${s.reframe}"`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * §3D — render the pack's `intakeQuestions` as a prompt-shaped block
  * the calling agent injects into the classifier system prompt. The
  * questions are reference material the LLM uses when classifier
