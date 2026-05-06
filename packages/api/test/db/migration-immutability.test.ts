@@ -140,6 +140,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['081_jobs_deposit_credited_to_invoice', 'bf7f98ac752a53459c1cecf2a8bcae1eae925359f33b90efb81af10250af0b54'],
   ['082_create_pending_invitations', '89375ee7544ab33410c437964a8f0404ec9b2efadc8838fdf3d351852294bb4b'],
   ['083_tenants_stripe_subscription', 'e5bb319f522bd4fb26196092c9c6c869ab6d8d546d9316e57f67de765166ceee'],
+  ['084_create_user_calendar_integrations', '3089d220b79db5759cf77d460dfc9e2b15910daf721627f56ad331af93450c80'],
+  ['085_create_oauth_states', 'ded44d140ef110f9a8d326c62478caa5e5d77ceed2fab46fbd1999c2d143e713'],
 ];
 
 function hashMigration(value: string): string {

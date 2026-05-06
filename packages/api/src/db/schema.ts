@@ -2224,6 +2224,91 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_tenants_stripe_customer
       ON tenants(stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
   `,
+
+  '084_create_user_calendar_integrations': `
+    -- Tier 4 (Calendar sync — PR 1). Per-user Google Calendar OAuth
+    -- connections. Each technician/dispatcher connects THEIR OWN
+    -- calendar (different shape from tenant_integrations, which is
+    -- per-tenant). Tokens are stored encrypted with TENANT_ENCRYPTION_KEY
+    -- using the same AES-256-GCM helper that Twilio/SendGrid creds use.
+    --
+    --   user_id (clerk_user_id) : the owner of this connection. We
+    --                             store the Clerk subject (string) not
+    --                             the users.id UUID, because the Clerk
+    --                             webhook sometimes lands BEFORE we've
+    --                             created the users row (race during
+    --                             tenant bootstrap), and we want OAuth
+    --                             to keep working in that window.
+    --   provider                : 'google' for now; the schema admits
+    --                             outlook/apple in future migrations.
+    --   access_token_encrypted /
+    --   refresh_token_encrypted : "iv:cipher:tag" hex per crypto.ts.
+    --   access_token_expires_at : Used by the refresh path to know
+    --                             when to call Google to mint a new
+    --                             access token.
+    --   external_account_email  : Display only ("Connected to alex@...");
+    --                             never used as identity.
+    --   calendar_id             : Default 'primary' (Google's special
+    --                             alias for the user's main calendar).
+    --                             Future: let the user pick which calendar.
+    --   status                  : 'active' | 'expired' | 'revoked'.
+    --                             'expired' means refresh-token rejected
+    --                             (operator must reconnect); 'revoked'
+    --                             is a soft-delete after disconnect.
+    --
+    -- UNIQUE on (tenant_id, user_id, provider) — at most one active
+    -- Google connection per user. Reconnecting overwrites the row.
+    CREATE TABLE IF NOT EXISTS user_calendar_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('google')),
+      access_token_encrypted TEXT NOT NULL,
+      refresh_token_encrypted TEXT NOT NULL,
+      access_token_expires_at TIMESTAMPTZ NOT NULL,
+      external_account_email TEXT NOT NULL,
+      calendar_id TEXT NOT NULL DEFAULT 'primary',
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'expired', 'revoked')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, user_id, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_calendar_integrations_tenant
+      ON user_calendar_integrations(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_user_calendar_integrations_user
+      ON user_calendar_integrations(user_id);
+    ALTER TABLE user_calendar_integrations ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_user_calendar_integrations ON user_calendar_integrations;
+    CREATE POLICY tenant_isolation_user_calendar_integrations ON user_calendar_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '085_create_oauth_states': `
+    -- Tier 4 (Calendar sync — PR 1). Short-lived nonces for the
+    -- Google OAuth flow. The /connect route mints a state, persists
+    -- it, redirects the user to Google with state=<id>; the /callback
+    -- route looks it up to bind the returned code back to the original
+    -- tenant + user. Without this the callback would have no way to
+    -- know whose token it just minted.
+    --
+    -- Rows are short-lived (5 min default); a cron job would TTL them.
+    -- For PR 1 we just leave them; volume is tiny (1 row per
+    -- connect attempt) and the lookup is by primary key.
+    CREATE TABLE IF NOT EXISTS oauth_states (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('google')),
+      redirect_after TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes',
+      consumed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_oauth_states_active
+      ON oauth_states(id)
+      WHERE consumed_at IS NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

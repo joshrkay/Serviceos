@@ -16,6 +16,7 @@ import { TerminologySheet } from './TerminologySheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
+import { CalendarSyncSheet } from './CalendarSyncSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -114,6 +115,22 @@ export function SettingsPage() {
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
+  const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
+  // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
+  // the user lands back here from Google's OAuth redirect. The
+  // server-side callback redirects to /settings?calendar_connected=1
+  // (or ?calendar_error=...).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('calendar_connected') === '1') {
+      setCalendarSyncOpen(true);
+      // Strip the param so a refresh doesn't re-open.
+      params.delete('calendar_connected');
+      const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
+      window.history.replaceState(null, '', next);
+    }
+  }, []);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -230,9 +247,8 @@ export function SettingsPage() {
         {
           icon: Link,
           label: 'Calendar sync',
-          description: 'Google Calendar connected',
-          badge: { label: 'Connected', color: 'bg-green-100 text-green-700' },
-          action: () => {},
+          description: 'Connect Google Calendar to your account',
+          action: () => setCalendarSyncOpen(true),
         },
         {
           icon: Link,
@@ -616,6 +632,11 @@ export function SettingsPage() {
           onClose={() => setTeamMembersOpen(false)}
           canEditRoles={me?.role === 'owner'}
         />
+      )}
+
+      {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
+      {calendarSyncOpen && (
+        <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
       )}
     </div>
   );
