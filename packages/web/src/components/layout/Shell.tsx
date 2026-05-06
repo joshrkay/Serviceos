@@ -229,9 +229,6 @@ export function Shell() {
   // modal's onConfirm executes the actual switchMode.
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
 
-  const isExact = (to: string) =>
-    to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
-
   // Phase 12 — reflect the active mode on document.body so global CSS,
   // analytics, and outer overlays can target it without prop drilling.
   useEffect(() => {

@@ -4,7 +4,7 @@ import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
   Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
-  AlertCircle, Volume2, PhoneCall,
+  AlertCircle, Volume2, VolumeX, PhoneCall,
 } from 'lucide-react';
 import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
@@ -12,7 +12,6 @@ import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useTTS } from '../../hooks/useTTS';
-import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiMessage {
   id: string;
@@ -492,21 +491,6 @@ function VoiceRecordingBar({ onCancel, onSend }: {
       return;
     }
 
-    setTranscribing(true);
-    recorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-      try {
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'recording.webm');
-        const res = await apiFetch('/api/voice/transcribe', {
-          method: 'POST',
-          body: formData,
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setTranscript(data.transcript || '(Could not transcribe audio)');
-        } else {
-          setTranscript('(Transcription service unavailable)');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -888,6 +872,8 @@ export function AssistantPage() {
             >
               {ttsEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
               {isSpeaking && <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+            </button>
+            <button
               onClick={() => setLiveSessionOpen(v => !v)}
               title="Live voice session"
               className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${

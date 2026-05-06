@@ -6,7 +6,6 @@ import {
   Plus,
 } from 'lucide-react';
 import { customers, technicians } from '../../data/mock-data';
-import type { ServiceType } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
 import type { Customer, ServiceType } from '../../data/mock-data';
 import { useMutation } from '../../hooks/useMutation';
