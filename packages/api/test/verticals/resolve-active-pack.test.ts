@@ -83,4 +83,50 @@ describe('buildVerticalPromptResolver', () => {
     const resolve = buildVerticalPromptResolver({ packActivationRepo, canonicalPackRegistry });
     expect(await resolve('tenant-other')).toBeUndefined();
   });
+
+  it('picks the most recently activated active pack (deterministic ordering)', async () => {
+    // Codex P2 — InMemory preserves insertion order, Pg orders by
+    // activated_at DESC. Without an explicit sort the resolver could
+    // return different packs in dev vs prod for the same tenant.
+    const PACK_OLDER = 'plumbing-pro-v1';
+    await registerPack(
+      {
+        packId: PACK_OLDER,
+        version: '1.0.0',
+        verticalType: 'plumbing',
+        status: 'active',
+        displayName: 'Plumbing Pro (older activation)',
+        metadata: {
+          terminology: { pipe: { displayName: 'Pipe', aliases: [] } },
+          categories: [{ id: 'p1', name: 'Pipe Repair', sortOrder: 1 }],
+        },
+      },
+      canonicalPackRegistry,
+    );
+
+    // Insert OLDER first, then PACK_ID. InMemory iteration order would
+    // return the older one; explicit sort by activatedAt should return
+    // the newer (PACK_ID).
+    const older = await activatePack({ tenantId: TENANT, packId: PACK_OLDER }, packActivationRepo);
+    await packActivationRepo.update(older.id, { activatedAt: new Date('2026-01-01T00:00:00Z') });
+    const newer = await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    await packActivationRepo.update(newer.id, { activatedAt: new Date('2026-04-01T00:00:00Z') });
+
+    const resolve = buildVerticalPromptResolver({ packActivationRepo, canonicalPackRegistry });
+    const section = await resolve(TENANT);
+    expect(section).toContain('Service vertical: HVAC Professional');
+    expect(section).not.toContain('Plumbing Pro');
+  });
+
+  it('skips canonical packs whose registry status is not "active"', async () => {
+    // Codex P2 — pack is deprecated upstream while activation remains
+    // active. Resolver must not surface deprecated taxonomy.
+    const found = await canonicalPackRegistry.getByPackId(PACK_ID);
+    if (!found) throw new Error('seed pack missing');
+    await canonicalPackRegistry.update(found.id, { status: 'deprecated' });
+
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const resolve = buildVerticalPromptResolver({ packActivationRepo, canonicalPackRegistry });
+    expect(await resolve(TENANT)).toBeUndefined();
+  });
 });
