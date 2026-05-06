@@ -10,7 +10,31 @@ export interface OpenAICompatibleConfig {
   timeout?: number;
 }
 
-export class OpenAICompatibleProvider implements LLMProvider {
+/**
+ * Embedding surface used by the RAG corpus (Phase 1 of the inbound-CSR
+ * training-data architecture). Locked to `text-embedding-3-small`
+ * (1536 dims) at the schema level via the CHECK constraint on
+ * `knowledge_chunks.embedding_model`; mixing models in the same ivfflat
+ * index would silently degrade retrieval quality because cosine
+ * distances aren't comparable across models.
+ */
+export interface EmbeddingProvider {
+  readonly name: string;
+  createEmbedding(input: string): Promise<EmbeddingResult>;
+}
+
+export interface EmbeddingResult {
+  embedding: number[];
+  model: string;
+  /** Total tokens billed by the provider for this request. */
+  tokenUsage: number;
+  latencyMs: number;
+}
+
+const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
+const EXPECTED_EMBEDDING_DIMS = 1536;
+
+export class OpenAICompatibleProvider implements LLMProvider, EmbeddingProvider {
   readonly name: string;
   private readonly client: OpenAI;
 
@@ -30,17 +54,58 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
   }
 
+  /**
+   * Single-input embedding call. The OpenAI embeddings endpoint accepts
+   * arrays for batching; we expose a single-string surface for now and
+   * let callers loop. Batching can be added when ingestion volume
+   * warrants it (Phase 4a metric — embedding tokens per minute).
+   */
+  async createEmbedding(input: string): Promise<EmbeddingResult> {
+    if (input.length === 0) {
+      throw new Error('createEmbedding: input must be non-empty');
+    }
+    const start = Date.now();
+    const response = await this.client.embeddings.create({
+      model: DEFAULT_EMBEDDING_MODEL,
+      input,
+    });
+    const datum = response.data[0];
+    if (!datum) {
+      throw new Error(`Provider ${this.name} returned no embedding data`);
+    }
+    const embedding = datum.embedding;
+    if (embedding.length !== EXPECTED_EMBEDDING_DIMS) {
+      // Fail loud rather than silently inserting a vector that breaks
+      // the schema CHECK constraint at INSERT time.
+      throw new Error(
+        `Provider ${this.name} returned ${embedding.length}-dim embedding; expected ${EXPECTED_EMBEDDING_DIMS} for ${DEFAULT_EMBEDDING_MODEL}`,
+      );
+    }
+    return {
+      embedding,
+      model: response.model ?? DEFAULT_EMBEDDING_MODEL,
+      tokenUsage: response.usage?.total_tokens ?? 0,
+      latencyMs: Date.now() - start,
+    };
+  }
+
   async complete(request: LLMRequest): Promise<LLMResponse> {
     const start = Date.now();
     const model = request.model ?? 'gpt-4o-mini';
 
-    const completion = await this.client.chat.completions.create({
-      model,
-      messages: request.messages,
-      temperature: request.temperature ?? 0.2,
-      max_tokens: request.maxTokens,
-      response_format: request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
-    });
+    // Honor the resilience-layer signal so deadline expiry / breaker abort
+    // tears down the in-flight HTTP request instead of leaving a zombie.
+    const completion = await this.client.chat.completions.create(
+      {
+        model,
+        messages: request.messages,
+        temperature: request.temperature ?? 0.2,
+        max_tokens: request.maxTokens,
+        response_format:
+          request.responseFormat === 'json' ? { type: 'json_object' } : undefined,
+      },
+      request.signal ? { signal: request.signal } : undefined,
+    );
 
     const choice = completion.choices[0];
     if (!choice?.message?.content) {

@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
+import { buildOriginationMetadata } from '../leads/attribution-metadata';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -19,6 +21,24 @@ export interface Invoice {
   issuedAt?: Date;
   dueDate?: Date;
   customerMessage?: string;
+  /** Random URL-safe token for unauthenticated customer payment-page links. */
+  viewToken?: string;
+  /** Timestamp the view_token becomes invalid. */
+  viewTokenExpiresAt?: Date;
+  /** Timestamp of the most recent send. */
+  sentAt?: Date;
+  /** ID of the most recent message_dispatches row. */
+  lastDispatchId?: string;
+  /** First time the customer opened the public payment link. */
+  firstViewedAt?: Date;
+  /** Number of times the public payment link has been opened. */
+  viewCount?: number;
+  /** Stripe Payment Link ID (e.g. plink_xxx) generated on first checkout request. */
+  stripePaymentLinkId?: string;
+  /** Stripe-hosted checkout URL returned with the payment link. */
+  stripePaymentLinkUrl?: string;
+  /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
+  originatingLeadId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -33,6 +53,8 @@ export interface CreateInvoiceInput {
   discountCents?: number;
   taxRateBps?: number;
   customerMessage?: string;
+  /** Optional override; routes auto-populate from job when omitted. */
+  originatingLeadId?: string;
   createdBy: string;
 }
 
@@ -43,12 +65,48 @@ export interface UpdateInvoiceInput {
   customerMessage?: string;
 }
 
+export interface InvoiceListOptions {
+  status?: InvoiceStatus;
+  jobId?: string;
+  customerId?: string;
+  /** ISO date — invoices with `due_date >= fromDueDate` are included. */
+  fromDueDate?: Date;
+  /** ISO date — invoices with `due_date <= toDueDate` are included. */
+  toDueDate?: Date;
+  /** ILIKE search across invoice_number / customer_message. */
+  search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (created_at). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface InvoiceListResult {
+  data: Invoice[];
+  total: number;
+}
+
+export const DEFAULT_INVOICE_LIMIT = 50;
+export const MAX_INVOICE_LIMIT = 200;
+
 export interface InvoiceRepository {
   create(invoice: Invoice): Promise<Invoice>;
   findById(tenantId: string, id: string): Promise<Invoice | null>;
   findByJob(tenantId: string, jobId: string): Promise<Invoice[]>;
-  findByTenant(tenantId: string): Promise<Invoice[]>;
+  findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]>;
+  /** P1-018: paginated `{ data, total }` form for list UIs. */
+  listWithMeta?(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult>;
   update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null>;
+  /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
+  findByViewToken?(token: string): Promise<Invoice | null>;
+  /**
+   * Atomically increment view_count and set first_viewed_at if not yet set.
+   * Implementations that support it (Pg) should do this in a single UPDATE
+   * to avoid the read-modify-write race when concurrent requests arrive.
+   */
+  incrementViewCount?(tenantId: string, id: string): Promise<void>;
 }
 
 export const INVOICE_STATUS_TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
@@ -95,7 +153,7 @@ export async function createInvoice(
   auditRepo?: AuditRepository
 ): Promise<Invoice> {
   const errors = validateInvoiceInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,
@@ -115,6 +173,7 @@ export async function createInvoice(
     amountPaidCents: 0,
     amountDueCents: totals.totalCents,
     customerMessage: input.customerMessage,
+    originatingLeadId: input.originatingLeadId,
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -130,11 +189,87 @@ export async function createInvoice(
       eventType: 'invoice.created',
       entityType: 'invoice',
       entityId: created.id,
+      metadata: buildOriginationMetadata(created.originatingLeadId),
     });
     await auditRepo.create(event);
   }
 
   return created;
+}
+
+export async function listInvoices(
+  tenantId: string,
+  repository: InvoiceRepository,
+  options?: InvoiceListOptions
+): Promise<Invoice[]> {
+  return repository.findByTenant(tenantId, options);
+}
+
+/**
+ * P1-018: paginated invoice list with `{ data, total }`. Falls back to
+ * in-memory pagination over `findByTenant` when the repo doesn't yet
+ * implement `listWithMeta`.
+ */
+export async function listInvoicesWithMeta(
+  tenantId: string,
+  repository: InvoiceRepository,
+  options?: InvoiceListOptions
+): Promise<InvoiceListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_INVOICE_LIMIT, MAX_INVOICE_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
+}
+
+/**
+ * Insert-first, then allocate — a failed createInvoice never increments
+ * the tenant's invoice counter, so there are no gaps in the user-visible
+ * sequence.
+ *
+ * Flow:
+ *   1. createInvoice with a placeholder number (passes validation but is
+ *      replaced before the row is ever read by any caller)
+ *   2. getNextInvoiceNumber — only runs when step 1 succeeded
+ *   3. invoiceRepo.update rewrites the placeholder with the real number
+ *
+ * Residual risk: a crash between step 2 and step 3 leaves the counter
+ * incremented while the row still shows the placeholder. That's a much
+ * smaller exposure than the previous ordering, where any validation or
+ * constraint failure in createInvoice burned a sequence number. A proper
+ * pg transaction (SELECT FOR UPDATE settings + INSERT invoice) is the
+ * long-term fix and lands alongside PgSettingsRepository when that ships.
+ */
+export async function createInvoiceWithNextNumber(
+  input: Omit<CreateInvoiceInput, 'invoiceNumber'>,
+  invoiceRepo: InvoiceRepository,
+  settingsRepo: SettingsRepository,
+  auditRepo?: AuditRepository
+): Promise<Invoice> {
+  const placeholderNumber = `PENDING-${uuidv4()}`;
+
+  const invoice = await createInvoice(
+    { ...input, invoiceNumber: placeholderNumber },
+    invoiceRepo,
+    auditRepo
+  );
+
+  const invoiceNumber = await getNextInvoiceNumber(input.tenantId, settingsRepo);
+  const updated = await invoiceRepo.update(input.tenantId, invoice.id, {
+    invoiceNumber,
+  });
+  if (!updated) {
+    // Hard failure: the counter is now allocated but the placeholder row
+    // can't be promoted to its real number. Returning a synthetic object
+    // would desync the app state from persistence — callers must see this
+    // as an error so it can be retried or alerted on.
+    throw new Error(
+      `Allocated invoice number ${invoiceNumber} but failed to update row ${invoice.id}`
+    );
+  }
+  return updated;
 }
 
 export async function getInvoice(
@@ -153,6 +288,10 @@ export async function updateInvoice(
 ): Promise<Invoice | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
+
+  if (existing.status !== 'draft') {
+    throw new ValidationError(`Cannot edit invoice in '${existing.status}' status`);
+  }
 
   const lineItems = input.lineItems ?? existing.lineItems;
   const discountCents = input.discountCents ?? existing.totals.discountCents;
@@ -230,10 +369,47 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
   }
 
-  async findByTenant(tenantId: string): Promise<Invoice[]> {
-    return Array.from(this.invoices.values())
-      .filter((i) => i.tenantId === tenantId)
-      .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  async findByTenant(tenantId: string, options?: InvoiceListOptions): Promise<Invoice[]> {
+    let results = Array.from(this.invoices.values()).filter((i) => i.tenantId === tenantId);
+    if (options?.status) results = results.filter((i) => i.status === options.status);
+    if (options?.jobId) results = results.filter((i) => i.jobId === options.jobId);
+    if (options?.fromDueDate) {
+      const from = options.fromDueDate.getTime();
+      results = results.filter((i) => i.dueDate !== undefined && i.dueDate.getTime() >= from);
+    }
+    if (options?.toDueDate) {
+      const to = options.toDueDate.getTime();
+      results = results.filter((i) => i.dueDate !== undefined && i.dueDate.getTime() <= to);
+    }
+    if (options?.search) {
+      const q = options.search.toLowerCase();
+      results = results.filter(
+        (i) =>
+          i.invoiceNumber.toLowerCase().includes(q) ||
+          (i.customerMessage && i.customerMessage.toLowerCase().includes(q))
+      );
+    }
+    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
+    const sortDir = options?.sort === 'asc' ? 1 : -1;
+    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_INVOICE_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
+    return results.map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  }
+
+  async listWithMeta(tenantId: string, options?: InvoiceListOptions): Promise<InvoiceListResult> {
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Invoice>): Promise<Invoice | null> {
@@ -242,5 +418,27 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     const updated = { ...i, ...updates };
     this.invoices.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async findByViewToken(token: string): Promise<Invoice | null> {
+    for (const inv of this.invoices.values()) {
+      if (inv.viewToken === token) {
+        if (inv.viewTokenExpiresAt && inv.viewTokenExpiresAt < new Date()) return null;
+        return { ...inv, lineItems: [...inv.lineItems] };
+      }
+    }
+    return null;
+  }
+
+  async incrementViewCount(tenantId: string, id: string): Promise<void> {
+    const inv = this.invoices.get(id);
+    if (!inv || inv.tenantId !== tenantId) return;
+    const now = new Date();
+    this.invoices.set(id, {
+      ...inv,
+      firstViewedAt: inv.firstViewedAt ?? now,
+      viewCount: (inv.viewCount ?? 0) + 1,
+      updatedAt: now,
+    });
   }
 }

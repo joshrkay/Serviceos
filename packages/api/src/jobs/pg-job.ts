@@ -1,6 +1,14 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Job, JobListOptions, JobRepository } from './job';
+import {
+  Job,
+  JobFindByCustomerOptions,
+  JobListOptions,
+  JobListResult,
+  JobRepository,
+  DEFAULT_JOB_LIMIT,
+  MAX_JOB_LIMIT,
+} from './job';
 
 function mapRow(row: Record<string, unknown>): Job {
   return {
@@ -14,6 +22,7 @@ function mapRow(row: Record<string, unknown>): Job {
     status: row.status as Job['status'],
     priority: row.priority as Job['priority'],
     assignedTechnicianId: (row.assigned_technician_id as string) ?? undefined,
+    originatingLeadId: (row.originating_lead_id as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -31,8 +40,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         `INSERT INTO jobs (
           id, tenant_id, customer_id, location_id, job_number, summary,
           problem_description, status, priority, assigned_technician_id,
-          created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          originating_lead_id, created_by, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING *`,
         [
           job.id,
@@ -45,6 +54,7 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
           job.status,
           job.priority,
           job.assignedTechnicianId ?? null,
+          job.originatingLeadId ?? null,
           job.createdBy,
           job.createdAt,
           job.updatedAt,
@@ -64,44 +74,113 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
     });
   }
 
+  /**
+   * Build the parameterized WHERE clause shared by the data and total-count
+   * queries. tenant_id is the FIRST predicate (defense-in-depth alongside
+   * RLS); all other filters are layered on with parameterized placeholders.
+   */
+  private buildListWhere(tenantId: string, options?: JobListOptions): {
+    where: string;
+    params: unknown[];
+  } {
+    const conditions: string[] = ['tenant_id = $1'];
+    const params: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (options?.status) {
+      conditions.push(`status = $${paramIndex}`);
+      params.push(options.status);
+      paramIndex++;
+    }
+
+    if (options?.customerId) {
+      conditions.push(`customer_id = $${paramIndex}`);
+      params.push(options.customerId);
+      paramIndex++;
+    }
+
+    if (options?.technicianId) {
+      conditions.push(`assigned_technician_id = $${paramIndex}`);
+      params.push(options.technicianId);
+      paramIndex++;
+    }
+
+    if (options?.search) {
+      const searchParam = `%${options.search}%`;
+      conditions.push(
+        `(summary ILIKE $${paramIndex} OR job_number ILIKE $${paramIndex})`
+      );
+      params.push(searchParam);
+      paramIndex++;
+    }
+
+    return { where: `WHERE ${conditions.join(' AND ')}`, params };
+  }
+
   async findByTenant(tenantId: string, options?: JobListOptions): Promise<Job[]> {
     return this.withTenant(tenantId, async (client) => {
-      const conditions: string[] = ['tenant_id = $1'];
-      const params: unknown[] = [tenantId];
-      let paramIndex = 2;
+      return this.queryListRows(client, tenantId, options);
+    });
+  }
 
-      if (options?.status) {
-        conditions.push(`status = $${paramIndex}`);
-        params.push(options.status);
-        paramIndex++;
+  /**
+   * P11-001: tenant-scoped read of every job belonging to a customer.
+   * Drives the voice lookup-skill family. tenant_id is the FIRST WHERE
+   * predicate (defense-in-depth alongside RLS) and customer_id rides as
+   * a parameterized placeholder. Default ordering matches `findByTenant`
+   * (created_at DESC) so callers see most-recent first.
+   */
+  async findByCustomer(
+    tenantId: string,
+    customerId: string,
+    opts?: JobFindByCustomerOptions,
+  ): Promise<Job[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const params: unknown[] = [tenantId, customerId];
+      let where = 'WHERE tenant_id = $1 AND customer_id = $2';
+      if (!opts?.includeArchived) {
+        where += " AND status <> 'canceled'";
       }
+      const limit = Math.min(opts?.limit ?? MAX_JOB_LIMIT, MAX_JOB_LIMIT);
+      params.push(limit);
+      const sql = `SELECT * FROM jobs ${where} ORDER BY created_at DESC LIMIT $${params.length}`;
+      const result = await client.query(sql, params);
+      return result.rows.map(mapRow);
+    });
+  }
 
-      if (options?.customerId) {
-        conditions.push(`customer_id = $${paramIndex}`);
-        params.push(options.customerId);
-        paramIndex++;
-      }
+  private async queryListRows(
+    client: PoolClient,
+    tenantId: string,
+    options?: JobListOptions
+  ): Promise<Job[]> {
+    const { where, params } = this.buildListWhere(tenantId, options);
+    // P1-018: jobs default to created_at DESC.
+    const sortDirection = options?.sort === 'asc' ? 'ASC' : 'DESC';
+    const usePagination = options?.limit !== undefined || options?.offset !== undefined;
+    let sql = `SELECT * FROM jobs ${where} ORDER BY created_at ${sortDirection}`;
+    let queryParams = params;
+    if (usePagination) {
+      const limit = Math.min(options?.limit ?? DEFAULT_JOB_LIMIT, MAX_JOB_LIMIT);
+      const offset = options?.offset ?? 0;
+      sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      queryParams = [...params, limit, offset];
+    }
+    const result = await client.query(sql, queryParams);
+    return result.rows.map(mapRow);
+  }
 
-      if (options?.technicianId) {
-        conditions.push(`assigned_technician_id = $${paramIndex}`);
-        params.push(options.technicianId);
-        paramIndex++;
-      }
-
-      if (options?.search) {
-        const searchParam = `%${options.search}%`;
-        conditions.push(
-          `(summary ILIKE $${paramIndex} OR job_number ILIKE $${paramIndex})`
-        );
-        params.push(searchParam);
-        paramIndex++;
-      }
-
-      const result = await client.query(
-        `SELECT * FROM jobs WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC`,
+  async listWithMeta(tenantId: string, options?: JobListOptions): Promise<JobListResult> {
+    return this.withTenant(tenantId, async (client) => {
+      const limit = Math.min(options?.limit ?? DEFAULT_JOB_LIMIT, MAX_JOB_LIMIT);
+      const offset = options?.offset ?? 0;
+      const data = await this.queryListRows(client, tenantId, { ...options, limit, offset });
+      const { where, params } = this.buildListWhere(tenantId, options);
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS total FROM jobs ${where}`,
         params
       );
-      return result.rows.map(mapRow);
+      return { data, total: countResult.rows[0].total as number };
     });
   }
 
@@ -116,6 +195,7 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         status: 'status',
         priority: 'priority',
         assignedTechnicianId: 'assigned_technician_id',
+        originatingLeadId: 'originating_lead_id',
         updatedAt: 'updated_at',
       };
 

@@ -5,6 +5,10 @@ import { AppointmentRepository } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician, unassignTechnician } from '../../appointments/assignment';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
+import {
+  DispatchAnalyticsRepository,
+  captureDispatchEvent,
+} from '../../dispatch/analytics';
 
 export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reassign_appointment';
@@ -12,6 +16,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
+    private readonly analyticsRepo?: DispatchAnalyticsRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -119,6 +124,14 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         isPrimary: true,
         assignedBy: context.executedBy,
       }, this.assignmentRepo);
+
+      if (this.analyticsRepo) {
+        await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'reassigned', {
+          appointmentId,
+          technicianId: toTechnicianId,
+          metadata: { proposalId: proposal.id },
+        });
+      }
 
       return { success: true, resultEntityId: assignment.id };
     }

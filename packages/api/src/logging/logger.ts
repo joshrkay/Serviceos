@@ -1,3 +1,5 @@
+import { redactSecrets, serializeRedacted } from './redact';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface LogEntry {
@@ -39,7 +41,7 @@ export function createLogger(opts: {
   function log(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
     if (LOG_LEVELS[level] < minLevel) return;
 
-    const entry: LogEntry = {
+    const entry: LogEntry = redactSecrets({
       level,
       message,
       timestamp: new Date().toISOString(),
@@ -47,9 +49,9 @@ export function createLogger(opts: {
       environment: opts.environment,
       ...baseBindings,
       ...meta,
-    };
+    });
 
-    const output = JSON.stringify(entry);
+    const output = serializeRedacted(entry, 'standard');
     if (level === 'error') {
       process.stderr.write(output + '\n');
     } else {

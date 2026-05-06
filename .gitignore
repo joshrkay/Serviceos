@@ -2,12 +2,30 @@ node_modules/
 dist/
 *.js.map
 *.d.ts
+
+# Multi-agent dispatch worktrees (created by /dispatch-story; ephemeral)
+.claude/worktrees/
 !jest.config.ts
 !**/vite-env.d.ts
 .env
 .env.*
 !.env.example
+!.env.qa.example
 *.tsbuildinfo
 coverage/
 
 
+
+# Playwright
+/playwright-report/
+/test-results/
+/playwright/.cache/
+
+# QA matrix run artifacts (reports folders are kept; transient outputs ignored)
+/qa/artifacts/*
+!/qa/artifacts/.gitkeep
+/qa/reports/*/
+!/qa/reports/.gitkeep
+
+# Voice Quality v1 corpus runner — generated JSON report (VQ-009)
+packages/api/voice-quality-report.json

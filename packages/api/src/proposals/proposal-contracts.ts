@@ -1,13 +1,26 @@
 import { z } from 'zod';
 
 export const proposalFilterSchema = z.object({
-  status: z.enum(['draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed']).optional(),
+  status: z.enum(['draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed']).optional(),
   proposalType: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
 });
 
 export type ProposalFilter = z.infer<typeof proposalFilterSchema>;
+
+export const rejectProposalBodySchema = z.object({
+  reason: z.string().min(1, 'reason is required'),
+  details: z.string().optional(),
+});
+
+export type RejectProposalBody = z.infer<typeof rejectProposalBodySchema>;
+
+export const editProposalBodySchema = z.object({
+  edits: z.record(z.unknown()),
+});
+
+export type EditProposalBody = z.infer<typeof editProposalBodySchema>;
 
 export const proposalResponseSchema = z.object({
   id: z.string().uuid(),

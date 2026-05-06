@@ -1,0 +1,10 @@
+[
+  {
+    "proposalType": "reschedule_appointment",
+    "payload": {
+      "appointmentId": "appt_02_reschedule_existing",
+      "newScheduledStart": "2026-05-13T21:00:00.000Z",
+      "newScheduledEnd": "2026-05-13T23:00:00.000Z"
+    }
+  }
+]

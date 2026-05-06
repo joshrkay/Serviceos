@@ -5,15 +5,31 @@ import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
+vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 vi.mock('../../data/mock-data', () => ({
   technicians: [
     { id: 't1', name: 'Carlos Reyes', initials: 'CR', color: '#3B82F6' },
     { id: 't2', name: 'Marcus Webb',  initials: 'MW', color: '#22C55E' },
     { id: 't3', name: 'Sarah Lin',    initials: 'SL', color: '#8B5CF6' },
   ],
+  jobs: [
+    {
+      id: 'seed-1',
+      jobNumber: '1042',
+      customer: 'Alice Smith',
+      customerId: 'c1',
+      description: 'Fix AC unit not cooling',
+      status: 'Scheduled',
+      serviceType: 'HVAC',
+      assignedTech: 'Carlos Reyes',
+      scheduledDate: 'Today',
+      scheduledTime: '9:00 AM',
+    },
+  ],
 }));
 
 import { useListQuery } from '../../hooks/useListQuery';
+import { apiFetch } from '../../utils/api-fetch';
 
 const today = new Date().toISOString().split('T')[0];
 
@@ -55,6 +71,11 @@ const defaultListResult = {
 
 beforeEach(() => {
   vi.mocked(useListQuery).mockReturnValue(defaultListResult);
+  vi.mocked(apiFetch).mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({}),
+  } as Response);
 });
 
 function renderPage() {
@@ -93,9 +114,9 @@ describe('SchedulePage', () => {
   it('renders team today section', () => {
     renderPage();
     expect(screen.getByText('Team today')).toBeInTheDocument();
-    expect(screen.getByText('Carlos Reyes')).toBeInTheDocument();
-    expect(screen.getByText('Marcus Webb')).toBeInTheDocument();
-    expect(screen.getByText('Sarah Lin')).toBeInTheDocument();
+    expect(screen.getAllByText('Carlos Reyes').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Marcus Webb').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Sarah Lin').length).toBeGreaterThan(0);
   });
 
   it('shows available for tech with no jobs', () => {
@@ -113,8 +134,9 @@ describe('SchedulePage', () => {
   it('shows error state with retry', () => {
     vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, error: 'HTTP 500', data: [] });
     renderPage();
-    expect(screen.getByText('Failed to load schedule')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Retry'));
+    expect(screen.getByText('Failed to load live schedule')).toBeInTheDocument();
+    expect(screen.getByText('Showing fallback schedule view while we reconnect.')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Retry live data'));
     expect(defaultListResult.refetch).toHaveBeenCalled();
   });
 
@@ -169,5 +191,38 @@ describe('SchedulePage', () => {
   it('uses /api/jobs endpoint', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs', expect.any(Object));
+  });
+
+  it('supports personal schedule view toggle', () => {
+    renderPage();
+    fireEvent.click(screen.getByRole('button', { name: 'My schedule' }));
+    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('Bob Jones')).not.toBeInTheDocument();
+  });
+
+  it('can remove an event from the calendar', () => {
+    renderPage();
+    const removeButtons = screen.getAllByRole('button', { name: 'Remove' });
+    fireEvent.click(removeButtons[0]);
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
+      '/api/jobs/j1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ scheduledStart: null, status: 'new' }),
+      })
+    );
+  });
+
+  it('can switch assigned team member', () => {
+    renderPage();
+    const assignmentSelects = screen.getAllByRole('combobox');
+    fireEvent.change(assignmentSelects[0], { target: { value: 't2' } });
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
+      '/api/jobs/j1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ assignedTechnicianId: 't2' }),
+      })
+    );
   });
 });

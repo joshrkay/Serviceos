@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { apiFetch } from '../../utils/api-fetch';
 import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
   Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
-  AlertCircle, Volume2, VolumeX,
+  AlertCircle, Volume2, PhoneCall,
 } from 'lucide-react';
+import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
 import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
@@ -59,18 +61,21 @@ const SUGGESTIONS = [
 // Send user messages to the backend conversation API and receive real AI responses.
 // Falls back to a simple echo if the API is unavailable.
 async function sendToConversationAPI(
-  conversationId: string | null,
+  _conversationId: string | null,
   text: string,
+  history: Array<{ role: 'user' | 'assistant'; content: string }>,
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string }> {
   try {
-    const body: Record<string, unknown> = { content: text, messageType: 'text' };
-    if (conversationId) body.conversationId = conversationId;
-
-    const res = await fetch('/api/conversations/message', {
+    // AST-01b: chat → /api/assistant/chat. The server runs intent
+    // classification first; recognized actions (e.g. create_customer)
+    // come back as a proposal the UI renders inline instead of as free
+    // text. Everything else falls through to the generic LLM reply.
+    const res = await apiFetch('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        messages: [...history, { role: 'user', content: text }],
+      }),
     });
 
     if (!res.ok) {
@@ -78,12 +83,12 @@ async function sendToConversationAPI(
     }
 
     const data = await res.json();
+    const msg = data.message ?? {};
     return {
-      content: data.content || data.message || 'I received your message but could not generate a response.',
-      reasoning: data.reasoning,
-      proposal: data.proposal,
-      autoApplied: data.autoApplied,
-      newConversationId: data.conversationId,
+      content: msg.content || 'I received your message but could not generate a response.',
+      reasoning: msg.reasoning,
+      proposal: msg.proposal,
+      autoApplied: msg.autoApplied,
     };
   } catch {
     // Fallback when API is unreachable (e.g., local dev without backend)
@@ -292,49 +297,198 @@ function DateSep({ label }: { label: string }) {
 }
 
 // ─── Voice Recording Overlay ────────────────────────────────────
+const MAX_RECORDING_SECONDS = 600;
+const VOICE_POLL_INTERVAL_MS = 1500;
+const VOICE_POLL_TIMEOUT_MS = 90000;
+
+function isIOSSafari(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  const iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const webkit = /WebKit/.test(ua);
+  const isCriOS = /CriOS/.test(ua);
+  const isFxiOS = /FxiOS/.test(ua);
+  return iOS && webkit && !isCriOS && !isFxiOS;
+}
+
+function getSupportedAudioMimeType(): string | null {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return null;
+  }
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+  ];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
+}
+
+async function createSignedAudioUpload(blob: Blob) {
+  const filename = `voice-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
+  // MediaRecorder emits "audio/webm;codecs=opus" but the backend whitelist
+  // keys on the base type only. Strip codec params before sending.
+  const contentType = (blob.type || 'audio/webm').split(';')[0].trim();
+  const body = JSON.stringify({
+    filename,
+    contentType,
+    sizeBytes: blob.size,
+    entityType: 'voice_recording',
+  });
+
+  const requestSigned = async (url: string) => apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+
+  let response = await requestSigned('/api/files/upload-url');
+  if (!response.ok) {
+    response = await requestSigned('/api/files/upload');
+  }
+  if (!response.ok) {
+    throw new Error('Unable to get a signed upload URL.');
+  }
+
+  const payload = await response.json();
+  const fileId = payload.fileId ?? payload.fileRecord?.id;
+  const uploadUrl = payload.uploadUrl;
+  const audioUrl = payload.audioUrl ?? payload.downloadUrl ?? payload.fileUrl;
+
+  if (!fileId || !uploadUrl) {
+    throw new Error('Upload URL response is missing required fields.');
+  }
+
+  const uploadResult = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': contentType },
+    body: blob,
+  });
+
+  if (!uploadResult.ok) {
+    throw new Error('Audio upload failed. Please retry.');
+  }
+
+  return { fileId, audioUrl: audioUrl ?? uploadUrl.split('?')[0] };
+}
+
+async function pollRecordingUntilDone(recordingId: string) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < VOICE_POLL_TIMEOUT_MS) {
+    const res = await apiFetch(`/api/voice/recordings/${recordingId}`, {
+      method: 'GET',
+    });
+
+    if (!res.ok) {
+      throw new Error('Could not fetch transcription status.');
+    }
+
+    const status = await res.json();
+    if (status.status === 'completed') return status;
+    if (status.status === 'failed') {
+      throw new Error(status.errorMessage || 'Transcription failed.');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, VOICE_POLL_INTERVAL_MS));
+  }
+
+  throw new Error('Transcription is taking longer than expected. Please retry.');
+}
+
 function VoiceRecordingBar({ onCancel, onSend }: {
   onCancel: () => void;
   onSend: (transcript: string, duration: number) => void;
 }) {
-  const [seconds, setSeconds]         = useState(0);
-  const [transcribing, setTranscribing] = useState(false);
-  const [transcript, setTranscript]   = useState('');
+  const [seconds, setSeconds] = useState(0);
+  const [phase, setPhase] = useState<'idle' | 'recording' | 'uploading' | 'transcribing'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const hasUploadedRef = useRef(false);
 
-  useEffect(() => {
-    // Start recording via MediaRecorder API
-    navigator.mediaDevices?.getUserMedia({ audio: true }).then((stream) => {
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      recorder.start();
-    }).catch(() => {
-      // Microphone not available — user will need to type instead
-    });
-
-    const t = setInterval(() => setSeconds(s => s + 1), 1000);
-    return () => {
-      clearInterval(t);
-      mediaRecorderRef.current?.stream.getTracks().forEach(t => t.stop());
-    };
+  const stopStream = useCallback(() => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
   }, []);
 
-  function stop() {
+  const uploadRecording = useCallback(async (blob: Blob, duration: number) => {
+    setPhase('uploading');
+    try {
+      const { fileId, audioUrl } = await createSignedAudioUpload(blob);
+      const idempotencyKey = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+      const createRes = await apiFetch('/api/voice/recordings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId, audioUrl, idempotencyKey }),
+      });
+
+      if (!createRes.ok) {
+        throw new Error('Unable to start transcription.');
+      }
+
+      setPhase('transcribing');
+      const created = await createRes.json();
+      const recordingId = created.recording?.id;
+      if (!recordingId) {
+        throw new Error('Missing recording id from API.');
+      }
+
+      const completed = await pollRecordingUntilDone(recordingId);
+      const transcript = (completed.transcript || '').trim();
+      if (!transcript) {
+        throw new Error('No transcript was returned for this recording.');
+      }
+
+      onSend(transcript, duration);
+    } catch (err) {
+      setPhase('idle');
+      const message = err instanceof Error ? err.message : 'Voice upload failed. Please retry.';
+      setError(message);
+      setCanRetry(true);
+    }
+  }, [onSend]);
+
+  const stopAndUpload = useCallback(async () => {
     const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === 'inactive') {
-      setTranscribing(true);
-      // Fallback: no recorder available
-      setTimeout(() => {
-        setTranscribing(false);
-        setTranscript('(Microphone not available — please type your message)');
-      }, 500);
+    if (!recorder || recorder.state !== 'recording') return;
+    hasUploadedRef.current = true;
+
+    await new Promise<void>((resolve) => {
+      recorder.onstop = () => {
+        const recordedBlob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        const capturedDuration = seconds;
+        stopStream();
+
+        if (!recordedBlob.size) {
+          setError('No audio captured. Please retry recording.');
+          setCanRetry(true);
+          setPhase('idle');
+          resolve();
+          return;
+        }
+
+        void uploadRecording(recordedBlob, capturedDuration).finally(resolve);
+      };
+      recorder.stop();
+    });
+  }, [seconds, stopStream, uploadRecording]);
+
+  const startRecording = useCallback(async () => {
+    setError(null);
+    setCanRetry(false);
+
+    const supportedType = getSupportedAudioMimeType();
+    if (!supportedType) {
+      setError('This browser does not support a compatible recording format.');
+      setCanRetry(true);
       return;
     }
 
@@ -353,65 +507,126 @@ function VoiceRecordingBar({ onCancel, onSend }: {
           setTranscript(data.transcript || '(Could not transcribe audio)');
         } else {
           setTranscript('(Transcription service unavailable)');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const recorder = new MediaRecorder(stream, { mimeType: supportedType });
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+      hasUploadedRef.current = false;
+      setSeconds(0);
+      setPhase('recording');
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunksRef.current.push(event.data);
+      };
+
+      recorder.onerror = () => {
+        setError('Recording failed. Please retry.');
+        setCanRetry(true);
+        setPhase('idle');
+        stopStream();
+      };
+
+      recorder.start(1000);
+    } catch {
+      setError('Microphone permission is required to record voice messages.');
+      setCanRetry(true);
+      setPhase('idle');
+      stopStream();
+    }
+  }, [stopStream]);
+
+  useEffect(() => {
+    if (phase !== 'recording') return;
+
+    const timer = setInterval(() => {
+      setSeconds((prev) => {
+        const next = prev + 1;
+        if (next >= MAX_RECORDING_SECONDS) {
+          setError('Recording is too long. Please stop and retry with a shorter message.');
+          setCanRetry(true);
+          void stopAndUpload();
         }
-      } catch {
-        setTranscript('(Transcription service unavailable)');
-      }
-      setTranscribing(false);
+        return next;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [phase, stopAndUpload]);
+
+  useEffect(() => {
+    if (phase !== 'recording') return;
+
+    const onVisibilityChange = () => {
+      if (!document.hidden || hasUploadedRef.current) return;
+      setError('Recording paused when app moved to background. Uploaded partial audio.');
+      setCanRetry(true);
+      void stopAndUpload();
     };
-    recorder.stop();
-  }
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [phase, stopAndUpload]);
+
+  useEffect(() => {
+    return () => {
+      const recorder = mediaRecorderRef.current;
+      if (recorder?.state === 'recording') recorder.stop();
+      stopStream();
+    };
+  }, [stopStream]);
 
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
+  const showIOSBanner = phase === 'recording' && isIOSSafari();
+
   return (
     <div className="flex flex-col gap-3 px-4 py-3 bg-white border-t border-slate-200">
-      {transcript ? (
-        /* Transcript preview */
-        <div className="flex flex-col gap-3">
-          <div className="flex items-start gap-2 rounded-xl bg-violet-50 border border-violet-100 px-3 py-3">
-            <Mic size={13} className="text-violet-500 shrink-0 mt-0.5" />
-            <p className="text-sm text-slate-700 flex-1 italic">"{transcript}"</p>
-            <button onClick={() => setTranscript('')} className="text-slate-300 hover:text-slate-500 transition-colors shrink-0">
-              <X size={14} />
-            </button>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onSend(transcript, seconds)}
-              className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 text-white py-3 text-sm hover:bg-slate-700 transition-colors"
-            >
-              <Send size={14} /> Send
-            </button>
-            <button
-              onClick={onCancel}
-              className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 px-4 py-3 text-sm hover:bg-slate-50 transition-colors"
-            >
-              <X size={14} /> Cancel
-            </button>
-          </div>
+      {showIOSBanner && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Keep this screen on and keep Fieldly in the foreground while recording (iOS Safari limitation).
         </div>
-      ) : transcribing ? (
-        /* Transcribing */
-        <div className="flex items-center justify-between py-2">
-          <div className="flex items-center gap-2">
-            <span className="size-1.5 rounded-full bg-violet-500" style={{ animation: 'pulse 0.8s infinite' }} />
-            <span className="text-sm text-slate-500">Transcribing…</span>
-          </div>
-          <div className="flex gap-1">
-            {[0,1,2].map(i => <span key={i} className="size-1.5 rounded-full bg-violet-300" style={{ animation: `typingBounce 0.9s ease ${i*0.15}s infinite` }} />)}
-          </div>
+      )}
+
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {error}
         </div>
-      ) : (
-        /* Recording */
+      )}
+
+      {phase === 'idle' && (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={startRecording}
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 text-white py-3 text-sm hover:bg-slate-700 transition-colors"
+          >
+            <Mic size={14} /> Start recording
+          </button>
+          {canRetry && (
+            <button
+              onClick={startRecording}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white text-slate-700 px-4 py-3 text-sm hover:bg-slate-50 transition-colors"
+            >
+              Retry
+            </button>
+          )}
+          <button
+            onClick={onCancel}
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 px-4 py-3 text-sm hover:bg-slate-50 transition-colors"
+          >
+            <X size={14} /> Cancel
+          </button>
+        </div>
+      )}
+
+      {phase === 'recording' && (
         <div className="flex items-center gap-3">
-          {/* Cancel */}
           <button onClick={onCancel} className="flex size-10 shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 hover:bg-slate-100 transition-colors">
             <X size={16} />
           </button>
 
-          {/* Live waveform */}
           <div className="flex-1 flex items-center gap-2 rounded-xl bg-red-50 border border-red-100 px-3 py-2.5">
             <span className="size-2 rounded-full bg-red-500 shrink-0" style={{ animation: 'pulse 1s infinite' }} />
             <div className="flex items-center gap-0.5 flex-1">
@@ -429,13 +644,24 @@ function VoiceRecordingBar({ onCancel, onSend }: {
             <span className="text-sm text-red-600 tabular-nums shrink-0">{fmt(seconds)}</span>
           </div>
 
-          {/* Stop */}
           <button
-            onClick={stop}
+            onClick={() => { void stopAndUpload(); }}
             className="flex size-10 shrink-0 items-center justify-center rounded-full bg-red-500 hover:bg-red-600 active:scale-95 transition-all shadow-md"
           >
             <Square size={14} className="text-white fill-current" />
           </button>
+        </div>
+      )}
+
+      {(phase === 'uploading' || phase === 'transcribing') && (
+        <div className="flex items-center justify-between py-2">
+          <div className="flex items-center gap-2">
+            <span className="size-1.5 rounded-full bg-violet-500" style={{ animation: 'pulse 0.8s infinite' }} />
+            <span className="text-sm text-slate-500">{phase === 'uploading' ? 'Uploading audio…' : 'Transcribing…'}</span>
+          </div>
+          <div className="flex gap-1">
+            {[0, 1, 2].map(i => <span key={i} className="size-1.5 rounded-full bg-violet-300" style={{ animation: `typingBounce 0.9s ease ${i * 0.15}s infinite` }} />)}
+          </div>
         </div>
       )}
     </div>
@@ -475,6 +701,7 @@ export function AssistantPage() {
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
   const [voiceMode, setVoiceMode]     = useState(false);
+  const [liveSessionOpen, setLiveSessionOpen] = useState(false);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -546,6 +773,11 @@ export function AssistantPage() {
       attachments: opts?.attachments,
     };
 
+    // Snapshot prior chat (before the new user message) to send as
+    // context — the server expects the current message appended at
+    // the end of `messages`, not duplicated.
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setPendingAttachment([]);
@@ -553,7 +785,7 @@ export function AssistantPage() {
     setTypingReason('Thinking…');
 
     try {
-      const reply = await sendToConversationAPI(conversationId, text);
+      const reply = await sendToConversationAPI(conversationId, text, history);
 
       // If a new conversation was created, store it
       if (reply.newConversationId && !conversationId) {
@@ -656,6 +888,15 @@ export function AssistantPage() {
             >
               {ttsEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
               {isSpeaking && <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+              onClick={() => setLiveSessionOpen(v => !v)}
+              title="Live voice session"
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                liveSessionOpen
+                  ? 'border-blue-300 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <PhoneCall size={12} /> Live session
             </button>
             <button className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
               <ChevronDown size={12} /> Context
@@ -833,6 +1074,13 @@ export function AssistantPage() {
               <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-500">↵ Enter</kbd> to send &nbsp;·&nbsp; <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-500">⇧ Shift+Enter</kbd> for new line
             </p>
           </div>
+        </div>
+      )}
+
+      {/* ── Live voice session panel (P8-009) ───────────────── */}
+      {liveSessionOpen && (
+        <div className="fixed bottom-24 right-6 z-50 w-96">
+          <VoiceSessionPanel />
         </div>
       )}
 

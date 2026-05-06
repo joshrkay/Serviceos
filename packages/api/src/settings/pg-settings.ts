@@ -31,6 +31,14 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     defaultPaymentTermDays: row.default_payment_term_days as number,
     terminologyPreferences,
     activeVerticalPacks,
+    // Phase 12 — columns added in migration 063 (P12-001).
+    backupSupervisorUserId: (row.backup_supervisor_user_id as string) ?? null,
+    unsupervisedProposalRouting:
+      (row.unsupervised_proposal_routing as
+        | 'queue_and_sms'
+        | 'queue_only'
+        | 'escalate_to_oncall'
+        | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -145,6 +153,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         nextEstimateNumber: 'next_estimate_number',
         nextInvoiceNumber: 'next_invoice_number',
         defaultPaymentTermDays: 'default_payment_term_days',
+        // Phase 12 — migration 063.
+        backupSupervisorUserId: 'backup_supervisor_user_id',
+        unsupervisedProposalRouting: 'unsupervised_proposal_routing',
         updatedAt: 'updated_at',
       };
 

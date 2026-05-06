@@ -1,8 +1,47 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Zap, ChevronRight, Check, AlertCircle, Phone, Mail,
   MapPin, Camera, ArrowLeft, Clock, Star,
 } from 'lucide-react';
+
+/**
+ * Marketing-attribution params we capture from the URL on mount and ship
+ * with the lead. Tracking blob lives in `attribution` JSONB; the three
+ * named UTM cols on the lead are indexed for grouped reporting.
+ *
+ * The recognized keys list is shared with the API enums.ts whitelist
+ * (which is documentation, not validation) so reviewers can grep for
+ * "ATTRIBUTION_KEYS" and find both ends of the wire.
+ */
+const ATTRIBUTION_KEYS = [
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+  'gclid', 'fbclid', 'msclkid',
+] as const;
+
+interface CapturedAttribution {
+  utmSource?: string;
+  utmMedium?: string;
+  utmCampaign?: string;
+  attribution: Record<string, string>;
+}
+
+function captureAttributionFromUrl(): CapturedAttribution {
+  if (typeof window === 'undefined') return { attribution: {} };
+  const params = new URLSearchParams(window.location.search);
+  const attribution: Record<string, string> = {};
+  for (const key of ATTRIBUTION_KEYS) {
+    const v = params.get(key);
+    if (v) attribution[key] = v.slice(0, 500);
+  }
+  if (document.referrer) attribution.referrer = document.referrer.slice(0, 500);
+  attribution.landing_page = window.location.pathname.slice(0, 500);
+  return {
+    utmSource: attribution.utm_source,
+    utmMedium: attribution.utm_medium,
+    utmCampaign: attribution.utm_campaign,
+    attribution,
+  };
+}
 
 type Step = 1 | 2 | 3 | 4 | 'done';
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
@@ -51,15 +90,78 @@ export function IntakeFormPage() {
     address: '',
   });
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Attribution captured once on mount. Storing in a ref so re-renders
+  // don't lose or duplicate it.
+  const attributionRef = useRef<CapturedAttribution>({ attribution: {} });
+  useEffect(() => {
+    attributionRef.current = captureAttributionFromUrl();
+  }, []);
 
   function update(partial: Partial<FormData>) {
     setData(prev => ({ ...prev, ...partial }));
   }
 
+  async function submit() {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      // Tenant id comes from `?t=<uuid>` on the marketing landing page.
+      // Public intake doesn't have a logged-in user to derive it from.
+      const tenantId =
+        new URLSearchParams(window.location.search).get('t') ?? '';
+      if (!tenantId) {
+        throw new Error('This intake form is missing its tenant id.');
+      }
+      const [firstName, ...rest] = data.name.trim().split(/\s+/);
+      const lastName = rest.join(' ') || undefined;
+      const description = [
+        data.serviceType ? `Service: ${data.serviceType}` : null,
+        data.urgency ? `Urgency: ${data.urgency}` : null,
+        data.description || null,
+      ].filter(Boolean).join(' — ');
+
+      const res = await fetch(`/public/intake/${tenantId}/leads`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          firstName,
+          lastName,
+          primaryPhone: data.phone || undefined,
+          email: data.email || undefined,
+          serviceType: data.serviceType ?? undefined,
+          urgency: data.urgency ?? undefined,
+          description: description || undefined,
+          preferredDates: data.preferredDates || undefined,
+          address: data.address || undefined,
+          utmSource: attributionRef.current.utmSource,
+          utmMedium: attributionRef.current.utmMedium,
+          utmCampaign: attributionRef.current.utmCampaign,
+          attribution: attributionRef.current.attribution,
+          // Honeypot — never set by the form, here so a bot that walks
+          // the DOM and fills every input still trips it.
+          _company_url: '',
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`Submission failed (${res.status})`);
+      }
+      setStep('done');
+    } catch (err) {
+      setSubmitError(
+        err instanceof Error
+          ? err.message
+          : 'Something went wrong. Please try calling us instead.'
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   function next() {
     if (step === 4) {
-      setSubmitting(true);
-      setTimeout(() => { setSubmitting(false); setStep('done'); }, 1200);
+      void submit();
     } else {
       setStep(s => (s as number + 1) as Step);
     }
@@ -368,6 +470,14 @@ export function IntakeFormPage() {
         {/* CTA button */}
         {step !== 'done' && (
           <div className="mt-auto pt-6">
+            {submitError && (
+              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                <p className="text-xs text-red-700 flex items-center gap-1.5">
+                  <AlertCircle size={12} className="shrink-0" />
+                  {submitError}
+                </p>
+              </div>
+            )}
             <button
               onClick={next}
               disabled={!canAdvance || submitting}

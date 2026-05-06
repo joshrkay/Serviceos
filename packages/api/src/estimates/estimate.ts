@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { ValidationError } from '../shared/errors';
 
 export type EstimateStatus = 'draft' | 'ready_for_review' | 'sent' | 'accepted' | 'rejected' | 'expired';
 
@@ -15,6 +16,28 @@ export interface Estimate {
   validUntil?: Date;
   customerMessage?: string;
   internalNotes?: string;
+  /** Random URL-safe token for unauthenticated customer view links. Set on first send. */
+  viewToken?: string;
+  /** Timestamp the view_token becomes invalid (typically sent_at + 90 days). */
+  viewTokenExpiresAt?: Date;
+  /** Timestamp of the most recent send. */
+  sentAt?: Date;
+  /** ID of the most recent message_dispatches row. */
+  lastDispatchId?: string;
+  /** First time the customer opened the public link. */
+  firstViewedAt?: Date;
+  /** Total number of times the public link has been opened. */
+  viewCount?: number;
+  /** Customer-side acceptance — captured at the public approval route. */
+  acceptedAt?: Date;
+  acceptedByName?: string;
+  acceptedByIp?: string;
+  acceptedUserAgent?: string;
+  /** Base64-encoded data URL of the signature canvas, if collected. */
+  acceptedSignatureData?: string;
+  /** Customer-side decline. */
+  rejectedAt?: Date;
+  rejectedReason?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -42,12 +65,43 @@ export interface UpdateEstimateInput {
   internalNotes?: string;
 }
 
+export interface EstimateListOptions {
+  status?: EstimateStatus;
+  jobId?: string;
+  /** ILIKE search on estimate_number / customer_message. */
+  search?: string;
+  /** Pagination cap. Default 50, hard-capped server-side at 200. */
+  limit?: number;
+  /** Pagination offset. Default 0. */
+  offset?: number;
+  /** Sort direction applied to the canonical sort column (created_at). */
+  sort?: 'asc' | 'desc';
+}
+
+export interface EstimateListResult {
+  data: Estimate[];
+  total: number;
+}
+
+export const DEFAULT_ESTIMATE_LIMIT = 50;
+export const MAX_ESTIMATE_LIMIT = 200;
+
 export interface EstimateRepository {
   create(estimate: Estimate): Promise<Estimate>;
   findById(tenantId: string, id: string): Promise<Estimate | null>;
   findByJob(tenantId: string, jobId: string): Promise<Estimate[]>;
-  findByTenant(tenantId: string): Promise<Estimate[]>;
+  findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]>;
+  /** P1-018: paginated `{ data, total }` form for list UIs. */
+  listWithMeta?(tenantId: string, options?: EstimateListOptions): Promise<EstimateListResult>;
   update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null>;
+  /**
+   * Public lookup by view-token. Used by unauthenticated customer-facing
+   * routes (`/public/estimates/:token`). Bypasses tenant scoping at the
+   * call site — the token IS the auth — but should still apply RLS in
+   * the Pg implementation by switching tenant context after a token-only
+   * lookup. Returns null if no estimate with this token exists.
+   */
+  findByViewToken?(token: string): Promise<Estimate | null>;
 }
 
 export const ESTIMATE_STATUS_TRANSITIONS: Record<EstimateStatus, EstimateStatus[]> = {
@@ -81,7 +135,7 @@ export async function createEstimate(
   auditRepo?: AuditRepository
 ): Promise<Estimate> {
   const errors = validateEstimateInput(input);
-  if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+  if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const totals = calculateDocumentTotals(
     input.lineItems,
@@ -122,6 +176,32 @@ export async function createEstimate(
   return created;
 }
 
+export async function listEstimates(
+  tenantId: string,
+  repository: EstimateRepository,
+  options?: EstimateListOptions
+): Promise<Estimate[]> {
+  return repository.findByTenant(tenantId, options);
+}
+
+/**
+ * P1-018: paginated estimate list. Falls back to in-memory pagination over
+ * `findByTenant` when the repo doesn't yet implement `listWithMeta`.
+ */
+export async function listEstimatesWithMeta(
+  tenantId: string,
+  repository: EstimateRepository,
+  options?: EstimateListOptions
+): Promise<EstimateListResult> {
+  if (repository.listWithMeta) {
+    return repository.listWithMeta(tenantId, options);
+  }
+  const all = await repository.findByTenant(tenantId, { ...options, limit: undefined, offset: undefined });
+  const limit = Math.min(options?.limit ?? DEFAULT_ESTIMATE_LIMIT, MAX_ESTIMATE_LIMIT);
+  const offset = options?.offset ?? 0;
+  return { data: all.slice(offset, offset + limit), total: all.length };
+}
+
 export async function getEstimate(
   tenantId: string,
   id: string,
@@ -140,7 +220,7 @@ export async function updateEstimate(
   if (!existing) return null;
 
   if (!['draft', 'ready_for_review'].includes(existing.status)) {
-    throw new Error(`Cannot edit estimate in '${existing.status}' status`);
+    throw new ValidationError(`Cannot edit estimate in '${existing.status}' status`);
   }
 
   const lineItems = input.lineItems ?? existing.lineItems;
@@ -168,7 +248,7 @@ export async function transitionEstimateStatus(
   if (!estimate) return null;
 
   if (!isValidEstimateTransition(estimate.status, newStatus)) {
-    throw new Error(`Invalid transition from ${estimate.status} to ${newStatus}`);
+    throw new ValidationError(`Invalid transition from ${estimate.status} to ${newStatus}`);
   }
 
   return repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
@@ -194,10 +274,39 @@ export class InMemoryEstimateRepository implements EstimateRepository {
       .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
   }
 
-  async findByTenant(tenantId: string): Promise<Estimate[]> {
-    return Array.from(this.estimates.values())
-      .filter((e) => e.tenantId === tenantId)
-      .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
+  async findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]> {
+    let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId);
+    if (options?.status) results = results.filter((e) => e.status === options.status);
+    if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
+    if (options?.search) {
+      const q = options.search.toLowerCase();
+      results = results.filter(
+        (e) =>
+          e.estimateNumber.toLowerCase().includes(q) ||
+          (e.customerMessage && e.customerMessage.toLowerCase().includes(q))
+      );
+    }
+    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
+    const sortDir = options?.sort === 'asc' ? 1 : -1;
+    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    if (options?.offset !== undefined || options?.limit !== undefined) {
+      const offset = options?.offset ?? 0;
+      const limit = options?.limit !== undefined
+        ? Math.min(options.limit, MAX_ESTIMATE_LIMIT)
+        : results.length;
+      results = results.slice(offset, offset + limit);
+    }
+    return results.map((e) => ({ ...e, lineItems: [...e.lineItems] }));
+  }
+
+  async listWithMeta(tenantId: string, options?: EstimateListOptions): Promise<EstimateListResult> {
+    const totalRows = await this.findByTenant(tenantId, {
+      ...options,
+      limit: undefined,
+      offset: undefined,
+    });
+    const data = await this.findByTenant(tenantId, options);
+    return { data, total: totalRows.length };
   }
 
   async update(tenantId: string, id: string, updates: Partial<Estimate>): Promise<Estimate | null> {
@@ -206,5 +315,14 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     const updated = { ...e, ...updates };
     this.estimates.set(id, updated);
     return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async findByViewToken(token: string): Promise<Estimate | null> {
+    for (const e of this.estimates.values()) {
+      if (e.viewToken === token) {
+        return { ...e, lineItems: [...e.lineItems] };
+      }
+    }
+    return null;
   }
 }

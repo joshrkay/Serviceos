@@ -3,6 +3,25 @@ import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
 
+/**
+ * Phase 12 — supervisor-mode-related settings on tenant_settings.
+ *
+ * Schema lives in migration 063 (P12-001). The repository round-trips
+ * these alongside the rest of TenantSettings; the routes layer
+ * exposes them via the existing PUT /api/settings handler with
+ * enum validation on `unsupervisedProposalRouting`.
+ */
+export type UnsupervisedProposalRouting =
+  | 'queue_and_sms'
+  | 'queue_only'
+  | 'escalate_to_oncall';
+
+export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedProposalRouting> = [
+  'queue_and_sms',
+  'queue_only',
+  'escalate_to_oncall',
+];
+
 export interface TenantSettings {
   id: string;
   tenantId: string;
@@ -17,6 +36,19 @@ export interface TenantSettings {
   defaultPaymentTermDays: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /**
+   * Phase 12 — userId of the backup supervisor invoked when the
+   * primary supervisor switches to tech mode. Null = no backup
+   * (unsupervised routing applies). Validated by the route as a
+   * non-empty string; FK enforcement happens at the DB.
+   */
+  backupSupervisorUserId?: string | null;
+  /**
+   * Phase 12 — what to do with low-confidence proposals while the
+   * tenant is unsupervised. See `auto-approve.ts` and the routing
+   * worker (follow-up). Default `'queue_and_sms'`.
+   */
+  unsupervisedProposalRouting?: UnsupervisedProposalRouting;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -44,6 +76,10 @@ export interface UpdateSettingsInput {
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /** Phase 12 — null clears the backup. */
+  backupSupervisorUserId?: string | null;
+  /** Phase 12 — see `UnsupervisedProposalRouting` for accepted values. */
+  unsupervisedProposalRouting?: UnsupervisedProposalRouting;
 }
 
 export interface SettingsRepository {
@@ -247,12 +283,67 @@ export async function updateSettings(
   return repository.update(tenantId, { ...normalizedInput, updatedAt: new Date() });
 }
 
+/**
+ * Idempotent settings seeder.
+ *
+ * Returns the existing settings row for the tenant if present. If not,
+ * creates a default row with conservative defaults and returns that.
+ *
+ * The "should" path is for `bootstrapTenant` (auth/clerk.ts) to call
+ * this when the Clerk webhook fires. This function is also called from
+ * `getNextEstimateNumber` / `getNextInvoiceNumber` as a safety net so a
+ * tenant whose webhook bootstrap was missed (test fixtures, manual
+ * tenant creation, future legacy ingestion) does not see a hard 500
+ * the first time it tries to create an estimate or invoice.
+ *
+ * Idempotency matters: race conditions are tolerated. If two requests
+ * call this concurrently for a missing tenant, one will create and the
+ * other will see the existing row (or get a duplicate-key conflict
+ * from the underlying repo and we fall back to refetching).
+ */
+export async function ensureTenantSettings(
+  tenantId: string,
+  repository: SettingsRepository,
+  options?: { businessName?: string }
+): Promise<TenantSettings> {
+  const existing = await repository.findByTenant(tenantId);
+  if (existing) return existing;
+
+  const settings: TenantSettings = {
+    id: uuidv4(),
+    tenantId,
+    businessName: options?.businessName ?? 'My Business',
+    timezone: 'America/New_York',
+    estimatePrefix: 'EST-',
+    invoicePrefix: 'INV-',
+    nextEstimateNumber: 1,
+    nextInvoiceNumber: 1,
+    defaultPaymentTermDays: 30,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  try {
+    return await repository.create(settings);
+  } catch {
+    // Race: another request created the settings row between the
+    // findByTenant() above and the create() here. Refetch and return.
+    const after = await repository.findByTenant(tenantId);
+    if (after) return after;
+    throw new ValidationError(
+      `ensureTenantSettings: could not create or refetch settings for tenant ${tenantId}`
+    );
+  }
+}
+
 export async function getNextEstimateNumber(
   tenantId: string,
   repository: SettingsRepository
 ): Promise<string> {
-  const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new ValidationError('Tenant settings not found');
+  // Lazy-seed: do not throw on missing settings. The webhook bootstrap
+  // is the SHOULD path; this is the safety net for any code path that
+  // didn't go through it.
+  const settings = await ensureTenantSettings(tenantId, repository);
   const num = await repository.incrementEstimateNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.estimatePrefix}${String(num).padStart(4, '0')}`;
@@ -262,8 +353,7 @@ export async function getNextInvoiceNumber(
   tenantId: string,
   repository: SettingsRepository
 ): Promise<string> {
-  const settings = await repository.findByTenant(tenantId);
-  if (!settings) throw new ValidationError('Tenant settings not found');
+  const settings = await ensureTenantSettings(tenantId, repository);
   const num = await repository.incrementInvoiceNumber(tenantId);
   // padStart(4, '0') pads numbers under 10000; larger numbers naturally produce wider strings
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;

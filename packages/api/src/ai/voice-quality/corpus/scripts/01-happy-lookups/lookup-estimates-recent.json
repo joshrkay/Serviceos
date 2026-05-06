@@ -1,0 +1,67 @@
+{
+  "id": "lookup-estimates-recent",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550106",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_estimates",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_estimates_grace",
+        "tenantId": "t_01_lookup_estimates",
+        "firstName": "Grace",
+        "lastName": "Hill",
+        "displayName": "Grace Hill",
+        "companyName": null,
+        "primaryPhone": "+15555550106",
+        "secondaryPhone": null,
+        "email": "grace.hill@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-03-10T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "estimates": [
+      {
+        "id": "est_01_estimates_1",
+        "tenantId": "t_01_lookup_estimates",
+        "jobId": "job_01_estimates_1",
+        "estimateNumber": "EST-4001",
+        "status": "sent",
+        "lineItems": [
+          { "description": "New thermostat install", "quantity": 1, "unitPriceCents": 35000 }
+        ],
+        "totals": { "subtotalCents": 35000, "discountCents": 0, "taxCents": 2800, "totalCents": 37800 },
+        "validUntil": "2026-06-01T10:00:00.000Z",
+        "customerMessage": null,
+        "internalNotes": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-22T10:00:00.000Z",
+        "updatedAt": "2026-04-22T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What estimates have you sent me?",
+      "expected": {
+        "intent": "lookup_estimates",
+        "spokenAnswerMatches": "Grace has one recent estimate, EST-4001 for $378 sent on April 22, valid until June 1"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": true
+}

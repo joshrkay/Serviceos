@@ -6,6 +6,10 @@ import { AssignmentRepository } from '../../appointments/assignment';
 import { validateAppointmentTimes } from '../../appointments/validation';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
+import {
+  DispatchAnalyticsRepository,
+  captureDispatchEvent,
+} from '../../dispatch/analytics';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -13,6 +17,7 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
+    private readonly analyticsRepo?: DispatchAnalyticsRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -125,6 +130,17 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
 
       if (!updated) {
         return { success: false, error: 'Failed to update appointment' };
+      }
+
+      if (this.analyticsRepo) {
+        await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'rescheduled', {
+          appointmentId,
+          metadata: {
+            proposalId: proposal.id,
+            newScheduledStart,
+            newScheduledEnd,
+          },
+        });
       }
 
       return { success: true, resultEntityId: appointmentId };

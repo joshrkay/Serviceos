@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createServiceLocationSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
+import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createLocation,
   getLocation,
@@ -13,7 +14,10 @@ import {
   LocationRepository,
 } from '../locations/location';
 
-export function createLocationRouter(locationRepo: LocationRepository): Router {
+export function createLocationRouter(
+  locationRepo: LocationRepository,
+  ownership: TenantOwnership
+): Router {
   const router = Router();
 
   router.post(
@@ -24,6 +28,10 @@ export function createLocationRouter(locationRepo: LocationRepository): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createServiceLocationSchema.parse(req.body);
+        // Cross-entity tenant guard: customerId must belong to the
+        // requesting tenant. Without this, tenant B could create a
+        // location whose customerId references a tenant A customer.
+        await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
         const result = await createLocation(
           { ...parsed, tenantId: req.auth!.tenantId },
           locationRepo

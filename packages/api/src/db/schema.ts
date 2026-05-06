@@ -439,6 +439,61 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  '070_tenant_location_and_integrations': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
+      ADD COLUMN IF NOT EXISTS region TEXT,
+      ADD COLUMN IF NOT EXISTS locale TEXT;
+    ALTER TABLE tenant_settings DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    ALTER TABLE tenant_settings ADD CONSTRAINT tenant_settings_us_region_check
+      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$'));
+
+    CREATE TABLE IF NOT EXISTS tenant_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      subaccount_sid TEXT,
+      subuser_id TEXT,
+      auth_token_primary_secret_ref TEXT,
+      auth_token_secondary_secret_ref TEXT,
+      credential_version INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'active', 'suspended', 'terminated', 'releasing', 'failed')),
+      provider_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      provisioned_at TIMESTAMPTZ,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tenant_integrations_tenant ON tenant_integrations(tenant_id);
+    ALTER TABLE tenant_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_tenant_integrations ON tenant_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS tenant_provisioning_costs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      currency CHAR(3) NOT NULL DEFAULT 'USD',
+      amount_cents BIGINT NOT NULL DEFAULT 0,
+      category TEXT NOT NULL,
+      occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      external_ref TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_costs_tenant
+      ON tenant_provisioning_costs(tenant_id, occurred_at DESC);
+    ALTER TABLE tenant_provisioning_costs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_provisioning_costs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_provisioning_costs ON tenant_provisioning_costs;
+    CREATE POLICY tenant_isolation_tenant_provisioning_costs ON tenant_provisioning_costs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   '019_create_appointment_assignments': `
     CREATE TABLE IF NOT EXISTS appointment_assignments (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -902,6 +957,1047 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_pack_act ON pack_activations;
     CREATE POLICY tenant_isolation_pack_act ON pack_activations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '039_proposals_v2': `
+    ALTER TABLE proposals
+      ADD COLUMN IF NOT EXISTS summary TEXT,
+      ADD COLUMN IF NOT EXISTS explanation TEXT,
+      ADD COLUMN IF NOT EXISTS confidence_factors JSONB,
+      ADD COLUMN IF NOT EXISTS source_context JSONB,
+      ADD COLUMN IF NOT EXISTS prompt_version_id UUID,
+      ADD COLUMN IF NOT EXISTS result_entity_id TEXT,
+      ADD COLUMN IF NOT EXISTS rejection_details TEXT,
+      ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS executed_by TEXT,
+      ADD COLUMN IF NOT EXISTS undone_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS undone_by TEXT;
+    ALTER TABLE proposals ALTER COLUMN idempotency_key DROP NOT NULL;
+    ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
+    ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+  `,
+
+  '040_create_technician_location_pings': `
+    CREATE TABLE IF NOT EXISTS technician_location_pings (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id TEXT NOT NULL,
+      appointment_id UUID REFERENCES appointments(id),
+      lat DOUBLE PRECISION NOT NULL CHECK (lat >= -90 AND lat <= 90),
+      lng DOUBLE PRECISION NOT NULL CHECK (lng >= -180 AND lng <= 180),
+      accuracy_meters DOUBLE PRECISION CHECK (accuracy_meters IS NULL OR accuracy_meters >= 0),
+      speed_mps DOUBLE PRECISION CHECK (speed_mps IS NULL OR speed_mps >= 0),
+      heading DOUBLE PRECISION CHECK (heading IS NULL OR (heading >= 0 AND heading < 360)),
+      recorded_at TIMESTAMPTZ NOT NULL,
+      source TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tlp_tenant_technician_recorded_desc
+      ON technician_location_pings(tenant_id, technician_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_tlp_tenant_appointment_recorded_desc
+      ON technician_location_pings(tenant_id, appointment_id, recorded_at DESC);
+    ALTER TABLE technician_location_pings ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE technician_location_pings FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_technician_location_pings ON technician_location_pings;
+    CREATE POLICY tenant_isolation_technician_location_pings ON technician_location_pings
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '041_create_catalog_items': `
+    CREATE TABLE IF NOT EXISTS catalog_items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL CHECK (category IN ('Labor', 'Parts', 'Materials')),
+      unit TEXT NOT NULL CHECK (unit IN ('each', 'hour', 'sq ft', 'per lb', 'per gal')),
+      unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+      product_service_type TEXT NOT NULL CHECK (product_service_type IN ('product', 'service')),
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_tenant ON catalog_items(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_tenant_category ON catalog_items(tenant_id, category);
+    CREATE INDEX IF NOT EXISTS idx_catalog_items_active ON catalog_items(tenant_id) WHERE archived_at IS NULL;
+    ALTER TABLE catalog_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE catalog_items FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_catalog_items ON catalog_items;
+    CREATE POLICY tenant_isolation_catalog_items ON catalog_items
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+
+  '042_create_feedback_requests': `
+    CREATE TABLE IF NOT EXISTS feedback_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      token TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'submitted', 'expired')),
+      expires_at TIMESTAMPTZ NOT NULL,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_requests_tenant ON feedback_requests(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_requests_job ON feedback_requests(tenant_id, job_id);
+    ALTER TABLE feedback_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE feedback_requests FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_feedback_requests ON feedback_requests;
+    CREATE POLICY tenant_isolation_feedback_requests ON feedback_requests
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '043_create_feedback_responses': `
+    CREATE TABLE IF NOT EXISTS feedback_responses (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      request_id UUID NOT NULL REFERENCES feedback_requests(id) ON DELETE CASCADE,
+      job_id UUID NOT NULL REFERENCES jobs(id),
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment TEXT,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_responses_request ON feedback_responses(request_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_responses_tenant_submitted ON feedback_responses(tenant_id, submitted_at DESC);
+    ALTER TABLE feedback_responses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE feedback_responses FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_feedback_responses ON feedback_responses;
+    CREATE POLICY tenant_isolation_feedback_responses ON feedback_responses
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Renamed from 044_* to 049_* after merge: upstream main also added a
+  // 044_create_ai_artifacts (P0-021). Keys are alphabetical at runtime so the
+  // exact number is informational; uniqueness matters because duplicates would
+  // silently lose a migration.
+  '049_add_view_tokens_to_estimates_and_invoices': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_token TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_dispatch_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_estimates_view_token ON estimates(view_token) WHERE view_token IS NOT NULL;
+
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_token TEXT;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS last_dispatch_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_view_token ON invoices(view_token) WHERE view_token IS NOT NULL;
+  `,
+
+  '045_create_message_dispatches': `
+    CREATE TABLE IF NOT EXISTS message_dispatches (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('estimate', 'invoice')),
+      entity_id UUID NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('sms', 'email')),
+      recipient TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'delivered', 'failed', 'bounced')),
+      error_message TEXT,
+      idempotency_key TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      delivered_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_entity ON message_dispatches(tenant_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_dispatches_provider_msg ON message_dispatches(provider, provider_message_id) WHERE provider_message_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatches_idempotency ON message_dispatches(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE message_dispatches ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE message_dispatches FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_message_dispatches ON message_dispatches;
+    CREATE POLICY tenant_isolation_message_dispatches ON message_dispatches
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P0-019 — Postgres-backed AssignmentRepository.
+  //
+  // The `appointment_assignments` table itself was created by migration
+  // `019_create_appointment_assignments` (with RLS, tenant_isolation policy,
+  // and single-column indexes on appointment_id and technician_id).
+  //
+  // This migration is idempotent and:
+  //   * Re-asserts RLS + tenant_isolation policy (defense-in-depth — safe no-op
+  //     when the policy already matches).
+  //   * Adds composite indexes `(tenant_id, appointment_id)` and
+  //     `(tenant_id, technician_id)` to support the access patterns used by
+  //     `PgAssignmentRepository.findByAppointment` / `findByTechnician`,
+  //     which always filter by tenant_id first as defense-in-depth.
+  '048_create_assignments': `
+    CREATE TABLE IF NOT EXISTS appointment_assignments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      appointment_id UUID NOT NULL REFERENCES appointments(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      is_primary BOOLEAN NOT NULL DEFAULT true,
+      assigned_by TEXT NOT NULL,
+      assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_appointment
+      ON appointment_assignments(tenant_id, appointment_id);
+    CREATE INDEX IF NOT EXISTS idx_assignments_tenant_technician
+      ON appointment_assignments(tenant_id, technician_id);
+    ALTER TABLE appointment_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE appointment_assignments FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_assignments ON appointment_assignments;
+    CREATE POLICY tenant_isolation_assignments ON appointment_assignments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P0-021 — Postgres-backed AI artifacts: document_revisions + diff_analyses.
+  //
+  // Both tables are append-only (the audit trail invariant). The Pg
+  // repositories implement create + read methods only; diff_analyses additionally
+  // exposes updateStatus to advance the worker state machine
+  // (pending -> processing -> completed/failed).
+  //
+  // Column-type rationale (driven by InMemory entity types):
+  //   * document_revisions.id is generated via uuidv4() in createRevision()
+  //     so we use UUID with gen_random_uuid() default.
+  //   * document_revisions.actor_id is TEXT (not UUID) — Clerk user ids are
+  //     TEXT throughout this codebase (see users.clerk_user_id, tenants.owner_id,
+  //     audit_events.actor_id).
+  //   * document_revisions.document_id is TEXT — the InMemory entity treats
+  //     documentId as an opaque string and several callers may pass non-UUID
+  //     ids (estimates / invoices / proposals across surfaces).
+  //   * diff_analyses.id is TEXT (not UUID) because diffAnalysisIdFor() builds
+  //     a deterministic key like `diff:<tenantId>:<docType>:<docId>:<from>:<to>`
+  //     so re-enqueueing the same revision pair is end-to-end idempotent.
+  //   * diff_analyses.diff is JSONB storing the DiffEntry[] array.
+  '044_create_ai_artifacts': `
+    CREATE TABLE IF NOT EXISTS document_revisions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      document_type TEXT NOT NULL CHECK (document_type IN ('estimate', 'invoice', 'proposal')),
+      document_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      snapshot JSONB NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'ai_generated', 'ai_revised')),
+      actor_id TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      ai_run_id UUID,
+      metadata JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, document_type, document_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_revisions_tenant_doc
+      ON document_revisions(tenant_id, document_type, document_id);
+    ALTER TABLE document_revisions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE document_revisions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_document_revisions ON document_revisions;
+    CREATE POLICY tenant_isolation_document_revisions ON document_revisions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS diff_analyses (
+      id TEXT PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      document_type TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      from_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      to_revision_id UUID NOT NULL REFERENCES document_revisions(id),
+      diff JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_tenant_doc
+      ON diff_analyses(tenant_id, document_type, document_id);
+    CREATE INDEX IF NOT EXISTS idx_diff_analyses_revisions
+      ON diff_analyses(tenant_id, from_revision_id, to_revision_id);
+    ALTER TABLE diff_analyses ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE diff_analyses FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_diff_analyses ON diff_analyses;
+    CREATE POLICY tenant_isolation_diff_analyses ON diff_analyses
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '046_estimate_view_expiry_and_acceptance': `
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_token_expires_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_by_name TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_by_ip TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_user_agent TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_signature_data TEXT;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS rejected_reason TEXT;
+  `,
+
+  '047_invoice_view_expiry': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_token_expires_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS first_viewed_at TIMESTAMPTZ;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS view_count INTEGER NOT NULL DEFAULT 0;
+  `,
+
+  '050_invoice_stripe_payment_link': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_id TEXT;
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS stripe_payment_link_url TEXT;
+  `,
+
+  // ── Phase 8: Customer Calling Agent ────────────────────────────────────────
+
+  // P8-001: pg_trgm fuzzy-match indexes for entity resolution
+  '051_p8_entity_resolution_indexes': `
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+    CREATE INDEX IF NOT EXISTS idx_customers_name_trgm
+      ON customers USING GIN (display_name gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_jobs_title_trgm
+      ON jobs USING GIN (summary gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_invoices_number_trgm
+      ON invoices USING GIN (invoice_number gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_for
+      ON appointments (tenant_id, scheduled_start);
+  `,
+
+  // P8-002: tenant-local DNC list for compliance skill
+  '052_p8_tenant_dnc_list': `
+    CREATE TABLE IF NOT EXISTS tenant_dnc_list (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      phone TEXT NOT NULL,
+      added_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dnc_tenant_phone
+      ON tenant_dnc_list (tenant_id, phone);
+    ALTER TABLE tenant_dnc_list ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dnc ON tenant_dnc_list;
+    CREATE POLICY tenant_isolation_dnc ON tenant_dnc_list
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P8-006: normalized phone index for identify_caller skill
+  '053_p8_customers_phone_index': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone_normalized TEXT
+      GENERATED ALWAYS AS (regexp_replace(primary_phone, '[^0-9]', '', 'g')) STORED;
+    CREATE INDEX IF NOT EXISTS idx_customers_phone_normalized
+      ON customers (tenant_id, phone_normalized);
+  `,
+
+  // P8-008 + P8-014: on-call rotation, call summaries, voice_recordings extensions
+  '054_p8_telephony_tables': `
+    CREATE TABLE IF NOT EXISTS tenant_oncall_rotation (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id UUID NOT NULL REFERENCES users(id),
+      order_index INTEGER NOT NULL DEFAULT 0,
+      active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_oncall_tenant_order
+      ON tenant_oncall_rotation (tenant_id, order_index) WHERE active = true;
+    ALTER TABLE tenant_oncall_rotation ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_oncall ON tenant_oncall_rotation;
+    CREATE POLICY tenant_isolation_oncall ON tenant_oncall_rotation
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS call_summaries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      call_id UUID REFERENCES voice_recordings(id),
+      summary TEXT NOT NULL,
+      detected_intent TEXT,
+      proposal_ids UUID[] DEFAULT '{}',
+      quality_score NUMERIC(3,2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE call_summaries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_summaries ON call_summaries;
+    CREATE POLICY tenant_isolation_call_summaries ON call_summaries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    -- Partial unique index: idempotent retries of summarizeSession for the
+    -- same recording collide cleanly. NULL call_id (no recording yet) is
+    -- intentionally excluded so multiple in-app sessions can coexist.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_summaries_tenant_call
+      ON call_summaries (tenant_id, call_id)
+      WHERE call_id IS NOT NULL;
+
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS call_sid TEXT,
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inapp_voice'
+        CHECK (source IN ('inbound_call', 'inapp_voice', 'batch_upload')),
+      ADD COLUMN IF NOT EXISTS recording_url TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_call_sid
+      ON voice_recordings (call_sid) WHERE call_sid IS NOT NULL;
+  `,
+
+  '056_create_service_agreements': `
+    CREATE TABLE IF NOT EXISTS service_agreements (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      location_id UUID REFERENCES service_locations(id),
+      name TEXT NOT NULL,
+      description TEXT,
+      recurrence_rule TEXT NOT NULL,
+      price_cents BIGINT NOT NULL DEFAULT 0,
+      auto_generate_invoice BOOLEAN NOT NULL DEFAULT TRUE,
+      auto_generate_job BOOLEAN NOT NULL DEFAULT TRUE,
+      next_run_at TIMESTAMPTZ NOT NULL,
+      last_run_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','cancelled')),
+      starts_on DATE NOT NULL,
+      ends_on DATE,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_agreements_tenant ON service_agreements(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_agreements_customer ON service_agreements(tenant_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_agreements_status_next ON service_agreements(tenant_id, status, next_run_at);
+    ALTER TABLE service_agreements ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_agreements FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_agreements ON service_agreements;
+    CREATE POLICY tenant_isolation_service_agreements ON service_agreements
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS service_agreement_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      agreement_id UUID NOT NULL REFERENCES service_agreements(id) ON DELETE CASCADE,
+      scheduled_for DATE NOT NULL,
+      generated_job_id UUID,
+      generated_invoice_id UUID,
+      status TEXT NOT NULL CHECK (status IN ('pending','generated','skipped','failed')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (agreement_id, scheduled_for)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agreement_runs_tenant ON service_agreement_runs(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_agreement_runs_agreement ON service_agreement_runs(tenant_id, agreement_id);
+    ALTER TABLE service_agreement_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_agreement_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_agreement_runs ON service_agreement_runs;
+    CREATE POLICY tenant_isolation_service_agreement_runs ON service_agreement_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P9-001: Lead pipeline table. PgLeadRepository writes to this; previously
+  // the table was created out-of-band (tests run against InMemory).
+  //
+  // The original P9-001 migration shipped without the `phone_normalized`
+  // generated column; the column + matching indexes are added in
+  // `058_leads_phone_normalized` so existing production databases (which
+  // already ran a CREATE TABLE that didn't include the generated column)
+  // still converge. Do NOT add `phone_normalized` back to this CREATE
+  // TABLE — `CREATE TABLE IF NOT EXISTS` is a no-op on existing tables,
+  // so any column added here would be silently skipped on the first DB
+  // that ran `055_create_leads` / the original `057_create_leads`.
+  '057_create_leads': `
+    CREATE TABLE IF NOT EXISTS leads (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      first_name TEXT NOT NULL DEFAULT '',
+      last_name TEXT NOT NULL DEFAULT '',
+      company_name TEXT,
+      primary_phone TEXT,
+      email TEXT,
+      source TEXT NOT NULL CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other')),
+      source_detail TEXT,
+      stage TEXT NOT NULL CHECK (stage IN ('new','contacted','qualified','quoted','won','lost')),
+      estimated_value_cents BIGINT,
+      notes TEXT,
+      assigned_user_id UUID,
+      converted_customer_id UUID,
+      lost_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_leads_tenant ON leads(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_leads_tenant_stage ON leads(tenant_id, stage);
+    CREATE INDEX IF NOT EXISTS idx_leads_tenant_source ON leads(tenant_id, source);
+    ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE leads FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_leads ON leads;
+    CREATE POLICY tenant_isolation_leads ON leads
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Add `phone_normalized` to leads as a generated column so the
+  // inbound-receptionist dedupe skill can index-lookup unknown callers
+  // in O(1). Split out from `057_create_leads` because that migration
+  // had already shipped to production without this column; the in-place
+  // mutation that added the column to the CREATE TABLE was a no-op
+  // there (`CREATE TABLE IF NOT EXISTS` skips when the table exists),
+  // and the indexes that followed crashed startup with
+  // `column "phone_normalized" does not exist`. ALTER TABLE … ADD
+  // COLUMN IF NOT EXISTS converges fresh and existing DBs on the same
+  // shape.
+  //
+  // The partial unique index keeps a (tenant_id, phone_normalized) pair
+  // unique only while the lead is still open (converted_customer_id IS
+  // NULL) so a contact can become a fresh lead again after they were
+  // previously converted to a customer.
+  '058_leads_phone_normalized': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS phone_normalized TEXT GENERATED ALWAYS AS (
+        regexp_replace(
+          regexp_replace(COALESCE(primary_phone, ''), '[^0-9]', '', 'g'),
+          '^1([0-9]{10})$', '\\1'
+        )
+      ) STORED;
+    CREATE INDEX IF NOT EXISTS idx_leads_phone_normalized
+      ON leads (tenant_id, phone_normalized)
+      WHERE phone_normalized <> '';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_phone_unique_open
+      ON leads (tenant_id, phone_normalized)
+      WHERE phone_normalized <> '' AND converted_customer_id IS NULL;
+  `,
+
+  // Lead source attribution + originating-lead FK chain.
+  //   - Adds richer marketing attribution to leads (UTM cols + JSONB blob).
+  //   - Adds nullable originating_lead_id FK to customers/jobs/invoices so
+  //     we can answer "which lead/source generated this revenue?" via a
+  //     single join. Estimates and payments deliberately omit the column;
+  //     they reach attribution via estimate.job_id / payment.invoice_id.
+  '059_lead_attribution': `
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS utm_source   TEXT,
+      ADD COLUMN IF NOT EXISTS utm_medium   TEXT,
+      ADD COLUMN IF NOT EXISTS utm_campaign TEXT,
+      ADD COLUMN IF NOT EXISTS attribution  JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+    CREATE INDEX IF NOT EXISTS idx_leads_utm_campaign
+      ON leads (tenant_id, utm_campaign) WHERE utm_campaign IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_leads_utm_source_medium
+      ON leads (tenant_id, utm_source, utm_medium) WHERE utm_source IS NOT NULL;
+
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS originating_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL;
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS originating_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL;
+    ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS originating_lead_id UUID REFERENCES leads(id) ON DELETE SET NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_customers_originating_lead
+      ON customers (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_jobs_originating_lead
+      ON jobs (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_invoices_originating_lead
+      ON invoices (tenant_id, originating_lead_id) WHERE originating_lead_id IS NOT NULL;
+  `,
+
+  // Phase 2 of the inbound-CSR training-data architecture (RAG corpus). Adds
+  // the four capture surfaces the downstream ingestion workers and quality
+  // dashboards need:
+  //
+  //   1. call_transcript_turns      — per-turn rows so the in-memory FSM
+  //                                   transcript survives a process restart
+  //                                   and the transcript-ingestion-worker
+  //                                   (Phase 4a) has stable input.
+  //   2. proposal_executions        — captures the as-executed payload
+  //                                   alongside the immutable proposals.payload
+  //                                   so the proposal-correction-worker
+  //                                   (Phase 4a) can diff the two and emit a
+  //                                   training chunk. Multiple rows allowed
+  //                                   per proposal (retry, undo + redo).
+  //   3. voice_recordings.outcome   — terminal-state enum stamped by the FSM
+  //                                   at hangup so analytics can correlate
+  //                                   recording rows with what actually
+  //                                   happened on the call.
+  //   4. retrieval_eval_runs        — quality measurement table built in from
+  //                                   day one so we can prove RAG retrieval
+  //                                   helps before flipping the default. Each
+  //                                   row links a query → retrieved chunks →
+  //                                   downstream proposal → downstream outcome.
+  //
+  // Originally merged via PR #233 but silently dropped in the merge that
+  // landed PR #229 onto main. Restored verbatim here; the immutability
+  // snapshot's hash matches PR #233's original block.
+  '060_capture_schema': `
+    CREATE TABLE IF NOT EXISTS call_transcript_turns (
+      id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id          UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      voice_recording_id UUID NOT NULL REFERENCES voice_recordings(id) ON DELETE CASCADE,
+      turn_index         INTEGER NOT NULL,
+      speaker            TEXT NOT NULL CHECK (speaker IN ('agent', 'caller')),
+      text               TEXT NOT NULL,
+      started_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at       TIMESTAMPTZ,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (turn_index >= 0)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_transcript_turns_recording
+      ON call_transcript_turns (voice_recording_id, turn_index);
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant
+      ON call_transcript_turns (tenant_id, created_at DESC);
+    ALTER TABLE call_transcript_turns ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_transcript_turns FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_transcript_turns ON call_transcript_turns;
+    CREATE POLICY tenant_isolation_call_transcript_turns ON call_transcript_turns
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS proposal_executions (
+      id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      proposal_id      UUID NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+      executed_payload JSONB NOT NULL,
+      executed_by      TEXT NOT NULL,
+      executed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status           TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'undone')),
+      error_message    TEXT,
+      idempotency_key  TEXT,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_proposal
+      ON proposal_executions (proposal_id, executed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proposal_executions_tenant
+      ON proposal_executions (tenant_id, executed_at DESC);
+    -- Idempotency: same (tenant, proposal, key) collides cleanly. Partial so
+    -- rows without an idempotency_key (legacy or undo paths) coexist freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_proposal_executions_idempotency
+      ON proposal_executions (tenant_id, proposal_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    ALTER TABLE proposal_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE proposal_executions FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_proposal_executions ON proposal_executions;
+    CREATE POLICY tenant_isolation_proposal_executions ON proposal_executions
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    -- Terminal-state enum on voice_recordings. NULL until the FSM stamps it
+    -- at hangup; backfillable from call_summaries.quality_score + escalation
+    -- audit signals (separate ops job).
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS outcome TEXT
+        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_outcome
+      ON voice_recordings (tenant_id, outcome) WHERE outcome IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS retrieval_eval_runs (
+      id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      ai_run_id              UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      query_text             TEXT NOT NULL,
+      retrieved_chunk_ids    UUID[] NOT NULL DEFAULT '{}',
+      retrieved_scores       REAL[] NOT NULL DEFAULT '{}',
+      downstream_proposal_id UUID REFERENCES proposals(id) ON DELETE SET NULL,
+      downstream_outcome     TEXT,
+      created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_tenant_time
+      ON retrieval_eval_runs (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_proposal
+      ON retrieval_eval_runs (downstream_proposal_id)
+      WHERE downstream_proposal_id IS NOT NULL;
+    ALTER TABLE retrieval_eval_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE retrieval_eval_runs FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_retrieval_eval_runs ON retrieval_eval_runs;
+    CREATE POLICY tenant_isolation_retrieval_eval_runs ON retrieval_eval_runs
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P11-001: voice lookup-skill audit log. Every invocation of a
+  // `lookup_*` voice skill writes one row — high-volume but tiny
+  // payload (no nested data). Tenant-scoped via RLS just like
+  // audit_events; session_id is the voice session that hosted the
+  // lookup, customer_id is nullable because the caller may be
+  // unidentified at lookup time.
+  '061_create_lookup_events': `
+    CREATE TABLE IF NOT EXISTS lookup_events (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      session_id UUID NOT NULL,
+      customer_id UUID,
+      intent TEXT NOT NULL,
+      result_status TEXT NOT NULL CHECK (result_status IN ('found','none','error')),
+      result_count INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      latency_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant ON lookup_events(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_session
+      ON lookup_events(tenant_id, session_id);
+    CREATE INDEX IF NOT EXISTS idx_lookup_events_tenant_customer
+      ON lookup_events(tenant_id, customer_id)
+      WHERE customer_id IS NOT NULL;
+    ALTER TABLE lookup_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lookup_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lookup_events ON lookup_events;
+    CREATE POLICY tenant_isolation_lookup_events ON lookup_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Phase 1 of the inbound-AI-CSR RAG corpus. One unified table holds
+  // both per-tenant chunks (tenant_id NOT NULL, RLS-scoped) and the
+  // global non-PII tier (tenant_id IS NULL — vertical-pack terminology
+  // and category patterns shared across tenants). The CHECK constraint
+  // forces (scope='tenant' ⇔ tenant_id IS NOT NULL) so the two tiers
+  // can't accidentally cross.
+  //
+  // Embedding model is locked to text-embedding-3-small (1536 dims) for
+  // v1: cosine distances aren't comparable across embedding models, so
+  // mixed-model rows in the same ivfflat index would silently degrade
+  // retrieval quality. Future model upgrades go through a separate
+  // re-embedding job that rebuilds the index.
+  //
+  // Phase 1 is purely additive — no caller in main reads or writes this
+  // table yet. Workers + retrieval wiring land in Phases 3b and 4a.
+  //
+  // Originally landed as 059_create_knowledge_chunks; bumped to 061 when
+  // 059_lead_attribution + 060_capture_schema landed on main first, then
+  // bumped again to 062 when 061_create_lookup_events claimed 061.
+  '062_create_knowledge_chunks': `
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+      id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id            UUID NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      scope                TEXT NOT NULL CHECK (scope IN ('tenant', 'global')),
+      source_type          TEXT NOT NULL,
+      source_id            TEXT NOT NULL,
+      source_version       INTEGER NOT NULL DEFAULT 1,
+      content              TEXT NOT NULL,
+      content_scrubbed     TEXT NOT NULL,
+      embedding            vector(1536) NOT NULL,
+      embedding_model      TEXT NOT NULL CHECK (embedding_model = 'text-embedding-3-small'),
+      chunk_schema_version INTEGER NOT NULL DEFAULT 1,
+      metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (
+        (scope = 'tenant' AND tenant_id IS NOT NULL)
+        OR (scope = 'global' AND tenant_id IS NULL)
+      )
+    );
+
+    -- Approximate-nearest-neighbour index for cosine similarity. Defaults to
+    -- 100 lists, suitable for tens of thousands to ~1M rows; revisit when a
+    -- single tenant crosses ~10M chunks.
+    CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_ivfflat
+      ON knowledge_chunks USING ivfflat (embedding vector_cosine_ops)
+      WITH (lists = 100);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_source
+      ON knowledge_chunks (tenant_id, source_type, source_id);
+
+    -- Idempotent ingestion: same (scope, source_type, source_id, version)
+    -- collides cleanly so re-ingestion with ON CONFLICT works.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_chunks_dedupe
+      ON knowledge_chunks (scope, source_type, source_id, source_version);
+
+    ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE knowledge_chunks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_knowledge_chunks ON knowledge_chunks;
+    CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
+      USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // Phase 4c: language detection telemetry for the inbound AI CSR.
+  // Body is byte-identical to origin/main; the immutability test will
+  // reject any in-place mutation here. P11-002's additions
+  // (tenant_settings columns, leads.preferred_language, customers
+  // CHECK constraint) live in a follow-up migration further down.
+  '063_language_detection': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS detected_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_lang
+      ON voice_recordings (tenant_id, detected_language)
+      WHERE detected_language IS NOT NULL;
+
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT;
+
+    ALTER TABLE retrieval_eval_runs
+      ADD COLUMN IF NOT EXISTS detected_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_retrieval_eval_runs_lang
+      ON retrieval_eval_runs (tenant_id, detected_language, created_at DESC)
+      WHERE detected_language IS NOT NULL;
+  `,
+
+  // P12-001: per-job photo storage. job_photos rows reference rows in
+  // the existing `files` table (the upload pipeline still creates a
+  // file row + S3 object); the join row carries photo-specific
+  // metadata (category/notes/taken_at/uploader). Deleting a job
+  // cascades photo rows; deleting a photo row leaves the underlying
+  // file/S3 object intact so existing download URLs still resolve.
+  '064_create_job_photos': `
+    CREATE TABLE IF NOT EXISTS job_photos (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      uploaded_by_user_id TEXT NOT NULL,
+      file_id UUID NOT NULL REFERENCES files(id),
+      category TEXT NOT NULL CHECK (category IN ('before','after','problem','completion','other')),
+      notes TEXT,
+      taken_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_photos_tenant_job ON job_photos(tenant_id, job_id);
+    ALTER TABLE job_photos ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE job_photos FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_job_photos ON job_photos;
+    CREATE POLICY tenant_isolation_job_photos ON job_photos
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P10-001: Customer self-service portal sessions. A single signed token
+  // grants a customer read access to all of their estimates, invoices,
+  // jobs, agreements, and appointments. The plaintext token is returned
+  // ONCE at create time and stored only as `token_hash = sha256(token)`.
+  // Lookup is hash-only (system-level / no tenant context) — RLS still
+  // applies for tenant-scoped reads/writes via `tenant_isolation_portal_sessions`.
+  //
+  // Originally landed as 060_create_portal_sessions; bumped to 065 because
+  // 060_capture_schema, 061_create_lookup_events, 062_create_knowledge_chunks,
+  // 063_language_detection, and 064_create_job_photos claimed 060–064 on main
+  // before this branch merged.
+  '065_create_portal_sessions': `
+    CREATE TABLE IF NOT EXISTS portal_sessions (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ,
+      last_accessed_at TIMESTAMPTZ,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_portal_token_hash
+      ON portal_sessions (token_hash);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_tenant
+      ON portal_sessions (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_portal_sessions_customer
+      ON portal_sessions (tenant_id, customer_id);
+    ALTER TABLE portal_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
+    -- Tenant-scoped reads/writes (most paths) match the active GUC. The
+    -- system-level token-hash lookup (resolvePortalToken) runs without
+    -- a tenant context — that's literally what it returns — so the
+    -- policy permits the read when the GUC is unset. The lookup is
+    -- still safe because the candidate row is selected by sha256 hash.
+    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
+      USING (
+        current_setting('app.current_tenant_id', true) IS NULL
+        OR current_setting('app.current_tenant_id', true) = ''
+        OR tenant_id::text = current_setting('app.current_tenant_id', true)
+      );
+  `,
+
+  // P12 — voice_sessions table + supervisor/tech mode columns.
+  // Originally landed on main as 066_create_voice_sessions_and_modes;
+  // ported here verbatim so the snapshot hash matches. Indices and
+  // policies use IF NOT EXISTS / DROP-then-CREATE so the migration is
+  // re-runnable.
+  '066_create_voice_sessions_and_modes': `
+    -- voice_sessions: persistent FSM state per AI operator instance
+    CREATE TABLE IF NOT EXISTS voice_sessions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      customer_id UUID REFERENCES customers(id),
+      channel TEXT NOT NULL CHECK (channel IN ('voice_inbound','voice_outbound','sms','mms','inapp_voice','webchat')),
+      external_id TEXT,
+      state TEXT NOT NULL,
+      context JSONB NOT NULL DEFAULT '{}'::jsonb,
+      cost_cents INTEGER NOT NULL DEFAULT 0,
+      supervisor_user_id UUID REFERENCES users(id),
+      supervisor_mode_at_start TEXT CHECK (supervisor_mode_at_start IN ('supervisor','tech','both','unsupervised')),
+      started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      ended_at TIMESTAMPTZ,
+      ended_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS voice_sessions_tenant_started ON voice_sessions(tenant_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS voice_sessions_active ON voice_sessions(tenant_id) WHERE ended_at IS NULL;
+    ALTER TABLE voice_sessions ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation ON voice_sessions;
+    CREATE POLICY tenant_isolation ON voice_sessions
+      USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+    -- users: field-capable + current mode
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS can_field_serve BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS current_mode TEXT NOT NULL DEFAULT 'supervisor'
+        CHECK (current_mode IN ('supervisor','tech','both')),
+      ADD COLUMN IF NOT EXISTS mode_changed_at TIMESTAMPTZ;
+    UPDATE users SET can_field_serve = true WHERE role = 'owner' AND can_field_serve = false;
+
+    -- tenant_settings: backup supervisor + unsupervised routing
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS backup_supervisor_user_id UUID REFERENCES users(id),
+      ADD COLUMN IF NOT EXISTS unsupervised_proposal_routing TEXT NOT NULL DEFAULT 'queue_and_sms'
+        CHECK (unsupervised_proposal_routing IN ('queue_and_sms','queue_only','escalate_to_oncall'));
+  `,
+
+  // P12-002: Tech time tracking. Captures clock-in / clock-out events per
+  // user, optionally linked to a job. Schema choices:
+  //   - user_id is TEXT (Clerk subject) to mirror audit_events.actor_id —
+  //     keeps the route handler from hitting a DB lookup for the FK.
+  //   - job_id is nullable to support non-billable hours (drive/break/admin).
+  //   - clocked_out_at is nullable while a shift is running; the partial
+  //     UNIQUE index enforces "at most one open entry per user per tenant"
+  //     at the database level, which is what makes the concurrent-clock-in
+  //     race correctness story possible (the service catches 23505 and
+  //     auto-closes the prior entry).
+  //   - duration_minutes is computed in app code on close; we store it so
+  //     the weekly rollup can sum without re-deriving.
+  '067_create_time_entries': `
+    CREATE TABLE IF NOT EXISTS time_entries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id TEXT NOT NULL,
+      job_id UUID,
+      entry_type TEXT NOT NULL CHECK (entry_type IN ('job', 'drive', 'break', 'admin')),
+      clocked_in_at TIMESTAMPTZ NOT NULL,
+      clocked_out_at TIMESTAMPTZ,
+      duration_minutes INTEGER,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_user
+      ON time_entries(tenant_id, user_id, clocked_in_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_job
+      ON time_entries(tenant_id, job_id) WHERE job_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_time_entries_one_active_per_user
+      ON time_entries(tenant_id, user_id) WHERE clocked_out_at IS NULL;
+    ALTER TABLE time_entries ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE time_entries FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_time_entries ON time_entries;
+    CREATE POLICY tenant_isolation_time_entries ON time_entries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P11-002: Spanish multilingual support — tenant-level language config
+  // (default lang + per-language TTS voice + auto-detect toggle + Spanish
+  // dispatcher routing) plus per-lead preferred_language column.
+  //
+  // Originally drafted as 063_create_language_settings on this branch,
+  // but main shipped 063 (language_detection), 064 (job_photos), 065
+  // (portal_sessions), 066 (voice_sessions_and_modes) and PR #253 added
+  // 067 (time_entries) before this branch had a chance to merge —
+  // bumped to 068 to keep the post-deploy ordering monotonic. Body uses
+  // ALTER TABLE … ADD COLUMN IF NOT EXISTS so it converges fresh and
+  // existing DBs on the same shape (lessons learned from PR #225).
+  //
+  // We deliberately do NOT add CHECK (preferred_language IN ('en','es'))
+  // to customers.preferred_language — main's 063 created it as a free
+  // BCP-47 string, and the immutability test forbids retro-tightening.
+  // The runtime catalog narrows to 'en'|'es' at the call site instead.
+  '068_create_language_settings': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS default_language TEXT NOT NULL DEFAULT 'en'
+        CHECK (default_language IN ('en','es')),
+      ADD COLUMN IF NOT EXISTS tts_voice_en TEXT,
+      ADD COLUMN IF NOT EXISTS tts_voice_es TEXT,
+      ADD COLUMN IF NOT EXISTS auto_detect_language BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS spanish_dispatcher_user_ids UUID[];
+
+    ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS preferred_language TEXT
+        CHECK (preferred_language IN ('en','es'));
+  `,
+
+  // P12-005 follow-up: extend the inline CHECK constraint on
+  // leads.source so 'customer_portal' is accepted at the DB layer.
+  // The original CHECK was authored inline in 057_create_leads, which
+  // makes Postgres generate the name `leads_source_check`. We drop it
+  // (IF EXISTS, so fresh DBs that never had the old constraint don't
+  // error) and re-add it with the extended value list. Originally
+  // drafted at slot 068; bumped to 069 because PR #245 landed
+  // 068_create_language_settings on main first.
+  '069_extend_leads_source_check': `
+    ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_source_check;
+    ALTER TABLE leads ADD CONSTRAINT leads_source_check
+      CHECK (source IN ('web_form','phone_call','referral','walk_in','marketplace','other','customer_portal'));
+  `,
+
+  // Twilio per-tenant subaccount model.
+  // Adds country/region to tenant_settings (US-only at launch; column is
+  // forward-compatible for future international expansion).
+  // Creates tenant_integrations to track Twilio subaccount + SendGrid subuser
+  // provisioning state per tenant. Auth tokens are stored AES-256-GCM
+  // encrypted (app-level key) — never plaintext.
+  '070_tenant_integrations': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS country CHAR(2) NOT NULL DEFAULT 'US',
+      ADD COLUMN IF NOT EXISTS region TEXT;
+
+    CREATE TABLE IF NOT EXISTS tenant_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      provider TEXT NOT NULL CHECK (provider IN ('twilio', 'sendgrid')),
+      status TEXT NOT NULL DEFAULT 'provisioning'
+        CHECK (status IN ('provisioning', 'active', 'suspended', 'terminated', 'releasing', 'failed')),
+      subaccount_sid TEXT,
+      subuser_username TEXT,
+      auth_token_primary_enc TEXT,
+      auth_token_secondary_enc TEXT,
+      credential_version INTEGER NOT NULL DEFAULT 1,
+      provider_data JSONB NOT NULL DEFAULT '{}',
+      last_error TEXT,
+      provisioned_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, provider)
+    );
+
+    ALTER TABLE tenant_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_integrations ON tenant_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '071_widen_tenant_integrations_status': `
+    UPDATE tenant_integrations SET status = 't0_requested' WHERE status = 'provisioning';
+    UPDATE tenant_integrations SET status = 'full_readiness' WHERE status = 'active';
+    ALTER TABLE tenant_integrations ALTER COLUMN status SET DEFAULT 't0_requested';
+    ALTER TABLE tenant_integrations DROP CONSTRAINT IF EXISTS tenant_integrations_status_check;
+    ALTER TABLE tenant_integrations ADD CONSTRAINT tenant_integrations_status_check
+      CHECK (status IN (
+        't0_requested',
+        'partial_readiness',
+        'pending_compliance_dns',
+        'full_readiness',
+        'failed',
+        'failed_compensated',
+        'compensating',
+        'suspended',
+        'terminated',
+        'releasing'
+      ));
+  `,
+
+  '072_add_executing_status': `
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_by UUID;
+    ALTER TABLE proposals ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+    ALTER TABLE proposals DROP CONSTRAINT IF EXISTS proposals_status_check;
+    ALTER TABLE proposals ADD CONSTRAINT proposals_status_check
+      CHECK (status IN ('draft', 'ready_for_review', 'approved', 'executing', 'rejected', 'expired', 'executed', 'execution_failed', 'undone'));
+  `,
+
+  '073_add_execution_retry_count': `
+    ALTER TABLE proposals
+      ADD COLUMN IF NOT EXISTS execution_retry_count INTEGER NOT NULL DEFAULT 0;
+  `,
+
+  // Inbound Twilio webhooks (voice/SMS/recording) need to look up
+  // tenant_integrations BEFORE a tenant is known — to find:
+  //   1. the tenant_id given an incoming `to` number
+  //   2. the subaccount auth token given the AccountSid in the webhook body
+  // Both lookups are inherently cross-tenant. The existing FORCE RLS
+  // policy on tenant_integrations blocks them. Add a permissive read
+  // policy that activates only when app.system_lookup = 'true' is set
+  // on the connection — set inside short-lived transactions in
+  // app.ts's resolveTwilioAuthTokenForSubaccount /
+  // resolveTenantIdByPhoneNumber helpers. Writes still require
+  // app.current_tenant_id (the original tenant_isolation_integrations
+  // policy stays in force for INSERT/UPDATE/DELETE).
+  '074_tenant_integrations_system_lookup': `
+    DROP POLICY IF EXISTS tenant_isolation_integrations ON tenant_integrations;
+    CREATE POLICY tenant_isolation_integrations ON tenant_integrations
+      USING (
+        tenant_id = current_setting('app.current_tenant_id', true)::UUID
+        OR current_setting('app.system_lookup', true) = 'true'
+      );
   `,
 };
 

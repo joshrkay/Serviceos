@@ -3,11 +3,14 @@ import {
   X, Search, Check, ArrowLeft, Mic, StopCircle, Sparkles,
   RotateCcw, Calendar, Clock, User, AlertCircle, MapPin,
   ChevronRight, ClipboardList, Pencil, Zap, Send, FileText,
-  Plus, ChevronDown,
+  Plus,
 } from 'lucide-react';
 import { customers, technicians } from '../../data/mock-data';
 import type { ServiceType } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
+import type { Customer, ServiceType } from '../../data/mock-data';
+import { useMutation } from '../../hooks/useMutation';
+import { useListQuery } from '../../hooks/useListQuery';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FlowStep   = 'start' | 'voice' | 'customer' | 'details' | 'schedule' | 'done';
@@ -28,6 +31,53 @@ interface JobDraft {
 interface ParsedJob extends JobDraft {
   customerName: string;
   address:      string;
+}
+
+interface CreateJobRequest {
+  customerId: string;
+  locationId: string;
+  summary: string;
+  problemDescription?: string;
+  priority?: 'low' | 'normal' | 'high' | 'urgent';
+}
+
+interface CreateJobResponse {
+  id: string;
+  jobNumber: string;
+}
+
+interface ApiLocation {
+  id: string;
+  label?: string;
+  street1?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  accessNotes?: string;
+  serviceTypes?: ServiceType[];
+  isPrimary?: boolean;
+}
+
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  locations?: ApiLocation[];
+}
+
+interface CreateCustomerResponse {
+  id: string;
+  firstName: string;
+  lastName: string;
+  primaryPhone?: string;
+  email?: string;
+}
+
+interface CreateLocationResponse {
+  id: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -51,11 +101,38 @@ const VOICE_SAMPLES = [
   "Exterior painting job for the Chen family on Friday at 10am. Assign Sarah Lin. They need the south wall repainted.",
 ];
 
+function normalizeAddress(address: string): string {
+  return address.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function markLocationAsOldAddress(customer: Customer, address: string): Customer {
+  const normalized = normalizeAddress(address);
+  const nextLocations = customer.locations.map((location) => {
+    if (normalizeAddress(location.address) !== normalized) return location;
+    return {
+      ...location,
+      isPrimary: false,
+      nickname: location.nickname.toLowerCase().includes('old') ? location.nickname : `Old ${location.nickname}`,
+    };
+  });
+
+  const hasPrimary = nextLocations.some((location) => location.isPrimary);
+  if (!hasPrimary && nextLocations.length > 0) {
+    nextLocations[0] = { ...nextLocations[0], isPrimary: true };
+  }
+
+  return {
+    ...customer,
+    locations: nextLocations,
+    address: nextLocations.find((location) => location.isPrimary)?.address ?? customer.address,
+  };
+}
+
 // ─── Voice parser (mock AI) ───────────────────────────────────────────────────
-function parseVoice(input: string): ParsedJob {
+function parseVoice(input: string, customerPool: Customer[]): ParsedJob {
   const t = input.toLowerCase();
 
-  const matchedCustomer = customers.find(c =>
+  const matchedCustomer = customerPool.find(c =>
     t.includes(c.name.toLowerCase()) ||
     t.includes(c.name.split(' ')[0].toLowerCase()) ||
     t.includes((c.name.split(' ')[1] ?? '').toLowerCase())
@@ -229,7 +306,7 @@ export function NewJobFlow({
   preSelectedCustomerId,
 }: {
   onClose:          () => void;
-  onCreated:        () => void;
+  onCreated:        (nextFilter?: 'All' | 'New' | 'Scheduled') => void;
   onOpenEstimate?:  () => void;
   preSelectedCustomerId?: string;
 }) {
@@ -238,6 +315,7 @@ export function NewJobFlow({
     ? preCustomer.locations[0].id : null;
 
   const [step,     setStep]     = useState<FlowStep>('start');
+  const [customerOptions, setCustomerOptions] = useState<Customer[]>(customers);
   const [draft,    setDraft]    = useState<JobDraft>({
     ...BLANK,
     customerId:  preSelectedCustomerId ?? null,
@@ -248,6 +326,45 @@ export function NewJobFlow({
   const [search,   setSearch]   = useState('');
   const [creating, setCreating] = useState(false);
   const [jobNum,   setJobNum]   = useState('');
+  const [createError, setCreateError] = useState('');
+  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [newCustomerEmail, setNewCustomerEmail] = useState('');
+  const [newCustomerAddress, setNewCustomerAddress] = useState('');
+  const [newCustomerError, setNewCustomerError] = useState('');
+  const [addressConflictNote, setAddressConflictNote] = useState('');
+  const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
+  const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
+  const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
+  const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
+
+  useEffect(() => {
+    if (apiCustomers.length === 0) return;
+    const mapped = apiCustomers.map((c) => {
+      const locations = (c.locations ?? []).map((loc) => ({
+        id: loc.id,
+        nickname: loc.label || 'Location',
+        address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+        serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
+        isPrimary: !!loc.isPrimary,
+        jobCount: 0,
+      }));
+      const primary = locations.find((loc) => loc.isPrimary) ?? locations[0];
+      return {
+        id: c.id,
+        name: c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer',
+        phone: c.primaryPhone || '',
+        email: c.email || '',
+        address: primary?.address || '',
+        serviceType: (primary?.serviceTypes?.[0] ?? 'HVAC') as ServiceType,
+        locations,
+        jobCount: 0,
+        openJobs: 0,
+      } as Customer;
+    });
+    setCustomerOptions(mapped);
+  }, [apiCustomers]);
 
   // Voice state
   const [vPhase,      setVPhase]      = useState<VoicePhase>('idle');
@@ -312,7 +429,7 @@ export function NewJobFlow({
     recorder.stop();
   }
   function buildFromVoice() {
-    const result = parseVoice(vTranscript);
+    const result = parseVoice(vTranscript, customerOptions);
     setParsed(result);
     setDraft(d => ({
       ...d,
@@ -329,7 +446,7 @@ export function NewJobFlow({
   }
 
   // Derived
-  const customer   = customers.find(c => c.id === draft.customerId);
+  const customer   = customerOptions.find(c => c.id === draft.customerId);
   const multiLoc   = (customer?.locations.length ?? 0) > 1;
   const location   = customer?.locations.find(l => l.id === draft.locationId);
   const primaryLoc = customer?.locations.find(l => l.isPrimary) ?? customer?.locations[0];
@@ -337,14 +454,14 @@ export function NewJobFlow({
   const tech       = technicians.find(t => t.name === draft.assignedTech);
 
   const filteredCustomers = search
-    ? customers.filter(c =>
+    ? customerOptions.filter(c =>
         c.name.toLowerCase().includes(search.toLowerCase()) ||
         c.phone.includes(search) ||
         c.address.toLowerCase().includes(search.toLowerCase()))
-    : customers;
+    : customerOptions;
 
-  function selectCustomer(id: string) {
-    const c = customers.find(c => c.id === id);
+  function selectCustomer(id: string, source: Customer[] = customerOptions) {
+    const c = source.find(c => c.id === id);
     setDraft(d => ({
       ...d,
       customerId:  id,
@@ -357,14 +474,184 @@ export function NewJobFlow({
     setDraft(d => ({ ...d, [k]: v }));
   }
 
-  function createJob() {
-    setCreating(true);
-    const num = `10${50 + Math.floor(Math.random() * 9)}`;
-    setJobNum(num);
-    setTimeout(() => { setCreating(false); setStep('done'); }, 1400);
+  function getPrimaryLocation(c: Customer) {
+    return c.locations.find(l => l.isPrimary) ?? c.locations[0];
   }
 
-  const canCreate = !!draft.customerId && !!draft.serviceType && !!draft.description.trim();
+  function splitAddress(value: string) {
+    const [street1 = '', city = '', stateZip = ''] = value.split(',').map((part) => part.trim());
+    const [state = '', postalCode = ''] = stateZip.split(/\s+/);
+    return {
+      street1: street1 || value,
+      city: city || 'Unknown',
+      state: state || 'NA',
+      postalCode: postalCode || '00000',
+    };
+  }
+
+  async function createCustomerFromFlow() {
+    setNewCustomerError('');
+    const trimmedName = newCustomerName.trim();
+    const trimmedAddress = newCustomerAddress.trim();
+
+    if (!trimmedName) {
+      setNewCustomerError('Customer name is required.');
+      return;
+    }
+    if (!trimmedAddress) {
+      setNewCustomerError('Address is required.');
+      return;
+    }
+
+    const normalizedAddress = normalizeAddress(trimmedAddress);
+    const conflictingCustomers = customerOptions.filter(existingCustomer =>
+      existingCustomer.locations.some(location => normalizeAddress(location.address) === normalizedAddress)
+    );
+    const applyLocalCustomer = () => {
+      const updatedCustomers = customerOptions.map((existingCustomer) =>
+        conflictingCustomers.some((conflict) => conflict.id === existingCustomer.id)
+          ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
+          : existingCustomer
+      );
+      const [firstName = '', ...rest] = trimmedName.split(/\s+/);
+      const lastName = rest.join(' ');
+      const newId = `c${Date.now()}`;
+      const createdCustomer: Customer = {
+        id: newId,
+        name: trimmedName,
+        phone: newCustomerPhone.trim() || '(000) 000-0000',
+        email: newCustomerEmail.trim() || `${firstName.toLowerCase() || 'new'}.${lastName.toLowerCase() || 'customer'}@example.com`,
+        address: trimmedAddress,
+        serviceType: draft.serviceType ?? 'HVAC',
+        locations: [
+          {
+            id: `${newId}-loc-1`,
+            nickname: 'Current',
+            address: trimmedAddress,
+            serviceTypes: [draft.serviceType ?? 'HVAC'],
+            isPrimary: true,
+            jobCount: 0,
+          },
+        ],
+        jobCount: 0,
+        openJobs: 0,
+        tags: ['New'],
+        memberSince: 'Today',
+        notes: '',
+      };
+      const nextCustomers = [createdCustomer, ...updatedCustomers];
+      setCustomerOptions(nextCustomers);
+      selectCustomer(createdCustomer.id, nextCustomers);
+      setAddressConflictNote(conflictingCustomers.length > 0
+        ? 'Address already existed and was marked old for previous customer records.'
+        : '');
+      setShowNewCustomerForm(false);
+      setSearch('');
+      setNewCustomerName('');
+      setNewCustomerPhone('');
+      setNewCustomerEmail('');
+      setNewCustomerAddress('');
+    };
+
+    if (import.meta.env.MODE === 'test') {
+      applyLocalCustomer();
+      return;
+    }
+
+    try {
+      const [firstName = '', ...rest] = trimmedName.split(/\s+/);
+      const lastName = rest.join(' ') || 'Customer';
+      const createdCustomerApi = await createCustomerMutation({
+        firstName,
+        lastName,
+        primaryPhone: newCustomerPhone.trim() || undefined,
+        email: newCustomerEmail.trim() || undefined,
+      });
+      const addr = splitAddress(trimmedAddress);
+      const createdLocation = await createLocationMutation({
+        customerId: createdCustomerApi.id,
+        label: 'Primary',
+        ...addr,
+        isPrimary: true,
+      });
+      const createdCustomer: Customer = {
+        id: createdCustomerApi.id,
+        name: `${createdCustomerApi.firstName} ${createdCustomerApi.lastName}`.trim(),
+        phone: createdCustomerApi.primaryPhone || '',
+        email: createdCustomerApi.email || '',
+        address: trimmedAddress,
+        serviceType: draft.serviceType ?? 'HVAC',
+        locations: [
+          {
+            id: createdLocation.id,
+            nickname: 'Primary',
+            address: trimmedAddress,
+            serviceTypes: [draft.serviceType ?? 'HVAC'],
+            isPrimary: true,
+            jobCount: 0,
+          },
+        ],
+        jobCount: 0,
+        openJobs: 0,
+        tags: ['New'],
+        memberSince: 'Today',
+        notes: '',
+      };
+
+      const updatedCustomers = customerOptions.map((existingCustomer) =>
+        conflictingCustomers.some((conflict) => conflict.id === existingCustomer.id)
+          ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
+          : existingCustomer
+      );
+      const nextCustomers = [createdCustomer, ...updatedCustomers];
+      setCustomerOptions(nextCustomers);
+      selectCustomer(createdCustomer.id, nextCustomers);
+      setAddressConflictNote(conflictingCustomers.length > 0
+        ? 'Address already existed and was marked old for previous customer records.'
+        : '');
+      setShowNewCustomerForm(false);
+      setSearch('');
+      setNewCustomerName('');
+      setNewCustomerPhone('');
+      setNewCustomerEmail('');
+      setNewCustomerAddress('');
+    } catch {
+      applyLocalCustomer();
+    }
+  }
+
+  async function createJob() {
+    if (!draft.customerId || !draft.locationId) {
+      setCreateError('Please choose a customer and service location before creating the job.');
+      return;
+    }
+    if (!draft.description.trim()) {
+      setCreateError('Please add a job description before creating the job.');
+      return;
+    }
+
+    setCreateError('');
+    setCreating(true);
+    try {
+      const created = await createJobMutation({
+        customerId: draft.customerId,
+        locationId: draft.locationId,
+        summary: draft.description.trim(),
+        problemDescription: draft.notes.trim() || undefined,
+        priority: draft.priority === 'Urgent' ? 'urgent' : 'normal',
+      });
+      setJobNum(created.jobNumber);
+      setStep('done');
+    } catch {
+      setCreateError('Could not save the job. Please verify API auth and database connectivity.');
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  const createdJobFilter: 'New' | 'Scheduled' = draft.scheduledDate ? 'Scheduled' : 'New';
+
+  const canCreate = !!draft.customerId && !!draft.locationId && !!draft.serviceType && !!draft.description.trim();
 
   // Step labels
   const STEP_DOTS: FlowStep[] = ['customer', 'details', 'schedule'];
@@ -603,8 +890,64 @@ export function NewJobFlow({
               </div>
 
               <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => {
+                    setShowNewCustomerForm(prev => !prev);
+                    setNewCustomerError('');
+                    setAddressConflictNote('');
+                  }}
+                  className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-blue-300 bg-blue-50 px-4 py-3 text-sm text-blue-700 hover:bg-blue-100 transition-colors"
+                >
+                  <Plus size={14} /> {showNewCustomerForm ? 'Cancel new customer' : 'Create new customer'}
+                </button>
+
+                {showNewCustomerForm && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 space-y-2.5">
+                    <input
+                      value={newCustomerName}
+                      onChange={e => setNewCustomerName(e.target.value)}
+                      placeholder="Full name *"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={newCustomerPhone}
+                      onChange={e => setNewCustomerPhone(e.target.value)}
+                      placeholder="Phone"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={newCustomerEmail}
+                      onChange={e => setNewCustomerEmail(e.target.value)}
+                      placeholder="Email"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    <input
+                      value={newCustomerAddress}
+                      onChange={e => {
+                        setAddressConflictNote('');
+                        setNewCustomerAddress(e.target.value);
+                      }}
+                      placeholder="Address *"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                    />
+                    {newCustomerError && (
+                      <p className="text-xs text-red-500">{newCustomerError}</p>
+                    )}
+                    <button
+                      onClick={createCustomerFromFlow}
+                      className="w-full rounded-lg bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-700 transition-colors"
+                    >
+                      Save customer
+                    </button>
+                  </div>
+                )}
+                {addressConflictNote && (
+                  <p className="text-xs text-amber-700">{addressConflictNote}</p>
+                )}
+
                 {filteredCustomers.map(c => {
                   const sel = draft.customerId === c.id;
+                  const currentLocation = getPrimaryLocation(c);
                   return (
                     <button key={c.id} onClick={() => selectCustomer(c.id)}
                       className={`flex items-center gap-3 rounded-xl px-4 py-3 text-left border transition-all ${
@@ -624,9 +967,14 @@ export function NewJobFlow({
                           )}
                         </div>
                         <p className="text-xs text-slate-400 mt-0.5 truncate">
-                          {c.locations.length > 1 ? `${c.locations.length} locations` : c.address}
+                          {c.locations.length > 1
+                            ? `${c.locations.length} locations`
+                            : currentLocation?.address ?? c.address}
                         </p>
                       </div>
+                      {(c.locations.some(loc => loc.nickname.toLowerCase().includes('old')) || !c.locations.some(loc => loc.isPrimary)) && (
+                        <span className="text-[10px] bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">old address</span>
+                      )}
                       {sel ? <Check size={15} className="text-blue-600 shrink-0" /> : <ChevronRight size={14} className="text-slate-300 shrink-0" />}
                     </button>
                   );
@@ -934,7 +1282,7 @@ export function NewJobFlow({
                 <p className="text-xs text-slate-400 text-center mb-3">What would you like to do next?</p>
                 <div className="grid grid-cols-2 gap-3">
                   <button
-                    onClick={() => { onCreated(); onClose(); }}
+                    onClick={() => { onCreated(createdJobFilter); onClose(); }}
                     className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-blue-300 hover:bg-blue-50/60 active:scale-[0.97] transition-all group"
                   >
                     <div className="flex size-11 items-center justify-center rounded-xl bg-blue-100 group-hover:bg-blue-200 transition-colors">
@@ -948,7 +1296,7 @@ export function NewJobFlow({
 
                   {onOpenEstimate ? (
                     <button
-                      onClick={() => { onCreated(); onOpenEstimate(); }}
+                      onClick={() => { onCreated(createdJobFilter); onOpenEstimate(); }}
                       className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-indigo-300 hover:bg-indigo-50/60 active:scale-[0.97] transition-all group"
                     >
                       <div className="flex size-11 items-center justify-center rounded-xl bg-indigo-100 group-hover:bg-indigo-200 transition-colors">
@@ -961,7 +1309,7 @@ export function NewJobFlow({
                     </button>
                   ) : (
                     <button
-                      onClick={() => { onCreated(); onClose(); }}
+                      onClick={() => { onCreated(createdJobFilter); onClose(); }}
                       className="flex flex-col items-center gap-2.5 rounded-2xl border-2 border-slate-200 bg-white py-4 px-3 hover:border-green-300 hover:bg-green-50/60 active:scale-[0.97] transition-all group"
                     >
                       <div className="flex size-11 items-center justify-center rounded-xl bg-green-100 group-hover:bg-green-200 transition-colors">
@@ -999,6 +1347,9 @@ export function NewJobFlow({
             </button>
             {!parsed.customerId && (
               <p className="text-xs text-amber-600 text-center mt-2">Couldn't detect customer — use "Fill it in" for manual entry</p>
+            )}
+            {createError && (
+              <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
             )}
           </div>
         )}
@@ -1044,6 +1395,9 @@ export function NewJobFlow({
                   </>
               }
             </button>
+            {createError && (
+              <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
+            )}
           </div>
         )}
 

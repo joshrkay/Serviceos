@@ -2,6 +2,10 @@ import React from 'react';
 import { Message, Role } from '../../types/conversation';
 import { MessageBubble } from '../../components/conversations/MessageBubble';
 import { SystemEvent } from '../../components/conversations/SystemEvent';
+import {
+  LookupEventInline,
+  isLookupEventMessage,
+} from '../../components/conversations/LookupEventInline';
 import { MessageInput } from '../../components/conversations/MessageInput';
 
 export interface ConversationThreadProps {
@@ -30,6 +34,13 @@ export function ConversationThread({
   const renderMessage = (message: Message) => {
     switch (message.messageType) {
       case 'system_event':
+        // P11-001: voice lookup_events ride into the thread as
+        // system_event rows tagged with `metadata.kind === 'lookup_event'`.
+        // Render those with the dedicated expandable inline component;
+        // everything else stays on the existing SystemEvent surface.
+        if (isLookupEventMessage(message)) {
+          return <LookupEventInline key={message.id} message={message} />;
+        }
         return <SystemEvent key={message.id} message={message} />;
       case 'transcript':
         return renderTranscript ? (

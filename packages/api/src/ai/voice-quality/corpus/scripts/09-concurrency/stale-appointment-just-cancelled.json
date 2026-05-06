@@ -1,0 +1,68 @@
+{
+  "id": "stale-appointment-just-cancelled",
+  "bucket": "09-concurrency",
+  "callerId": "+15555550901",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_09_stale_cancelled",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_09_stale_jane",
+        "tenantId": "t_09_stale_cancelled",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550901",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_09_stale_existing",
+        "tenantId": "t_09_stale_cancelled",
+        "jobId": "job_09_stale_1",
+        "scheduledStart": "2026-05-12T21:00:00.000Z",
+        "scheduledEnd": "2026-05-12T23:00:00.000Z",
+        "arrivalWindowStart": "2026-05-12T21:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-12T21:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "cancelled",
+        "notes": "AC service",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-05-04T17:59:30.000Z",
+        "cancelledAt": "2026-05-04T17:59:30.000Z",
+        "cancellationReason": "customer_request"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. I'd like to reschedule my Tuesday appointment to Wednesday at the same time.",
+      "expected": {
+        "intent": "reschedule_appointment",
+        "spokenAnswerMatches": "I see your Tuesday appointment was just cancelled, so there's nothing to reschedule. Let me hand you to an operator who can sort this out and book a new visit if you'd like.",
+        "escalates": true
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}

@@ -1,0 +1,51 @@
+{
+  "id": "caller-id-matches-one-customer",
+  "bucket": "04-identity-edges",
+  "callerId": "+15555550401",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_04_identity_one_match",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_04_one_match_jane",
+        "tenantId": "t_04_identity_one_match",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550401",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, can you tell me what's on my account?",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "escalates": false,
+        "spokenAnswerMatches": "resolves caller to Jane Smith based on caller-id and summarizes account; no duplicate customer is created"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 5, 6],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

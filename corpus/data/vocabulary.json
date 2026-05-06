@@ -1,0 +1,337 @@
+{
+  "_meta": {
+    "description": "Curated plumbing and HVAC vocabulary for inbound AI agent training. Maps customer lay language to technical terms, organized by fixture/system.",
+    "version": "1.0.0",
+    "sources": [
+      "ASSE International Plumbing Dictionary 6th Ed",
+      "ASHRAE Terminology Glossary",
+      "InterNACHI HVAC Inspection Guide",
+      "ServiceTitan Contractor Playbook",
+      "r/Plumbing, r/HVAC expert responses",
+      "JustAnswer plumbing/HVAC archives",
+      "DIY Stack Exchange"
+    ]
+  },
+  "lay_to_technical": {
+    "under_sink_supply": [
+      { "customer": "the knob under the sink", "technical": "angle stop valve / shut-off valve", "aliases": ["shutoff valve", "supply valve", "stop valve"] },
+      { "customer": "the curved pipe under the drain", "technical": "P-trap", "aliases": ["trap", "U-bend", "U-pipe"] },
+      { "customer": "the first piece of pipe from the drain", "technical": "tailpiece" },
+      { "customer": "the strainer / strainer basket", "technical": "basket strainer", "aliases": ["drain strainer", "sink strainer"] },
+      { "customer": "the flexible tubes connecting to the faucet", "technical": "supply lines / braided supply hoses", "aliases": ["braided lines", "flex hoses"] },
+      { "customer": "the thing that screws on the drain hole", "technical": "drain flange / basket strainer body" },
+      { "customer": "the pipe going into the wall under the sink", "technical": "drain stub-out / trap arm" },
+      { "customer": "the screen at the tip of the faucet", "technical": "aerator" },
+      { "customer": "the part inside the faucet that controls water", "technical": "faucet cartridge" },
+      { "customer": "the little chrome cap on the sink near the faucet", "technical": "air gap" }
+    ],
+    "toilet": [
+      { "customer": "the toilet keeps running", "technical": "faulty flapper or fill valve — water bypassing flapper seat" },
+      { "customer": "the flushing part / the handle arm", "technical": "trip lever / flush lever" },
+      { "customer": "the rubber thing at the bottom of the tank", "technical": "flapper" },
+      { "customer": "the ball / float thing", "technical": "float ball (older) or float cup (modern fill valve)" },
+      { "customer": "the valve that fills the tank", "technical": "fill valve / ballcock" },
+      { "customer": "the big opening at the bottom of the tank", "technical": "flush valve seat" },
+      { "customer": "the chain", "technical": "flapper chain / lift chain" },
+      { "customer": "the wax seal / the ring at the bottom of the toilet", "technical": "wax ring" },
+      { "customer": "the bolts that hold the toilet down", "technical": "closet bolts / johnny bolts" },
+      { "customer": "the rubber gasket between tank and bowl", "technical": "spud washer / tank-to-bowl gasket" },
+      { "customer": "the supply tube at the wall behind the toilet", "technical": "toilet supply line" },
+      { "customer": "the cap at the base of the toilet", "technical": "closet bolt cap" },
+      { "customer": "the tall tube in the middle of the tank", "technical": "overflow tube (prevents flood if fill valve fails)" },
+      { "customer": "the small tube that goes inside the overflow tube", "technical": "refill tube" },
+      { "customer": "the drain fitting in the floor", "technical": "closet flange" }
+    ],
+    "bathtub": [
+      { "customer": "the knob that switches between tub and shower", "technical": "shower diverter / diverter valve" },
+      { "customer": "the drain stopper that won't open or close", "technical": "trip lever drain assembly / pop-up stopper" },
+      { "customer": "the cover plate thing on the tub with the lever", "technical": "trip lever face plate / overflow plate" },
+      { "customer": "the spout on the wall", "technical": "tub spout" },
+      { "customer": "the valve behind the wall", "technical": "tub/shower valve body" },
+      { "customer": "the cartridge inside the valve", "technical": "shower cartridge" },
+      { "customer": "the decorative trim plate around the valve handles", "technical": "escutcheon plate" },
+      { "customer": "the piece under the tub connecting to the drain", "technical": "shoe fitting" },
+      { "customer": "the pipe inside the wall behind the overflow plate", "technical": "tub overflow tube" }
+    ],
+    "shower": [
+      { "customer": "the valve inside the wall", "technical": "shower valve body" },
+      { "customer": "the cartridge that keeps the temperature from changing", "technical": "pressure-balancing cartridge" },
+      { "customer": "the temperature control cartridge", "technical": "thermostatic cartridge" },
+      { "customer": "the pipe coming out of the wall to the showerhead", "technical": "shower arm" },
+      { "customer": "the sprayer", "technical": "showerhead" },
+      { "customer": "the waterproof membrane under the tile floor", "technical": "shower pan liner" },
+      { "customer": "the drain in the floor", "technical": "drain body / drain flange" },
+      { "customer": "the stuff between the tiles", "technical": "grout / caulk" },
+      { "customer": "the step at the shower entry", "technical": "curb" }
+    ],
+    "water_heater": [
+      { "customer": "the pipe thing on the side with a lever", "technical": "T&P valve (temperature and pressure relief valve)", "aliases": ["TP valve", "relief valve", "pressure relief valve"] },
+      { "customer": "the overflow pipe / the dripping pipe on the side", "technical": "T&P discharge pipe" },
+      { "customer": "the pipe on top of the water heater", "technical": "cold water inlet / hot water outlet / dip tube depending on position" },
+      { "customer": "the dial on the front", "technical": "gas control valve / thermostat dial" },
+      { "customer": "the pilot light", "technical": "pilot light / thermocouple assembly" },
+      { "customer": "the small extra tank near the water heater", "technical": "expansion tank" },
+      { "customer": "the valve at the top where water comes in", "technical": "cold water shut-off valve" },
+      { "customer": "gunk / sediment at the bottom", "technical": "scale / sediment buildup" },
+      { "customer": "the drain at the bottom", "technical": "drain valve" },
+      { "customer": "the inside rod that prevents tank corrosion", "technical": "anode rod (magnesium or aluminum)" },
+      { "customer": "the dip tube", "technical": "dip tube (sends cold water to bottom of tank for heating)" }
+    ],
+    "sewer_main_line": [
+      { "customer": "the cap in the floor / the cap in the yard", "technical": "clean-out / access cleanout" },
+      { "customer": "the main drain pipe", "technical": "main sewer line / building drain" },
+      { "customer": "tree roots in my pipes", "technical": "root intrusion" },
+      { "customer": "camera in the pipes", "technical": "sewer camera inspection / video inspection" },
+      { "customer": "high-pressure cleaning", "technical": "hydro-jetting" }
+    ],
+    "hvac_general": [
+      { "customer": "the outside unit / the box outside / the compressor unit", "technical": "condenser unit", "aliases": ["condensing unit", "outdoor unit"] },
+      { "customer": "the coil thing above the furnace / the A-coil", "technical": "evaporator coil" },
+      { "customer": "the white PVC pipe dripping outside", "technical": "condensate drain line" },
+      { "customer": "the thing in the attic / the box in the attic", "technical": "air handler / fan coil unit" },
+      { "customer": "the blower", "technical": "blower motor" },
+      { "customer": "the cylinder can inside the outside unit", "technical": "run capacitor" },
+      { "customer": "the electrical switch for the compressor", "technical": "contactor" },
+      { "customer": "the copper pipes between inside and outside", "technical": "refrigerant lines (suction line + liquid line)" },
+      { "customer": "the big insulated copper pipe", "technical": "suction line" },
+      { "customer": "the smaller copper pipe", "technical": "liquid line" },
+      { "customer": "the drain pan under the indoor coil", "technical": "condensate pan" },
+      { "customer": "the safety switch that shuts off AC if drain clogs", "technical": "float switch" }
+    ],
+    "furnace": [
+      { "customer": "the glowing element that lights the gas", "technical": "hot surface igniter (HSI)" },
+      { "customer": "the small rod that detects the flame", "technical": "flame sensor / flame rod" },
+      { "customer": "the motor that exhausts combustion gases", "technical": "inducer motor / draft inducer" },
+      { "customer": "the part that transfers heat (if cracked, dangerous)", "technical": "heat exchanger" },
+      { "customer": "the burners", "technical": "burner assembly" },
+      { "customer": "the valve that controls gas flow to burners", "technical": "gas valve" },
+      { "customer": "the circuit board / the brain of the furnace", "technical": "control board" },
+      { "customer": "the safety switch that shuts off if furnace overheats", "technical": "limit switch" },
+      { "customer": "the vent pipe for exhaust", "technical": "flue pipe" },
+      { "customer": "the white pipe dripping from furnace", "technical": "PVC condensate drain (high-efficiency furnace)" }
+    ],
+    "heat_pump": [
+      { "customer": "the valve that switches between heating and cooling modes", "technical": "reversing valve" },
+      { "customer": "the backup heat / strip heat", "technical": "auxiliary heat / electric heat strips" },
+      { "customer": "emergency heat mode", "technical": "emergency heat mode (backup mode using only electric strips)" },
+      { "customer": "steam coming off the outdoor unit in winter", "technical": "normal defrost cycle — NOT an emergency" }
+    ],
+    "ductwork": [
+      { "customer": "the vent", "technical": "supply register" },
+      { "customer": "the big return vent", "technical": "return grille" },
+      { "customer": "the large box attached to the furnace", "technical": "supply plenum" },
+      { "customer": "the thing that blocks air in the duct", "technical": "zone damper / manual damper" },
+      { "customer": "the flexible duct", "technical": "flex duct" }
+    ],
+    "mini_split": [
+      { "customer": "the unit mounted high on the wall", "technical": "indoor air handler / wall-mount head unit" },
+      { "customer": "the pump that drains the indoor unit", "technical": "condensate pump" },
+      { "customer": "the copper pipes + wire running between indoor and outdoor", "technical": "line set" }
+    ],
+    "washing_machine_laundry": [
+      { "customer": "the two knobs behind the washer", "technical": "washing machine valves (hot and cold)" },
+      { "customer": "the hoses from the wall to the washer", "technical": "washing machine hoses" },
+      { "customer": "the pipe the washer drain hose goes into", "technical": "drain standpipe" }
+    ],
+    "dishwasher": [
+      { "customer": "the chrome device on the sink deck", "technical": "air gap" },
+      { "customer": "the hose that drains into the disposal", "technical": "drain hose" },
+      { "customer": "the shutoff under the sink for the dishwasher", "technical": "dishwasher supply valve" }
+    ]
+  },
+  "symptom_vocabulary": {
+    "sounds": [
+      { "customer_description": "banging in the pipes", "technical_cause": "water hammer — pressure surge from sudden valve closure" },
+      { "customer_description": "gurgling drain", "technical_cause": "partial blockage or venting issue" },
+      { "customer_description": "whistling pipes", "technical_cause": "worn valves with deposit buildup or high pressure" },
+      { "customer_description": "ticking / tapping / sputtering in the pipes", "technical_cause": "air in pipes" },
+      { "customer_description": "popping / rumbling from the water heater", "technical_cause": "sediment buildup (scale at bottom of tank)" },
+      { "customer_description": "hissing from the toilet tank", "technical_cause": "fill valve seat wear or flapper bypass" },
+      { "customer_description": "clicking from the furnace that won't start", "technical_cause": "faulty igniter or gas valve; flame sensor misread" },
+      { "customer_description": "banging when the furnace or AC turns on", "technical_cause": "duct thermal expansion (oil-canning) or undersized ductwork" },
+      { "customer_description": "loud rumbling from the outdoor unit", "technical_cause": "compressor or fan bearing failure" },
+      { "customer_description": "squealing from the air handler", "technical_cause": "blower motor bearing failure" },
+      { "customer_description": "loud bang when furnace starts", "technical_cause": "delayed ignition from gas buildup — urgent" }
+    ],
+    "sight": [
+      { "customer_description": "rusty water / brown water", "technical_cause": "sediment, depleted anode rod, or corroded iron pipes" },
+      { "customer_description": "white chalky buildup", "technical_cause": "mineral scale / hard water deposits" },
+      { "customer_description": "ice on the pipes or outside AC unit", "technical_cause": "low refrigerant or airflow restriction (dirty filter or failed blower)" },
+      { "customer_description": "water pooling under the water heater", "technical_cause": "T&P valve relief, tank corrosion, or failed drain valve" },
+      { "customer_description": "steam coming off the outdoor unit in winter", "technical_cause": "NORMAL heat pump defrost cycle — not an emergency" },
+      { "customer_description": "yellow or sooty flame on furnace", "technical_cause": "combustion problem; dirty burners or gas pressure issue — urgent" },
+      { "customer_description": "water coming through the ceiling", "technical_cause": "active pipe leak above — emergency" }
+    ],
+    "smell": [
+      { "customer_description": "rotten eggs / sulfur smell", "technical_cause": "gas leak (mercaptan odorant) — EMERGENCY: evacuate and call 911" },
+      { "customer_description": "sewer smell from drains", "technical_cause": "dry P-trap, broken wax ring, or vent pipe issue" },
+      { "customer_description": "burning smell from furnace at first use of season", "technical_cause": "dust burnoff (usually benign) — escalate if persistent or accompanied by smoke" },
+      { "customer_description": "musty smell from vents", "technical_cause": "mold in ductwork or on evaporator coil" },
+      { "customer_description": "chemical smell from AC", "technical_cause": "refrigerant leak" },
+      { "customer_description": "gas smell from furnace area", "technical_cause": "EMERGENCY — potential gas leak or cracked heat exchanger" }
+    ],
+    "touch_feel": [
+      { "customer_description": "wet drywall under the sink", "technical_cause": "supply line or P-trap leak" },
+      { "customer_description": "soft floor near the toilet", "technical_cause": "subfloor rot from wax ring failure — elevated urgency" },
+      { "customer_description": "warm air from vents when AC is on", "technical_cause": "refrigerant issue or condenser failure" },
+      { "customer_description": "weak water pressure only at one faucet", "technical_cause": "aerator clog or shut-off valve partially closed" }
+    ]
+  },
+  "common_misidentifications": [
+    { "what_customer_thinks_it_is": "the overflow pipe on the side of the water heater", "what_it_actually_is": "T&P relief valve discharge pipe", "training_note": "If customer says 'dripping from the pipe on the side', ask if there's a lever on it" },
+    { "what_customer_thinks_it_is": "a leak from a small extra tank", "what_it_actually_is": "expansion tank — normal component, may indicate T&P valve issue if wet" },
+    { "what_customer_thinks_it_is": "steam / smoke from the outdoor AC unit in winter", "what_it_actually_is": "normal heat pump defrost cycle — customer should NOT be dispatched an emergency tech" },
+    { "what_customer_thinks_it_is": "the compressor", "what_it_actually_is": "condenser unit (the compressor is one component inside the condenser)" },
+    { "what_customer_thinks_it_is": "the filter box", "what_it_actually_is": "return air plenum / return grille housing" },
+    { "what_customer_thinks_it_is": "a separate small tank", "what_it_actually_is": "expansion tank — normal" },
+    { "what_customer_thinks_it_is": "the outside fan", "what_it_actually_is": "condenser fan motor" }
+  ],
+  "fixture_parts_map": {
+    "kitchen_sink": {
+      "parts_technical": ["basket strainer", "tailpiece", "P-trap", "trap arm", "angle stop (x2)", "supply lines hot/cold", "faucet cartridge", "aerator", "air gap", "garbage disposal", "disposal mounting ring", "dishwasher drain inlet"],
+      "common_complaints": [
+        { "customer_says": "water under the sink", "likely_causes": ["P-trap leak", "supply line leak", "drain connection failure"] },
+        { "customer_says": "disposal hums but doesn't grind", "likely_causes": ["jammed impeller — check reset button under unit"] },
+        { "customer_says": "disposal leaking from the bottom", "likely_causes": ["failed internal seal — unit must be replaced"] },
+        { "customer_says": "disposal won't turn on at all", "likely_causes": ["tripped reset button (under unit)", "tripped breaker", "wiring failure"] },
+        { "customer_says": "faucet drips when off", "likely_causes": ["worn cartridge or O-rings"] },
+        { "customer_says": "low pressure only at kitchen faucet", "likely_causes": ["clogged aerator"] },
+        { "customer_says": "dishwasher water backs up into sink", "likely_causes": ["air gap clog", "drain hose issue", "disposal knockout plug not removed"] }
+      ]
+    },
+    "bathroom_sink": {
+      "parts_technical": ["basket strainer", "tailpiece", "P-trap", "trap arm", "angle stop (x2)", "supply lines", "faucet cartridge", "aerator", "pop-up assembly", "pivot rod", "clevis strap", "overflow plate"],
+      "common_complaints": [
+        { "customer_says": "the stopper won't stay up", "likely_causes": ["pivot rod adjustment needed"] },
+        { "customer_says": "stopper stuck down / won't come up", "likely_causes": ["pivot rod disconnected or corroded"] }
+      ]
+    },
+    "bathtub": {
+      "parts_technical": ["tub drain assembly", "trip lever", "overflow face plate", "tub stopper", "shoe fitting", "overflow tube", "tub spout", "diverter", "tub/shower valve body", "cartridge", "escutcheon plate"],
+      "common_complaints": [
+        { "customer_says": "tub won't drain", "likely_causes": ["clog in drain", "trip lever stopper stuck in closed position"] },
+        { "customer_says": "the lever thing doesn't work", "likely_causes": ["trip lever mechanism failure or adjustment needed"] },
+        { "customer_says": "water comes out spout and showerhead at same time", "likely_causes": ["worn diverter"] },
+        { "customer_says": "can't switch from tub to shower", "likely_causes": ["diverter stuck due to mineral buildup"] },
+        { "customer_says": "slow drip from the spout", "likely_causes": ["cartridge wear"] }
+      ]
+    },
+    "shower": {
+      "parts_technical": ["shower valve body", "pressure-balancing cartridge", "thermostatic cartridge", "shower arm", "showerhead", "shower pan liner", "drain body", "grout", "caulk", "curb"],
+      "common_complaints": [
+        { "customer_says": "temperature fluctuates when toilet flushes", "likely_causes": ["pressure-balancing cartridge failure"] },
+        { "customer_says": "can't get water hot or cold enough", "likely_causes": ["cartridge reach limiter or anti-scald set too low"] },
+        { "customer_says": "leak from behind the shower wall", "likely_causes": ["failed pan liner", "failed grout or caulk"] }
+      ]
+    },
+    "toilet": {
+      "parts_technical": ["fill valve", "float", "flapper", "flush valve seat", "trip lever", "refill tube", "overflow tube", "tank-to-bowl gasket", "tank bolts", "wax ring", "closet flange", "closet bolts", "toilet supply line", "angle stop"],
+      "common_complaints": [
+        { "customer_says": "toilet keeps running", "likely_causes": ["worn flapper (most common)", "fill valve not shutting off"] },
+        { "customer_says": "toilet runs for a few seconds then stops (ghost flushing)", "likely_causes": ["slow flapper leak — water slowly draining through worn flapper"] },
+        { "customer_says": "toilet won't flush / handle does nothing", "likely_causes": ["broken flapper chain", "disconnected trip lever"] },
+        { "customer_says": "water on floor at the toilet base", "likely_causes": ["failed wax ring", "cracked toilet base", "tank-to-bowl leak"] },
+        { "customer_says": "toilet rocks", "likely_causes": ["failed wax ring", "loose closet bolts"] },
+        { "customer_says": "tank won't fill", "likely_causes": ["closed supply valve", "failed fill valve"] },
+        { "customer_says": "toilet flushes slowly or weak flush", "likely_causes": ["clogged trap", "partially blocked drain", "low-flow issue"] },
+        { "customer_says": "toilet gurgles when not flushing", "likely_causes": ["main line partial blockage", "venting issue"] }
+      ]
+    },
+    "laundry": {
+      "parts_technical": ["washing machine valves (hot/cold)", "washing machine hoses", "drain standpipe", "P-trap", "floor drain"],
+      "common_complaints": [
+        { "customer_says": "washing machine standpipe overflows", "likely_causes": ["drain line clog", "undersized standpipe"] },
+        { "customer_says": "hose leaking at the washer connection", "likely_causes": ["failed hose washer", "cracked hose"] },
+        { "customer_says": "water on floor during wash cycle", "likely_causes": ["hose failure", "standpipe issue", "internal washer pump failure"] },
+        { "customer_says": "washing machine won't drain", "likely_causes": ["clogged standpipe", "kinked drain hose"] }
+      ],
+      "notes": "Proper standpipe height: 18–24 inches minimum, 96 inches maximum (prevents siphoning)"
+    },
+    "dishwasher": {
+      "parts_technical": ["supply valve", "supply line", "drain hose", "air gap", "high loop", "disposal inlet"],
+      "common_complaints": [
+        { "customer_says": "dishwasher has standing water after cycle", "likely_causes": ["clogged drain hose", "air gap clog", "disposal knockout plug not removed"] },
+        { "customer_says": "dishwasher leaks under sink", "likely_causes": ["failed drain hose connection"] },
+        { "customer_says": "water backing up into sink when dishwasher drains", "likely_causes": ["clogged air gap"] }
+      ]
+    },
+    "water_heater": {
+      "parts_technical": ["tank body", "cold water inlet", "hot water outlet", "dip tube", "anode rod", "T&P valve", "T&P discharge pipe", "gas control valve", "thermocouple", "burner assembly", "flue pipe", "drain valve", "expansion tank"],
+      "common_complaints": [
+        { "customer_says": "no hot water — gas unit", "likely_causes": ["pilot out", "failed thermocouple", "gas valve failure"] },
+        { "customer_says": "no hot water — electric unit", "likely_causes": ["tripped breaker", "failed heating element", "failed thermostat"] },
+        { "customer_says": "not enough hot water / runs out fast", "likely_causes": ["undersized unit", "failed dip tube", "sediment buildup"] },
+        { "customer_says": "popping / rumbling / banging from water heater", "likely_causes": ["sediment buildup"] },
+        { "customer_says": "rusty or discolored hot water", "likely_causes": ["depleted anode rod", "internal corrosion"] },
+        { "customer_says": "water heater leaking from the bottom", "likely_causes": ["tank corrosion (replace)", "failed drain valve"] },
+        { "customer_says": "T&P valve dripping or discharging", "likely_causes": ["excessive pressure", "failed T&P valve", "failed expansion tank"] },
+        { "customer_says": "pilot light won't stay lit", "likely_causes": ["dirty thermocouple", "draft issue", "gas supply problem"] },
+        { "customer_says": "sulfur or rotten egg smell in hot water", "likely_causes": ["anode rod reacting with high-sulfur water"] }
+      ]
+    },
+    "main_line_sewer": {
+      "parts_technical": ["main sewer line", "building drain", "clean-out", "root intrusion", "hydro-jetting equipment", "sewer camera"],
+      "pipe_types": ["cast iron", "clay", "Orangeburg (failing — 1940s–1970s homes)", "PVC", "ABS"],
+      "common_complaints": [
+        { "customer_says": "multiple drains are slow or backing up", "likely_causes": ["main line involvement — NOT individual clogs"], "escalation": "reclassify job type to main line" },
+        { "customer_says": "when I flush the toilet the sink gurgles", "likely_causes": ["main line blockage"] },
+        { "customer_says": "water comes up in the bathtub when I run the dishwasher", "likely_causes": ["main line blockage"] },
+        { "customer_says": "sewage smell throughout the house", "likely_causes": ["dry trap OR main line/vent issue"] },
+        { "customer_says": "sewage coming up through the floor drain in the basement", "likely_causes": ["main line backup — EMERGENCY"] }
+      ]
+    },
+    "central_ac": {
+      "parts_technical": ["condenser unit", "compressor", "condenser coil", "condenser fan", "contactor", "run capacitor", "refrigerant lines", "suction line", "liquid line", "evaporator coil", "air handler", "blower motor", "filter drier", "TXV", "condensate pan", "condensate drain line", "float switch"],
+      "common_complaints": [
+        { "customer_says": "AC running but not cooling", "likely_causes": ["low refrigerant", "dirty evaporator coil", "failed compressor", "failed contactor"] },
+        { "customer_says": "outside unit not running but inside is", "likely_causes": ["failed contactor", "failed capacitor", "tripped breaker"] },
+        { "customer_says": "ice on the pipes or unit freezing up", "likely_causes": ["low refrigerant", "dirty filter", "failed blower motor"] },
+        { "customer_says": "water dripping or flooding from inside unit", "likely_causes": ["clogged condensate drain line"] },
+        { "customer_says": "not reaching temperature", "likely_causes": ["undersized system", "refrigerant issue", "duct leaks"] }
+      ]
+    },
+    "furnace_gas": {
+      "parts_technical": ["heat exchanger", "burner assembly", "gas valve", "inducer motor", "hot surface igniter", "flame sensor", "limit switch", "pressure switch", "control board", "blower motor", "blower capacitor", "flue pipe"],
+      "common_complaints": [
+        { "customer_says": "furnace won't turn on / nothing happens", "likely_causes": ["thermostat issue", "no power", "failed control board"] },
+        { "customer_says": "furnace starts then shuts off immediately", "likely_causes": ["dirty flame sensor", "failed inducer", "pressure switch fault"] },
+        { "customer_says": "furnace short cycles", "likely_causes": ["dirty filter", "oversized unit", "limit switch tripping", "dirty flame sensor"] },
+        { "customer_says": "furnace blowing cold air", "likely_causes": ["failed igniter", "failed gas valve", "pilot outage"] },
+        { "customer_says": "clicking from furnace that won't start", "likely_causes": ["igniter firing but gas not reaching", "flame sensor misread"] },
+        { "customer_says": "loud bang when furnace starts", "likely_causes": ["delayed ignition from gas buildup — urgent"] },
+        { "customer_says": "gas smell from furnace area", "likely_causes": ["gas leak or cracked heat exchanger — EMERGENCY"] }
+      ]
+    },
+    "heat_pump": {
+      "parts_technical": ["all AC components", "reversing valve", "defrost board", "defrost thermostat/sensor", "auxiliary heat strips", "emergency heat mode"],
+      "common_complaints": [
+        { "customer_says": "heat pump blowing cold air in heat mode", "likely_causes": ["failed reversing valve (stuck in cooling)", "low refrigerant", "in defrost cycle (temporary — normal)"] },
+        { "customer_says": "thick ice covering the entire outdoor unit", "likely_causes": ["failed defrost board", "failed defrost sensor", "low refrigerant"] },
+        { "customer_says": "steam coming off the outdoor unit in winter", "likely_causes": ["NORMAL defrost cycle — do not dispatch emergency tech"] },
+        { "customer_says": "heat pump not switching from heat to cool", "likely_causes": ["stuck reversing valve"] }
+      ]
+    },
+    "mini_split": {
+      "parts_technical": ["outdoor condensing unit", "indoor wall-mount head unit", "remote control", "condensate pump", "line set", "refrigerant port"],
+      "common_complaints": [
+        { "customer_says": "indoor unit dripping water inside", "likely_causes": ["clogged condensate drain", "failed condensate pump"] },
+        { "customer_says": "one room not cooling but others are fine", "likely_causes": ["failed indoor unit", "low refrigerant in that zone"] },
+        { "customer_says": "unit displays error code", "likely_causes": ["manufacturer-specific fault codes — lookup required"] }
+      ]
+    }
+  },
+  "location_descriptions": {
+    "under the kitchen sink": "beneath kitchen sink cabinet — typically P-trap, supply lines, angle stops, disposal",
+    "the pipe behind the toilet": "toilet supply line or shut-off valve",
+    "under my bathroom sink": "P-trap area, pop-up assembly, supply lines",
+    "in the wall": "in-wall plumbing — typically shower valve body",
+    "outside the house": "hose bib / sillcock / exterior faucet",
+    "in my crawlspace": "sub-floor drain lines or supply runs",
+    "the thing on my wall by the washing machine": "washing machine valves / hose bibs",
+    "the pipes in my attic": "HVAC condensate drain or supply/drain stack",
+    "the cap in the yard": "clean-out access port for main sewer line",
+    "the box outside": "condenser unit (outdoor AC/heat pump unit)",
+    "the box in the attic or closet": "air handler / furnace",
+    "the unit mounted high on the wall": "mini-split indoor head unit"
+  }
+}

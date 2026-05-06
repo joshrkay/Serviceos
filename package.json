@@ -15,9 +15,21 @@
     "lint": "npm run lint --workspaces",
     "seed": "npm run seed --workspace=packages/api",
     "seed:clean": "npm run seed:clean --workspace=packages/api",
-    "migrate:dryrun": "npm run migrate:dryrun --workspace=packages/api"
+    "migrate:dryrun": "npm run migrate:dryrun --workspace=packages/api",
+    "e2e": "playwright test",
+    "e2e:smoke": "playwright test e2e/smoke.spec.ts",
+    "e2e:ui": "playwright test --ui",
+    "e2e:report": "playwright show-report",
+    "qa:smoke-tools": "node qa-runner/src/orchestrator.mjs smoke",
+    "qa:run": "node qa-runner/src/orchestrator.mjs run",
+    "qa:report": "node qa-runner/src/orchestrator.mjs summary",
+    "qa:doctor": "node qa-runner/src/orchestrator.mjs doctor",
+    "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/pg": "^8.18.0",
+    "pg": "^8.20.0",
     "typescript": "^5.4.0"
   }
 }

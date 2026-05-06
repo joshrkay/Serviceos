@@ -3,6 +3,9 @@ import {
   validateProposalInput,
   InMemoryProposalRepository,
   CreateProposalInput,
+  ProposalType,
+  decideInitialStatus,
+  actionClassForProposalType,
 } from '../../src/proposals/proposal';
 import { ConflictError } from '../../src/shared/errors';
 
@@ -210,5 +213,270 @@ describe('P2-001 — Proposal entity and core schema', () => {
       createdBy: 'user-1',
     });
     expect(arrayPayloadErrors).toContain('payload must be a non-null object');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Decision 3 — Action-class registry + decideInitialStatus
+//
+// The 2026-04-14 retrospective identified Decision 3 as the only decision
+// with no runtime wiring on the TS side. Step 5b adds the action-class
+// registry and a single pure decision function that maps
+// (action class, trust tier, confidence) → initial proposal status.
+// These tests lock the rules so they cannot silently regress.
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('actionClassForProposalType — D3 action-class registry', () => {
+  it('classifies create_customer as capture', () => {
+    expect(actionClassForProposalType('create_customer')).toBe('capture');
+  });
+
+  it('classifies update_customer as capture', () => {
+    expect(actionClassForProposalType('update_customer')).toBe('capture');
+  });
+
+  it('classifies create_job as capture', () => {
+    expect(actionClassForProposalType('create_job')).toBe('capture');
+  });
+
+  it('classifies create_appointment as capture', () => {
+    expect(actionClassForProposalType('create_appointment')).toBe('capture');
+  });
+
+  it('classifies draft_estimate as capture', () => {
+    expect(actionClassForProposalType('draft_estimate')).toBe('capture');
+  });
+
+  it('classifies draft_invoice as capture (drafting moves no money)', () => {
+    expect(actionClassForProposalType('draft_invoice')).toBe('capture');
+  });
+
+  it('classifies reschedule_appointment as capture', () => {
+    expect(actionClassForProposalType('reschedule_appointment')).toBe('capture');
+  });
+
+  it('classifies cancel_appointment as irreversible (always asks)', () => {
+    expect(actionClassForProposalType('cancel_appointment')).toBe('irreversible');
+  });
+
+  it('classifies all onboarding_* types as capture', () => {
+    const onboardingTypes: ProposalType[] = [
+      'onboarding_tenant_settings',
+      'onboarding_service_category',
+      'onboarding_estimate_template',
+      'onboarding_team_member',
+      'onboarding_schedule',
+    ];
+    for (const t of onboardingTypes) {
+      expect(actionClassForProposalType(t)).toBe('capture');
+    }
+  });
+});
+
+describe('decideInitialStatus — D3 trust-tier decision', () => {
+  it('no source trust tier → draft (existing behavior preserved)', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  it('autonomous + capture + confidence ≥ 0.9 → approved', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+      })
+    ).toBe('approved');
+  });
+
+  it('autonomous + capture + confidence at exact 0.9 → approved', () => {
+    // The threshold is inclusive — 0.9 is enough.
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.9,
+      })
+    ).toBe('approved');
+  });
+
+  it('autonomous + capture + confidence < 0.9 → draft', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.89,
+      })
+    ).toBe('draft');
+  });
+
+  it('autonomous + capture + missing confidence → draft (no signal)', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+      })
+    ).toBe('draft');
+  });
+
+  it('autonomous + irreversible (cancel) at high confidence → draft (always_asks)', () => {
+    // Even with autonomous tier and 0.99 confidence, cancel_appointment
+    // is irreversible → never auto-approve.
+    expect(
+      decideInitialStatus({
+        proposalType: 'cancel_appointment',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  it('graduates_fast + capture + high confidence → draft (gated until trust ledger lands)', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'graduates_fast',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  it('graduates_slowly + capture + high confidence → draft (gated)', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'draft_estimate',
+        sourceTrustTier: 'graduates_slowly',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  it('always_asks + capture + high confidence → draft (forever gated)', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'always_asks',
+        confidenceScore: 0.99,
+      })
+    ).toBe('draft');
+  });
+
+  // missingFields override — partial payloads can never auto-execute.
+  // The forcing function: even a maximally-trusted autonomous agent
+  // at 0.95 confidence on a capture-class proposal stays in 'draft'
+  // whenever the task handler reports a gap. Review UI blocks
+  // Approve until the operator fills the listed fields.
+  it('missingFields non-empty forces draft even with autonomous + capture + 0.95', () => {
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        missingFields: ['email'],
+      })
+    ).toBe('draft');
+  });
+
+  it('missingFields empty array behaves as no-missingFields (preserves auto-approve path)', () => {
+    // An empty array should NOT be treated as "gaps exist" — it's
+    // semantically "we checked, nothing missing".
+    expect(
+      decideInitialStatus({
+        proposalType: 'create_customer',
+        sourceTrustTier: 'autonomous',
+        confidenceScore: 0.95,
+        missingFields: [],
+      })
+    ).toBe('approved');
+  });
+});
+
+describe('createProposal — D3 trust-tier integration', () => {
+  it('without sourceTrustTier, status is draft (backward compatible)', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      payload: { name: 'Acme' },
+      summary: 'Create customer Acme',
+      confidenceScore: 0.99,
+      createdBy: 'user-1',
+    });
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('with sourceTrustTier=autonomous + capture + 0.95 confidence, status is approved', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      payload: { name: 'Acme' },
+      summary: 'Create customer Acme via CaptureAgent',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      createdBy: 'agent-capture',
+    });
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('with sourceTrustTier=autonomous + cancel_appointment, status is draft (irreversible)', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'cancel_appointment',
+      payload: { appointmentId: 'appt-1' },
+      summary: 'Cancel appt-1',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.99,
+      createdBy: 'agent-capture',
+    });
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('with sourceTrustTier=graduates_slowly + draft_estimate, status is draft (money class gated)', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'draft_estimate',
+      payload: { lineItems: [] },
+      summary: 'Draft estimate via InvoiceAgent',
+      sourceTrustTier: 'graduates_slowly',
+      confidenceScore: 0.99,
+      createdBy: 'agent-invoice',
+    });
+    expect(proposal.status).toBe('draft');
+  });
+
+  it('missingFields land in sourceContext and force draft even on autonomous + 0.95', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'create_customer',
+      payload: { name: 'Acme' },
+      summary: 'Create customer Acme',
+      sourceTrustTier: 'autonomous',
+      confidenceScore: 0.95,
+      createdBy: 'agent-capture',
+      missingFields: ['email', 'phone'],
+    });
+    expect(proposal.status).toBe('draft');
+    // missingFields ride on sourceContext so we don't need a new DB
+    // column — the typed accessor `missingFieldsFor(proposal)` reads
+    // them back.
+    expect(proposal.sourceContext).toBeDefined();
+    expect(proposal.sourceContext?.missingFields).toEqual(['email', 'phone']);
+  });
+
+  it('missingFields merge into existing sourceContext without clobbering other keys', () => {
+    const proposal = createProposal({
+      tenantId: 'tenant-1',
+      proposalType: 'reschedule_appointment',
+      payload: { appointmentReference: 'the Miller job' },
+      summary: 'Reschedule',
+      sourceContext: { conversationId: 'conv-42' },
+      createdBy: 'user-1',
+      missingFields: ['newScheduledStart'],
+    });
+    expect(proposal.sourceContext?.conversationId).toBe('conv-42');
+    expect(proposal.sourceContext?.missingFields).toEqual(['newScheduledStart']);
   });
 });

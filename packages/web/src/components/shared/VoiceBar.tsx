@@ -39,8 +39,84 @@ function Waveform() {
   );
 }
 
+const VOICE_POLL_INTERVAL_MS = 1500;
+const VOICE_POLL_TIMEOUT_MS = 90000;
+
+function isIOSSafari(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  const iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const webkit = /WebKit/.test(ua);
+  return iOS && webkit && !/CriOS|FxiOS/.test(ua);
+}
+
+function getSupportedAudioMimeType(): string | null {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') return null;
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
+}
+
+async function createSignedAudioUpload(blob: Blob) {
+  const filename = `voice-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : 'webm'}`;
+  // MediaRecorder emits "audio/webm;codecs=opus" but the backend whitelist
+  // keys on the base type only. Strip codec params before sending.
+  const contentType = (blob.type || 'audio/webm').split(';')[0].trim();
+  const body = JSON.stringify({
+    filename,
+    contentType,
+    sizeBytes: blob.size,
+    entityType: 'voice_recording',
+  });
+
+  const requestSigned = async (url: string) => apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+
+  let response = await requestSigned('/api/files/upload-url');
+  if (!response.ok) {
+    response = await requestSigned('/api/files/upload');
+  }
+  if (!response.ok) throw new Error('Unable to get a signed upload URL.');
+
+  const payload = await response.json();
+  const fileId = payload.fileId ?? payload.fileRecord?.id;
+  const uploadUrl = payload.uploadUrl;
+  const downloadUrl = payload.downloadUrl ?? payload.audioUrl ?? payload.fileUrl;
+
+  if (!fileId || !uploadUrl) throw new Error('Upload URL response is missing required fields.');
+
+  // Content-Type must match what was signed server-side — we used the
+  // normalized (no-codec-params) value in the upload-url request, so
+  // echo that here.
+  const uploadResult = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': contentType },
+    body: blob,
+  });
+
+  if (!uploadResult.ok) throw new Error('Audio upload failed. Please retry.');
+
+  return { fileId, audioUrl: downloadUrl ?? uploadUrl.split('?')[0] };
+}
+
+async function pollRecordingUntilDone(recordingId: string) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < VOICE_POLL_TIMEOUT_MS) {
+    const res = await apiFetch(`/api/voice/recordings/${recordingId}`);
+    if (!res.ok) throw new Error('Could not fetch transcription status.');
+
+    const status = await res.json();
+    if (status.status === 'completed') return status;
+    if (status.status === 'failed') throw new Error(status.errorMessage || 'Transcription failed.');
+
+    await new Promise((resolve) => setTimeout(resolve, VOICE_POLL_INTERVAL_MS));
+  }
+  throw new Error('Transcription timed out. Please retry.');
+}
+
 interface VoiceBarProps {
-  /** Renders as an inline sidebar element (desktop) rather than the mobile bottom bar */
   variant?: 'mobile' | 'desktop';
 }
 
@@ -48,8 +124,11 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const navigate = useNavigate();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
 
@@ -57,39 +136,133 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   useImperativeHandle(ref, () => ({
     activate: () => { if (phase === 'idle') startListening(); },
   }), [phase]);
+  const stoppingRef = useRef(false);
 
-  // Start recording via MediaRecorder API
-  const startListening = async () => {
-    setPhase('listening');
-    setTranscript('');
-    audioChunksRef.current = [];
+  const stopStream = useCallback(() => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }, []);
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
+  const uploadAndTranscribe = useCallback(async (audioBlob: Blob) => {
+    const { fileId, audioUrl } = await createSignedAudioUpload(audioBlob);
+    // Reconcile declared vs. actual uploaded size. The signed URL does not
+    // bind content length, so the API HEADs the object and rejects over-max
+    // payloads. A non-2xx here means the upload exceeded the size ceiling
+    // or storage was otherwise unhappy; treat it as a hard failure.
+    const verifyRes = await apiFetch(`/api/files/${fileId}/verify`, {
+      method: 'POST',
+    });
+    if (!verifyRes.ok) throw new Error('Upload verification failed.');
+    const idempotencyKey = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
+    const createRes = await apiFetch('/api/voice/recordings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileId, audioUrl, idempotencyKey }),
+    });
 
-      recorder.start();
-    } catch {
-      // Microphone unavailable — let the user know
-      setTranscript('(Microphone not available — please type your message)');
-      setPhase('transcript');
-    }
-  };
+    if (!createRes.ok) throw new Error('Unable to start transcription.');
 
-  // Stop recording and send audio for transcription
-  const stopListening = async () => {
+    const created = await createRes.json();
+    const recordingId = created.recording?.id;
+    if (!recordingId) throw new Error('Missing recording id from API.');
+
+    const completed = await pollRecordingUntilDone(recordingId);
+    return (completed.transcript || '').trim();
+  }, []);
+
+  const stopListening = useCallback(async () => {
     const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === 'inactive') {
-      setPhase('transcript');
+    if (!recorder || recorder.state !== 'recording' || stoppingRef.current) return;
+
+    stoppingRef.current = true;
+    setPhase('transcribing');
+
+    await new Promise<void>((resolve) => {
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        stopStream();
+
+        if (!audioBlob.size) {
+          setError('No audio captured. Please retry.');
+          setCanRetry(true);
+          setPhase('idle');
+          stoppingRef.current = false;
+          resolve();
+          return;
+        }
+
+        void uploadAndTranscribe(audioBlob)
+          .then((text) => {
+            if (!text) {
+              setError('No transcript was returned. Please retry.');
+              setCanRetry(true);
+              setPhase('idle');
+            } else {
+              setTranscript(text);
+              setPhase('transcript');
+            }
+          })
+          .catch((err) => {
+            setError(err instanceof Error ? err.message : 'Transcription failed.');
+            setCanRetry(true);
+            setPhase('idle');
+          })
+          .finally(() => {
+            stoppingRef.current = false;
+            resolve();
+          });
+      };
+      recorder.stop();
+    });
+  }, [stopStream, uploadAndTranscribe]);
+
+  const startListening = useCallback(async () => {
+    setError(null);
+    setCanRetry(false);
+    setTranscript('');
+
+    const mimeType = getSupportedAudioMimeType();
+    if (!mimeType) {
+      setError('This browser does not support a compatible recording format.');
+      setCanRetry(true);
       return;
     }
 
-    setPhase('transcribing');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      stoppingRef.current = false;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+
+      recorder.onerror = () => {
+        stopStream();
+        setError('Recording failed. Please retry.');
+        setCanRetry(true);
+        setPhase('idle');
+      };
+
+      recorder.start(1000);
+      setPhase('listening');
+    } catch {
+      setError('Microphone permission is required to record voice messages.');
+      setCanRetry(true);
+      setPhase('idle');
+      stopStream();
+    }
+  }, [stopStream]);
+
+  useEffect(() => {
+    if (phase !== 'listening') return;
 
     recorder.onstop = async () => {
       // Clean up media stream
@@ -113,24 +286,28 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         setTranscript('(Transcription service unavailable)');
       }
       setPhase('transcript');
+    const onVisibilityChange = () => {
+      if (!document.hidden) return;
+      setError('Recording paused in background. Uploaded partial audio.');
+      setCanRetry(true);
+      void stopListening();
     };
 
-    recorder.stop();
-  };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [phase, stopListening]);
 
-  // Focus input when transcript appears
   useEffect(() => {
     if (phase === 'transcript') {
       setTimeout(() => inputRef.current?.focus(), 80);
     }
   }, [phase]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      mediaRecorderRef.current?.stream?.getTracks().forEach(t => t.stop());
-    };
-  }, []);
+  useEffect(() => () => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state === 'recording') recorder.stop();
+    stopStream();
+  }, [stopStream]);
 
   function handleSend() {
     if (!transcript.trim()) return;
@@ -154,30 +331,44 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       navigate(`/assistant?q=${encodeURIComponent(transcript.trim())}`);
       setPhase('idle');
       setTranscript('');
+      setError(null);
+      setCanRetry(false);
     }, 420);
   }
 
   function handleCancel() {
-    // Stop recording if active
     const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stream.getTracks().forEach(t => t.stop());
+    if (recorder && recorder.state === 'recording') {
       recorder.stop();
     }
+    stopStream();
     setPhase('idle');
     setTranscript('');
+    setError(null);
   }
 
   const isDesktop = variant === 'desktop';
-
   const containerClass = isDesktop
     ? 'px-3 py-2.5'
     : 'px-3 py-2.5 bg-white border-t border-slate-100';
 
   return (
     <div className={containerClass}>
+      {phase === 'listening' && isIOSSafari() && (
+        <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Keep this screen on and keep Fieldly in the foreground while recording (iOS Safari limitation).
+        </div>
+      )}
 
-      {/* ── IDLE ── */}
+      {error && (
+        <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          {error}
+          {canRetry && (
+            <button onClick={startListening} className="ml-2 underline text-red-800">Retry</button>
+          )}
+        </div>
+      )}
+
       {phase === 'idle' && (
         <button
           onClick={startListening}
@@ -197,7 +388,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         </button>
       )}
 
-      {/* ── LISTENING ── */}
       {phase === 'listening' && (
         <div className={`
           flex items-center gap-3 rounded-2xl border border-blue-200 bg-blue-50
@@ -211,9 +401,8 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
             <span className="text-sm text-blue-700 shrink-0">Listening…</span>
             <div className="flex-1"><Waveform /></div>
           </div>
-          {/* Stop recording */}
           <button
-            onClick={stopListening}
+            onClick={() => { void stopListening(); }}
             className="shrink-0 flex size-7 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors"
           >
             <Send size={13} />
@@ -233,7 +422,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         </div>
       )}
 
-      {/* ── TRANSCRIBING ── */}
       {phase === 'transcribing' && (
         <div className={`
           flex items-center gap-3 rounded-2xl border border-blue-100 bg-blue-50
@@ -241,7 +429,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
           ${isDesktop ? 'py-2.5' : 'py-3'}
         `}>
           <Sparkles size={16} className="text-blue-500 shrink-0" style={{ animation: 'spin 1.2s linear infinite' }} />
-          <span className="text-sm text-blue-700 flex-1">Transcribing…</span>
+          <span className="text-sm text-blue-700 flex-1">Uploading & transcribing…</span>
           <div className="flex gap-1 shrink-0">
             {[0, 1, 2].map(i => (
               <span key={i} className="size-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: `${i * 120}ms` }} />
@@ -251,7 +439,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         </div>
       )}
 
-      {/* ── TRANSCRIPT (review & edit before sending) ── */}
       {phase === 'transcript' && (
         <div className="flex flex-col gap-1.5">
           <div className={`
@@ -289,7 +476,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         </div>
       )}
 
-      {/* ── SENDING ── */}
       {phase === 'sending' && (
         <div className={`
           flex items-center gap-3 rounded-2xl border border-blue-100 bg-blue-50
@@ -302,19 +488,8 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
             style={{ animation: 'spin 1.2s linear infinite' }}
           />
           <span className="text-sm text-blue-700 flex-1 truncate">{transcript}</span>
-          <div className="flex gap-1 shrink-0">
-            {[0, 1, 2].map(i => (
-              <span
-                key={i}
-                className="size-1.5 rounded-full bg-blue-400 animate-bounce"
-                style={{ animationDelay: `${i * 120}ms` }}
-              />
-            ))}
-          </div>
-          <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
-
     </div>
   );
 });

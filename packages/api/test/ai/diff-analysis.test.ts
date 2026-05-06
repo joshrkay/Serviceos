@@ -1,6 +1,7 @@
 import {
   computeDiff,
   createDiffAnalysisWorker,
+  enqueueDiffAnalysis,
   InMemoryDiffAnalysisRepository,
 } from '../../src/ai/diff-analysis';
 import {
@@ -8,7 +9,7 @@ import {
   createRevision,
 } from '../../src/ai/document-revision';
 import { createLogger } from '../../src/logging/logger';
-import { QueueMessage } from '../../src/queues/queue';
+import { InMemoryQueue, QueueMessage } from '../../src/queues/queue';
 
 describe('P0-018 — Async diff-analysis worker foundation', () => {
   const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -202,6 +203,85 @@ describe('P0-018 — Async diff-analysis worker foundation', () => {
     it('malformed AI output handled gracefully — empty snapshots produce no diff', () => {
       const diff = computeDiff({}, {});
       expect(diff).toHaveLength(0);
+    });
+  });
+
+  describe('enqueueDiffAnalysis (P0-018 AC — uses async job framework with idempotency)', () => {
+    it('happy path — creates a pending row and enqueues a typed job', async () => {
+      const diffRepo = new InMemoryDiffAnalysisRepository();
+      const queue = new InMemoryQueue();
+
+      const analysis = await enqueueDiffAnalysis(diffRepo, queue, {
+        tenantId: 'tenant-1',
+        documentType: 'estimate',
+        documentId: 'doc-1',
+        fromRevisionId: 'rev-1',
+        toRevisionId: 'rev-2',
+      });
+
+      expect(analysis.status).toBe('pending');
+      expect(analysis.diff).toEqual([]);
+      expect(await diffRepo.findById('tenant-1', analysis.id)).not.toBeNull();
+
+      const msg = await queue.receive<{ analysisId: string; tenantId: string }>();
+      expect(msg).not.toBeNull();
+      expect(msg!.type).toBe('diff_analysis');
+      expect(msg!.payload.analysisId).toBe(analysis.id);
+      expect(msg!.idempotencyKey).toBe(analysis.id);
+    });
+
+    it('idempotency — same revision pair yields the same id + one repo row', async () => {
+      const diffRepo = new InMemoryDiffAnalysisRepository();
+      const queue = new InMemoryQueue();
+
+      const input = {
+        tenantId: 'tenant-1',
+        documentType: 'estimate',
+        documentId: 'doc-1',
+        fromRevisionId: 'rev-1',
+        toRevisionId: 'rev-2',
+      };
+
+      const first = await enqueueDiffAnalysis(diffRepo, queue, input);
+      const second = await enqueueDiffAnalysis(diffRepo, queue, input);
+
+      // Same deterministic id.
+      expect(second.id).toBe(first.id);
+
+      // Only one row persisted (findByDocument returns the one analysis row).
+      const rows = await diffRepo.findByDocument('tenant-1', 'estimate', 'doc-1');
+      expect(rows).toHaveLength(1);
+
+      // Both queue messages carry the same idempotency key; PgQueue's unique
+      // index on idempotency_key is the production-level dedupe.
+      const m1 = await queue.receive();
+      const m2 = await queue.receive();
+      expect(m1!.idempotencyKey).toBe(first.id);
+      expect(m2!.idempotencyKey).toBe(first.id);
+    });
+
+    it('different revision pairs produce different deterministic ids', async () => {
+      const diffRepo = new InMemoryDiffAnalysisRepository();
+      const queue = new InMemoryQueue();
+
+      const a = await enqueueDiffAnalysis(diffRepo, queue, {
+        tenantId: 'tenant-1',
+        documentType: 'estimate',
+        documentId: 'doc-1',
+        fromRevisionId: 'rev-1',
+        toRevisionId: 'rev-2',
+      });
+      const b = await enqueueDiffAnalysis(diffRepo, queue, {
+        tenantId: 'tenant-1',
+        documentType: 'estimate',
+        documentId: 'doc-1',
+        fromRevisionId: 'rev-2',
+        toRevisionId: 'rev-3',
+      });
+
+      expect(b.id).not.toBe(a.id);
+      const rows = await diffRepo.findByDocument('tenant-1', 'estimate', 'doc-1');
+      expect(rows).toHaveLength(2);
     });
   });
 });

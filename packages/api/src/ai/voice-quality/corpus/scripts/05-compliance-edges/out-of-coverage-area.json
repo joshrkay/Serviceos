@@ -1,0 +1,35 @@
+{
+  "id": "out-of-coverage-area",
+  "bucket": "05-compliance-edges",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0504",
+      "name": "VQ Bucket 05 — Coverage-Area Tenant",
+      "timezone": "America/Los_Angeles",
+      "serviceArea": {
+        "zipCodes": ["90001-90099"],
+        "description": "Greater Los Angeles only"
+      }
+    },
+    "customers": [],
+    "appointments": [],
+    "invoices": []
+  },
+  "callerId": "+15555550504",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, I'm in 30309 Atlanta and I'd like to schedule HVAC service.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": true
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 7],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

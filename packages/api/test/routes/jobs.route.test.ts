@@ -93,6 +93,71 @@ describe('GET /api/jobs', () => {
   });
 });
 
+describe('P1-018 — listJobs filtering + pagination', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function seedJob(summary: string) {
+    return request(app).post('/api/jobs').send({
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      summary,
+    });
+  }
+
+  it('filter by status returns only matching jobs', async () => {
+    const j1 = await seedJob('Replace condenser');
+    await seedJob('Flush drain');
+    await seedJob('Tune-up');
+
+    await request(app).post(`/api/jobs/${j1.body.id}/transition`).send({ status: 'scheduled' });
+
+    const res = await request(app).get('/api/jobs?status=scheduled');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].id).toBe(j1.body.id);
+  });
+
+  it('search by ILIKE on summary (case-insensitive)', async () => {
+    await seedJob('Install Heat Pump');
+    await seedJob('Replace water heater');
+    const res = await request(app).get('/api/jobs?search=HEAT');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+  });
+
+  it('pagination with limit/offset returns { data, total }', async () => {
+    for (let i = 0; i < 4; i++) {
+      await seedJob(`Job ${i}`);
+    }
+    const res = await request(app).get('/api/jobs?limit=2&offset=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.total).toBe(4);
+  });
+
+  it('rejects limit > 200 with 400', async () => {
+    const res = await request(app).get('/api/jobs?limit=500');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('total reflects post-filter count when status is applied', async () => {
+    const j1 = await seedJob('A');
+    await seedJob('B');
+    await seedJob('C');
+    await request(app).post(`/api/jobs/${j1.body.id}/transition`).send({ status: 'scheduled' });
+
+    const res = await request(app).get('/api/jobs?status=scheduled&paginated=true&limit=10');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.data).toHaveLength(1);
+  });
+});
+
 describe('POST /api/jobs', () => {
   let app: Express;
 
@@ -128,12 +193,12 @@ describe('POST /api/jobs', () => {
     expect(r2.body.jobNumber).toBe('JOB-0002');
   });
 
-  it('returns an error for missing required fields', async () => {
+  it('returns 400 with field errors for missing required fields', async () => {
     const res = await request(app).post('/api/jobs').send({ summary: 'No customer or location' });
-    // ZodError is not mapped to AppError so the server returns 5xx — either
-    // way it must be non-2xx and include an error key
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.body).toHaveProperty('error');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fields).toHaveProperty('customerId');
+    expect(res.body.details.fields).toHaveProperty('locationId');
   });
 });
 
@@ -219,7 +284,7 @@ describe('POST /api/jobs/:id/transition', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
-  it('returns an error for an invalid status transition', async () => {
+  it('returns 400 for an invalid status transition', async () => {
     const created = await request(app).post('/api/jobs').send({
       customerId: 'c1',
       locationId: 'l1',
@@ -227,14 +292,12 @@ describe('POST /api/jobs/:id/transition', () => {
     });
     expect(created.status).toBe(201);
 
-    // new → completed is not a valid transition per the lifecycle.
-    // The lifecycle throws a plain Error (not AppError) so the server
-    // maps it to 5xx — either way it must be non-2xx.
     const res = await request(app)
       .post(`/api/jobs/${created.body.id}/transition`)
       .send({ status: 'completed' });
 
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
   it('full lifecycle: new → scheduled → in_progress → completed', async () => {
