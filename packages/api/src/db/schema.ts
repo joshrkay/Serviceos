@@ -2154,6 +2154,52 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS deposit_credited_to_invoice_id UUID
         REFERENCES invoices(id);
   `,
+
+  '082_create_pending_invitations': `
+    -- Tier 4 (Team members — PR 3). Tracks team invitations sent via
+    -- Clerk before the invitee accepts. The Clerk user.created webhook
+    -- looks up by email to attach an accepted invitee to the right
+    -- tenant + role rather than bootstrapping a brand-new tenant.
+    --
+    --   tenant_id          : tenant the invitee will join.
+    --   email              : matched against email_addresses[0] from
+    --                        the Clerk webhook payload.
+    --   role               : role they'll be assigned on accept.
+    --   clerk_invitation_id: returned by POST /v1/invitations; used to
+    --                        revoke. Nullable so the dev/test path
+    --                        (no CLERK_SECRET_KEY) still works.
+    --   invited_by         : Clerk subject of the inviting user (audit).
+    --   accepted_at        : NULL until user.created fires for this email.
+    --   created_at / expires_at : standard. Default 14d expiry.
+    CREATE TABLE IF NOT EXISTS pending_invitations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      email TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('owner','dispatcher','technician')),
+      clerk_invitation_id TEXT,
+      invited_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '14 days',
+      accepted_at TIMESTAMPTZ
+    );
+    -- Used by the webhook lookup (email) and by the list view (tenant +
+    -- accepted_at IS NULL). Partial index keeps the lookup tight.
+    CREATE INDEX IF NOT EXISTS idx_pending_invitations_email_pending
+      ON pending_invitations(LOWER(email))
+      WHERE accepted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_pending_invitations_tenant_pending
+      ON pending_invitations(tenant_id)
+      WHERE accepted_at IS NULL;
+    -- Prevent two simultaneously-pending invitations for the same
+    -- (tenant, email) — the operator should revoke the first.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_invitations_tenant_email_pending
+      ON pending_invitations(tenant_id, LOWER(email))
+      WHERE accepted_at IS NULL;
+    ALTER TABLE pending_invitations ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_pending_invitations ON pending_invitations;
+    CREATE POLICY tenant_isolation_pending_invitations ON pending_invitations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -1,12 +1,14 @@
 /**
- * Tier 4 (Team members — PR 1 + PR 2).
+ * Tier 4 (Team members — PR 1 + PR 2 + PR 3).
  *
  * Closes the "Team members" stub on Settings. PR 1 surfaced the
- * tenant's roster (read-only); PR 2 adds inline role editing for
- * owners. PR 3 will add an invite flow.
+ * tenant's roster (read-only); PR 2 added inline role editing for
+ * owners; PR 3 adds the invite flow with a pending-invitations
+ * section that drops off rows as each invitee accepts and the Clerk
+ * webhook joins them to the tenant.
  */
 import { useEffect, useState } from 'react';
-import { X, Users, Pencil } from 'lucide-react';
+import { X, Users, Pencil, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -21,13 +23,22 @@ interface TeamUser {
   canFieldServe: boolean;
 }
 
+interface PendingInvitation {
+  id: string;
+  email: string;
+  role: Role;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 interface TeamMembersSheetProps {
   onClose: () => void;
   /**
-   * When false, the role select + Save button are hidden. The
-   * SettingsPage caller passes the current actor's role; only owners
-   * see edit affordances. The backend re-enforces this via
-   * users:edit_role.
+   * When false, the role select + Save button + Invite button are
+   * hidden. The SettingsPage caller passes the current actor's role;
+   * only owners see edit + invite affordances. The backend
+   * re-enforces this via users:edit_role + users:invite.
    */
   canEditRoles?: boolean;
 }
@@ -62,6 +73,13 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
    * in edit mode for retry.
    */
   const [saveError, setSaveError] = useState<string>('');
+  // Tier 4 (Team members — PR 3) — pending invitations + invite dialog state.
+  const [pending, setPending] = useState<PendingInvitation[]>([]);
+  const [showInviteDialog, setShowInviteDialog] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<Role>('technician');
+  const [inviting, setInviting] = useState(false);
+  const [inviteError, setInviteError] = useState<string>('');
 
   function startEdit(u: TeamUser) {
     setEditingId(u.id);
@@ -113,11 +131,28 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetch('/api/users');
-        if (!res.ok) throw new Error(`Load failed (${res.status})`);
-        const json = (await res.json()) as { data?: TeamUser[] } | TeamUser[];
-        const list = Array.isArray(json) ? json : json?.data ?? [];
+        // Load roster + pending invitations in parallel. The
+        // invitations endpoint is best-effort (legacy harnesses
+        // without the repo wired return an empty array, so we don't
+        // surface its failures as the load-error).
+        const [usersRes, pendingRes] = await Promise.all([
+          apiFetch('/api/users'),
+          apiFetch('/api/users/invitations').catch(() => null),
+        ]);
+        if (!usersRes.ok) throw new Error(`Load failed (${usersRes.status})`);
+        const usersJson = (await usersRes.json()) as { data?: TeamUser[] } | TeamUser[];
+        const list = Array.isArray(usersJson) ? usersJson : usersJson?.data ?? [];
         if (!cancelled) setUsers(list);
+
+        if (pendingRes && pendingRes.ok) {
+          const pendingJson = (await pendingRes.json()) as
+            | { data?: PendingInvitation[] }
+            | PendingInvitation[];
+          const pendingList = Array.isArray(pendingJson)
+            ? pendingJson
+            : pendingJson?.data ?? [];
+          if (!cancelled) setPending(pendingList);
+        }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load team');
       } finally {
@@ -129,6 +164,45 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
     };
   }, []);
 
+  async function sendInvite() {
+    setInviteError('');
+    const trimmed = inviteEmail.trim();
+    if (!trimmed) {
+      setInviteError('Email is required');
+      return;
+    }
+    setInviting(true);
+    try {
+      const res = await apiFetch('/api/users/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: trimmed, role: inviteRole }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON body */
+        }
+        throw new Error(detail || `Invite failed (${res.status})`);
+      }
+      const created = (await res.json()) as PendingInvitation;
+      setPending((prev) => [...prev, created]);
+      toast.success(`Invited ${trimmed}`);
+      setInviteEmail('');
+      setInviteRole('technician');
+      setShowInviteDialog(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not send invitation';
+      setInviteError(msg);
+      toast.error(msg);
+    } finally {
+      setInviting(false);
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 md:items-center"
@@ -138,7 +212,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
       aria-modal="true"
     >
       <div
-        className="w-full max-w-md rounded-t-2xl bg-white shadow-xl md:rounded-2xl max-h-[90vh] overflow-y-auto"
+        className="relative w-full max-w-md rounded-t-2xl bg-white shadow-xl md:rounded-2xl max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-4 sticky top-0 bg-white">
@@ -148,6 +222,19 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
           <h2 id="team-members-title" className="flex-1 text-base text-slate-900">
             Team members
           </h2>
+          {canEditRoles && (
+            <button
+              type="button"
+              onClick={() => {
+                setInviteError('');
+                setShowInviteDialog(true);
+              }}
+              data-testid="team-members-invite-button"
+              className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs text-white hover:bg-slate-700"
+            >
+              <UserPlus size={14} /> Invite
+            </button>
+          )}
           <button
             onClick={onClose}
             aria-label="Close"
@@ -259,7 +346,115 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
               {saveError}
             </p>
           )}
+
+          {pending.length > 0 && (
+            <div data-testid="pending-invitations-section" className="pt-2">
+              <p className="text-xs uppercase tracking-wide text-slate-400 mb-2">
+                Pending invitations
+              </p>
+              <ul className="space-y-2">
+                {pending.map((p) => (
+                  <li
+                    key={p.id}
+                    data-testid={`pending-invitation-row-${p.id}`}
+                    className="flex items-center gap-3 rounded-xl border border-dashed border-slate-200 px-4 py-3 bg-slate-50"
+                  >
+                    <span className="flex size-9 items-center justify-center rounded-full bg-slate-100 text-sm text-slate-400">
+                      ?
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-700 truncate">{p.email}</p>
+                      <p className="text-xs text-slate-500">Awaiting acceptance</p>
+                    </div>
+                    <span
+                      className={`text-xs rounded-full px-2 py-0.5 ${ROLE_BADGE[p.role]}`}
+                    >
+                      {ROLE_LABEL[p.role]}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
+
+        {/* Invite dialog. Inline rather than a separate sheet — it's
+            a small two-field form and the existing modal stack already
+            owns z-50, so nesting another <fixed inset-0> would conflict. */}
+        {showInviteDialog && (
+          <div
+            data-testid="invite-dialog"
+            className="absolute inset-0 z-10 flex items-center justify-center bg-black/30"
+            onClick={() => !inviting && setShowInviteDialog(false)}
+          >
+            <div
+              className="w-[90%] max-w-sm rounded-2xl bg-white shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="border-b border-slate-100 px-5 py-4">
+                <h3 className="text-base text-slate-900">Invite teammate</h3>
+              </div>
+              <div className="px-5 py-4 space-y-3">
+                <div>
+                  <label htmlFor="invite-email" className="text-sm text-slate-700">
+                    Email
+                  </label>
+                  <input
+                    id="invite-email"
+                    data-testid="invite-email-input"
+                    type="email"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    disabled={inviting}
+                    placeholder="teammate@company.com"
+                    className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="invite-role" className="text-sm text-slate-700">
+                    Role
+                  </label>
+                  <select
+                    id="invite-role"
+                    data-testid="invite-role-select"
+                    value={inviteRole}
+                    onChange={(e) => setInviteRole(e.target.value as Role)}
+                    disabled={inviting}
+                    className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm"
+                  >
+                    <option value="technician">Technician</option>
+                    <option value="dispatcher">Dispatcher</option>
+                    <option value="owner">Owner</option>
+                  </select>
+                </div>
+                {inviteError && (
+                  <p className="text-sm text-red-600" role="alert">
+                    {inviteError}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setShowInviteDialog(false)}
+                  disabled={inviting}
+                  className="rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={sendInvite}
+                  disabled={inviting}
+                  data-testid="invite-send-button"
+                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-60"
+                >
+                  {inviting ? 'Sending…' : 'Send invitation'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-4 sticky bottom-0 bg-white">
           <button

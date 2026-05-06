@@ -8,6 +8,7 @@ import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
+import { PendingInvitationRepository } from '../users/pending-invitation';
 import { ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
@@ -32,6 +33,21 @@ export interface WebhookRouterDeps {
    * without the deposit flow keep working.
    */
   jobRepo?: JobRepository;
+  /**
+   * Tier 4 (Team members — PR 3). When wired, the Clerk user.created
+   * webhook checks for a pending invitation by email — if one
+   * exists, the new user joins THAT tenant instead of bootstrapping
+   * a brand-new one. Optional so legacy harnesses keep working.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Pg pool for the invitee join-tenant path (writes a users row
+   * directly because we don't have an InsertUser repo yet — the
+   * existing webhook already uses `pool.query` for similar inline
+   * writes). When omitted the join-tenant path is a no-op (legacy
+   * fakes that don't track users).
+   */
+  pool?: import('pg').Pool;
   stripeWebhookSecret?: string;
   queue?: Queue;
   appBaseUrl?: string;
@@ -129,6 +145,105 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const primaryEmail = emailAddresses?.[0]?.email_address;
 
         logger.info('user.created webhook received', { userId, email: primaryEmail });
+
+        // Tier 4 (Team members — PR 3). Invitation acceptance path.
+        // If this email has a pending invitation, JOIN them to the
+        // inviting tenant with the invited role rather than
+        // bootstrapping a brand-new tenant. The pending_invitations
+        // table's partial unique index on (LOWER(email))
+        // WHERE accepted_at IS NULL guarantees at most one match.
+        if (deps.pendingInvitationRepo && primaryEmail) {
+          const pending = await deps.pendingInvitationRepo.findPendingByEmail(primaryEmail).catch(() => null);
+          if (pending) {
+            logger.info('Pending invitation found for new user', {
+              userId, email: primaryEmail, tenantId: pending.tenantId, role: pending.role,
+            });
+            try {
+              if (deps.pool) {
+                // Insert the users row directly. RLS is bypassed here
+                // because we set the tenant context explicitly. The
+                // existing tenant context pattern (current_setting
+                // 'app.current_tenant_id') is set by the Pg base repo's
+                // withTenant; for this raw insert we set it inline.
+                const client = await deps.pool.connect();
+                try {
+                  await client.query(
+                    `SET LOCAL app.current_tenant_id = '${pending.tenantId.replace(/'/g, "''")}'`,
+                  );
+                  await client.query(
+                    `INSERT INTO users (
+                       id, tenant_id, clerk_user_id, email, role,
+                       first_name, last_name, created_at, updated_at
+                     ) VALUES (
+                       gen_random_uuid(), $1, $2, $3, $4,
+                       $5, $6, NOW(), NOW()
+                     )
+                     ON CONFLICT DO NOTHING`,
+                    [
+                      pending.tenantId,
+                      userId,
+                      primaryEmail,
+                      pending.role,
+                      (userData.first_name as string | null) ?? null,
+                      (userData.last_name as string | null) ?? null,
+                    ],
+                  );
+                } finally {
+                  client.release();
+                }
+              }
+              await deps.pendingInvitationRepo.markAccepted(pending.id);
+
+              // Push tenant_id back to Clerk public_metadata so the
+              // JWT carries the right tenant context on the next sign-in.
+              if (config.CLERK_SECRET_KEY) {
+                try {
+                  await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+                    method: 'PATCH',
+                    headers: {
+                      Authorization: `Bearer ${config.CLERK_SECRET_KEY}`,
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      public_metadata: { tenant_id: pending.tenantId, role: pending.role },
+                    }),
+                  });
+                } catch (err) {
+                  logger.error('Clerk public_metadata sync failed (invitee path)', {
+                    userId, tenantId: pending.tenantId,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
+
+              if (deps.auditRepo) {
+                await deps.auditRepo.create(createAuditEvent({
+                  tenantId: pending.tenantId,
+                  actorId: userId,
+                  actorRole: pending.role,
+                  eventType: 'tenant.invitation.accepted',
+                  entityType: 'user',
+                  entityId: userId,
+                  metadata: {
+                    invitationId: pending.id,
+                    invitedBy: pending.invitedBy,
+                    email: primaryEmail,
+                  },
+                }));
+              }
+
+              await webhookRepo.updateStatus(svixId, 'processed');
+              return res.status(200).json({ received: true, joined: pending.tenantId });
+            } catch (joinErr) {
+              logger.error('Invitee join failed; falling back to bootstrap', {
+                userId, email: primaryEmail, tenantId: pending.tenantId,
+                error: joinErr instanceof Error ? joinErr.message : String(joinErr),
+              });
+              // Fall through to the bootstrap path below; the
+              // operator can manually clean up if needed.
+            }
+          }
+        }
 
         if (deps.tenantRepo && primaryEmail) {
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
