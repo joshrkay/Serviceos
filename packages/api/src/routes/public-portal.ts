@@ -397,16 +397,27 @@ async function buildInvoicePayload(
       description: `Invoice ${inv.invoiceNumber}`,
     });
     if (link) {
-      payNowUrl = link.linkUrl;
       try {
         await invoiceRepo.update(tenantId, inv.id, {
           stripePaymentLinkId: link.linkId,
           stripePaymentLinkUrl: link.linkUrl,
           updatedAt: new Date(),
         });
+        payNowUrl = link.linkUrl;
       } catch {
-        // Best effort: a persist failure leaves the link unanchored, but
-        // the read still succeeds. Owner-side workflow can clean up.
+        // Persistence failed. If we returned the URL anyway and persist
+        // keeps failing, every refresh would mint a fresh Stripe link
+        // and accumulate orphan live charge URLs. Roll back by
+        // deactivating the just-minted link and serving no payNowUrl —
+        // the next refresh starts clean.
+        try {
+          await provider.deactivateLink(link.linkId);
+        } catch {
+          // Deactivation also failed. The link is still live but at
+          // least one orphan is bounded; the next refresh will retry
+          // persistence and deactivation rather than minting a third.
+        }
+        payNowUrl = null;
       }
     }
   }

@@ -53,14 +53,17 @@ interface Harness {
   customer: Customer;
 }
 
-async function build(): Promise<Harness> {
+async function build(opts: {
+  paymentLinkProvider?: import('../../src/payments/payment-link-provider').PaymentLinkProvider;
+  invoiceRepoOverride?: import('../../src/invoices/invoice').InvoiceRepository;
+} = {}): Promise<Harness> {
   const app = express();
   app.use(express.json());
 
   const portalRepo = new InMemoryPortalSessionRepository();
   const customerRepo = new InMemoryCustomerRepository();
   const estimateRepo = new InMemoryEstimateRepository();
-  const invoiceRepo = new InMemoryInvoiceRepository();
+  const invoiceRepo = (opts.invoiceRepoOverride ?? new InMemoryInvoiceRepository()) as InMemoryInvoiceRepository;
   const jobRepo = new InMemoryJobRepository();
   const agreementRepo = new InMemoryAgreementRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
@@ -97,6 +100,7 @@ async function build(): Promise<Harness> {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      paymentLinkProvider: opts.paymentLinkProvider,
     }),
   );
 
@@ -297,6 +301,45 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     expect(res.body.invoices[0].id).toBe(invoiceId);
     expect(res.body.invoices[0].payNowUrl).toBeNull();
     expect(res.body.invoices[0].amountDueCents).toBe(10000);
+  });
+
+  it('rolls back the Stripe link when persisting the URL to the invoice fails', async () => {
+    // Codex P2 — without rollback, persist failures cause every refresh to
+    // mint a fresh Stripe link; the prior ones orphan as live charge URLs.
+    const generated: string[] = [];
+    const deactivated: string[] = [];
+    const provider = {
+      async generateLink() {
+        const linkId = `plink_test_${generated.length + 1}`;
+        generated.push(linkId);
+        return {
+          linkId,
+          linkUrl: `https://checkout.stripe.com/pay/${linkId}`,
+          providerReference: `stripe_${linkId}`,
+        };
+      },
+      async deactivateLink(linkId: string) {
+        deactivated.push(linkId);
+      },
+    };
+
+    // Force update() to throw so the persist branch fails.
+    const failingInvoiceRepo = new InMemoryInvoiceRepository();
+    failingInvoiceRepo.update = async () => {
+      throw new Error('simulated DB outage');
+    };
+
+    const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: failingInvoiceRepo });
+    const token = await mintToken(h);
+    await seedJobAndDocs(h);
+    const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
+
+    expect(res.status).toBe(200);
+    // No payNowUrl served — caller must not see an unrecoverable URL.
+    expect(res.body.invoices[0].payNowUrl).toBeNull();
+    // The just-minted link was deactivated to avoid orphan live charge URLs.
+    expect(generated).toHaveLength(1);
+    expect(deactivated).toEqual(generated);
   });
 
   it('lists jobs scoped to the customer', async () => {
