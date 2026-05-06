@@ -46,8 +46,36 @@ export async function applyDepositCreditToInvoice(
 
   // Cap at the invoice total so we never produce a negative amountDue.
   // Any leftover deposit (rare — would mean rule changed downward)
-  // remains on the job; PR 3c+ can reconcile it through dispatch.
+  // remains on the job; a follow-up reconciliation flow can handle it.
   const credit = Math.min(depositPaid, invoice.totals.totalCents);
+
+  // Atomically claim the deposit BEFORE writing the payment row.
+  // Two concurrent invoice-creation requests would otherwise both
+  // pass the `depositCreditedToInvoiceId` pre-check above and each
+  // create a deposit_credit Payment, applying the deposit twice.
+  // The conditional UPDATE in atomicallyConsumeDeposit returns null
+  // when another caller beat us — bail out cleanly with no side
+  // effects in that case.
+  //
+  // Repos that don't implement the atomic method (legacy fakes) fall
+  // back to the read-then-write path; the InMemoryJobRepository
+  // SHIPS atomicallyConsumeDeposit so production-shape tests stay
+  // race-safe. The fallback is only for fake repos in unit tests
+  // that intentionally subset the interface.
+  if (jobRepo.atomicallyConsumeDeposit) {
+    const claimed = await jobRepo.atomicallyConsumeDeposit(
+      job.tenantId,
+      job.id,
+      invoice.id,
+    );
+    if (!claimed) return null;
+  } else {
+    // Defense in depth for legacy fakes — no atomicity guarantee.
+    await jobRepo.update(job.tenantId, job.id, {
+      depositCreditedToInvoiceId: invoice.id,
+      updatedAt: new Date(),
+    });
+  }
 
   const now = new Date();
   const payment: Payment = {
@@ -82,10 +110,9 @@ export async function applyDepositCreditToInvoice(
     );
   }
 
-  await jobRepo.update(job.tenantId, job.id, {
-    depositCreditedToInvoiceId: invoice.id,
-    updatedAt: now,
-  });
+  // Job marker is already set by the atomic claim above — no second
+  // write needed. The fallback path also wrote the marker via the
+  // legacy `jobRepo.update`, so we're consistent across both branches.
 
   return { invoice: updatedInvoice, payment, creditCents: credit };
 }

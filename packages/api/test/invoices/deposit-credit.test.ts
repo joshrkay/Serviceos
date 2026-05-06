@@ -195,4 +195,33 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
 
     expect(result?.invoice.status).toBe('draft');
   });
+
+  it('uses the atomic consume so concurrent calls cannot double-credit', async () => {
+    // PR 319 race: two near-simultaneous invoice creations for the
+    // same job. Only one should produce a credit; the other must
+    // bail out cleanly with no Payment row written.
+    const job = makeJob();
+    await jobRepo.create(job);
+    const invoiceA = makeInvoice(job.id, 100000);
+    const invoiceB = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoiceA);
+    await invoiceRepo.create(invoiceB);
+
+    const [a, b] = await Promise.all([
+      applyDepositCreditToInvoice(invoiceA, job, invoiceRepo, paymentRepo, jobRepo),
+      applyDepositCreditToInvoice(invoiceB, job, invoiceRepo, paymentRepo, jobRepo),
+    ]);
+
+    const successes = [a, b].filter((r) => r !== null);
+    expect(successes).toHaveLength(1);
+
+    // Exactly one Payment row exists across both invoices.
+    const paysA = await paymentRepo.findByInvoice('tenant-deposit-credit', invoiceA.id);
+    const paysB = await paymentRepo.findByInvoice('tenant-deposit-credit', invoiceB.id);
+    expect(paysA.length + paysB.length).toBe(1);
+
+    // Job marker points at the winning invoice.
+    const after = await jobRepo.findById('tenant-deposit-credit', job.id);
+    expect(after?.depositCreditedToInvoiceId).toBe(successes[0]!.invoice.id);
+  });
 });

@@ -66,6 +66,43 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     });
   }
 
+  /**
+   * Tier 4 (Team members — PR 2 follow-up, PR 319 review). Atomic
+   * single-statement demotion guarded by "another owner exists" in
+   * the same tenant. Closes the read-then-write race that two
+   * concurrent demotions could exploit to leave the tenant ownerless.
+   *
+   * Returns the updated row when the demotion succeeded, null when
+   * the guard blocked it (no other owner) OR the row didn't match.
+   */
+  async demoteOwnerIfAnotherExists(
+    tenantId: string,
+    id: string,
+    newRole: 'dispatcher' | 'technician',
+  ): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE users SET role = $1, updated_at = NOW()
+         WHERE id = $2
+           AND tenant_id = $3
+           AND role = 'owner'
+           AND EXISTS (
+             SELECT 1 FROM users u2
+             WHERE u2.tenant_id = $3
+               AND u2.role = 'owner'
+               AND u2.id != $2
+           )
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   created_at, updated_at`,
+        [newRole, id, tenantId],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
   async update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const fieldMap: Record<string, string> = {

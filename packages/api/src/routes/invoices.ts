@@ -102,18 +102,29 @@ export function createInvoiceRouter(
             // Best-effort. Invoice exists with the right total; the
             // unconsumed deposit stays on the job and operations can
             // apply it manually if this hook misfires repeatedly.
+            //
+            // CRITICAL: the audit-write below ALSO has to be best-effort.
+            // A storage hiccup must not flip a successful invoice
+            // creation to a 500 — the client would retry and create a
+            // duplicate invoice (a separate row, since the first
+            // POST already returned a real id). PR 319 review feedback.
             const message = creditErr instanceof Error ? creditErr.message : String(creditErr);
-            await auditRepo.create(
-              createAuditEvent({
-                tenantId: req.auth!.tenantId,
-                actorId: req.auth!.userId,
-                actorRole: 'system',
-                eventType: 'invoice.deposit_credit_failed',
-                entityType: 'invoice',
-                entityId: result.id,
-                metadata: { jobId: job.id, error: message },
-              }),
-            );
+            try {
+              await auditRepo.create(
+                createAuditEvent({
+                  tenantId: req.auth!.tenantId,
+                  actorId: req.auth!.userId,
+                  actorRole: 'system',
+                  eventType: 'invoice.deposit_credit_failed',
+                  entityType: 'invoice',
+                  entityId: result.id,
+                  metadata: { jobId: job.id, error: message },
+                }),
+              );
+            } catch {
+              // Audit write failure cannot block the response — the
+              // invoice is real and the client should see it.
+            }
           }
         }
         res.status(201).json(credited);

@@ -51,6 +51,25 @@ export interface UserRepository {
   findByTenant(tenantId: string, options?: UserListOptions): Promise<User[]>;
   findById(tenantId: string, id: string): Promise<User | null>;
   update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null>;
+  /**
+   * Tier 4 (Team members — PR 2 follow-up). Atomic role demotion that
+   * preserves the "at least one owner per tenant" invariant under
+   * concurrent updates. Only succeeds when there's another owner on
+   * the same tenant at UPDATE time. Returns the updated row, or
+   * null when the guard blocked the update (the only-owner case)
+   * or the user wasn't found.
+   *
+   * Used for owner→{dispatcher,technician} transitions. All other
+   * updates go through `update`. Pg implementation does this in a
+   * single statement (UPDATE ... WHERE EXISTS (SELECT another owner));
+   * InMemory fakes can fall back to the read-then-write path because
+   * Node serializes their access.
+   */
+  demoteOwnerIfAnotherExists?(
+    tenantId: string,
+    id: string,
+    newRole: 'dispatcher' | 'technician',
+  ): Promise<User | null>;
   /** Test/dev helper. Production user creation goes through the Clerk webhook. */
   create?(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
 }
@@ -93,7 +112,17 @@ export async function updateUser(
   // role of the only owner away from 'owner' would lock the tenant
   // out of users:edit_role + users:invite forever. Refuse — the
   // operator must promote someone else first.
-  if (input.role && input.role !== 'owner') {
+  //
+  // Race-safety (PR 319 review): two concurrent demotions of two
+  // different owners can both observe `owners.length > 1` in the
+  // pre-check below and each succeed, leaving the tenant with zero
+  // owners. The atomic demoteOwnerIfAnotherExists path closes that
+  // window in the Pg implementation by enforcing the guard inside a
+  // single SQL statement (UPDATE ... WHERE EXISTS (SELECT another
+  // owner)). The pre-check stays as a fast user-facing error path
+  // (returns the friendly message before the SQL fires); the atomic
+  // path is the actual safety net.
+  if (input.role && (input.role === 'dispatcher' || input.role === 'technician')) {
     const target = await repository.findById(tenantId, id);
     if (target?.role === 'owner') {
       const owners = await repository.findByTenant(tenantId, { role: 'owner' });
@@ -101,6 +130,25 @@ export async function updateUser(
         throw new ValidationError(
           'Cannot demote the only owner — promote another team member first',
         );
+      }
+      if (repository.demoteOwnerIfAnotherExists) {
+        const updated = await repository.demoteOwnerIfAnotherExists(
+          tenantId,
+          id,
+          input.role,
+        );
+        if (!updated) {
+          // The atomic guard rejected: between the pre-check above and
+          // this UPDATE, another concurrent request demoted the other
+          // owner. Surface the same friendly error.
+          throw new ValidationError(
+            'Cannot demote the only owner — promote another team member first',
+          );
+        }
+        // Fall through to the regular update for any non-role fields.
+        const { role: _droppedRole, ...rest } = input;
+        if (Object.keys(rest).length === 0) return updated;
+        return repository.update(tenantId, id, rest);
       }
     }
   }

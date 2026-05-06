@@ -258,4 +258,40 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
       return result.rows[0].next_number as number;
     });
   }
+
+  /**
+   * Tier 4 (Deposit rules — PR 3c follow-up). Atomic single-claim of
+   * the job's paid deposit, addressing the race flagged on PR 319 (a
+   * concurrent invoice-creation could otherwise pass the in-memory
+   * "is consumed?" check twice and credit the same deposit twice).
+   *
+   * Only succeeds when `deposit_credited_to_invoice_id IS NULL` at
+   * UPDATE time. Returns the updated row on success, null when the
+   * job was already consumed or doesn't exist in the tenant.
+   *
+   * Tenant scoping: the WHERE includes both id and tenant_id
+   * explicitly (defense-in-depth alongside RLS, per the standard
+   * called out by the reviewer).
+   */
+  async atomicallyConsumeDeposit(
+    tenantId: string,
+    id: string,
+    invoiceId: string,
+  ): Promise<Job | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE jobs
+         SET deposit_credited_to_invoice_id = $1,
+             updated_at = NOW()
+         WHERE id = $2
+           AND tenant_id = $3
+           AND deposit_credited_to_invoice_id IS NULL
+         RETURNING *`,
+        [invoiceId, id, tenantId],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
 }
