@@ -1,4 +1,5 @@
 import { Invoice, InvoiceRepository } from './invoice';
+import { PaymentRepository } from './payment';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
@@ -34,6 +35,14 @@ export interface PublicInvoiceView {
   viewCount: number;
   /** Stripe-hosted checkout URL, populated once the customer requests checkout. */
   stripePaymentLinkUrl?: string;
+  /**
+   * Tier 4 (Deposit rules — PR 3c). Total deposit credit applied to
+   * this invoice (in cents). Surfaced so the customer page can render
+   * a "Deposit credit -$X" line and the math reconciles. 0 when no
+   * deposit was credited (job had no deposit, or this isn't the first
+   * invoice for the job).
+   */
+  depositCreditCents: number;
 }
 
 export interface PublicInvoiceServiceDeps {
@@ -42,6 +51,12 @@ export interface PublicInvoiceServiceDeps {
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   stripeConfig?: StripeConfig;
+  /**
+   * Tier 4 (Deposit rules — PR 3c). Optional: when wired, the public
+   * view sums up payments with providerReference='deposit_credit' to
+   * surface depositCreditCents. Without it the field reads as 0.
+   */
+  paymentRepo?: PaymentRepository;
 }
 
 export class PublicInvoiceService {
@@ -181,6 +196,23 @@ export class PublicInvoiceService {
       : null;
     const settings = await this.deps.settingsRepo.findByTenant(invoice.tenantId);
 
+    // Tier 4 (Deposit rules — PR 3c). Sum payments tagged
+    // providerReference='deposit_credit' for this invoice. The credit
+    // also flows through amountPaidCents (so amountDue is correct
+    // without any extra client-side math), but the field surfaced
+    // here lets the customer page render an explicit "Deposit credit"
+    // row so the math is transparent to the customer.
+    let depositCreditCents = 0;
+    if (this.deps.paymentRepo) {
+      const payments = await this.deps.paymentRepo.findByInvoice(
+        invoice.tenantId,
+        invoice.id,
+      );
+      depositCreditCents = payments
+        .filter((p) => p.providerReference === 'deposit_credit')
+        .reduce((sum, p) => sum + p.amountCents, 0);
+    }
+
     return {
       id: invoice.id,
       invoiceNumber: invoice.invoiceNumber,
@@ -208,6 +240,7 @@ export class PublicInvoiceService {
       isPaid: invoice.status === 'paid' || invoice.amountDueCents <= 0,
       viewCount: invoice.viewCount ?? 0,
       stripePaymentLinkUrl: invoice.stripePaymentLinkUrl,
+      depositCreditCents,
     };
   }
 }

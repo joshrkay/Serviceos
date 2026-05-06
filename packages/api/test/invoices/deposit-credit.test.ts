@@ -1,0 +1,280 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { v4 as uuidv4 } from 'uuid';
+import { applyDepositCreditToInvoice } from '../../src/invoices/deposit-credit';
+import {
+  Invoice,
+  InMemoryInvoiceRepository,
+} from '../../src/invoices/invoice';
+import { InMemoryPaymentRepository } from '../../src/invoices/payment';
+import { Job, InMemoryJobRepository } from '../../src/jobs/job';
+
+const TENANT = 'tenant-deposit-credit';
+
+function makeJob(overrides: Partial<Job> = {}): Job {
+  return {
+    id: uuidv4(),
+    tenantId: TENANT,
+    customerId: uuidv4(),
+    locationId: uuidv4(),
+    jobNumber: 'JOB-0042',
+    summary: 'AC repair',
+    status: 'completed',
+    priority: 'normal',
+    depositRequiredCents: 25000,
+    depositPaidCents: 25000,
+    depositStatus: 'paid',
+    createdBy: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+function makeInvoice(jobId: string, totalCents: number, overrides: Partial<Invoice> = {}): Invoice {
+  return {
+    id: uuidv4(),
+    tenantId: TENANT,
+    jobId,
+    invoiceNumber: 'INV-0001',
+    status: 'draft',
+    lineItems: [
+      {
+        id: uuidv4(),
+        description: 'Service',
+        quantity: 1,
+        unitPriceCents: totalCents,
+        totalCents,
+        sortOrder: 0,
+        taxable: true,
+      },
+    ],
+    totals: {
+      subtotalCents: totalCents,
+      taxableSubtotalCents: totalCents,
+      discountCents: 0,
+      taxRateBps: 0,
+      taxCents: 0,
+      totalCents,
+    },
+    amountPaidCents: 0,
+    amountDueCents: totalCents,
+    createdBy: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let jobRepo: InMemoryJobRepository;
+
+  beforeEach(() => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    jobRepo = new InMemoryJobRepository();
+  });
+
+  it('credits the paid deposit, reduces amount due, and marks the job consumed', async () => {
+    const job = makeJob();
+    await jobRepo.create(job);
+    const invoice = makeInvoice(job.id, 100000); // $1,000
+    await invoiceRepo.create(invoice);
+
+    const result = await applyDepositCreditToInvoice(
+      invoice,
+      job,
+      invoiceRepo,
+      paymentRepo,
+      jobRepo,
+    );
+
+    expect(result?.creditCents).toBe(25000);
+    expect(result?.invoice.amountPaidCents).toBe(25000);
+    expect(result?.invoice.amountDueCents).toBe(75000);
+
+    const payments = await paymentRepo.findByInvoice(TENANT, invoice.id);
+    expect(payments).toHaveLength(1);
+    expect(payments[0].providerReference).toBe('deposit_credit');
+    expect(payments[0].method).toBe('other');
+    expect(payments[0].amountCents).toBe(25000);
+
+    const after = await jobRepo.findById(TENANT, job.id);
+    expect(after?.depositCreditedToInvoiceId).toBe(invoice.id);
+  });
+
+  it('caps the credit at the invoice total (deposit > total)', async () => {
+    const job = makeJob({ depositPaidCents: 200000, depositRequiredCents: 200000 });
+    await jobRepo.create(job);
+    const invoice = makeInvoice(job.id, 50000);
+    await invoiceRepo.create(invoice);
+
+    const result = await applyDepositCreditToInvoice(
+      invoice,
+      job,
+      invoiceRepo,
+      paymentRepo,
+      jobRepo,
+    );
+
+    expect(result?.creditCents).toBe(50000);
+    expect(result?.invoice.amountDueCents).toBe(0);
+  });
+
+  it('is a no-op when the job has no paid deposit', async () => {
+    const job = makeJob({ depositPaidCents: 0, depositStatus: 'not_required' });
+    await jobRepo.create(job);
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const result = await applyDepositCreditToInvoice(
+      invoice,
+      job,
+      invoiceRepo,
+      paymentRepo,
+      jobRepo,
+    );
+
+    expect(result).toBeNull();
+    expect(await paymentRepo.findByInvoice(TENANT, invoice.id)).toHaveLength(0);
+  });
+
+  it('is a no-op when the deposit has already been credited to another invoice', async () => {
+    const previousInvoiceId = uuidv4();
+    const job = makeJob({ depositCreditedToInvoiceId: previousInvoiceId });
+    await jobRepo.create(job);
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const result = await applyDepositCreditToInvoice(
+      invoice,
+      job,
+      invoiceRepo,
+      paymentRepo,
+      jobRepo,
+    );
+
+    expect(result).toBeNull();
+    expect(await paymentRepo.findByInvoice(TENANT, invoice.id)).toHaveLength(0);
+    // Marker is unchanged.
+    const after = await jobRepo.findById(TENANT, job.id);
+    expect(after?.depositCreditedToInvoiceId).toBe(previousInvoiceId);
+  });
+
+  it('is a no-op when the invoice total is 0', async () => {
+    const job = makeJob();
+    await jobRepo.create(job);
+    const invoice = makeInvoice(job.id, 0);
+    await invoiceRepo.create(invoice);
+
+    const result = await applyDepositCreditToInvoice(
+      invoice,
+      job,
+      invoiceRepo,
+      paymentRepo,
+      jobRepo,
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it('preserves draft status when the credit is partial', async () => {
+    const job = makeJob();
+    await jobRepo.create(job);
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const result = await applyDepositCreditToInvoice(
+      invoice,
+      job,
+      invoiceRepo,
+      paymentRepo,
+      jobRepo,
+    );
+
+    expect(result?.invoice.status).toBe('draft');
+  });
+
+  it('rolls back the consumed marker when payment creation throws (PR 319 P1)', async () => {
+    // Simulate a transient paymentRepo failure — the marker should
+    // not stick or the deposit becomes permanently orphaned.
+    const job = await jobRepo.create!(makeJob());
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const originalCreate = paymentRepo.create.bind(paymentRepo);
+    paymentRepo.create = async () => {
+      throw new Error('simulated paymentRepo outage');
+    };
+
+    await expect(
+      applyDepositCreditToInvoice(invoice, job, invoiceRepo, paymentRepo, jobRepo),
+    ).rejects.toThrow(/simulated paymentRepo outage/);
+
+    // Marker rolled back so the deposit is available for a retry.
+    const after = await jobRepo.findById('tenant-deposit-credit', job.id);
+    expect(after?.depositCreditedToInvoiceId).toBeFalsy();
+
+    paymentRepo.create = originalCreate;
+  });
+
+  it('KEEPS the consumed marker when payment write succeeded but invoice update failed (PR 319 P1 v2)', async () => {
+    // Codex caught a follow-up to the rollback: if paymentRepo.create
+    // succeeded and invoiceRepo.update later failed, rolling back the
+    // marker would let a retry double-credit (the orphan Payment row
+    // + a fresh Payment row from the retry). The marker must STAY
+    // SET in that case so future credits skip; ops reconciles via
+    // the failure audit event.
+    const job = await jobRepo.create!(makeJob());
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const originalUpdate = invoiceRepo.update.bind(invoiceRepo);
+    invoiceRepo.update = async () => null;
+
+    await expect(
+      applyDepositCreditToInvoice(invoice, job, invoiceRepo, paymentRepo, jobRepo),
+    ).rejects.toThrow(/Failed to update invoice/);
+
+    // Marker stays set so a retry can't re-credit.
+    const after = await jobRepo.findById('tenant-deposit-credit', job.id);
+    expect(after?.depositCreditedToInvoiceId).toBe(invoice.id);
+
+    // The orphan payment row exists for ops reconciliation.
+    const payments = await paymentRepo.findByInvoice('tenant-deposit-credit', invoice.id);
+    expect(payments).toHaveLength(1);
+    expect(payments[0].providerReference).toBe('deposit_credit');
+
+    invoiceRepo.update = originalUpdate;
+  });
+
+  it('uses the atomic consume so concurrent calls cannot double-credit', async () => {
+    // PR 319 race: two near-simultaneous invoice creations for the
+    // same job. Only one should produce a credit; the other must
+    // bail out cleanly with no Payment row written.
+    const job = makeJob();
+    await jobRepo.create(job);
+    const invoiceA = makeInvoice(job.id, 100000);
+    const invoiceB = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoiceA);
+    await invoiceRepo.create(invoiceB);
+
+    const [a, b] = await Promise.all([
+      applyDepositCreditToInvoice(invoiceA, job, invoiceRepo, paymentRepo, jobRepo),
+      applyDepositCreditToInvoice(invoiceB, job, invoiceRepo, paymentRepo, jobRepo),
+    ]);
+
+    const successes = [a, b].filter((r) => r !== null);
+    expect(successes).toHaveLength(1);
+
+    // Exactly one Payment row exists across both invoices.
+    const paysA = await paymentRepo.findByInvoice('tenant-deposit-credit', invoiceA.id);
+    const paysB = await paymentRepo.findByInvoice('tenant-deposit-credit', invoiceB.id);
+    expect(paysA.length + paysB.length).toBe(1);
+
+    // Job marker points at the winning invoice.
+    const after = await jobRepo.findById('tenant-deposit-credit', job.id);
+    expect(after?.depositCreditedToInvoiceId).toBe(successes[0]!.invoice.id);
+  });
+});

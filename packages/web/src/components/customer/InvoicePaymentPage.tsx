@@ -42,6 +42,13 @@ interface PublicInvoiceView {
   isPaid: boolean;
   viewCount: number;
   stripePaymentLinkUrl?: string;
+  /**
+   * Tier 4 (Deposit rules — PR 3c). Total deposit credit applied to
+   * this invoice. Surfaced as a discrete totals row so the customer
+   * can see the credit explicitly; the credit is also baked into
+   * amountPaidCents so amountDueCents already reflects the reduction.
+   */
+  depositCreditCents?: number;
 }
 
 function formatMoney(cents: number) {
@@ -572,10 +579,30 @@ export function InvoicePaymentPage() {
               <span className="text-sm text-slate-500">${formatMoney(inv.taxCents)}</span>
             </div>
           )}
-          {inv.amountPaidCents > 0 && (
+          {(inv.depositCreditCents ?? 0) > 0 && (
+            <div
+              data-testid="invoice-deposit-credit-row"
+              className="flex justify-between px-5 py-2 border-t border-slate-100"
+            >
+              <span className="text-sm text-slate-500">Deposit credit</span>
+              <span className="text-sm text-green-600">
+                -${formatMoney(inv.depositCreditCents ?? 0)}
+              </span>
+            </div>
+          )}
+          {/*
+            "Paid" row excludes the deposit credit so the two amounts
+            don't double-up visually. amountPaidCents includes the
+            credit (it's a real Payment row), so we subtract before
+            rendering. When the only "payment" was the credit, the
+            row collapses to 0 and we hide it.
+          */}
+          {inv.amountPaidCents - (inv.depositCreditCents ?? 0) > 0 && (
             <div className="flex justify-between px-5 py-2 border-t border-slate-100">
               <span className="text-sm text-slate-500">Paid</span>
-              <span className="text-sm text-green-600">-${formatMoney(inv.amountPaidCents)}</span>
+              <span className="text-sm text-green-600">
+                -${formatMoney(inv.amountPaidCents - (inv.depositCreditCents ?? 0))}
+              </span>
             </div>
           )}
           <div className="flex items-center justify-between px-5 py-4 bg-slate-900 rounded-b-2xl">

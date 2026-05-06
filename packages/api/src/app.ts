@@ -28,6 +28,13 @@ import { createJobRouter } from './routes/jobs';
 import { createAppointmentRouter } from './routes/appointments';
 import { createEstimateRouter } from './routes/estimates';
 import { createInvoiceRouter } from './routes/invoices';
+import { createUsersRouter } from './routes/users';
+import { PgUserRepository } from './users/pg-user';
+import { InMemoryUserRepository } from './users/user';
+import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
+import { InMemoryPendingInvitationRepository } from './users/pending-invitation';
+import { createBillingRouter } from './routes/billing';
+import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
 import {
@@ -485,6 +492,27 @@ export function createApp(): express.Express {
   // are stateful, so two separate `new InMemoryJobRepository()` calls
   // would diverge in tests.
   const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
+  // Tier 4 (Team members — PR 3). Same hoist for pending invitations
+  // — the Clerk webhook reads them on user.created and the /api/users
+  // routes write them. Single shared InMemory in tests.
+  const pendingInvitationRepo = pool
+    ? new PgPendingInvitationRepository(pool)
+    : new InMemoryPendingInvitationRepository();
+  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // webhook can update the cached subscription status when
+  // customer.subscription.* events arrive. Single instance shared
+  // with the /api/billing route. Requires both Pg pool + Stripe key
+  // to instantiate — InMemory tests skip the subscription mirror
+  // (the route surfaces 503 / null fields gracefully).
+  const billingService = pool && process.env.STRIPE_SECRET_KEY
+    ? new BillingService({
+        pool,
+        config: {
+          apiKey: process.env.STRIPE_SECRET_KEY,
+          portalConfigurationId: process.env.STRIPE_BILLING_PORTAL_CONFIGURATION,
+        },
+      })
+    : undefined;
   // Queue constructed here (before webhook router) so new-tenant webhooks can
   // enqueue provisioning jobs synchronously during the request.
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
@@ -563,6 +591,17 @@ export function createApp(): express.Express {
       invoiceRepo: webhookInvoiceRepo,
       paymentRepo: webhookPaymentRepo,
       jobRepo,
+      // Tier 4 (Team members — PR 3). Invitee join-tenant path on
+      // user.created. The same shared pending invitation repo + pool
+      // backs the /api/users invite routes so an invite written by
+      // the route is found by the webhook on accept.
+      pendingInvitationRepo,
+      pool: pool ?? undefined,
+      // Tier 4 (Subscription — PR 1). Same instance the route uses,
+      // so a customer.subscription.* webhook updates the cached
+      // status the GET /api/billing/subscription endpoint reads.
+      // Wired only when both pool and STRIPE_SECRET_KEY exist.
+      billingService,
       stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
       queue,
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
@@ -1166,6 +1205,9 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
+    // Tier 4 (Deposit rules — PR 3c). Required for the public view to
+    // surface the deposit-credit line; without it the field reads 0.
+    paymentRepo,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
@@ -1616,7 +1658,29 @@ export function createApp(): express.Express {
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+
+  // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
+  // invitation flow. Tenant scoping is enforced by the route's
+  // requireTenant + the repo's tenant context. Clerk integration is
+  // best-effort: missing CLERK_SECRET_KEY just persists the local
+  // intent; the operator can still re-send via dashboard and the
+  // webhook still attaches the invitee on accept (lookup is by email).
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
+  app.use(
+    '/api/users',
+    createUsersRouter(userRepo, {
+      // Same instance the Clerk webhook reads on user.created — the
+      // accept side reads what the invite side wrote.
+      pendingInvitationRepo,
+      clerkSecretKey: process.env.CLERK_SECRET_KEY,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    }),
+  );
+
+  // billingService is hoisted earlier so the Stripe webhook can use
+  // the same instance.
+  app.use('/api/billing', createBillingRouter({ billingService }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).
   const revenueBySourceRepo = pool

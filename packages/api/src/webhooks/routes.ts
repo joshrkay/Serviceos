@@ -8,6 +8,8 @@ import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
+import { PendingInvitationRepository } from '../users/pending-invitation';
+import { BillingService } from '../billing/subscription';
 import { ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
@@ -32,6 +34,28 @@ export interface WebhookRouterDeps {
    * without the deposit flow keep working.
    */
   jobRepo?: JobRepository;
+  /**
+   * Tier 4 (Team members — PR 3). When wired, the Clerk user.created
+   * webhook checks for a pending invitation by email — if one
+   * exists, the new user joins THAT tenant instead of bootstrapping
+   * a brand-new one. Optional so legacy harnesses keep working.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Tier 4 (Subscription — Fieldly billing). When wired, the Stripe
+   * webhook applies customer.subscription.* events onto tenants
+   * (cached subscription_status). Optional so legacy harnesses
+   * without Stripe configured still build the router.
+   */
+  billingService?: BillingService;
+  /**
+   * Pg pool for the invitee join-tenant path (writes a users row
+   * directly because we don't have an InsertUser repo yet — the
+   * existing webhook already uses `pool.query` for similar inline
+   * writes). When omitted the join-tenant path is a no-op (legacy
+   * fakes that don't track users).
+   */
+  pool?: import('pg').Pool;
   stripeWebhookSecret?: string;
   queue?: Queue;
   appBaseUrl?: string;
@@ -129,6 +153,171 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         const primaryEmail = emailAddresses?.[0]?.email_address;
 
         logger.info('user.created webhook received', { userId, email: primaryEmail });
+
+        // Tier 4 (Team members — PR 3). Invitation acceptance path.
+        // If this user has a pending invitation, JOIN them to the
+        // inviting tenant with the invited role rather than
+        // bootstrapping a brand-new tenant.
+        //
+        // Lookup order (PR 319 review P1):
+        //   1. By invitation id from Clerk's public_metadata (set by
+        //      the invite route) — uniquely identifies the invitation
+        //      even if two tenants invited the same email.
+        //   2. By email — fallback ONLY when no invitation id was
+        //      provided. If an id was present but failed lookup or
+        //      sanity-check, we DO NOT fall back to email; that would
+        //      reintroduce the cross-tenant ambiguity the id was
+        //      meant to resolve (PR 319 review P1). Refusing the
+        //      stale/forged id falls through to the bootstrap path,
+        //      which is the safe outcome.
+        if (deps.pendingInvitationRepo && primaryEmail) {
+          const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
+          const invitationId = publicMeta?.invitation_id as string | undefined;
+          let pending = null;
+          if (invitationId) {
+            if (deps.pendingInvitationRepo.findById) {
+              pending = await deps.pendingInvitationRepo
+                .findById(invitationId)
+                .catch(() => null);
+              // Sanity check: id-matched invitation MUST also match
+              // email (defense against a replay where the metadata
+              // is forged). Already-accepted ones are also ignored.
+              if (pending && pending.email.toLowerCase() !== primaryEmail.toLowerCase()) {
+                logger.warn('Pending invitation id+email mismatch — refusing join', {
+                  userId, invitationId, expected: pending.email, got: primaryEmail,
+                });
+                pending = null;
+              }
+              if (pending && pending.acceptedAt) pending = null;
+            }
+            // Deliberately NO email fallback here — see comment above.
+          } else {
+            // No id present (e.g. a tenant invited without Clerk
+            // integration) — email lookup is the only path. The
+            // single pending-per-(tenant,email) unique index is the
+            // primary defense; same-email-across-tenants remains a
+            // known edge in this fallback path.
+            pending = await deps.pendingInvitationRepo
+              .findPendingByEmail(primaryEmail)
+              .catch(() => null);
+          }
+
+          if (pending) {
+            logger.info('Pending invitation found for new user', {
+              userId, email: primaryEmail, tenantId: pending.tenantId, role: pending.role,
+              matchedBy: invitationId ? 'id' : 'email',
+            });
+            try {
+              // PR 319 review (P2): only markAccepted AFTER the join
+              // write succeeded. Without this guard, a deps.pool=null
+              // configuration would consume the invitation without
+              // ever inserting the users row, and the invitee would
+              // have no access despite Clerk reporting acceptance.
+              if (!deps.pool) {
+                logger.error('pendingInvitation found but pool not wired — cannot join user', {
+                  userId, tenantId: pending.tenantId,
+                });
+                throw new Error('pool not configured for invitee join');
+              }
+              // Insert the users row directly. RLS requires the
+              // tenant GUC to be set; SET LOCAL only persists inside
+              // a transaction (PR 319 review P1), so the BEGIN /
+              // COMMIT block is mandatory — without it the SET LOCAL
+              // is a no-op and the INSERT fails the RLS policy.
+              //
+              // The tenantId is also asserted to look like a UUID
+              // before being interpolated into the SET LOCAL string
+              // (parameterized binding doesn't work for SET names).
+              // The id comes from the DB row (FK-backed), so this is
+              // belt + suspenders, but explicit prevents a future
+              // change from accidentally widening the column.
+              const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+              if (!UUID_RE.test(pending.tenantId)) {
+                throw new Error(`Invalid tenantId on pending invitation: ${pending.tenantId}`);
+              }
+              const client = await deps.pool.connect();
+              try {
+                await client.query('BEGIN');
+                await client.query(
+                  `SET LOCAL app.current_tenant_id = '${pending.tenantId}'`,
+                );
+                await client.query(
+                  `INSERT INTO users (
+                     id, tenant_id, clerk_user_id, email, role,
+                     first_name, last_name, created_at, updated_at
+                   ) VALUES (
+                     gen_random_uuid(), $1, $2, $3, $4,
+                     $5, $6, NOW(), NOW()
+                   )
+                   ON CONFLICT DO NOTHING`,
+                  [
+                    pending.tenantId,
+                    userId,
+                    primaryEmail,
+                    pending.role,
+                    (userData.first_name as string | null) ?? null,
+                    (userData.last_name as string | null) ?? null,
+                  ],
+                );
+                await client.query('COMMIT');
+              } catch (txErr) {
+                await client.query('ROLLBACK').catch(() => undefined);
+                throw txErr;
+              } finally {
+                client.release();
+              }
+              await deps.pendingInvitationRepo.markAccepted(pending.id);
+
+              // Push tenant_id back to Clerk public_metadata so the
+              // JWT carries the right tenant context on the next sign-in.
+              if (config.CLERK_SECRET_KEY) {
+                try {
+                  await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+                    method: 'PATCH',
+                    headers: {
+                      Authorization: `Bearer ${config.CLERK_SECRET_KEY}`,
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      public_metadata: { tenant_id: pending.tenantId, role: pending.role },
+                    }),
+                  });
+                } catch (err) {
+                  logger.error('Clerk public_metadata sync failed (invitee path)', {
+                    userId, tenantId: pending.tenantId,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
+
+              if (deps.auditRepo) {
+                await deps.auditRepo.create(createAuditEvent({
+                  tenantId: pending.tenantId,
+                  actorId: userId,
+                  actorRole: pending.role,
+                  eventType: 'tenant.invitation.accepted',
+                  entityType: 'user',
+                  entityId: userId,
+                  metadata: {
+                    invitationId: pending.id,
+                    invitedBy: pending.invitedBy,
+                    email: primaryEmail,
+                  },
+                }));
+              }
+
+              await webhookRepo.updateStatus(svixId, 'processed');
+              return res.status(200).json({ received: true, joined: pending.tenantId });
+            } catch (joinErr) {
+              logger.error('Invitee join failed; falling back to bootstrap', {
+                userId, email: primaryEmail, tenantId: pending.tenantId,
+                error: joinErr instanceof Error ? joinErr.message : String(joinErr),
+              });
+              // Fall through to the bootstrap path below; the
+              // operator can manually clean up if needed.
+            }
+          }
+        }
 
         if (deps.tenantRepo && primaryEmail) {
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
@@ -469,6 +658,40 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           } else {
             throw payErr;
           }
+        }
+      }
+
+      // Tier 4 (Subscription — Fieldly billing). customer.subscription.*
+      // events update the tenant's cached subscription status. Match
+      // by stripe_customer_id (the BillingService persists it on
+      // first portal-open). Idempotent — we just write the latest
+      // snapshot. created/updated/deleted all share the same handler;
+      // 'deleted' typically arrives with status='canceled' so the
+      // mirror naturally reflects the lifecycle end.
+      if (
+        deps.billingService &&
+        (event.type === 'customer.subscription.created' ||
+          event.type === 'customer.subscription.updated' ||
+          event.type === 'customer.subscription.deleted')
+      ) {
+        const sub = event.data.object as {
+          id?: string;
+          customer?: string;
+          status?: string;
+        };
+        if (sub.id && sub.customer && sub.status) {
+          await deps.billingService.applySubscriptionEvent({
+            customerId: sub.customer,
+            subscriptionId: sub.id,
+            status: sub.status,
+          });
+          logger.info('Subscription status mirrored from Stripe', {
+            customerId: sub.customer, subscriptionId: sub.id, status: sub.status,
+          });
+        } else {
+          logger.warn('customer.subscription.* missing fields', {
+            eventId: event.id, type: event.type,
+          });
         }
       }
 

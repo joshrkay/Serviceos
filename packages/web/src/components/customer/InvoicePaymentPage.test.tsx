@@ -348,3 +348,62 @@ describe('P5-018 InvoicePaymentPage — async settlement polling', () => {
     expect(screen.getByText('Paid on')).toBeInTheDocument();
   }, 15_000);
 });
+
+describe('Tier 4 deposit (PR 3c) — InvoicePaymentPage credit row', () => {
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    confirmPaymentMock.mockReset();
+    process.env.VITE_STRIPE_PUBLISHABLE_KEY = 'pk_test_unit_test_key';
+    const stripeJs = await import('@stripe/stripe-js');
+    vi.mocked(stripeJs.loadStripe).mockReturnValue(Promise.resolve({} as never));
+  });
+
+  afterEach(() => {
+    delete process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+  });
+
+  it('renders a "Deposit credit" row when depositCreditCents > 0', async () => {
+    mockFetch({
+      invoice: {
+        ...baseInvoice,
+        amountPaidCents: 25000,
+        amountDueCents: 17500,
+        depositCreditCents: 25000,
+      },
+    });
+    renderPage();
+
+    const row = await screen.findByTestId('invoice-deposit-credit-row');
+    expect(row).toHaveTextContent(/deposit credit/i);
+    expect(row).toHaveTextContent('-$250.00');
+  });
+
+  it('does not render the row when depositCreditCents is 0 or absent', async () => {
+    mockFetch({});
+    renderPage();
+    await waitFor(() =>
+      expect(screen.queryByTestId('invoice-deposit-credit-row')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('the "Paid" row excludes the deposit credit so the two amounts do not double up', async () => {
+    mockFetch({
+      invoice: {
+        ...baseInvoice,
+        // amountPaid = depositCredit + cash payment (25000 + 10000)
+        amountPaidCents: 35000,
+        amountDueCents: 7500,
+        depositCreditCents: 25000,
+      },
+    });
+    renderPage();
+
+    // Deposit credit row should appear at -$250.
+    const credit = await screen.findByTestId('invoice-deposit-credit-row');
+    expect(credit).toHaveTextContent('-$250.00');
+    // The "Paid" row should reflect 350 - 250 = 100.
+    const paidRows = screen.getAllByText(/^-\$/);
+    const paidRowText = paidRows.map((el) => el.textContent).join(' ');
+    expect(paidRowText).toContain('-$100.00');
+  });
+});

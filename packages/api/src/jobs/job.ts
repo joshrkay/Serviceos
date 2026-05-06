@@ -46,6 +46,14 @@ export interface Job {
    */
   depositStripePaymentLinkId?: string;
   depositStripePaymentLinkUrl?: string;
+  /**
+   * Tier 4 (Deposit rules — PR 3c). Set the first time an invoice is
+   * created from this job — points at the invoice that consumed the
+   * deposit credit. Used to keep the credit single-use: subsequent
+   * invoices for the same job (rare; change-orders) won't re-credit
+   * an already-consumed deposit.
+   */
+  depositCreditedToInvoiceId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -119,6 +127,27 @@ export interface JobRepository {
   ): Promise<Job[]>;
   update(tenantId: string, id: string, updates: Partial<Job>): Promise<Job | null>;
   getNextJobNumber(tenantId: string): Promise<number>;
+  /**
+   * Tier 4 (Deposit rules — PR 3c follow-up). Atomic claim of a job's
+   * paid deposit for a specific invoice. Returns the updated job
+   * (with `depositCreditedToInvoiceId` set) ONLY when the row was in
+   * the unconsumed state at update time. Returns null when the row
+   * was already consumed by a concurrent invoice creation.
+   *
+   * Used by `applyDepositCreditToInvoice` to close the race where two
+   * invoice-creation requests for the same job both pass the
+   * "is this consumed?" check before either has actually written the
+   * marker. Without this, the deposit could be credited twice.
+   *
+   * Optional on the interface so legacy in-memory fakes that don't
+   * need atomicity continue to satisfy the type — callers that need
+   * the guard fall back to the non-atomic path with a logged warning.
+   */
+  atomicallyConsumeDeposit?(
+    tenantId: string,
+    id: string,
+    invoiceId: string,
+  ): Promise<Job | null>;
 }
 
 export function validateJobInput(input: CreateJobInput): string[] {
@@ -329,5 +358,29 @@ export class InMemoryJobRepository implements JobRepository {
     const next = current + 1;
     this.counters.set(tenantId, next);
     return next;
+  }
+
+  /**
+   * In-memory equivalent of the Pg conditional UPDATE. Sequential
+   * Map operations are inherently serialized inside Node, so two
+   * concurrent calls can't both observe the unconsumed state — one
+   * runs to completion before the other reads, and the second sees
+   * the marker already set.
+   */
+  async atomicallyConsumeDeposit(
+    tenantId: string,
+    id: string,
+    invoiceId: string,
+  ): Promise<Job | null> {
+    const j = this.jobs.get(id);
+    if (!j || j.tenantId !== tenantId) return null;
+    if (j.depositCreditedToInvoiceId) return null;
+    const updated = {
+      ...j,
+      depositCreditedToInvoiceId: invoiceId,
+      updatedAt: new Date(),
+    };
+    this.jobs.set(id, updated);
+    return { ...updated };
   }
 }
