@@ -2023,6 +2023,49 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS auto_approve_threshold JSONB NOT NULL DEFAULT '{}'::jsonb;
   `,
+
+  '077_tenant_settings_deposit_rules': `
+    -- Tier 4 (Deposit rules — PR 1: data plane only) — per-tenant rules
+    -- for requiring a deposit before work begins on an estimate. PR 2
+    -- will compute the deposit on estimate generation/send; PR 3 will
+    -- split the customer payment flow. This migration establishes the
+    -- settings columns; behavior is unchanged until PR 2 lands.
+    --
+    -- Strategy:
+    --   - NULL (default): no deposit ever required.
+    --   - 'percentage':   deposit_percentage_bps must be set (0-10000).
+    --   - 'fixed':        deposit_fixed_cents must be set (>= 0).
+    --
+    -- deposit_required_above_cents: optional threshold. When NULL the
+    -- rule applies to every estimate; otherwise only estimates whose
+    -- total >= this value require a deposit. NULL is also the default
+    -- so adding the column is a no-op for existing tenants.
+    --
+    -- The CHECK constraint enforces that when a strategy is picked,
+    -- the matching amount column is set; the converse (extra fields
+    -- when strategy is NULL) is left to the application layer to keep
+    -- the constraint surface small.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS deposit_strategy TEXT
+        CHECK (deposit_strategy IN ('percentage', 'fixed') OR deposit_strategy IS NULL),
+      ADD COLUMN IF NOT EXISTS deposit_percentage_bps INTEGER
+        CHECK (deposit_percentage_bps IS NULL
+               OR (deposit_percentage_bps >= 0 AND deposit_percentage_bps <= 10000)),
+      ADD COLUMN IF NOT EXISTS deposit_fixed_cents INTEGER
+        CHECK (deposit_fixed_cents IS NULL OR deposit_fixed_cents >= 0),
+      ADD COLUMN IF NOT EXISTS deposit_required_above_cents INTEGER
+        CHECK (deposit_required_above_cents IS NULL OR deposit_required_above_cents >= 0);
+
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_deposit_strategy_amount_check;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT tenant_settings_deposit_strategy_amount_check
+        CHECK (
+          deposit_strategy IS NULL
+          OR (deposit_strategy = 'percentage' AND deposit_percentage_bps IS NOT NULL)
+          OR (deposit_strategy = 'fixed' AND deposit_fixed_cents IS NOT NULL)
+        );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

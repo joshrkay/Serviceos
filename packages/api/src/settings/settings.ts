@@ -74,6 +74,26 @@ export interface TenantSettings {
    * `createProposal`. Behavior unchanged until the wire-up lands.
    */
   autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /**
+   * Tier 4 (Deposit rules — PR 1: data plane only). Strategy + amount
+   * for requiring a deposit before work begins. Consumed by the
+   * estimate-flow integration that lands in PR 2; this PR persists
+   * the settings end-to-end without changing behavior.
+   *
+   * Field correlation rules (mirrored by the migration's CHECK):
+   *   - When `depositStrategy` is null/undefined, no deposit applies.
+   *   - When `depositStrategy === 'percentage'`, `depositPercentageBps`
+   *     must be set (0–10000 = 0%–100%).
+   *   - When `depositStrategy === 'fixed'`, `depositFixedCents` must
+   *     be set (non-negative integer).
+   *   - `depositRequiredAboveCents` is an optional threshold: when
+   *     null, the rule applies to every estimate; otherwise only
+   *     estimates whose total `>=` this amount require a deposit.
+   */
+  depositStrategy?: 'percentage' | 'fixed' | null;
+  depositPercentageBps?: number | null;
+  depositFixedCents?: number | null;
+  depositRequiredAboveCents?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -111,6 +131,11 @@ export interface UpdateSettingsInput {
   autoSendAppointmentReminders?: boolean;
   /** Tier 4 — per-mode override of the proposal auto-approve threshold. */
   autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /** Tier 4 (Deposit rules) — see TenantSettings doc for correlation rules. */
+  depositStrategy?: 'percentage' | 'fixed' | null;
+  depositPercentageBps?: number | null;
+  depositFixedCents?: number | null;
+  depositRequiredAboveCents?: number | null;
 }
 
 export interface SettingsRepository {

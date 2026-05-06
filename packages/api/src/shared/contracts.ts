@@ -273,6 +273,32 @@ export const updateSettingsSchema = z.object({
     })
     .strict()
     .optional(),
+  // Tier 4 — Deposit rules. Cross-field correlation enforced both at
+  // the DB layer (CHECK constraint) and here (z.refine) so a malformed
+  // request fails at validation time with a useful message rather than
+  // bouncing off a generic CHECK violation.
+  depositStrategy: z.enum(['percentage', 'fixed']).nullable().optional(),
+  depositPercentageBps: z.number().int().min(0).max(10000).nullable().optional(),
+  depositFixedCents: z.number().int().min(0).nullable().optional(),
+  depositRequiredAboveCents: z.number().int().min(0).nullable().optional(),
+}).superRefine((val, ctx) => {
+  if (val.depositStrategy === 'percentage') {
+    if (val.depositPercentageBps == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'depositPercentageBps is required when depositStrategy is "percentage"',
+        path: ['depositPercentageBps'],
+      });
+    }
+  } else if (val.depositStrategy === 'fixed') {
+    if (val.depositFixedCents == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'depositFixedCents is required when depositStrategy is "fixed"',
+        path: ['depositFixedCents'],
+      });
+    }
+  }
 });
 
 export const conversationAccessSchema = z.object({

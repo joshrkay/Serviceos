@@ -14,6 +14,7 @@ import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
 import { TerminologySheet } from './TerminologySheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
+import { DepositRulesSheet } from './DepositRulesSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -110,6 +111,7 @@ export function SettingsPage() {
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
   const [terminologyOpen, setTerminologyOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
+  const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -181,7 +183,7 @@ export function SettingsPage() {
       title: 'Payments & billing',
       items: [
         { icon: CreditCard, label: 'Payment methods',        description: 'Card, ACH · Stripe connected',  action: () => {} },
-        { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => {} },
+        { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: CreditCard, label: 'Fieldly subscription',   description: 'Pro plan · $79/mo',             action: () => {} },
       ],
     },
@@ -562,6 +564,11 @@ export function SettingsPage() {
       {/* AI approval rules sheet — per-mode auto-approve threshold overrides. */}
       {aiRulesOpen && (
         <AIApprovalRulesSheet onClose={() => setAiRulesOpen(false)} />
+      )}
+
+      {/* Deposit rules sheet — strategy + amount + optional threshold. */}
+      {depositRulesOpen && (
+        <DepositRulesSheet onClose={() => setDepositRulesOpen(false)} />
       )}
     </div>
   );
