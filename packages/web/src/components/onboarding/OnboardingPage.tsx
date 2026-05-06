@@ -331,7 +331,7 @@ function useStepVoice(onTranscript: (t: string) => void) {
     setRecording(false);
     recorder.onstop = async () => {
       recorder.stream.getTracks().forEach(t => t.stop());
-      const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
+      const audioBlob = new Blob(chunksRef.current, { type: recorder.mimeType });
       try {
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
