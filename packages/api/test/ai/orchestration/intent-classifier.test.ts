@@ -263,6 +263,58 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.messages[1]).toEqual({ role: 'user', content: expect.any(String) });
   });
 
+  describe('§3B vertical-aware system prompt', () => {
+    it('emits a single system message when no vertical context is supplied', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+      );
+      await classifyIntent('create an invoice', { tenantId }, gateway);
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+
+    it('appends a second system message carrying the vertical prompt section', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.85 })
+      );
+      const verticalPromptSection = [
+        'Service vertical: HVAC Professional',
+        'Equipment and terminology recognized:',
+        '  - Furnace (heater, heating unit)',
+      ].join('\n');
+      await classifyIntent(
+        'my heater is broken',
+        { tenantId, verticalPromptSection },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Tenant vertical context');
+      expect(systemMessages[1].content).toContain('Furnace (heater, heating unit)');
+      // User message is still the last entry.
+      expect(call.messages[call.messages.length - 1]).toEqual({
+        role: 'user',
+        content: 'my heater is broken',
+      });
+    });
+
+    it('skips the vertical message when the section is empty / whitespace', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+      );
+      await classifyIntent(
+        'create an invoice',
+        { tenantId, verticalPromptSection: '   \n\t  ' },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+  });
+
   it('handles empty transcript gracefully', async () => {
     const gateway = mockGateway(JSON.stringify({ intentType: 'unknown', confidence: 0 }));
     const result = await classifyIntent('', { tenantId }, gateway);

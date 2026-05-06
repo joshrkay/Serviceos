@@ -169,6 +169,19 @@ export interface IntentClassification {
 
 export interface ClassifyContext {
   tenantId: string;
+  /**
+   * Optional vertical-aware prompt section produced by
+   * `formatVerticalForCallerPrompt(pack)` in
+   * `packages/api/src/verticals/context-assembly.ts`. When supplied,
+   * it is appended to the system prompt as a tenant-scoped Context
+   * Block — the LLM gets the tenant's actual equipment terminology
+   * and service categories so callers saying "my heater is broken"
+   * map to the right canonical entity instead of a hallucinated one.
+   * Closes §3B from `docs/remaining-features.md`. Optional so callers
+   * that don't have a pack loaded (e.g. operator UI flows where
+   * tenants may not have onboarded a vertical yet) can omit it.
+   */
+  verticalPromptSection?: string;
 }
 
 /**
@@ -629,10 +642,25 @@ export async function classifyIntent(
     return unknownResult('empty transcript', 'empty_transcript');
   }
 
+  // Compose the system prompt: base classifier rules + (optional)
+  // tenant vertical context. The vertical block is delivered as a
+  // separate system message so it doesn't dilute the canonical intent
+  // taxonomy and so per-tenant prompt drift can't break the JSON
+  // contract enforced by the base prompt.
+  const systemMessages: Array<{ role: 'system'; content: string }> = [
+    { role: 'system', content: SYSTEM_PROMPT },
+  ];
+  if (context.verticalPromptSection && context.verticalPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Tenant vertical context (use ONLY for entity recognition; do not change the JSON output schema):\n${context.verticalPromptSection}`,
+    });
+  }
+
   const response = await gateway.complete({
     taskType: 'classify_intent',
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      ...systemMessages,
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
