@@ -88,6 +88,23 @@ export async function updateUser(
   if (errors.length > 0) {
     throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
   }
+
+  // Tier 4 (Team members — PR 2). Last-owner guard: changing the
+  // role of the only owner away from 'owner' would lock the tenant
+  // out of users:edit_role + users:invite forever. Refuse — the
+  // operator must promote someone else first.
+  if (input.role && input.role !== 'owner') {
+    const target = await repository.findById(tenantId, id);
+    if (target?.role === 'owner') {
+      const owners = await repository.findByTenant(tenantId, { role: 'owner' });
+      if (owners.length <= 1) {
+        throw new ValidationError(
+          'Cannot demote the only owner — promote another team member first',
+        );
+      }
+    }
+  }
+
   return repository.update(tenantId, id, input);
 }
 

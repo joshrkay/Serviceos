@@ -71,3 +71,77 @@ describe('GET /api/users — Tier 4 Team members (PR 1)', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('PATCH /api/users/:id — Tier 4 Team members (PR 2)', () => {
+  let repo: InMemoryUserRepository;
+  let ownerId: string;
+  let techId: string;
+
+  beforeEach(async () => {
+    repo = new InMemoryUserRepository();
+    ownerId = uuidv4();
+    techId = uuidv4();
+    await repo.create!({
+      id: ownerId, tenantId: TENANT, email: 'owner@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_owner',
+    });
+    await repo.create!({
+      id: techId, tenantId: TENANT, email: 'tech@example.com',
+      role: 'technician', canFieldServe: false, clerkUserId: 'clerk_tech',
+    });
+    // A second owner so demotion tests aren't blocked by the
+    // last-owner guard unless they want to be.
+    await repo.create!({
+      id: uuidv4(), tenantId: TENANT, email: 'co-owner@example.com',
+      role: 'owner', canFieldServe: false, clerkUserId: 'clerk_co_owner',
+    });
+  });
+
+  it('owner can change a teammate role and the response carries the new role', async () => {
+    const app = buildApp(repo, 'owner');
+    const res = await request(app)
+      .patch(`/api/users/${techId}`)
+      .send({ role: 'dispatcher' });
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('dispatcher');
+  });
+
+  it('rejects unknown role values at the schema layer', async () => {
+    const app = buildApp(repo, 'owner');
+    const res = await request(app)
+      .patch(`/api/users/${techId}`)
+      .send({ role: 'admin' });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the user does not exist in the tenant', async () => {
+    const app = buildApp(repo, 'owner');
+    const res = await request(app)
+      .patch(`/api/users/${uuidv4()}`)
+      .send({ role: 'technician' });
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects dispatchers without users:edit_role', async () => {
+    const app = buildApp(repo, 'dispatcher');
+    const res = await request(app)
+      .patch(`/api/users/${techId}`)
+      .send({ role: 'dispatcher' });
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses to demote the last owner', async () => {
+    const onlyOwnerRepo = new InMemoryUserRepository();
+    const id = uuidv4();
+    await onlyOwnerRepo.create!({
+      id, tenantId: TENANT, email: 'solo@example.com',
+      role: 'owner', canFieldServe: true, clerkUserId: 'clerk_solo',
+    });
+    const app = buildApp(onlyOwnerRepo, 'owner');
+    const res = await request(app)
+      .patch(`/api/users/${id}`)
+      .send({ role: 'dispatcher' });
+    expect(res.status).toBe(400);
+    expect(res.body.message ?? '').toMatch(/only owner/i);
+  });
+});

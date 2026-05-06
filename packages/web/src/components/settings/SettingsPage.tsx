@@ -573,9 +573,14 @@ export function SettingsPage() {
         <DepositRulesSheet onClose={() => setDepositRulesOpen(false)} />
       )}
 
-      {/* Team members sheet — read-only roster (PR 1). */}
+      {/* Team members sheet — roster + role editing (PR 1 + PR 2).
+          Owner-only edit affordances; backend re-enforces via
+          users:edit_role. */}
       {teamMembersOpen && (
-        <TeamMembersSheet onClose={() => setTeamMembersOpen(false)} />
+        <TeamMembersSheet
+          onClose={() => setTeamMembersOpen(false)}
+          canEditRoles={me?.role === 'owner'}
+        />
       )}
     </div>
   );

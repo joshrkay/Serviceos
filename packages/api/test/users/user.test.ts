@@ -81,4 +81,18 @@ describe('users — Tier 4 Team members (PR 1: read + role-edit primitives)', ()
       'firstName must be 200 characters or fewer',
     );
   });
+
+  it('updateUser refuses to demote the only owner', async () => {
+    const owner = await seedUser(repo, { id: 'owner-only', role: 'owner' });
+    await expect(
+      updateUser(TENANT, owner.id, { role: 'dispatcher' }, repo),
+    ).rejects.toThrow(/only owner/);
+  });
+
+  it('updateUser allows demoting an owner when another owner exists', async () => {
+    const a = await seedUser(repo, { id: 'owner-a', role: 'owner' });
+    await seedUser(repo, { id: 'owner-b', role: 'owner' });
+    const updated = await updateUser(TENANT, a.id, { role: 'dispatcher' }, repo);
+    expect(updated?.role).toBe('dispatcher');
+  });
 });
