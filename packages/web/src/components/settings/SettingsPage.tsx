@@ -17,6 +17,7 @@ import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
+import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -116,6 +117,7 @@ export function SettingsPage() {
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
+  const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
@@ -126,14 +128,24 @@ export function SettingsPage() {
     const params = new URLSearchParams(window.location.search);
     const isConnected = params.get('calendar_connected') === '1';
     const connectionError = params.get('calendar_error');
+    // Tier 4 (Payment methods — PR 1). Operator returns from Stripe
+    // Connect onboarding to /settings?stripe_connect=1. Auto-open
+    // the sheet so they see the freshly-mirrored status.
+    const stripeReturned = params.get('stripe_connect') === '1';
     if (isConnected || connectionError) {
       setCalendarSyncOpen(true);
       if (connectionError) {
         toast.error(`Calendar connection failed: ${connectionError}`);
       }
+    }
+    if (stripeReturned) {
+      setPaymentMethodsOpen(true);
+    }
+    if (isConnected || connectionError || stripeReturned) {
       // Strip the params so a refresh doesn't re-open / re-toast.
       params.delete('calendar_connected');
       params.delete('calendar_error');
+      params.delete('stripe_connect');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }
@@ -243,7 +255,7 @@ export function SettingsPage() {
     {
       title: 'Payments & billing',
       items: [
-        { icon: CreditCard, label: 'Payment methods',        description: 'Card, ACH · Stripe connected',  action: () => {} },
+        { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: CreditCard, label: 'Fieldly subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
       ],
@@ -644,6 +656,11 @@ export function SettingsPage() {
       {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
+      )}
+
+      {/* Payment methods sheet — Stripe Connect onboarding (PR 1). */}
+      {paymentMethodsOpen && (
+        <PaymentMethodsSheet onClose={() => setPaymentMethodsOpen(false)} />
       )}
     </div>
   );
