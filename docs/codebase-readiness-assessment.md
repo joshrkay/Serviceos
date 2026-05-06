@@ -51,8 +51,8 @@ domain knowledge** in agent prompts, and a finite list of UI polish items
 | **P5 — Invoice Intelligence + Payments** | 29 | 28/29 | ~26/29 | invoice delivery notif |
 | **P6 — Dispatch Board + Scheduling** | 27 | 24/27 | ~20/27 | conflict badges, refresh |
 | **P7 — Integrations + Beta Hardening** | 18 | 8/18 | ~5/18 | QuickBooks, Zapier, runbook |
-| **P8 — Customer Calling Agent (new)** | 14 | 5/14 | ~3/14 | 9 stories across 8B/8C |
-| **TOTAL** | **198** | **175/198** | **~155/198** | **~43** |
+| **P8 — Customer Calling Agent (new)** | 14 | 13/14 | ~12/14 | hardening + Tier 3 prompt work |
+| **TOTAL** | **198** | **183/198** | **~164/198** | **~34** |
 
 ---
 
@@ -99,24 +99,40 @@ From `git log` and `docs/remaining-features.md` cross-referenced against code:
 
 ## REMAINING WORK (May 6 forward)
 
-### Tier 1 — In-flight active sprint (Phase 8: Customer Calling Agent)
+### Tier 1 — Phase 8 Customer Calling Agent (largely shipped)
 
-The active bet per `docs/remaining-features.md`. 14 stories across 3 waves;
-~5 stories scaffolded, 9 still open.
+> **Reality check 2026-05-06:** when this audit dug into the calling-agent
+> directory, ~13 of the 14 Phase 8 stories had implementation in
+> `packages/api/src/ai/agents/customer-calling/`,
+> `packages/api/src/ai/skills/`, `packages/api/src/telephony/`, and
+> `packages/api/src/routes/telephony.ts` + `routes/voice-sessions.ts`.
+> Hardening, end-to-end load testing, and the Tier 3 prompt-engineering
+> follow-ups below are the actual remaining work.
 
-**Wave 8A (parallel — 8 stories, ~3 partly scaffolded):**
-P8-001 Pg entity resolver + trigram, P8-002 enforce_compliance,
-P8-003 enforce_session_caps, P8-004 calling-agent FSM core (scaffolded),
-P8-005 disclose_recording, P8-006 identify_caller, P8-007 confirm_intent,
-P8-008 escalate_to_human (in-app variant).
+**Wave 8A — shipped:** P8-001 (`ai/resolution/pg-entity-resolver.ts`),
+P8-002 (`compliance/business-hours.ts` + `dnc.ts` + `jurisdiction.ts` +
+`ai/skills/enforce-compliance.ts`), P8-003 (`ai/skills/session-cost-tracker.ts`),
+P8-004 (FSM in `ai/agents/customer-calling/state-machine.ts` +
+`transitions.ts`), P8-005 (`ai/skills/disclose-recording.ts`),
+P8-006 (`ai/skills/identify-caller.ts`), P8-007 (`ai/skills/confirm-intent.ts`),
+P8-008 (`ai/skills/escalate-to-human.ts` in-app variant).
 
-**Wave 8B (3 stories, after 8A):**
-P8-009 in-app voice session integration, P8-010 summarize_session,
-P8-011 Twilio inbound webhook + TwiML adapter (`<Gather>` mode).
+**Wave 8B — shipped:** P8-009 (`routes/voice-sessions.ts` +
+`ai/agents/customer-calling/inapp-adapter.ts`, mounted in `app.ts:1843`),
+P8-010 (`ai/skills/summarize-session.ts`), P8-011 (`routes/telephony.ts`
++ `telephony/twilio-adapter.ts`, Gather mode at `/api/telephony/voice` +
+`/api/telephony/gather`).
 
-**Wave 8C (3 stories, after 8B — competitive parity):**
-**P8-012 Twilio Media Streams (real-time audio)** — the Avoca-parity story,
-P8-013 escalate_to_human telephony, P8-014 record_call.
+**Wave 8C — shipped:** P8-012 (`telephony/media-streams/` —
+`mulaw-codec.ts`, `mediastream-adapter.ts`, `twilio-mediastream-server.ts`,
+4 dedicated test files, gated behind `TWILIO_MEDIA_STREAMS_ENABLED`),
+P8-013 (`telephony/twilio-call-control.ts` + `OnCallRepository.listRotation`
+integration), P8-014 (`telephony/recording-webhook.ts`, mounted at
+`/api/telephony/recording`, `voice_recordings` table + S3 upload).
+
+**Remaining Phase-8 tasks:** end-to-end load testing of the Media Streams
+path, real-call transcript regression suite, post-launch cost tuning, and
+the Tier 3 prompt-engineering follow-ups below.
 
 ### Tier 2 — Voice provider upgrades (1A / 1B)
 
@@ -130,13 +146,13 @@ P8-013 escalate_to_human telephony, P8-014 record_call.
 Prompt-engineering + data-wiring tasks that make the calling agent sound like
 it knows home services. From `remaining-features.md` §3.
 
-| ID | Gap | Fix |
+| ID | Gap | Status / Fix |
 |---|---|---|
-| 3A | No `emergency_dispatch` intent | Add 15th intent in `ai/orchestration/intent-classifier.ts`; fast-path in P8-004 FSM. |
-| 3B | Vertical terminology not injected into agent prompts | `formatVerticalForCallerPrompt()` in `verticals/context-assembly.ts`. |
-| 3C | No maintenance-plan / membership awareness | Extend `buildCallerContext()` in `ai/orchestration/context-builder.ts` to query active contracts. |
-| 3D | No service-type disambiguation templates | Add `intake_questions` array to vertical packs. |
-| 3E | No objection-handling scripts | Add `objection_scripts` to tenant settings + per-vertical defaults. |
+| 3A | No `emergency_dispatch` intent | **DONE** — present in `ai/orchestration/intent-classifier.ts` (15th intent). Fast-path in FSM via `transitions.ts` `intent_capture → escalating` on `emergency_dispatch`. |
+| 3B | Vertical terminology not injected into agent prompts | **HELPER LANDED** — `formatVerticalForCallerPrompt()` in `verticals/context-assembly.ts`. Wire-up into `intent-classifier`'s `SYSTEM_PROMPT` is the next slice. |
+| 3C | No maintenance-plan / membership awareness | OPEN — extend `buildCallerContext()` in `ai/orchestration/context-builder.ts` to query active contracts; pass `{ hasActivePlan, planType, nextServiceDue }` to FSM. |
+| 3D | No service-type disambiguation templates | OPEN — add `intake_questions` array to `VerticalPack` + per-pack defaults in `verticals/packs/{hvac,plumbing}.ts`. |
+| 3E | No objection-handling scripts | OPEN — add `objection_scripts` to tenant settings + per-vertical defaults; classifier emits `objection_detected` event. |
 
 ### Tier 4 — Finite UI polish
 
@@ -262,30 +278,32 @@ in Tier 4 (UI polish) above.
 ## RECOMMENDED EXECUTION ORDER
 
 ### Now — Sprint A (active)
-**Phase 8 Wave 8A** — 8 stories, parallelizable. Land the calling-agent state
-machine, identify_caller, confirm_intent, compliance + session caps, recording
-disclosure. Outcome: in-app voice agent demonstrably handles a full intake.
+**Phase 8 hardening + Tier 3 prompt wire-up** — Wire
+`formatVerticalForCallerPrompt` (3B helper, landed 2026-05-06) into
+`intent-classifier`'s `SYSTEM_PROMPT` so per-tenant terminology actually
+reaches the LLM. Add Media Streams transcript regression fixtures.
+Outcome: agent uses tenant vocabulary; Media Streams path validated
+under load.
 
 ### Next — Sprint B
-**Phase 8 Wave 8B + Tier 3 (3A + 3B)** — Twilio inbound `<Gather>` adapter,
-session summary, in-app voice integration. Add emergency intent fast-path
-+ vertical terminology in agent prompts. Outcome: telephony path live (higher
-latency but functional); agent sounds vertical-aware.
+**Tier 3 (3C + 3D + 3E) + Tier 2** — Plan-awareness via `buildCallerContext`
+(3C), per-vertical `intake_questions` (3D), per-vertical `objection_scripts`
+(3E). Then upgrade to Deepgram streaming STT + ElevenLabs streaming TTS
+(Tier 2) for sub-800 ms TTFA. Outcome: vertical-aware agent at competitive
+latency.
 
-### Then — Sprint C (competitive parity)
-**Phase 8 Wave 8C + Tier 2** — Twilio Media Streams + Deepgram streaming +
-ElevenLabs TTS + telephony escalation + recording. Target TTFA < 800 ms.
-Outcome: feature parity vs. Avoca for inbound calls.
+### Then — Sprint C
+**Tier 4 — UI polish** — Close the 13 settings stubs, conflict-visibility
+badges, board-refresh-after-execution, conversation persistence across
+navigation, template management UI.
 
 ### Polish — Sprint D
-**Tier 4 + Tier 3 (3C–3E) + Tier 5 partial** — Settings page wiring (close
-13 stubs), conflict badges, board refresh, plan-awareness, disambiguation
-templates, objection scripts, dependency audit, rollback runbook,
-production smoke script.
+**Tier 5 — Operational hardening** — dependency audit, rollback runbook,
+production smoke-test script, load test, `as any` cleanup.
 
 ### Final — Sprint E (beta hardening)
-**Tier 5 (Original P7-001..018)** — QuickBooks sync, Zapier, support tooling,
-feature-flag UI, degraded-mode, backup/recovery, launch checklist, load test.
+**Original P7-001..018** — QuickBooks sync, Zapier, support tooling,
+feature-flag UI, degraded-mode, backup/recovery, launch checklist.
 
 ---
 
