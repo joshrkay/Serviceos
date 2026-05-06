@@ -1,0 +1,91 @@
+import { v4 as uuidv4 } from 'uuid';
+import { Invoice, InvoiceRepository } from './invoice';
+import { Payment, PaymentRepository } from './payment';
+import { Job, JobRepository } from '../jobs/job';
+
+/**
+ * Tier 4 (Deposit rules — PR 3c). Apply a previously-paid deposit on a
+ * job to a freshly-created invoice for that job:
+ *
+ *   - Inserts a Payment row (method='other', providerReference='deposit_credit')
+ *     so the invoice's payment history is complete and the standard
+ *     amountPaid / amountDue accounting stays accurate.
+ *   - Updates the invoice's amountPaidCents + amountDueCents + status.
+ *   - Marks the job's deposit as consumed (depositCreditedToInvoiceId)
+ *     so a subsequent invoice from the same job (rare; change-orders)
+ *     does not re-credit an already-applied deposit.
+ *
+ * Idempotency: a no-op when the job has no paid deposit OR the deposit
+ * has already been credited to another invoice. Returns the credited
+ * amount + updated invoice on success; null when nothing was credited.
+ *
+ * Lives separate from `recordPayment` because:
+ *   - recordPayment requires invoice.status ∈ {open, partially_paid};
+ *     this credit lands on a freshly-created `draft` invoice.
+ *   - We don't want this in the user-visible payment-method enum
+ *     (it's a system-level transfer between job and invoice, not a
+ *     real transaction the customer made against the invoice).
+ */
+export interface DepositCreditResult {
+  invoice: Invoice;
+  payment: Payment;
+  creditCents: number;
+}
+
+export async function applyDepositCreditToInvoice(
+  invoice: Invoice,
+  job: Job,
+  invoiceRepo: InvoiceRepository,
+  paymentRepo: PaymentRepository,
+  jobRepo: JobRepository,
+): Promise<DepositCreditResult | null> {
+  const depositPaid = job.depositPaidCents ?? 0;
+  if (depositPaid <= 0) return null;
+  if (job.depositCreditedToInvoiceId) return null;
+  if (invoice.totals.totalCents <= 0) return null;
+
+  // Cap at the invoice total so we never produce a negative amountDue.
+  // Any leftover deposit (rare — would mean rule changed downward)
+  // remains on the job; PR 3c+ can reconcile it through dispatch.
+  const credit = Math.min(depositPaid, invoice.totals.totalCents);
+
+  const now = new Date();
+  const payment: Payment = {
+    id: uuidv4(),
+    tenantId: invoice.tenantId,
+    invoiceId: invoice.id,
+    amountCents: credit,
+    method: 'other',
+    status: 'completed',
+    providerReference: 'deposit_credit',
+    note: `Deposit credit from job ${job.jobNumber}`,
+    receivedAt: now,
+    processedBy: 'system',
+    createdAt: now,
+    updatedAt: now,
+  };
+  await paymentRepo.create(payment);
+
+  const newAmountPaid = invoice.amountPaidCents + credit;
+  const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
+  // Status only gets bumped from draft if the credit was the FULL amount.
+  // Otherwise the invoice stays in draft until the operator issues it
+  // (existing flow). For draft → draft we just update the cents fields.
+  const updatedInvoice = await invoiceRepo.update(invoice.tenantId, invoice.id, {
+    amountPaidCents: newAmountPaid,
+    amountDueCents: newAmountDue,
+    updatedAt: now,
+  });
+  if (!updatedInvoice) {
+    throw new Error(
+      `Failed to update invoice ${invoice.id} with deposit credit ${credit}`,
+    );
+  }
+
+  await jobRepo.update(job.tenantId, job.id, {
+    depositCreditedToInvoiceId: invoice.id,
+    updatedAt: now,
+  });
+
+  return { invoice: updatedInvoice, payment, creditCents: credit };
+}

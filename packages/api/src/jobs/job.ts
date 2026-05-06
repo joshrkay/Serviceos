@@ -46,6 +46,14 @@ export interface Job {
    */
   depositStripePaymentLinkId?: string;
   depositStripePaymentLinkUrl?: string;
+  /**
+   * Tier 4 (Deposit rules — PR 3c). Set the first time an invoice is
+   * created from this job — points at the invoice that consumed the
+   * deposit credit. Used to keep the credit single-use: subsequent
+   * invoices for the same job (rare; change-orders) won't re-credit
+   * an already-consumed deposit.
+   */
+  depositCreditedToInvoiceId?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

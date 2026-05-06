@@ -2137,6 +2137,23 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_id TEXT,
       ADD COLUMN IF NOT EXISTS deposit_stripe_payment_link_url TEXT;
   `,
+
+  '081_jobs_deposit_credited_to_invoice': `
+    -- Tier 4 (Deposit rules — PR 3c). Marks which invoice consumed
+    -- this job's paid deposit. NULL = deposit hasn't been applied to
+    -- any invoice yet (or no deposit was paid). Set the FIRST time an
+    -- invoice is created from this job; downstream invoices for the
+    -- same job (rare but possible — e.g. additional change-order work)
+    -- skip the credit because the deposit is already consumed.
+    --
+    -- FK without ON DELETE so a deleted invoice surfaces a clear
+    -- foreign-key error rather than silently re-enabling a credit.
+    -- Idempotent: nullable + default NULL, so existing rows are
+    -- unaffected.
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS deposit_credited_to_invoice_id UUID
+        REFERENCES invoices(id);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

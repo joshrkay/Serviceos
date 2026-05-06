@@ -1166,6 +1166,9 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
+    // Tier 4 (Deposit rules — PR 3c). Required for the public view to
+    // surface the deposit-credit line; without it the field reads 0.
+    paymentRepo,
   });
   app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
 
@@ -1616,7 +1619,7 @@ export function createApp(): express.Express {
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
 
   // Tenant-scoped reporting (revenue by lead source / UTM).
   const revenueBySourceRepo = pool

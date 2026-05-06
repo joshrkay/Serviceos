@@ -35,6 +35,9 @@ function mapRow(row: Record<string, unknown>): Job {
       (row.deposit_stripe_payment_link_id as string | null) ?? undefined,
     depositStripePaymentLinkUrl:
       (row.deposit_stripe_payment_link_url as string | null) ?? undefined,
+    // Tier 4 (Deposit rules — PR 3c). Migration 081.
+    depositCreditedToInvoiceId:
+      (row.deposit_credited_to_invoice_id as string | null) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -215,6 +218,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         // Tier 4 (Deposit rules — PR 3b). Migration 080.
         depositStripePaymentLinkId: 'deposit_stripe_payment_link_id',
         depositStripePaymentLinkUrl: 'deposit_stripe_payment_link_url',
+        // Tier 4 (Deposit rules — PR 3c). Migration 081.
+        depositCreditedToInvoiceId: 'deposit_credited_to_invoice_id',
         updatedAt: 'updated_at',
       };
 

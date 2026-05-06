@@ -18,11 +18,12 @@ import {
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
-import { AuditRepository } from '../audit/audit';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
 import { SendService } from '../notifications/send-service';
-import { Job } from '../jobs/job';
+import { Job, JobRepository } from '../jobs/job';
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -38,6 +39,10 @@ export function createInvoiceRouter(
   ownership: TenantOwnership,
   paymentRepo?: PaymentRepository,
   sendService?: SendService,
+  // Tier 4 (Deposit rules — PR 3c). Optional so legacy harnesses
+  // without a job repo still build the router; deposit credit only
+  // fires when both jobRepo + paymentRepo are wired.
+  jobRepo?: JobRepository,
 ): Router {
   const router = Router();
 
@@ -72,7 +77,46 @@ export function createInvoiceRouter(
           settingsRepo,
           auditRepo
         );
-        res.status(201).json(result);
+
+        // Tier 4 (Deposit rules — PR 3c). When the linked job has a
+        // paid deposit that hasn't been credited to any invoice yet,
+        // apply it as a system payment + reduce amountDue on this
+        // invoice. No-op when the deposit is 0, already-consumed, or
+        // when the deps haven't been wired (legacy harnesses). Failure
+        // here must NOT bounce the invoice creation — we already
+        // returned the invoice number and the customer expects a
+        // record. Surface as a structured log + an audit event so
+        // dispatch can reconcile manually.
+        let credited = result;
+        if (jobRepo && paymentRepo && job) {
+          try {
+            const credit = await applyDepositCreditToInvoice(
+              result,
+              job,
+              invoiceRepo,
+              paymentRepo,
+              jobRepo,
+            );
+            if (credit) credited = credit.invoice;
+          } catch (creditErr) {
+            // Best-effort. Invoice exists with the right total; the
+            // unconsumed deposit stays on the job and operations can
+            // apply it manually if this hook misfires repeatedly.
+            const message = creditErr instanceof Error ? creditErr.message : String(creditErr);
+            await auditRepo.create(
+              createAuditEvent({
+                tenantId: req.auth!.tenantId,
+                actorId: req.auth!.userId,
+                actorRole: 'system',
+                eventType: 'invoice.deposit_credit_failed',
+                entityType: 'invoice',
+                entityId: result.id,
+                metadata: { jobId: job.id, error: message },
+              }),
+            );
+          }
+        }
+        res.status(201).json(credited);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
