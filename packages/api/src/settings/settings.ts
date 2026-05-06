@@ -374,6 +374,31 @@ export async function getNextInvoiceNumber(
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
 }
 
+/**
+ * Tier 4 — entity-label keys the Terminology sheet edits.
+ * These describe how the tenant wants ServiceOS to refer to common
+ * CRM entities (e.g. "Quote" instead of "Estimate", "Project" instead
+ * of "Job"). Distinct from per-vertical equipment terminology keys
+ * which come from the active pack at runtime.
+ *
+ * Used by `validateTerminologyPreferences` so a PUT /api/settings can
+ * persist these regardless of which vertical packs are active. The
+ * onboarding route already writes these keys directly through the
+ * repo; this allowlist makes them editable through the API too.
+ */
+export const ENTITY_LABEL_TERMINOLOGY_KEYS = [
+  'jobTerm',
+  'estimateTerm',
+  'invoiceTerm',
+  'customerTerm',
+  'appointmentTerm',
+  'workerTerm',
+  // Onboarding seeds these too — included here so a re-save of the
+  // existing payload doesn't accidentally fail validation.
+  'teamSize',
+  'ownerName',
+] as const;
+
 export function validateTerminologyPreferences(
   preferences: Record<string, string>,
   validKeys?: string[]
@@ -383,6 +408,9 @@ export function validateTerminologyPreferences(
     errors.push('terminologyPreferences must be an object');
     return errors;
   }
+  const allowed = validKeys
+    ? new Set([...validKeys, ...ENTITY_LABEL_TERMINOLOGY_KEYS])
+    : null;
   for (const [key, value] of Object.entries(preferences)) {
     if (!key || key.trim().length === 0) {
       errors.push('terminologyPreferences key must not be empty');
@@ -390,7 +418,7 @@ export function validateTerminologyPreferences(
     if (typeof value !== 'string' || value.trim().length === 0) {
       errors.push(`terminologyPreferences value for "${key}" must be a non-empty string`);
     }
-    if (validKeys && !validKeys.includes(key)) {
+    if (allowed && !allowed.has(key)) {
       errors.push(`terminologyPreferences key "${key}" is not a recognized term for the active vertical`);
     }
   }

@@ -1714,7 +1714,13 @@ export function createApp(): express.Express {
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
-  app.use('/api/settings', createSettingsRouter(settingsRepo));
+  app.use(
+    '/api/settings',
+    createSettingsRouter(settingsRepo, {
+      activationRepo: packActivationRepo,
+      verticalPackRegistry: canonicalPackRegistry,
+    }),
+  );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/templates', createTemplateRouter(templateRepo));

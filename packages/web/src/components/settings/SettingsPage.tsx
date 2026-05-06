@@ -12,6 +12,7 @@ import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
+import { TerminologySheet } from './TerminologySheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -106,6 +107,7 @@ export function SettingsPage() {
   const [qbConnected, setQbConnected] = useState(false);
   const [suppliersOpen, setSuppliersOpen] = useState(false);
   const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
+  const [terminologyOpen, setTerminologyOpen] = useState(false);
   const [copied, setCopied]         = useState(false);
   const [googleReviewUrl, setGoogleReviewUrl] = useState('');
   const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
@@ -148,7 +150,7 @@ export function SettingsPage() {
       items: [
         { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
-        { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => {} },
+        { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
       ],
     },
@@ -548,6 +550,11 @@ export function SettingsPage() {
       {/* Business profile sheet — closes the first of the 13 settings stubs. */}
       {businessProfileOpen && (
         <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
+      )}
+
+      {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
+      {terminologyOpen && (
+        <TerminologySheet onClose={() => setTerminologyOpen(false)} />
       )}
     </div>
   );
