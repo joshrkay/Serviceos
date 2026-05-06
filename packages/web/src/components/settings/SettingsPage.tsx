@@ -80,7 +80,7 @@ export function SettingsPage() {
       items: [
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => {} },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
-        { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => {} },
+        { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
       ],
     },
     {
