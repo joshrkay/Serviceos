@@ -131,6 +131,32 @@ function getMissingItemRules(verticalType?: VerticalType): MissingItemRule[] {
 }
 
 /**
+ * §3D — render the pack's `intakeQuestions` as a prompt-shaped block
+ * the calling agent injects into the classifier system prompt. The
+ * questions are reference material the LLM uses when classifier
+ * confidence is below TAU_INT — instead of asking a generic "Can you
+ * tell me more?" the agent picks a vertical-specific clarifying
+ * question.
+ *
+ * Returns '' for null/undefined pack OR a pack with no intake
+ * questions, so callers can unconditionally concatenate.
+ */
+export function formatIntakeQuestionsForPrompt(
+  pack: import('./registry').VerticalPack | null | undefined,
+): string {
+  if (!pack) return '';
+  const questions = pack.intakeQuestions ?? [];
+  if (questions.length === 0) return '';
+
+  const lines: string[] = ['Disambiguation questions to use when caller intent is unclear:'];
+  for (const q of questions) {
+    const intentLabel = q.intent ? ` [intent: ${q.intent}]` : '';
+    lines.push(`  - "${q.question}"${intentLabel}`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * Build a prompt section the calling agent can inject into its system
  * prompt for the `intent_capture` and downstream states. Closes §3B from
  * `docs/remaining-features.md`: without this, the agent receives the

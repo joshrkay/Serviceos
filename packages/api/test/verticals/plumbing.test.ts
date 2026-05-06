@@ -38,4 +38,12 @@ describe('P4-003 — Plumbing Vertical Pack', () => {
     expect(Number.isInteger(PLUMBING_LINE_ITEM_DEFAULTS.laborRatePerHourCents)).toBe(true);
     expect(PLUMBING_LINE_ITEM_DEFAULTS.drainCleaningCents).toBeGreaterThan(0);
   });
+
+  it('§3D — ships default intake_questions for caller disambiguation', () => {
+    expect(pack.intakeQuestions).toBeDefined();
+    expect((pack.intakeQuestions ?? []).length).toBeGreaterThan(0);
+    const triggers = (pack.intakeQuestions ?? []).map((q) => q.trigger);
+    expect(triggers).toEqual(expect.arrayContaining(['plumbing']));
+    expect((pack.metadata as Record<string, unknown>).intake_questions).toBeDefined();
+  });
 });

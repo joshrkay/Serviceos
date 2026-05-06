@@ -40,4 +40,13 @@ describe('P4-002 — HVAC Vertical Pack', () => {
     expect(Number.isInteger(HVAC_LINE_ITEM_DEFAULTS.diagnosticFeeCents)).toBe(true);
     expect(HVAC_LINE_ITEM_DEFAULTS.laborRatePerHourCents).toBeGreaterThan(0);
   });
+
+  it('§3D — ships default intake_questions for caller disambiguation', () => {
+    expect(pack.intakeQuestions).toBeDefined();
+    expect((pack.intakeQuestions ?? []).length).toBeGreaterThan(0);
+    const questions = (pack.intakeQuestions ?? []).map((q) => q.question);
+    expect(questions).toEqual(expect.arrayContaining(['Is this for heating or cooling?']));
+    // Mirrored to canonical metadata for round-trip through the registry.
+    expect((pack.metadata as Record<string, unknown>).intake_questions).toBeDefined();
+  });
 });

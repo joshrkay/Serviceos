@@ -24,12 +24,34 @@ export interface TerminologyMap {
   };
 }
 
+/**
+ * §3D — Vertical-specific disambiguation questions the calling agent
+ * uses when the classifier's confidence is low. Each entry maps a
+ * `trigger` (a vertical-wide tag like `'hvac'`, or a fallback marker
+ * like `'unknown_issue'`) to a short clarifying question. Optional
+ * `intent` labels the resolved follow-up so the FSM can route the
+ * caller's response.
+ *
+ * Per `docs/remaining-features.md` §3D: a generic "Can you tell me
+ * more?" loses the caller; "Is this for heating or cooling?" gets to
+ * a usable answer faster.
+ */
+export interface IntakeQuestion {
+  trigger: string;
+  question: string;
+  intent?: string;
+}
+
+export type IntakeQuestionList = readonly IntakeQuestion[];
+
 export interface VerticalPack extends CanonicalVerticalPack {
   type: VerticalType;
   name: string;
   isActive: boolean;
   categories: ServiceCategory[];
   terminology: TerminologyMap;
+  /** §3D — Optional. Packs without intake questions still load. */
+  intakeQuestions?: IntakeQuestionList;
 }
 
 export interface VerticalPackRepository {
@@ -47,10 +69,22 @@ export function createVerticalPack(
   version: string,
   description: string,
   categories: ServiceCategory[],
-  terminology: TerminologyMap
+  terminology: TerminologyMap,
+  intakeQuestions: IntakeQuestionList = []
 ): VerticalPack {
   const now = new Date();
-  return {
+  // Mirror intakeQuestions in metadata so the canonical (non-rich)
+  // VerticalPack carries the same data when stored / retrieved
+  // through the registry, matching the existing pattern for
+  // categories + terminology.
+  const metadata: Record<string, unknown> = {
+    categories,
+    terminology,
+  };
+  if (intakeQuestions.length > 0) {
+    metadata.intake_questions = intakeQuestions;
+  }
+  const pack: VerticalPack = {
     id: randomUUID(),
     packId: `${type}-pack`,
     version,
@@ -58,10 +92,7 @@ export function createVerticalPack(
     status: 'active',
     displayName: name,
     description,
-    metadata: {
-      categories,
-      terminology,
-    },
+    metadata,
     createdAt: now,
     updatedAt: now,
     type,
@@ -70,6 +101,10 @@ export function createVerticalPack(
     categories,
     terminology,
   };
+  if (intakeQuestions.length > 0) {
+    pack.intakeQuestions = intakeQuestions;
+  }
+  return pack;
 }
 
 export function validateVerticalPack(pack: Partial<VerticalPack>): string[] {
@@ -102,6 +137,22 @@ function readTerminology(pack: Pick<VerticalPack, 'terminology' | 'metadata'>): 
   return (pack.terminology && Object.keys(pack.terminology).length > 0)
     ? pack.terminology
     : (metadataTerminology || {});
+}
+
+/**
+ * §3D — read intake questions from the rich pack OR fall back to
+ * `metadata.intake_questions` on the canonical pack. Mirrors
+ * `readTerminology` / `readCategories`.
+ */
+export function readIntakeQuestions(
+  pack: Pick<VerticalPack, 'intakeQuestions' | 'metadata'>,
+): IntakeQuestionList {
+  if (pack.intakeQuestions && pack.intakeQuestions.length > 0) {
+    return pack.intakeQuestions;
+  }
+  const metadataIntake = (pack.metadata as Record<string, unknown> | undefined)
+    ?.intake_questions as IntakeQuestionList | undefined;
+  return metadataIntake ?? [];
 }
 
 export function resolveTerminology(

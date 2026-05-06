@@ -3,6 +3,7 @@
 import {
   VerticalPack,
   ServiceCategory,
+  IntakeQuestion,
   TerminologyMap,
   createVerticalPack,
 } from '../registry';
@@ -117,6 +118,34 @@ const HVAC_TERMINOLOGY: TerminologyMap = {
   },
 };
 
+/**
+ * §3D — default disambiguation questions the calling agent uses when
+ * intent classifier confidence is low or the caller's request is
+ * vertical-ambiguous. Tenants can override via tenant settings.
+ */
+const HVAC_INTAKE_QUESTIONS: readonly IntakeQuestion[] = [
+  {
+    trigger: 'hvac',
+    question: 'Is this for heating or cooling?',
+    intent: 'service_disambiguation',
+  },
+  {
+    trigger: 'unknown_issue',
+    question: 'Is this an emergency, or can we schedule a visit?',
+    intent: 'urgency_triage',
+  },
+  {
+    trigger: 'equipment_age',
+    question: 'How old is the unit?',
+    intent: 'equipment_age',
+  },
+  {
+    trigger: 'symptom',
+    question: 'Is the system not turning on, not reaching temperature, or making an unusual noise?',
+    intent: 'symptom_triage',
+  },
+];
+
 export function createHvacPack(): VerticalPack {
   return createVerticalPack(
     'hvac',
@@ -124,7 +153,8 @@ export function createHvacPack(): VerticalPack {
     '1.0.0',
     'Heating, ventilation, and air conditioning service pack for residential and light commercial',
     HVAC_CATEGORIES,
-    HVAC_TERMINOLOGY
+    HVAC_TERMINOLOGY,
+    HVAC_INTAKE_QUESTIONS
   );
 }
 

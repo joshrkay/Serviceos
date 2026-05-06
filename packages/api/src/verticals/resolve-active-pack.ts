@@ -28,6 +28,7 @@ import type { PackActivationRepository } from '../settings/pack-activation';
 import type { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatVerticalForCallerPrompt } from './context-assembly';
 import type {
+  IntakeQuestionList,
   ServiceCategory,
   TerminologyMap,
   VerticalPack,
@@ -92,6 +93,9 @@ export function buildVerticalPromptResolver(
         const metadata = (canonical.metadata ?? {}) as Record<string, unknown>;
         const terminology = (metadata.terminology as TerminologyMap | undefined) ?? {};
         const categories = (metadata.categories as ServiceCategory[] | undefined) ?? [];
+        // §3D — surface intake_questions onto the rich pack so the
+        // formatter (or downstream consumers) can render them.
+        const intakeQuestions = (metadata.intake_questions as IntakeQuestionList | undefined);
 
         const richPack: VerticalPack = {
           ...canonical,
@@ -100,6 +104,9 @@ export function buildVerticalPromptResolver(
           isActive: canonical.status === 'active',
           terminology,
           categories,
+          ...(intakeQuestions && intakeQuestions.length > 0
+            ? { intakeQuestions }
+            : {}),
         };
 
         const formatted = formatVerticalForCallerPrompt(richPack);

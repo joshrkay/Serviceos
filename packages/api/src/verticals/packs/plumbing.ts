@@ -4,6 +4,7 @@ import {
   VerticalPack,
   ServiceCategory,
   TerminologyMap,
+  IntakeQuestion,
   createVerticalPack,
 } from '../registry';
 
@@ -121,6 +122,33 @@ const PLUMBING_TERMINOLOGY: TerminologyMap = {
   },
 };
 
+/**
+ * §3D — default disambiguation questions for plumbing intake.
+ * Tenants can override via tenant settings.
+ */
+const PLUMBING_INTAKE_QUESTIONS: readonly IntakeQuestion[] = [
+  {
+    trigger: 'plumbing',
+    question: 'Is this a leak, a clog, no water, or a fixture issue?',
+    intent: 'service_disambiguation',
+  },
+  {
+    trigger: 'unknown_issue',
+    question: 'Is this an emergency — flooding or burst pipe — or can we schedule a visit?',
+    intent: 'urgency_triage',
+  },
+  {
+    trigger: 'water_shut_off',
+    question: 'Is the water currently shut off, or is it actively leaking?',
+    intent: 'containment_status',
+  },
+  {
+    trigger: 'fixture',
+    question: 'Which fixture is affected — a sink, toilet, water heater, or shower?',
+    intent: 'fixture_disambiguation',
+  },
+];
+
 export function createPlumbingPack(): VerticalPack {
   return createVerticalPack(
     'plumbing',
@@ -128,7 +156,8 @@ export function createPlumbingPack(): VerticalPack {
     '1.0.0',
     'Plumbing service pack for residential and light commercial',
     PLUMBING_CATEGORIES,
-    PLUMBING_TERMINOLOGY
+    PLUMBING_TERMINOLOGY,
+    PLUMBING_INTAKE_QUESTIONS
   );
 }
 
