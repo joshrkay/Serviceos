@@ -285,6 +285,11 @@ export const updateSettingsSchema = z.object({
   depositPercentageBps: z.number().int().min(0).max(10000).nullable().optional(),
   depositFixedCents: z.number().int().min(0).nullable().optional(),
   depositRequiredAboveCents: z.number().int().min(0).nullable().optional(),
+  // Tier 4 (Deposit rules — PR 3a-extended). Selects whether the
+  // customer pays the deposit BEFORE they can approve the estimate
+  // ('before_approval') or AFTER ('after_approval'). Default behavior
+  // is 'after_approval'; existing tenants keep current flow.
+  depositTimingPolicy: z.enum(['before_approval', 'after_approval']).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

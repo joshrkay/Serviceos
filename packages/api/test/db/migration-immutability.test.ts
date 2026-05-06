@@ -135,6 +135,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['076_tenant_settings_auto_approve_threshold', 'f1bdefbaa0c21afb4f7ddf11e1c2f8da528ff38ed54fc97595f9a0425d7ade89'],
   ['077_tenant_settings_deposit_rules', 'a3a600e39f688c733850d6baec9e6aa163e730f999b00200cce8d0f7f5179163'],
   ['078_jobs_deposit_columns', '7346a842c870d8cc9333cc9fc5c5145931d5efe656e4aad98f9b189c0b18e78c'],
+  ['079_tenant_settings_deposit_timing_policy', '7a175b9d0562783dfb7156e9ad9e5e999085f2a1c83ef3dc46c0ad23a233053a'],
 ];
 
 function hashMigration(value: string): string {

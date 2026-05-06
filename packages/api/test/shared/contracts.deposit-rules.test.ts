@@ -90,4 +90,27 @@ describe('updateSettingsSchema — Tier 4 Deposit rules cross-field refinement (
     });
     expect(result.success).toBe(false);
   });
+
+  it('accepts depositTimingPolicy "before_approval"', () => {
+    const result = updateSettingsSchema.safeParse({
+      depositStrategy: 'percentage',
+      depositPercentageBps: 2500,
+      depositTimingPolicy: 'before_approval',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts depositTimingPolicy "after_approval"', () => {
+    const result = updateSettingsSchema.safeParse({
+      depositTimingPolicy: 'after_approval',
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects an unknown depositTimingPolicy value', () => {
+    const result = updateSettingsSchema.safeParse({
+      depositTimingPolicy: 'whenever',
+    });
+    expect(result.success).toBe(false);
+  });
 });
