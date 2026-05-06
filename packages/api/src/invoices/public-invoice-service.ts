@@ -187,8 +187,10 @@ export class PublicInvoiceService {
       status: invoice.status,
       customerName: customer?.displayName ?? 'Customer',
       businessName: settings?.businessName ?? 'Service team',
-      businessPhone: settings?.businessPhone,
-      businessEmail: settings?.businessEmail,
+      // Codex P2 PR #316: settings types allow null on optional
+      // string columns; coalesce to undefined for the wire shape.
+      businessPhone: settings?.businessPhone ?? undefined,
+      businessEmail: settings?.businessEmail ?? undefined,
       lineItems: invoice.lineItems.map((li) => ({
         description: li.description,
         quantity: li.quantity,

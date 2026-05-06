@@ -2066,6 +2066,43 @@ export const MIGRATIONS = {
           OR (deposit_strategy = 'fixed' AND deposit_fixed_cents IS NOT NULL)
         );
   `,
+
+  '078_jobs_deposit_columns': `
+    -- Tier 4 (Deposit rules — PR 2: estimate-flow computation). The
+    -- deposit lives on the JOB rather than the estimate so it works
+    -- in both the estimate-approval flow AND the direct-to-job flow
+    -- (a tech can be dispatched to a scheduled job without an estimate
+    -- ever existing). The estimate-approval hook in
+    -- PublicEstimateService writes the rule's required amount onto
+    -- the linked job; the upcoming PR 3 customer split-payment
+    -- updates deposit_paid_cents and deposit_status.
+    --
+    --   deposit_required_cents : amount the rule says to collect.
+    --                            0 = no deposit (default; legacy rows
+    --                            and tenants without a configured rule
+    --                            land here automatically).
+    --   deposit_paid_cents     : amount actually collected. Capped at
+    --                            deposit_required_cents by the
+    --                            CHECK below.
+    --   deposit_status         : 'not_required' (deposit_required_cents = 0)
+    --                            'pending'      (required > 0, paid < required)
+    --                            'paid'         (paid >= required > 0).
+    --                            Computed on write by the application
+    --                            layer; the CHECK is for shape only.
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS deposit_required_cents INTEGER NOT NULL DEFAULT 0
+        CHECK (deposit_required_cents >= 0),
+      ADD COLUMN IF NOT EXISTS deposit_paid_cents INTEGER NOT NULL DEFAULT 0
+        CHECK (deposit_paid_cents >= 0),
+      ADD COLUMN IF NOT EXISTS deposit_status TEXT NOT NULL DEFAULT 'not_required'
+        CHECK (deposit_status IN ('not_required', 'pending', 'paid'));
+
+    ALTER TABLE jobs
+      DROP CONSTRAINT IF EXISTS jobs_deposit_paid_lte_required;
+    ALTER TABLE jobs
+      ADD CONSTRAINT jobs_deposit_paid_lte_required
+        CHECK (deposit_paid_cents <= deposit_required_cents);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

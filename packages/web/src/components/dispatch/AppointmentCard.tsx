@@ -22,10 +22,15 @@ export interface AppointmentCardProps {
   onDragStart?: (e: React.DragEvent, appointmentId: string) => void;
   /**
    * P6-026 — when true, the card renders a "Conflict" badge to signal
-   * the appointment overlaps another booking for the same technician
-   * (or the same customer). Computed in the parent (DispatchBoard) so
-   * the card stays presentational. Optional: omitting it preserves
-   * the pre-P6-026 quiet card.
+   * the appointment overlaps another booking on the same technician's
+   * lane. Computed in the parent (DispatchBoard) so the card stays
+   * presentational. Optional: omitting it preserves the pre-P6-026
+   * quiet card.
+   *
+   * Codex P2 (PR #316): the conflict scope is technician-only by
+   * design today — the card payload doesn't carry `customerId` and
+   * cross-lane same-customer detection needs that field plumbed
+   * through. Tracked as a follow-up.
    */
   hasConflict?: boolean;
 }

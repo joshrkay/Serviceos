@@ -246,9 +246,13 @@ export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
-  businessPhone: z.string().optional(),
-  businessEmail: z.string().email().optional(),
-  timezone: z.string().optional(),
+  // Codex P2 (PR #316): `.nullable()` so the Business profile sheet
+  // can clear a previously-set phone/email/timezone by sending null.
+  // JSON.stringify drops undefined keys (no-op on the route's update),
+  // so an explicit null is the only path to "clear this field".
+  businessPhone: z.string().nullable().optional(),
+  businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  timezone: z.string().nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),

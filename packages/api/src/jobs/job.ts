@@ -19,6 +19,25 @@ export interface Job {
   assignedTechnicianId?: string;
   /** Inherits from `customer.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
+  /**
+   * Tier 4 (Deposit rules — PR 2). Required deposit amount in cents,
+   * computed by `evaluateDepositRule` at the moment a contractual
+   * obligation forms (estimate approval today; direct job creation
+   * later). 0 means no deposit applies. Defaults to 0 for legacy rows
+   * via the migration's column DEFAULT.
+   */
+  depositRequiredCents?: number;
+  /** Amount of the deposit actually collected. PR 3 wires the payment side. */
+  depositPaidCents?: number;
+  /**
+   * Lifecycle marker derived by the application layer:
+   *   'not_required' — depositRequiredCents === 0
+   *   'pending'      — required > 0 AND paid < required
+   *   'paid'         — required > 0 AND paid >= required
+   * Optional in TS so legacy callers (tests, in-memory fixtures) can
+   * omit the field; the Pg layer surfaces the default.
+   */
+  depositStatus?: 'not_required' | 'pending' | 'paid';
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -131,6 +150,12 @@ export async function createJob(
     status: 'new',
     priority: input.priority || 'normal',
     originatingLeadId: input.originatingLeadId,
+    // Tier 4 (Deposit rules — PR 2): defaults for new jobs. The
+    // estimate-approval hook will overwrite these when an estimate
+    // is approved against a tenant with a configured rule.
+    depositRequiredCents: 0,
+    depositPaidCents: 0,
+    depositStatus: 'not_required',
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),

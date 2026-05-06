@@ -130,8 +130,12 @@ describe('BusinessProfileSheet — Tier 4 settings stub closure', () => {
     );
     const body = JSON.parse((putCall![1] as RequestInit).body as string);
     expect(body.businessName).toBe('Acme');
-    expect(body.businessPhone).toBeUndefined();
-    expect(body.businessEmail).toBeUndefined();
-    expect(body.timezone).toBeUndefined();
+    // Codex P2 (PR #316): empty optional fields are sent as explicit
+    // null so the backend can clear them. The previous behavior sent
+    // undefined which JSON.stringify dropped, so previously-saved
+    // values couldn't actually be deleted.
+    expect(body.businessPhone).toBeNull();
+    expect(body.businessEmail).toBeNull();
+    expect(body.timezone).toBeNull();
   });
 });
