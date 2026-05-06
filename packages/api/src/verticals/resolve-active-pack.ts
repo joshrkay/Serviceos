@@ -50,6 +50,12 @@ export interface ResolveActivePackDeps {
    * terminology across turns. Set to 0 to disable caching (tests).
    */
   cacheTtlMs?: number;
+  /**
+   * Maximum cache entries (LRU eviction). Defaults to 1000. Mirrors
+   * the threshold-resolver bound — prevents unbounded memory growth
+   * in tenants-many environments.
+   */
+  maxCacheEntries?: number;
   /** Injectable clock for tests. Defaults to Date.now. */
   now?: () => number;
 }
@@ -60,11 +66,13 @@ interface CacheEntry {
 }
 
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_CACHE_ENTRIES = 1000;
 
 export function buildVerticalPromptResolver(
   deps: ResolveActivePackDeps,
 ): (tenantId: string) => Promise<string | undefined> {
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  const maxEntries = deps.maxCacheEntries ?? DEFAULT_MAX_CACHE_ENTRIES;
   const now = deps.now ?? Date.now;
   const cache = new Map<string, CacheEntry>();
 
@@ -72,6 +80,9 @@ export function buildVerticalPromptResolver(
     if (ttlMs > 0) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {
+        // Bump to back of LRU on hit.
+        cache.delete(tenantId);
+        cache.set(tenantId, hit);
         return hit.section;
       }
     }
@@ -136,7 +147,13 @@ export function buildVerticalPromptResolver(
     }
 
     if (ttlMs > 0) {
+      cache.delete(tenantId);
       cache.set(tenantId, { section, expiresAt: now() + ttlMs });
+      while (cache.size > maxEntries) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
     }
     return section;
   };

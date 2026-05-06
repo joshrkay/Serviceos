@@ -100,4 +100,33 @@ describe('createThresholdResolver — Tier 4 PR B', () => {
   it('noopThresholdResolver always returns undefined', async () => {
     expect(await noopThresholdResolver('any-tenant')).toBeUndefined();
   });
+
+  it('caps cache size and evicts LRU entries (gemini PR #316 review)', async () => {
+    // Pre-create three tenants with overrides.
+    for (const t of ['t-a', 't-b', 't-c']) {
+      await ensureTenantSettings(t, repo, { businessName: t });
+      await repo.update(t, { autoApproveThreshold: { supervisor: 0.9 } });
+    }
+    const findSpy = vi.spyOn(repo, 'findByTenant');
+    const resolve = createThresholdResolver(repo, {
+      ttlMs: 60_000,
+      maxEntries: 2,
+    });
+
+    await resolve('t-a'); // populate
+    await resolve('t-b'); // populate (cache: a, b)
+    await resolve('t-c'); // populate, evict a (cache: b, c)
+
+    expect(findSpy).toHaveBeenCalledTimes(3);
+    findSpy.mockClear();
+
+    // Hits cache.
+    await resolve('t-c');
+    await resolve('t-b');
+    expect(findSpy).toHaveBeenCalledTimes(0);
+
+    // 't-a' was evicted; re-resolving must hit the repo.
+    await resolve('t-a');
+    expect(findSpy).toHaveBeenCalledTimes(1);
+  });
 });

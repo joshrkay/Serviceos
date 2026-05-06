@@ -43,18 +43,31 @@ interface CacheEntry {
 export interface ThresholdResolverOptions {
   /** Cache TTL in milliseconds. Defaults to 60_000 (1 minute). 0 disables caching. */
   ttlMs?: number;
+  /**
+   * Maximum cache entries (LRU eviction). Defaults to 1000 — enough for
+   * realistic multi-tenant deployments without unbounded memory growth.
+   * Gemini code review (PR #316): the prior unbounded Map could leak
+   * memory in tenants-many environments since expired entries are never
+   * removed unless the same tenantId is re-resolved after the TTL. The
+   * LRU bound caps the high-water mark regardless of access patterns.
+   */
+  maxEntries?: number;
   /** Injectable clock for tests. Defaults to Date.now. */
   now?: () => number;
 }
 
 const DEFAULT_TTL_MS = 60_000;
+const DEFAULT_MAX_ENTRIES = 1000;
 
 export function createThresholdResolver(
   settingsRepo: SettingsRepository,
   options: ThresholdResolverOptions = {},
 ): ThresholdResolver {
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+  const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
   const now = options.now ?? Date.now;
+  // Insertion-order Map doubles as a cheap LRU when we re-insert on
+  // hit and evict from the front when the size cap is exceeded.
   const cache = new Map<string, CacheEntry>();
 
   return async (tenantId: string): Promise<ThresholdOverride | undefined> => {
@@ -62,6 +75,9 @@ export function createThresholdResolver(
     if (ttlMs > 0) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {
+        // Bump to the back of the LRU on hit.
+        cache.delete(tenantId);
+        cache.set(tenantId, hit);
         return hit.override;
       }
     }
@@ -81,7 +97,16 @@ export function createThresholdResolver(
     }
 
     if (ttlMs > 0) {
+      // Replace any stale entry, then evict the LRU head if we're
+      // over capacity. Map iteration order is insertion-order, so
+      // map.keys().next().value is the oldest entry.
+      cache.delete(tenantId);
       cache.set(tenantId, { override, expiresAt: now() + ttlMs });
+      while (cache.size > maxEntries) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
     }
     return override;
   };
