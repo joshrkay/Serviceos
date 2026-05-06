@@ -12,6 +12,7 @@ import {
   buildGoogleAuthUrl,
   exchangeAuthorizationCode,
 } from '../integrations/google-calendar';
+import { CalendarSyncService } from '../integrations/calendar-sync';
 
 /**
  * Tier 4 (Calendar sync — PR 1). Per-user Google Calendar OAuth
@@ -36,6 +37,13 @@ export interface CalendarIntegrationsRouteDeps {
   /** Public web URL (Settings page) we send the operator back to
    *  after a successful disconnect/reconnect. */
   appBaseUrl?: string;
+  /**
+   * Tier 4 (Calendar sync — PR 2). When wired, the auth'd router
+   * exposes POST /google/test-push so the operator can verify their
+   * connection by pushing a synthetic event to their primary
+   * calendar. Optional so legacy harnesses still build the router.
+   */
+  syncService?: CalendarSyncService;
 }
 
 /**
@@ -187,6 +195,45 @@ export function createCalendarIntegrationsRouter(
           throw new NotFoundError('Calendar integration', 'google');
         }
         res.json({ revoked: true });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * Tier 4 (Calendar sync — PR 2). Pushes a synthetic event 1 hour
+   * from now into the calling user's connected Google Calendar so
+   * the operator can verify their integration. Returns the sync
+   * outcome ('synced' / 'skipped' / 'failed') without throwing on
+   * sync failure — the result.failed flag carries the signal.
+   */
+  router.post(
+    '/google/test-push',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.syncService) {
+          throw new ValidationError('Calendar sync is not configured');
+        }
+        const start = new Date(Date.now() + 60 * 60 * 1000);
+        const end = new Date(start.getTime() + 30 * 60 * 1000);
+        const outcome = await deps.syncService.pushForTechnician({
+          tenantId: req.auth!.tenantId,
+          // Use a synthetic appointment id so the local row tagging
+          // doesn't collide with a real appointment.
+          appointmentId: `test-push-${Date.now()}`,
+          technicianUserId: req.auth!.userId,
+          scheduledStart: start,
+          scheduledEnd: end,
+          timezone: 'UTC',
+          summary: 'ServiceOS test event',
+          description:
+            'This is a test event from ServiceOS confirming your calendar is connected.',
+        });
+        res.json({ outcome });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

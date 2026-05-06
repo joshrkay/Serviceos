@@ -2309,6 +2309,48 @@ export const MIGRATIONS = {
       ON oauth_states(id)
       WHERE consumed_at IS NULL;
   `,
+
+  '086_create_appointment_calendar_events': `
+    -- Tier 4 (Calendar sync — PR 2). Maps an appointment + assigned
+    -- technician to the Google Calendar event we created for them.
+    -- Stored separately from the appointment row because:
+    --   1. One appointment may sync to multiple techs' calendars
+    --      (multi-assignment).
+    --   2. Updating + deleting the event later needs the external id.
+    --   3. Some techs may have no integration; we don't want to bloat
+    --      the assignment row with mostly-null columns.
+    --
+    -- Status mirrors the lifecycle:
+    --   'synced'  — event exists on Google; external_event_id is set.
+    --   'failed'  — push failed; the operator can retry. An audit
+    --               event ('appointment.calendar_push_failed') carries
+    --               the error detail.
+    --   'deleted' — Google event was deleted (soft); a future update
+    --               syncs a fresh event.
+    CREATE TABLE IF NOT EXISTS appointment_calendar_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      appointment_id UUID NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('google')),
+      external_event_id TEXT,
+      external_calendar_id TEXT NOT NULL DEFAULT 'primary',
+      status TEXT NOT NULL DEFAULT 'synced'
+        CHECK (status IN ('synced', 'failed', 'deleted')),
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (appointment_id, user_id, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_appointment_calendar_events_tenant
+      ON appointment_calendar_events(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_appointment_calendar_events_appt
+      ON appointment_calendar_events(appointment_id);
+    ALTER TABLE appointment_calendar_events ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_appointment_calendar_events ON appointment_calendar_events;
+    CREATE POLICY tenant_isolation_appointment_calendar_events ON appointment_calendar_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

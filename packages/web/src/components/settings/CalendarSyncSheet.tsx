@@ -79,6 +79,42 @@ export function CalendarSyncSheet({ onClose }: CalendarSyncSheetProps) {
     }
   }
 
+  async function testPush() {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await apiFetch('/api/calendar-integrations/google/test-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON */
+        }
+        throw new Error(detail || `Test push failed (${res.status})`);
+      }
+      const json = (await res.json()) as { outcome: 'synced' | 'skipped' | 'failed' };
+      if (json.outcome === 'synced') {
+        toast.success('Test event added to your calendar');
+      } else if (json.outcome === 'skipped') {
+        toast.error('No active connection — please reconnect');
+      } else {
+        toast.error('Test push failed — check the connection');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not push test event';
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function disconnect() {
     if (!integration) return;
     setBusy(true);
@@ -182,15 +218,26 @@ export function CalendarSyncSheet({ onClose }: CalendarSyncSheetProps) {
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-4 sticky bottom-0 bg-white">
           {isConnected ? (
-            <button
-              type="button"
-              onClick={disconnect}
-              disabled={busy}
-              data-testid="calendar-sync-disconnect"
-              className="rounded-xl border border-red-200 bg-white px-4 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60"
-            >
-              {busy ? 'Disconnecting…' : 'Disconnect'}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={testPush}
+                disabled={busy}
+                data-testid="calendar-sync-test-push"
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              >
+                {busy ? 'Testing…' : 'Test push'}
+              </button>
+              <button
+                type="button"
+                onClick={disconnect}
+                disabled={busy}
+                data-testid="calendar-sync-disconnect"
+                className="rounded-xl border border-red-200 bg-white px-4 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60"
+              >
+                {busy ? 'Disconnecting…' : 'Disconnect'}
+              </button>
+            </>
           ) : (
             <button
               type="button"

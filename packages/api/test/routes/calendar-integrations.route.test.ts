@@ -9,6 +9,10 @@ import {
   InMemoryCalendarIntegrationRepository,
   InMemoryOAuthStateRepository,
 } from '../../src/integrations/calendar-integration';
+import {
+  CalendarSyncService,
+  InMemoryAppointmentCalendarEventRepository,
+} from '../../src/integrations/calendar-sync';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const TENANT = 'tenant-cal-1';
@@ -242,5 +246,78 @@ describe('Calendar integrations routes (PR 1)', () => {
     const app = buildApp({ integrationRepo, stateRepo });
     const res = await request(app).delete('/api/calendar-integrations/google');
     expect(res.status).toBe(404);
+  });
+
+  describe('POST /google/test-push (PR 2)', () => {
+    function buildAppWithSync(opts: {
+      integration: 'connected' | 'none';
+      googleFetch: typeof fetch;
+    }) {
+      const eventRepo = new InMemoryAppointmentCalendarEventRepository();
+      const syncService = new CalendarSyncService({
+        integrationRepo,
+        eventRepo,
+        googleConfig: {
+          clientId: 'cid',
+          clientSecret: 'csec',
+          redirectUri: 'http://x',
+        },
+        googleFetch: opts.googleFetch,
+      });
+      const app = express();
+      app.use(express.json());
+      app.use((req: Request, _res: Response, next: NextFunction) => {
+        (req as AuthenticatedRequest).auth = {
+          userId: USER,
+          sessionId: 'sess-1',
+          tenantId: TENANT,
+          role: 'owner',
+        };
+        next();
+      });
+      app.use(
+        '/api/calendar-integrations',
+        createCalendarIntegrationsRouter({
+          integrationRepo,
+          stateRepo,
+          googleConfig: {
+            clientId: 'cid',
+            clientSecret: 'csec',
+            redirectUri: 'http://x',
+          },
+          syncService,
+          appBaseUrl: 'https://app.example.com',
+        }),
+      );
+      return app;
+    }
+
+    it("returns 'synced' on a successful push", async () => {
+      await integrationRepo.upsert({
+        tenantId: TENANT, userId: USER, provider: 'google',
+        accessToken: 'a', refreshToken: 'r',
+        accessTokenExpiresAt: new Date(Date.now() + 3600_000),
+        externalAccountEmail: 'tech@example.com',
+      });
+      const fetchMock = vi.fn(async () => jsonRes({ id: 'evt-pushed' }));
+      const app = buildAppWithSync({
+        integration: 'connected',
+        googleFetch: fetchMock as unknown as typeof fetch,
+      });
+      const res = await request(app).post('/api/calendar-integrations/google/test-push');
+      expect(res.status).toBe(200);
+      expect(res.body.outcome).toBe('synced');
+    });
+
+    it("returns 'skipped' when the user has no integration", async () => {
+      const fetchMock = vi.fn(async () => jsonRes({ id: 'never' }));
+      const app = buildAppWithSync({
+        integration: 'none',
+        googleFetch: fetchMock as unknown as typeof fetch,
+      });
+      const res = await request(app).post('/api/calendar-integrations/google/test-push');
+      expect(res.status).toBe(200);
+      expect(res.body.outcome).toBe('skipped');
+    });
   });
 });

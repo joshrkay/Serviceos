@@ -133,6 +133,56 @@ describe('CalendarSyncSheet — Tier 4 Calendar sync (PR 1)', () => {
     await screen.findByTestId('calendar-sync-connect');
   });
 
+  it('Test push button POSTs and shows success toast on synced', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          id: 'int-1',
+          provider: 'google',
+          status: 'active',
+          externalAccountEmail: 'jane@example.com',
+          calendarId: 'primary',
+          createdAt: '2026-05-01T00:00:00Z',
+          updatedAt: '2026-05-01T00:00:00Z',
+        },
+      }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ outcome: 'synced' }));
+
+    render(<CalendarSyncSheet onClose={() => {}} />);
+    fireEvent.click(await screen.findByTestId('calendar-sync-test-push'));
+    await waitFor(() => {
+      expect(toastSuccess).toHaveBeenCalledWith('Test event added to your calendar');
+    });
+    const postCall = apiFetchMock.mock.calls.find(
+      (c) => c[0] === '/api/calendar-integrations/google/test-push',
+    );
+    expect(postCall).toBeDefined();
+  });
+
+  it('Test push shows error toast when outcome is failed', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          id: 'int-1',
+          provider: 'google',
+          status: 'active',
+          externalAccountEmail: 'jane@example.com',
+          calendarId: 'primary',
+          createdAt: '2026-05-01T00:00:00Z',
+          updatedAt: '2026-05-01T00:00:00Z',
+        },
+      }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ outcome: 'failed' }));
+
+    render(<CalendarSyncSheet onClose={() => {}} />);
+    fireEvent.click(await screen.findByTestId('calendar-sync-test-push'));
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalledWith('Test push failed — check the connection');
+    });
+  });
+
   it('surfaces an error toast when Connect fails', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ data: null }));
     apiFetchMock.mockResolvedValueOnce(

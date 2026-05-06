@@ -39,6 +39,11 @@ import {
   InMemoryCalendarIntegrationRepository,
   InMemoryOAuthStateRepository,
 } from './integrations/calendar-integration';
+import {
+  CalendarSyncService,
+  PgAppointmentCalendarEventRepository,
+  InMemoryAppointmentCalendarEventRepository,
+} from './integrations/calendar-sync';
 import { PgUserRepository } from './users/pg-user';
 import { InMemoryUserRepository } from './users/user';
 import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
@@ -1274,19 +1279,32 @@ export function createApp(): express.Express {
   const oauthStateRepo = pool
     ? new PgOAuthStateRepository(pool)
     : new InMemoryOAuthStateRepository();
+  // Tier 4 (Calendar sync — PR 2). Sync service exposed on the
+  // auth'd router as POST /google/test-push so operators can verify
+  // their connection before relying on it for real appointments.
+  const appointmentCalendarEventRepo = pool
+    ? new PgAppointmentCalendarEventRepository(pool)
+    : new InMemoryAppointmentCalendarEventRepository();
   const googleApiUrl =
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
+  const googleConfig =
+    process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET
+      ? {
+          clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+          redirectUri: `${googleApiUrl}/api/calendar-integrations/google/callback`,
+        }
+      : undefined;
+  const calendarSyncService = new CalendarSyncService({
+    integrationRepo: calendarIntegrationRepo,
+    eventRepo: appointmentCalendarEventRepo,
+    googleConfig,
+  });
   const calendarRouterDeps = {
     integrationRepo: calendarIntegrationRepo,
     stateRepo: oauthStateRepo,
-    googleConfig:
-      process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET
-        ? {
-            clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
-            clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
-            redirectUri: `${googleApiUrl}/api/calendar-integrations/google/callback`,
-          }
-        : undefined,
+    googleConfig,
+    syncService: calendarSyncService,
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
   };
   app.use(
