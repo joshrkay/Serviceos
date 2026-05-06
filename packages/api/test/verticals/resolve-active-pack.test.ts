@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { buildVerticalPromptResolver } from '../../src/verticals/resolve-active-pack';
 import {
   InMemoryPackActivationRepository,
@@ -116,6 +116,52 @@ describe('buildVerticalPromptResolver', () => {
     const section = await resolve(TENANT);
     expect(section).toContain('Service vertical: HVAC Professional');
     expect(section).not.toContain('Plumbing Pro');
+  });
+
+  it('caches the resolved section per tenant within the TTL', async () => {
+    // gemini-code-assist (PR #315): each turn previously did 2 DB
+    // lookups. Verify the cache short-circuits subsequent calls.
+    const findByTenantSpy = vi.spyOn(packActivationRepo, 'findByTenant');
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 60_000,
+    });
+    const a = await resolve(TENANT);
+    const b = await resolve(TENANT);
+    expect(a).toBe(b);
+    expect(findByTenantSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the cache after the TTL expires', async () => {
+    let nowMs = 1_000_000;
+    const findByTenantSpy = vi.spyOn(packActivationRepo, 'findByTenant');
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 1_000,
+      now: () => nowMs,
+    });
+    await resolve(TENANT);
+    nowMs += 5_000; // past the TTL
+    await resolve(TENANT);
+    expect(findByTenantSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('caches negative results (no active pack) so a missing pack does not re-query every turn', async () => {
+    const findByTenantSpy = vi.spyOn(packActivationRepo, 'findByTenant');
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 60_000,
+    });
+    expect(await resolve(TENANT)).toBeUndefined();
+    expect(await resolve(TENANT)).toBeUndefined();
+    expect(findByTenantSpy).toHaveBeenCalledTimes(1);
   });
 
   it('skips canonical packs whose registry status is not "active"', async () => {

@@ -405,17 +405,25 @@ async function buildInvoicePayload(
         });
         payNowUrl = link.linkUrl;
       } catch {
-        // Persistence failed. If we returned the URL anyway and persist
-        // keeps failing, every refresh would mint a fresh Stripe link
-        // and accumulate orphan live charge URLs. Roll back by
-        // deactivating the just-minted link and serving no payNowUrl —
-        // the next refresh starts clean.
+        // Persistence failed. Best-effort rollback: deactivate the
+        // just-minted link and serve no payNowUrl so the next refresh
+        // starts clean.
+        //
+        // Honest accounting (PR #315 review): if BOTH invoiceRepo.update
+        // and provider.deactivateLink keep failing across refreshes,
+        // every refresh mints a fresh live charge URL and we accumulate
+        // orphans. Any single-side outage is bounded — DB outage with
+        // healthy Stripe leaves no orphans (deactivate succeeds);
+        // Stripe outage with healthy DB never reaches this branch
+        // (persist succeeds first). The only failure mode that grows
+        // unboundedly is a correlated outage of both. Operators should
+        // monitor `[payments] persist + deactivate failed` log events
+        // (TODO: emit a structured log here in a follow-up).
         try {
           await provider.deactivateLink(link.linkId);
         } catch {
-          // Deactivation also failed. The link is still live but at
-          // least one orphan is bounded; the next refresh will retry
-          // persistence and deactivation rather than minting a third.
+          // Both sides failed; the just-minted link stays live. Next
+          // refresh will mint another and try again.
         }
         payNowUrl = null;
       }
