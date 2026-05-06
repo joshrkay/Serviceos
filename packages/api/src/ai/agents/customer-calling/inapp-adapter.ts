@@ -55,14 +55,26 @@ export interface InAppAdapterDeps {
   /** Used for `actorId` on proposal/audit rows. */
   systemActorId?: string;
   /**
-   * §3B vertical-aware classifier prompt. Resolves the tenant's active
-   * vertical pack and returns a prompt-shaped section (see
-   * `formatVerticalForCallerPrompt` in `verticals/context-assembly.ts`).
+   * §3B + §3D vertical-aware classifier prompt. Resolves the tenant's
+   * active vertical pack and returns a prompt-shaped section (see
+   * `formatVerticalForCallerPrompt` in `verticals/context-assembly.ts`,
+   * which now also embeds the pack's intake_questions per §3D).
    * Pluggable so app.ts can wire in its own pack lookup and tests can
    * stub a fixed string. Returns undefined when the tenant has no
    * active pack — the classifier falls back to its base prompt.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * §3C caller-plan / membership classifier prompt. Resolved per
+   * (tenantId, customerId) once the caller is identified — for
+   * unknown callers or operator-side flows without a customerId, the
+   * resolver is not consulted. Returns undefined when the customer
+   * has no active maintenance plan.
+   */
+  callerPlanResolver?: (
+    tenantId: string,
+    customerId: string,
+  ) => Promise<string | undefined>;
 }
 
 export interface StartSessionResult {
@@ -240,16 +252,29 @@ export class InAppVoiceAdapter {
 
     session.transcript.push(`caller: ${text}`);
 
-    // §3B: load the tenant's vertical prompt section before classifying
-    // so per-tenant equipment terminology reaches the LLM. Best-effort:
-    // if the resolver fails, we proceed without the vertical block
-    // rather than failing the turn.
+    // §3B + §3D: vertical + intake-question prompt section.
+    // §3C: caller-plan prompt section (only when caller is identified).
+    // Both best-effort: a resolver that throws or returns undefined
+    // silently degrades to base-prompt classification rather than
+    // failing the turn (callers don't lose voice service over a
+    // contextual lookup hiccup).
     let verticalPromptSection: string | undefined;
     if (this.deps.verticalPromptResolver) {
       try {
         verticalPromptSection = await this.deps.verticalPromptResolver(session.tenantId);
       } catch {
         verticalPromptSection = undefined;
+      }
+    }
+    let planPromptSection: string | undefined;
+    if (this.deps.callerPlanResolver && session.customerId) {
+      try {
+        planPromptSection = await this.deps.callerPlanResolver(
+          session.tenantId,
+          session.customerId,
+        );
+      } catch {
+        planPromptSection = undefined;
       }
     }
 
@@ -261,7 +286,11 @@ export class InAppVoiceAdapter {
     try {
       const classification = await classifyIntent(
         text,
-        { tenantId: session.tenantId, verticalPromptSection },
+        {
+          tenantId: session.tenantId,
+          verticalPromptSection,
+          planPromptSection,
+        },
         this.deps.gateway
       );
       classifierUsage = classification.tokenUsage

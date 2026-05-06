@@ -315,6 +315,47 @@ describe('intent-classifier — classifyIntent', () => {
     });
   });
 
+  describe('§3C planPromptSection', () => {
+    it('appends a third system message with the caller plan context', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 })
+      );
+      await classifyIntent(
+        'when is my next visit',
+        {
+          tenantId,
+          verticalPromptSection: 'Service vertical: HVAC',
+          planPromptSection: 'Caller is on an active maintenance plan.\nPlans: Gold Membership',
+        },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(3);
+      expect(systemMessages[1].content).toContain('Tenant vertical context');
+      expect(systemMessages[2].content).toContain('Caller plan context');
+      expect(systemMessages[2].content).toContain('Gold Membership');
+    });
+
+    it('emits plan section only (no vertical) when only plan is supplied', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 })
+      );
+      await classifyIntent(
+        'when is my next visit',
+        {
+          tenantId,
+          planPromptSection: 'Caller is on an active maintenance plan.\nPlans: Gold',
+        },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Caller plan context');
+    });
+  });
+
   it('handles empty transcript gracefully', async () => {
     const gateway = mockGateway(JSON.stringify({ intentType: 'unknown', confidence: 0 }));
     const result = await classifyIntent('', { tenantId }, gateway);

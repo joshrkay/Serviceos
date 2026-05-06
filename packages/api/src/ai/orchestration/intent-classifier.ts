@@ -180,8 +180,21 @@ export interface ClassifyContext {
    * Closes §3B from `docs/remaining-features.md`. Optional so callers
    * that don't have a pack loaded (e.g. operator UI flows where
    * tenants may not have onboarded a vertical yet) can omit it.
+   *
+   * §3D extension: the resolver now also includes the pack's
+   * `intakeQuestions` block in this same string when present.
    */
   verticalPromptSection?: string;
+  /**
+   * Optional caller-plan / membership context produced by
+   * `formatCallerPlanForPrompt(ctx)` in
+   * `packages/api/src/ai/orchestration/caller-plan-context.ts`.
+   * Closes §3C — when a customer with an active maintenance plan
+   * calls in, the agent acknowledges the plan in its replies and
+   * routes with priority. Optional: when caller is unknown or has
+   * no active plan the section is omitted.
+   */
+  planPromptSection?: string;
 }
 
 /**
@@ -643,10 +656,11 @@ export async function classifyIntent(
   }
 
   // Compose the system prompt: base classifier rules + (optional)
-  // tenant vertical context. The vertical block is delivered as a
-  // separate system message so it doesn't dilute the canonical intent
-  // taxonomy and so per-tenant prompt drift can't break the JSON
-  // contract enforced by the base prompt.
+  // tenant vertical context + (optional) caller plan context. Each
+  // optional block is delivered as a separate system message so it
+  // doesn't dilute the canonical intent taxonomy and so per-tenant
+  // prompt drift can't break the JSON contract enforced by the base
+  // prompt.
   const systemMessages: Array<{ role: 'system'; content: string }> = [
     { role: 'system', content: SYSTEM_PROMPT },
   ];
@@ -654,6 +668,12 @@ export async function classifyIntent(
     systemMessages.push({
       role: 'system',
       content: `Tenant vertical context (use ONLY for entity recognition; do not change the JSON output schema):\n${context.verticalPromptSection}`,
+    });
+  }
+  if (context.planPromptSection && context.planPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
     });
   }
 

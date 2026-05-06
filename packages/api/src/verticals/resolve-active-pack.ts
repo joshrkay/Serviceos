@@ -26,7 +26,10 @@
 
 import type { PackActivationRepository } from '../settings/pack-activation';
 import type { VerticalPackRegistry } from '../shared/vertical-pack-registry';
-import { formatVerticalForCallerPrompt } from './context-assembly';
+import {
+  formatVerticalForCallerPrompt,
+  formatIntakeQuestionsForPrompt,
+} from './context-assembly';
 import type {
   IntakeQuestionList,
   ServiceCategory,
@@ -109,7 +112,14 @@ export function buildVerticalPromptResolver(
             : {}),
         };
 
-        const formatted = formatVerticalForCallerPrompt(richPack);
+        // §3B + §3D combined: render the vertical block AND intake
+        // questions as one section. Both come from the same pack so we
+        // emit them together in a single classifier system message
+        // rather than splitting across two; the model sees them as one
+        // coherent tenant-vertical context.
+        const verticalBlock = formatVerticalForCallerPrompt(richPack);
+        const intakeBlock = formatIntakeQuestionsForPrompt(richPack);
+        const formatted = [verticalBlock, intakeBlock].filter((s) => s.length > 0).join('\n\n');
         section = formatted.length > 0 ? formatted : undefined;
       }
     }
