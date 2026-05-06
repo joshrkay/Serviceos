@@ -29,6 +29,21 @@ import { createAppointmentRouter } from './routes/appointments';
 import { createEstimateRouter } from './routes/estimates';
 import { createInvoiceRouter } from './routes/invoices';
 import { createUsersRouter } from './routes/users';
+import {
+  createCalendarIntegrationsRouter,
+  createCalendarOAuthCallbackRouter,
+} from './routes/calendar-integrations';
+import {
+  PgCalendarIntegrationRepository,
+  PgOAuthStateRepository,
+  InMemoryCalendarIntegrationRepository,
+  InMemoryOAuthStateRepository,
+} from './integrations/calendar-integration';
+import {
+  CalendarSyncService,
+  PgAppointmentCalendarEventRepository,
+  InMemoryAppointmentCalendarEventRepository,
+} from './integrations/calendar-sync';
 import { PgUserRepository } from './users/pg-user';
 import { InMemoryUserRepository } from './users/user';
 import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
@@ -1247,6 +1262,60 @@ export function createApp(): express.Express {
     }),
   );
 
+  // Tier 4 (Calendar sync — PR 1). Per-user Google OAuth callback.
+  // The CALLBACK is mounted here (BEFORE the global /api requireAuth)
+  // because Google's redirect back from the consent screen has no
+  // Clerk session — the state nonce stored in oauth_states does the
+  // auth binding instead. The connect / list / delete endpoints are
+  // mounted later (after requireAuth) where they belong.
+  //
+  // Google client + secret are required for both initiating the
+  // consent flow AND exchanging the callback code; without them the
+  // /connect route returns ValidationError. Callback URL must match
+  // the one registered in the Google Cloud OAuth console.
+  const calendarIntegrationRepo = pool
+    ? new PgCalendarIntegrationRepository(pool)
+    : new InMemoryCalendarIntegrationRepository();
+  const oauthStateRepo = pool
+    ? new PgOAuthStateRepository(pool)
+    : new InMemoryOAuthStateRepository();
+  // Tier 4 (Calendar sync — PR 2). Sync service exposed on the
+  // auth'd router as POST /google/test-push so operators can verify
+  // their connection before relying on it for real appointments.
+  const appointmentCalendarEventRepo = pool
+    ? new PgAppointmentCalendarEventRepository(pool)
+    : new InMemoryAppointmentCalendarEventRepository();
+  const googleApiUrl =
+    process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
+  const googleConfig =
+    process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET
+      ? {
+          clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+          redirectUri: `${googleApiUrl}/api/calendar-integrations/google/callback`,
+        }
+      : undefined;
+  const calendarSyncService = new CalendarSyncService({
+    integrationRepo: calendarIntegrationRepo,
+    eventRepo: appointmentCalendarEventRepo,
+    googleConfig,
+  });
+  const calendarRouterDeps = {
+    integrationRepo: calendarIntegrationRepo,
+    stateRepo: oauthStateRepo,
+    googleConfig,
+    syncService: calendarSyncService,
+    // appBaseUrl is the FRONTEND URL we redirect the operator's
+    // browser back to after OAuth completes. The API/callback URL is
+    // separate (googleApiUrl). 5173 is the Vite dev default; matches
+    // publicBaseUrl elsewhere in this file.
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+  };
+  app.use(
+    '/api/calendar-integrations',
+    createCalendarOAuthCallbackRouter(calendarRouterDeps),
+  );
+
   // ── Twilio telephony webhooks (P8-011) ────────────────────────────────────
   // Mounted under /api/telephony but BEFORE the Clerk auth middleware so
   // Twilio's signed POSTs aren't rejected for missing a Clerk session.
@@ -1676,6 +1745,15 @@ export function createApp(): express.Express {
       clerkSecretKey: process.env.CLERK_SECRET_KEY,
       appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     }),
+  );
+
+  // Tier 4 (Calendar sync — PR 1). Auth'd lifecycle endpoints.
+  // The OAuth callback was mounted earlier (before global
+  // requireAuth) on the same prefix; Express dispatches by method+path
+  // so the two registrations don't conflict.
+  app.use(
+    '/api/calendar-integrations',
+    createCalendarIntegrationsRouter(calendarRouterDeps),
   );
 
   // billingService is hoisted earlier so the Stripe webhook can use
