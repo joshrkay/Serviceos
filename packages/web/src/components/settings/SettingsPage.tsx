@@ -1,23 +1,107 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
+import {
+  fetchLanguageSettings,
+  updateLanguageSettings,
+} from '../../api/settings';
 
 export function SettingsPage() {
   const navigate = useNavigate();
   const { me } = useMe();
-  const [aiAuto, setAiAuto]         = useState(true);
+  // Tier 4 — Quick toggles: load from backend on mount, persist on
+  // toggle. aiAuto + reminders live on /api/settings (migration 075).
+  // spanishMode derives from /api/settings/language (P11-002).
+  const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings');
+        if (cancelled || !res.ok) return;
+        const data = (await res.json()) as {
+          autoApplyInternalUpdates?: boolean;
+          autoSendAppointmentReminders?: boolean;
+        };
+        if (typeof data.autoApplyInternalUpdates === 'boolean') {
+          setAiAuto(data.autoApplyInternalUpdates);
+        }
+        if (typeof data.autoSendAppointmentReminders === 'boolean') {
+          setReminders(data.autoSendAppointmentReminders);
+        }
+      } catch {
+        /* network hiccup — defaults remain */
+      }
+    })();
+    (async () => {
+      try {
+        const lang = await fetchLanguageSettings();
+        if (cancelled) return;
+        setSpanishMode(lang.defaultLanguage === 'es');
+      } catch {
+        /* language settings missing — default to English */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function persistToggle(field: 'aiAuto' | 'reminders' | 'spanishMode', value: boolean) {
+    if (field === 'spanishMode') {
+      try {
+        await updateLanguageSettings({ defaultLanguage: value ? 'es' : 'en' });
+      } catch {
+        toast.error('Could not save language preference');
+        setSpanishMode(!value); // revert
+      }
+      return;
+    }
+    const body =
+      field === 'aiAuto'
+        ? { autoApplyInternalUpdates: value }
+        : { autoSendAppointmentReminders: value };
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      // revert on failure
+      if (field === 'aiAuto') setAiAuto(!value);
+      else setReminders(!value);
+    }
+  }
+
+  function toggleAiAuto(value: boolean) {
+    setAiAuto(value);
+    void persistToggle('aiAuto', value);
+  }
+  function toggleReminders(value: boolean) {
+    setReminders(value);
+    void persistToggle('reminders', value);
+  }
+  function toggleSpanishMode(value: boolean) {
+    setSpanishMode(value);
+    void persistToggle('spanishMode', value);
+  }
   const [qbOpen, setQbOpen]         = useState(false);
   const [qbConnected, setQbConnected] = useState(false);
   const [suppliersOpen, setSuppliersOpen] = useState(false);
@@ -262,17 +346,17 @@ export function SettingsPage() {
             {
               label: 'AI auto-apply for internal updates',
               description: 'Let the assistant apply safe internal changes without asking',
-              value: aiAuto, onChange: setAiAuto,
+              value: aiAuto, onChange: toggleAiAuto,
             },
             {
               label: 'Auto send appointment reminders',
               description: 'Text customers 2 hours before scheduled jobs',
-              value: reminders, onChange: setReminders,
+              value: reminders, onChange: toggleReminders,
             },
             {
               label: 'Spanish language mode',
               description: 'Interface and customer communications in Español',
-              value: spanishMode, onChange: setSpanishMode,
+              value: spanishMode, onChange: toggleSpanishMode,
             },
           ].map(({ label, description, value, onChange }) => (
             <div key={label} className="flex items-start justify-between gap-3 px-4 py-3.5">

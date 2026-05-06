@@ -1999,6 +1999,16 @@ export const MIGRATIONS = {
         OR current_setting('app.system_lookup', true) = 'true'
       );
   `,
+
+  '075_tenant_settings_quick_toggles': `
+    -- Tier 4 (Settings stubs) — persist the SettingsPage Quick toggles.
+    -- Defaults: auto_apply false (stricter, humans approve internal AI
+    -- updates by default); reminders true (existing toggle ships on,
+    -- mirrors today's UX expectation).
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS auto_apply_internal_updates BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS auto_send_appointment_reminders BOOLEAN NOT NULL DEFAULT true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

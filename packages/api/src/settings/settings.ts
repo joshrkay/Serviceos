@@ -49,6 +49,17 @@ export interface TenantSettings {
    * worker (follow-up). Default `'queue_and_sms'`.
    */
   unsupervisedProposalRouting?: UnsupervisedProposalRouting;
+  /**
+   * Tier 4 (Settings stubs) — when true, low-risk internal updates
+   * the AI proposes are applied automatically. When false, every
+   * change requires a human tap. Default false (stricter).
+   */
+  autoApplyInternalUpdates?: boolean;
+  /**
+   * Tier 4 (Settings stubs) — when true, the system text-messages
+   * customers ~2h before scheduled appointments. Default true.
+   */
+  autoSendAppointmentReminders?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -80,6 +91,10 @@ export interface UpdateSettingsInput {
   backupSupervisorUserId?: string | null;
   /** Phase 12 — see `UnsupervisedProposalRouting` for accepted values. */
   unsupervisedProposalRouting?: UnsupervisedProposalRouting;
+  /** Tier 4 — auto-apply low-risk internal AI updates without asking. */
+  autoApplyInternalUpdates?: boolean;
+  /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
+  autoSendAppointmentReminders?: boolean;
 }
 
 export interface SettingsRepository {

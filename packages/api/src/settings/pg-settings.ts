@@ -39,6 +39,11 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
         | 'queue_only'
         | 'escalate_to_oncall'
         | null) ?? undefined,
+    // Tier 4 — migration 075. Booleans default at the column level so
+    // a row created before this migration reads as the migration's
+    // DEFAULT value.
+    autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
+    autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -156,6 +161,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Phase 12 — migration 063.
         backupSupervisorUserId: 'backup_supervisor_user_id',
         unsupervisedProposalRouting: 'unsupervised_proposal_routing',
+        // Tier 4 — migration 075.
+        autoApplyInternalUpdates: 'auto_apply_internal_updates',
+        autoSendAppointmentReminders: 'auto_send_appointment_reminders',
         updatedAt: 'updated_at',
       };
 

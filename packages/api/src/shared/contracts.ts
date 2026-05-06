@@ -259,6 +259,9 @@ export const updateSettingsSchema = z.object({
   unsupervisedProposalRouting: z
     .enum(['queue_and_sms', 'queue_only', 'escalate_to_oncall'])
     .optional(),
+  // Tier 4 — Quick-settings toggles persistence.
+  autoApplyInternalUpdates: z.boolean().optional(),
+  autoSendAppointmentReminders: z.boolean().optional(),
 });
 
 export const conversationAccessSchema = z.object({
