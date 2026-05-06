@@ -47,6 +47,25 @@ export interface CalendarIntegrationsRouteDeps {
 }
 
 /**
+ * PR 320 review (P2 — Codex). The OAuth callback redirects back to
+ * `consumed.redirectAfter`, which originated as user-controlled
+ * input on POST /google/connect. Without validation that's a classic
+ * open-redirect from a trusted domain — useful for phishing.
+ *
+ * Allow only relative paths (must start with `/` and NOT with `//`,
+ * which is a protocol-relative URL that browsers treat as absolute
+ * to a foreign host). Anything else falls through to the default
+ * `/settings?calendar_connected=1` target.
+ */
+function isSafeRelativePath(value: string | undefined): value is string {
+  if (!value) return false;
+  if (!value.startsWith('/')) return false;
+  if (value.startsWith('//')) return false;
+  if (value.startsWith('/\\')) return false; // some browsers treat \ like /
+  return true;
+}
+
+/**
  * Returns just the unauthenticated OAuth callback route. Mounted
  * BEFORE the global /api Clerk-session middleware so the inbound
  * redirect from Google isn't rejected for lack of a session. The
@@ -96,9 +115,12 @@ export function createCalendarOAuthCallbackRouter(
         externalAccountEmail: tokens.email,
       });
 
-      const back =
-        consumed.redirectAfter ??
-        `${deps.appBaseUrl ?? ''}/settings?calendar_connected=1`;
+      // Default redirect to Settings; honor a custom redirectAfter
+      // ONLY when it's a same-origin relative path. See
+      // isSafeRelativePath above for the open-redirect rationale.
+      const back = isSafeRelativePath(consumed.redirectAfter)
+        ? `${deps.appBaseUrl ?? ''}${consumed.redirectAfter}`
+        : `${deps.appBaseUrl ?? ''}/settings?calendar_connected=1`;
       res.redirect(back);
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
@@ -163,8 +185,13 @@ export function createCalendarIntegrationsRouter(
         if (!deps.googleConfig) {
           throw new ValidationError('Google calendar integration is not configured');
         }
-        const redirectAfter =
+        // PR 320 review (P2). Reject obviously-bogus redirectAfter
+        // values at intake — defense-in-depth alongside the callback
+        // validator. Users can still pass relative same-origin paths
+        // like "/settings/calendar".
+        const rawRedirect =
           typeof req.body?.redirectAfter === 'string' ? req.body.redirectAfter : undefined;
+        const redirectAfter = isSafeRelativePath(rawRedirect) ? rawRedirect : undefined;
         const { id: stateId } = await deps.stateRepo.create({
           tenantId: req.auth!.tenantId,
           userId: req.auth!.userId,

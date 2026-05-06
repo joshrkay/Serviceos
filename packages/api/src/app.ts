@@ -1305,7 +1305,11 @@ export function createApp(): express.Express {
     stateRepo: oauthStateRepo,
     googleConfig,
     syncService: calendarSyncService,
-    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    // appBaseUrl is the FRONTEND URL we redirect the operator's
+    // browser back to after OAuth completes. The API/callback URL is
+    // separate (googleApiUrl). 5173 is the Vite dev default; matches
+    // publicBaseUrl elsewhere in this file.
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   };
   app.use(
     '/api/calendar-integrations',

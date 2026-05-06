@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
+import { PgBaseRepository } from '../db/pg-base';
 import {
   CalendarIntegrationRepository,
   CalendarProvider,
@@ -252,10 +253,21 @@ export class InMemoryAppointmentCalendarEventRepository
   }
 }
 
+/**
+ * Pg implementation. Routes through withTenant so the
+ * appointment_calendar_events RLS policy is satisfied (PR 320 review
+ * P1). The sync hook fires from inside a request that already has
+ * the tenant GUC set; the early callback path doesn't write to this
+ * table (no appointment exists yet at OAuth time), so the only
+ * caller that hits Pg is the request-scoped path.
+ */
 export class PgAppointmentCalendarEventRepository
+  extends PgBaseRepository
   implements AppointmentCalendarEventRepository
 {
-  constructor(private pool: Pool) {}
+  constructor(pool: Pool) {
+    super(pool);
+  }
 
   private map(row: Record<string, unknown>): AppointmentCalendarEvent {
     return {
@@ -283,41 +295,45 @@ export class PgAppointmentCalendarEventRepository
     status: AppointmentCalendarEvent['status'];
     lastError?: string | null;
   }): Promise<AppointmentCalendarEvent> {
-    const result = await this.pool.query(
-      `INSERT INTO appointment_calendar_events
-         (tenant_id, appointment_id, user_id, provider,
-          external_event_id, external_calendar_id, status, last_error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (appointment_id, user_id, provider) DO UPDATE SET
-         external_event_id = EXCLUDED.external_event_id,
-         external_calendar_id = EXCLUDED.external_calendar_id,
-         status = EXCLUDED.status,
-         last_error = EXCLUDED.last_error,
-         updated_at = NOW()
-       RETURNING *`,
-      [
-        input.tenantId,
-        input.appointmentId,
-        input.userId,
-        input.provider,
-        input.externalEventId,
-        input.externalCalendarId,
-        input.status,
-        input.lastError ?? null,
-      ],
-    );
-    return this.map(result.rows[0] as Record<string, unknown>);
+    return this.withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO appointment_calendar_events
+           (tenant_id, appointment_id, user_id, provider,
+            external_event_id, external_calendar_id, status, last_error)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (appointment_id, user_id, provider) DO UPDATE SET
+           external_event_id = EXCLUDED.external_event_id,
+           external_calendar_id = EXCLUDED.external_calendar_id,
+           status = EXCLUDED.status,
+           last_error = EXCLUDED.last_error,
+           updated_at = NOW()
+         RETURNING *`,
+        [
+          input.tenantId,
+          input.appointmentId,
+          input.userId,
+          input.provider,
+          input.externalEventId,
+          input.externalCalendarId,
+          input.status,
+          input.lastError ?? null,
+        ],
+      );
+      return this.map(result.rows[0] as Record<string, unknown>);
+    });
   }
 
   async findByAppointment(
     tenantId: string,
     appointmentId: string,
   ): Promise<AppointmentCalendarEvent[]> {
-    const result = await this.pool.query(
-      `SELECT * FROM appointment_calendar_events
-       WHERE tenant_id = $1 AND appointment_id = $2`,
-      [tenantId, appointmentId],
-    );
-    return result.rows.map((r) => this.map(r as Record<string, unknown>));
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM appointment_calendar_events
+         WHERE tenant_id = $1 AND appointment_id = $2`,
+        [tenantId, appointmentId],
+      );
+      return result.rows.map((r) => this.map(r as Record<string, unknown>));
+    });
   }
 }

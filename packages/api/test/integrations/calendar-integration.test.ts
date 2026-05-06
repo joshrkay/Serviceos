@@ -94,7 +94,7 @@ describe('CalendarIntegration repos + Google OAuth helpers (PR 1)', () => {
         accessTokenExpiresAt: new Date(Date.now() + 3600_000),
         externalAccountEmail: 'b@example.com',
       });
-      await repo.setStatus(b.id, 'expired');
+      await repo.setStatus('tenant-1', b.id, 'expired');
       void a;
       const active = await repo.findActiveByTenant('tenant-1');
       expect(active.map((r) => r.userId)).toEqual(['user-1']);

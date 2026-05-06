@@ -192,6 +192,82 @@ describe('Calendar integrations routes (PR 1)', () => {
     expect(row?.status).toBe('active');
   });
 
+  it('GET /google/callback honors a same-origin relative redirectAfter (PR 320 P2)', async () => {
+    const { id: stateId } = await stateRepo.create({
+      tenantId: TENANT,
+      userId: USER,
+      provider: 'google',
+      redirectAfter: '/settings/calendar',
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      if (String(input).includes('/token')) {
+        return jsonRes({ access_token: 'AT', refresh_token: 'RT', expires_in: 3600 });
+      }
+      if (String(input).includes('/userinfo')) {
+        return jsonRes({ email: 'a@example.com' });
+      }
+      return jsonRes({}, 404);
+    });
+    const app = buildApp({
+      integrationRepo, stateRepo, authenticate: false,
+      googleConfig: { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+      googleFetch: fetchMock as unknown as typeof fetch,
+    });
+    const res = await request(app)
+      .get('/api/calendar-integrations/google/callback')
+      .query({ code: 'auth-xyz', state: stateId });
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.example.com/settings/calendar');
+  });
+
+  it('GET /google/callback ignores an open-redirect attempt and falls back to default', async () => {
+    const { id: stateId } = await stateRepo.create({
+      tenantId: TENANT,
+      userId: USER,
+      provider: 'google',
+      // Even though we now block this at intake, also assert the
+      // callback's belt-and-braces validation in case a row was
+      // persisted before that fix landed.
+      redirectAfter: '//evil.com/phish',
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      if (String(input).includes('/token')) {
+        return jsonRes({ access_token: 'AT', refresh_token: 'RT', expires_in: 3600 });
+      }
+      return jsonRes({ email: 'a@example.com' });
+    });
+    const app = buildApp({
+      integrationRepo, stateRepo, authenticate: false,
+      googleConfig: { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+      googleFetch: fetchMock as unknown as typeof fetch,
+    });
+    const res = await request(app)
+      .get('/api/calendar-integrations/google/callback')
+      .query({ code: 'auth-xyz', state: stateId });
+    expect(res.status).toBe(302);
+    // Falls back to the default settings target, NOT the attacker's URL.
+    expect(res.headers.location).toContain('/settings?calendar_connected=1');
+    expect(res.headers.location).not.toContain('evil.com');
+  });
+
+  it('POST /google/connect ignores an absolute-URL redirectAfter at intake', async () => {
+    const app = buildApp({
+      integrationRepo, stateRepo,
+      googleConfig: { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+    });
+    const res = await request(app)
+      .post('/api/calendar-integrations/google/connect')
+      .send({ redirectAfter: 'https://evil.com/phish' });
+    expect(res.status).toBe(200);
+    // The persisted state should NOT carry the absolute URL — the
+    // route strips it. We verify via the in-memory repo's row.
+    const states = (stateRepo as unknown as {
+      rows: Map<string, { redirectAfter?: string }>;
+    }).rows;
+    const persisted = Array.from(states.values())[0];
+    expect(persisted.redirectAfter).toBeUndefined();
+  });
+
   it('GET /google/callback rejects an invalid/expired state', async () => {
     const app = buildApp({
       integrationRepo,

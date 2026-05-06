@@ -119,14 +119,21 @@ export function SettingsPage() {
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
-  // (or ?calendar_error=...).
+  // on success or ?calendar_error=<reason> when Google rejects /
+  // user declines (PR 320 review — Gemini).
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
-    if (params.get('calendar_connected') === '1') {
+    const isConnected = params.get('calendar_connected') === '1';
+    const connectionError = params.get('calendar_error');
+    if (isConnected || connectionError) {
       setCalendarSyncOpen(true);
-      // Strip the param so a refresh doesn't re-open.
+      if (connectionError) {
+        toast.error(`Calendar connection failed: ${connectionError}`);
+      }
+      // Strip the params so a refresh doesn't re-open / re-toast.
       params.delete('calendar_connected');
+      params.delete('calendar_error');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }

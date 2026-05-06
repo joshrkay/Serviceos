@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
+import { PgBaseRepository } from '../db/pg-base';
 import { ValidationError } from '../shared/errors';
 import { encrypt, decrypt } from './crypto';
 
@@ -58,13 +59,19 @@ export interface CalendarIntegrationRepository {
   /** Used by the appointment-push hook to enumerate connected techs. */
   findActiveByTenant(tenantId: string): Promise<CalendarIntegration[]>;
   /** Refresh path — bumps the access token + expiry without changing
-   *  the refresh token. */
+   *  the refresh token. tenantId is required so the Pg implementation
+   *  can route through `withTenant` and satisfy RLS (PR 320 review P1). */
   updateAccessToken(
+    tenantId: string,
     id: string,
     accessTokenEncrypted: string,
     accessTokenExpiresAt: Date,
   ): Promise<CalendarIntegration | null>;
-  setStatus(id: string, status: CalendarStatus): Promise<CalendarIntegration | null>;
+  setStatus(
+    tenantId: string,
+    id: string,
+    status: CalendarStatus,
+  ): Promise<CalendarIntegration | null>;
   /** Soft delete. Disconnects on the UI side; keeps the row around for
    *  audit. Future reconnect on the same (tenant, user, provider)
    *  upserts and flips status back to 'active'. */
@@ -167,23 +174,25 @@ export class InMemoryCalendarIntegrationRepository
   }
 
   async updateAccessToken(
+    tenantId: string,
     id: string,
     accessTokenEncrypted: string,
     accessTokenExpiresAt: Date,
   ): Promise<CalendarIntegration | null> {
     const r = this.rows.get(id);
-    if (!r) return null;
+    if (!r || r.tenantId !== tenantId) return null;
     const next = { ...r, accessTokenEncrypted, accessTokenExpiresAt, updatedAt: new Date() };
     this.rows.set(id, next);
     return { ...next };
   }
 
   async setStatus(
+    tenantId: string,
     id: string,
     status: CalendarStatus,
   ): Promise<CalendarIntegration | null> {
     const r = this.rows.get(id);
-    if (!r) return null;
+    if (!r || r.tenantId !== tenantId) return null;
     const next = { ...r, status, updatedAt: new Date() };
     this.rows.set(id, next);
     return { ...next };
@@ -196,7 +205,7 @@ export class InMemoryCalendarIntegrationRepository
   ): Promise<boolean> {
     const row = await this.findByUser(tenantId, userId, provider);
     if (!row) return false;
-    await this.setStatus(row.id, 'revoked');
+    await this.setStatus(tenantId, row.id, 'revoked');
     return true;
   }
 }
@@ -252,8 +261,21 @@ export class InMemoryOAuthStateRepository implements OAuthStateRepository {
 
 /* ───────────────────── Pg implementations ───────────────────── */
 
-export class PgCalendarIntegrationRepository implements CalendarIntegrationRepository {
-  constructor(private pool: Pool) {}
+/**
+ * Pg implementation. Extends PgBaseRepository so every query routes
+ * through `withTenant` — required for the RLS policy on
+ * user_calendar_integrations (`tenant_id = current_setting(
+ * 'app.current_tenant_id')`). The OAuth callback path runs BEFORE
+ * the global tenant-transaction middleware, so without an explicit
+ * SET LOCAL the queries would be RLS-rejected (PR 320 review P1).
+ */
+export class PgCalendarIntegrationRepository
+  extends PgBaseRepository
+  implements CalendarIntegrationRepository
+{
+  constructor(pool: Pool) {
+    super(pool);
+  }
 
   private map(row: Record<string, unknown>): CalendarIntegration {
     return {
@@ -275,33 +297,35 @@ export class PgCalendarIntegrationRepository implements CalendarIntegrationRepos
   async upsert(input: UpsertCalendarIntegrationInput): Promise<CalendarIntegration> {
     const accessTokenEncrypted = encryptToken(input.accessToken);
     const refreshTokenEncrypted = encryptToken(input.refreshToken);
-    const result = await this.pool.query(
-      `INSERT INTO user_calendar_integrations
-         (tenant_id, user_id, provider, access_token_encrypted,
-          refresh_token_encrypted, access_token_expires_at,
-          external_account_email, calendar_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
-       ON CONFLICT (tenant_id, user_id, provider) DO UPDATE SET
-         access_token_encrypted = EXCLUDED.access_token_encrypted,
-         refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-         access_token_expires_at = EXCLUDED.access_token_expires_at,
-         external_account_email = EXCLUDED.external_account_email,
-         calendar_id = EXCLUDED.calendar_id,
-         status = 'active',
-         updated_at = NOW()
-       RETURNING *`,
-      [
-        input.tenantId,
-        input.userId,
-        input.provider,
-        accessTokenEncrypted,
-        refreshTokenEncrypted,
-        input.accessTokenExpiresAt,
-        input.externalAccountEmail,
-        input.calendarId ?? 'primary',
-      ],
-    );
-    return this.map(result.rows[0] as Record<string, unknown>);
+    return this.withTenant(input.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO user_calendar_integrations
+           (tenant_id, user_id, provider, access_token_encrypted,
+            refresh_token_encrypted, access_token_expires_at,
+            external_account_email, calendar_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
+         ON CONFLICT (tenant_id, user_id, provider) DO UPDATE SET
+           access_token_encrypted = EXCLUDED.access_token_encrypted,
+           refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+           access_token_expires_at = EXCLUDED.access_token_expires_at,
+           external_account_email = EXCLUDED.external_account_email,
+           calendar_id = EXCLUDED.calendar_id,
+           status = 'active',
+           updated_at = NOW()
+         RETURNING *`,
+        [
+          input.tenantId,
+          input.userId,
+          input.provider,
+          accessTokenEncrypted,
+          refreshTokenEncrypted,
+          input.accessTokenExpiresAt,
+          input.externalAccountEmail,
+          input.calendarId ?? 'primary',
+        ],
+      );
+      return this.map(result.rows[0] as Record<string, unknown>);
+    });
   }
 
   async findByUser(
@@ -309,58 +333,68 @@ export class PgCalendarIntegrationRepository implements CalendarIntegrationRepos
     userId: string,
     provider: CalendarProvider = 'google',
   ): Promise<CalendarIntegration | null> {
-    const result = await this.pool.query(
-      `SELECT * FROM user_calendar_integrations
-       WHERE tenant_id = $1 AND user_id = $2 AND provider = $3`,
-      [tenantId, userId, provider],
-    );
-    return result.rows.length > 0
-      ? this.map(result.rows[0] as Record<string, unknown>)
-      : null;
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM user_calendar_integrations
+         WHERE tenant_id = $1 AND user_id = $2 AND provider = $3`,
+        [tenantId, userId, provider],
+      );
+      return result.rows.length > 0
+        ? this.map(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
   }
 
   async findActiveByTenant(tenantId: string): Promise<CalendarIntegration[]> {
-    const result = await this.pool.query(
-      `SELECT * FROM user_calendar_integrations
-       WHERE tenant_id = $1 AND status = 'active'`,
-      [tenantId],
-    );
-    return result.rows.map((r) => this.map(r as Record<string, unknown>));
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM user_calendar_integrations
+         WHERE tenant_id = $1 AND status = 'active'`,
+        [tenantId],
+      );
+      return result.rows.map((r) => this.map(r as Record<string, unknown>));
+    });
   }
 
   async updateAccessToken(
+    tenantId: string,
     id: string,
     accessTokenEncrypted: string,
     accessTokenExpiresAt: Date,
   ): Promise<CalendarIntegration | null> {
-    const result = await this.pool.query(
-      `UPDATE user_calendar_integrations
-       SET access_token_encrypted = $1,
-           access_token_expires_at = $2,
-           updated_at = NOW()
-       WHERE id = $3
-       RETURNING *`,
-      [accessTokenEncrypted, accessTokenExpiresAt, id],
-    );
-    return result.rows.length > 0
-      ? this.map(result.rows[0] as Record<string, unknown>)
-      : null;
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE user_calendar_integrations
+         SET access_token_encrypted = $1,
+             access_token_expires_at = $2,
+             updated_at = NOW()
+         WHERE id = $3 AND tenant_id = $4
+         RETURNING *`,
+        [accessTokenEncrypted, accessTokenExpiresAt, id, tenantId],
+      );
+      return result.rows.length > 0
+        ? this.map(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
   }
 
   async setStatus(
+    tenantId: string,
     id: string,
     status: CalendarStatus,
   ): Promise<CalendarIntegration | null> {
-    const result = await this.pool.query(
-      `UPDATE user_calendar_integrations
-       SET status = $1, updated_at = NOW()
-       WHERE id = $2
-       RETURNING *`,
-      [status, id],
-    );
-    return result.rows.length > 0
-      ? this.map(result.rows[0] as Record<string, unknown>)
-      : null;
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE user_calendar_integrations
+         SET status = $1, updated_at = NOW()
+         WHERE id = $2 AND tenant_id = $3
+         RETURNING *`,
+        [status, id, tenantId],
+      );
+      return result.rows.length > 0
+        ? this.map(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
   }
 
   async revoke(
@@ -368,14 +402,16 @@ export class PgCalendarIntegrationRepository implements CalendarIntegrationRepos
     userId: string,
     provider: CalendarProvider,
   ): Promise<boolean> {
-    const result = await this.pool.query(
-      `UPDATE user_calendar_integrations
-       SET status = 'revoked', updated_at = NOW()
-       WHERE tenant_id = $1 AND user_id = $2 AND provider = $3
-         AND status != 'revoked'`,
-      [tenantId, userId, provider],
-    );
-    return (result.rowCount ?? 0) > 0;
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE user_calendar_integrations
+         SET status = 'revoked', updated_at = NOW()
+         WHERE tenant_id = $1 AND user_id = $2 AND provider = $3
+           AND status != 'revoked'`,
+        [tenantId, userId, provider],
+      );
+      return (result.rowCount ?? 0) > 0;
+    });
   }
 }
 

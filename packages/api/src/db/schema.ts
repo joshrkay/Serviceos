@@ -2305,9 +2305,10 @@ export const MIGRATIONS = {
       expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '5 minutes',
       consumed_at TIMESTAMPTZ
     );
-    CREATE INDEX IF NOT EXISTS idx_oauth_states_active
-      ON oauth_states(id)
-      WHERE consumed_at IS NULL;
+    -- PR 320 review (Gemini): the partial index on PK column 'id'
+    -- was redundant — the primary key index already covers PK
+    -- lookups, including the consume() lookup with a WHERE filter
+    -- on consumed_at. The partial saved no work and bloated writes.
   `,
 
   '086_create_appointment_calendar_events': `

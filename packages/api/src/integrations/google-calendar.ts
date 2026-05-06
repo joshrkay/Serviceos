@@ -161,7 +161,7 @@ export async function getValidAccessToken(
       // invalid_grant — the user revoked the connection on Google's
       // side (or admin-disabled the OAuth client). Mark the integration
       // expired so the UI can surface a "reconnect" prompt.
-      await repo.setStatus(integration.id, 'expired');
+      await repo.setStatus(integration.tenantId, integration.id, 'expired');
       throw new ValidationError(
         'Google calendar connection has expired — please reconnect',
       );
@@ -176,6 +176,11 @@ export async function getValidAccessToken(
     throw new Error('Google token refresh returned no access_token');
   }
   const expiresAt = new Date(Date.now() + (json.expires_in ?? 3600) * 1000);
-  await repo.updateAccessToken(integration.id, encryptToken(json.access_token), expiresAt);
+  await repo.updateAccessToken(
+    integration.tenantId,
+    integration.id,
+    encryptToken(json.access_token),
+    expiresAt,
+  );
   return json.access_token;
 }
