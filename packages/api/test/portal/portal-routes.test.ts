@@ -53,14 +53,17 @@ interface Harness {
   customer: Customer;
 }
 
-async function build(): Promise<Harness> {
+async function build(opts: {
+  paymentLinkProvider?: import('../../src/payments/payment-link-provider').PaymentLinkProvider;
+  invoiceRepoOverride?: import('../../src/invoices/invoice').InvoiceRepository;
+} = {}): Promise<Harness> {
   const app = express();
   app.use(express.json());
 
   const portalRepo = new InMemoryPortalSessionRepository();
   const customerRepo = new InMemoryCustomerRepository();
   const estimateRepo = new InMemoryEstimateRepository();
-  const invoiceRepo = new InMemoryInvoiceRepository();
+  const invoiceRepo = (opts.invoiceRepoOverride ?? new InMemoryInvoiceRepository()) as InMemoryInvoiceRepository;
   const jobRepo = new InMemoryJobRepository();
   const agreementRepo = new InMemoryAgreementRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
@@ -97,6 +100,7 @@ async function build(): Promise<Harness> {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      paymentLinkProvider: opts.paymentLinkProvider,
     }),
   );
 
@@ -297,6 +301,156 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     expect(res.body.invoices[0].id).toBe(invoiceId);
     expect(res.body.invoices[0].payNowUrl).toBeNull();
     expect(res.body.invoices[0].amountDueCents).toBe(10000);
+  });
+
+  it('rolls back the Stripe link when persisting the URL to the invoice fails', async () => {
+    // Codex P2 — without rollback, persist failures cause every refresh to
+    // mint a fresh Stripe link; the prior ones orphan as live charge URLs.
+    const generated: string[] = [];
+    const deactivated: string[] = [];
+    const provider = {
+      async generateLink() {
+        const linkId = `plink_test_${generated.length + 1}`;
+        generated.push(linkId);
+        return {
+          linkId,
+          linkUrl: `https://checkout.stripe.com/pay/${linkId}`,
+          providerReference: `stripe_${linkId}`,
+        };
+      },
+      async deactivateLink(linkId: string) {
+        deactivated.push(linkId);
+      },
+    };
+
+    // Force update() to throw so the persist branch fails.
+    const failingInvoiceRepo = new InMemoryInvoiceRepository();
+    failingInvoiceRepo.update = async () => {
+      throw new Error('simulated DB outage');
+    };
+
+    const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: failingInvoiceRepo });
+    const token = await mintToken(h);
+    await seedJobAndDocs(h);
+    const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
+
+    expect(res.status).toBe(200);
+    // No payNowUrl served — caller must not see an unrecoverable URL.
+    expect(res.body.invoices[0].payNowUrl).toBeNull();
+    // The just-minted link was deactivated to avoid orphan live charge URLs.
+    expect(generated).toHaveLength(1);
+    expect(deactivated).toEqual(generated);
+  });
+
+  it('does NOT deactivate when update throws but the invoice actually has the URL persisted (commit-but-response-timeout)', async () => {
+    // Codex P2 follow-up — DB commit succeeds, response throws. If we
+    // blindly deactivate, the next read sees the URL on the invoice
+    // and serves a permanently dead pay-now link.
+    const generated: string[] = [];
+    const deactivated: string[] = [];
+    const provider = {
+      async generateLink() {
+        const linkId = 'plink_committed_then_threw';
+        generated.push(linkId);
+        return {
+          linkId,
+          linkUrl: `https://checkout.stripe.com/pay/${linkId}`,
+          providerReference: `stripe_${linkId}`,
+        };
+      },
+      async deactivateLink(linkId: string) {
+        deactivated.push(linkId);
+      },
+    };
+
+    // Force update() to throw, BUT first patch the in-memory store
+    // so the invoice already has the URL persisted (simulates DB
+    // commit succeeding before the response threw).
+    const repo = new InMemoryInvoiceRepository();
+    let updateCalls = 0;
+    const originalUpdate = repo.update.bind(repo);
+    repo.update = async (tenantId, id, updates) => {
+      updateCalls += 1;
+      // Apply the update to underlying state, then throw.
+      await originalUpdate(tenantId, id, updates);
+      throw new Error('response timed out after commit');
+    };
+
+    const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: repo });
+    const token = await mintToken(h);
+    await seedJobAndDocs(h);
+    const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
+
+    expect(res.status).toBe(200);
+    expect(updateCalls).toBe(1);
+    // Re-read found the persisted URL → resolver used it instead of deactivating.
+    expect(res.body.invoices[0].payNowUrl).toContain('plink_committed_then_threw');
+    expect(deactivated).toEqual([]);
+  });
+
+  it('does NOT deactivate when both update and the re-read throw (DB genuinely degraded)', async () => {
+    // Codex P2 follow-up — when we can't tell whether persist succeeded,
+    // the safer choice is to skip deactivation (avoid dead-linking a
+    // successful persist) and serve no URL.
+    const generated: string[] = [];
+    const deactivated: string[] = [];
+    const provider = {
+      async generateLink() {
+        const linkId = 'plink_db_down';
+        generated.push(linkId);
+        return {
+          linkId,
+          linkUrl: `https://checkout.stripe.com/pay/${linkId}`,
+          providerReference: `stripe_${linkId}`,
+        };
+      },
+      async deactivateLink(linkId: string) {
+        deactivated.push(linkId);
+      },
+    };
+
+    const repo = new InMemoryInvoiceRepository();
+    repo.update = async () => {
+      throw new Error('DB write failed');
+    };
+    repo.findById = async () => {
+      throw new Error('DB read also failed');
+    };
+
+    const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: repo });
+    const token = await mintToken(h);
+    await seedJobAndDocs(h);
+    // findById is also called when listing invoices for the portal;
+    // patch only the post-update re-read to fail. In practice the
+    // listing query is a different call site so this test is
+    // pragmatic — it asserts the rollback's deactivate is NOT
+    // attempted under uncertainty.
+    // (If the listing itself can't load, the route will already 5xx
+    // upstream of this branch.)
+    // To make the test exercise just the rollback branch, swap back
+    // the read for the listing path — only the post-update re-read
+    // matters for the deactivate decision. Re-derive by counting:
+    let findByIdCalls = 0;
+    repo.findById = async () => {
+      findByIdCalls += 1;
+      // Listing reads succeed; the rollback re-read (call #2+) fails.
+      if (findByIdCalls === 1) {
+        return null; // first call shouldn't matter for this test
+      }
+      throw new Error('DB read failed during rollback');
+    };
+    // The portal listing path uses findByJob, not findById, so the
+    // rollback's findById is the only call we need to fail. Reset
+    // counter and make it always throw.
+    repo.findById = async () => {
+      throw new Error('DB read failed during rollback');
+    };
+
+    const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
+    expect(res.status).toBe(200);
+    expect(res.body.invoices[0].payNowUrl).toBeNull();
+    // Crucially, NO deactivation attempt — uncertain state.
+    expect(deactivated).toEqual([]);
   });
 
   it('lists jobs scoped to the customer', async () => {

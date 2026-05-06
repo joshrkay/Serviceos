@@ -164,4 +164,157 @@ describe('InAppVoiceAdapter', () => {
     });
     await expect(adapter.handleInput('does-not-exist', 'hi')).rejects.toThrow(/not found/i);
   });
+
+  describe('§3B verticalPromptResolver wire-up', () => {
+    it('passes the resolved vertical section through to classifyIntent', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const verticalPromptResolver = vi.fn(async (tenantId: string) => {
+        expect(tenantId).toBe(TENANT);
+        return 'Service vertical: HVAC Professional\nEquipment: Furnace (heater)';
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        verticalPromptResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'invoice Acme');
+
+      expect(verticalPromptResolver).toHaveBeenCalledWith(TENANT);
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Service vertical: HVAC Professional');
+    });
+
+    it('falls back to base prompt when resolver throws', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const verticalPromptResolver = vi.fn(async () => {
+        throw new Error('pack lookup blew up');
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        verticalPromptResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Must not throw — turn proceeds without the vertical context.
+      await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+
+    it('omits the vertical message when resolver returns undefined', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const verticalPromptResolver = vi.fn(async () => undefined);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        verticalPromptResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'invoice Acme');
+
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+  });
+
+  describe('§3C callerPlanResolver wire-up', () => {
+    it('does not call the plan resolver when the caller is not yet identified', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const callerPlanResolver = vi.fn(async () => 'should not be used');
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        callerPlanResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'invoice Acme');
+
+      expect(callerPlanResolver).not.toHaveBeenCalled();
+    });
+
+    it('passes the plan section through to classifyIntent when caller is identified', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 }),
+      ]);
+      const callerPlanResolver = vi.fn(
+        async (_tenantId: string, _customerId: string) =>
+          'Caller is on an active maintenance plan.\nPlans: Gold Membership',
+      );
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        callerPlanResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      // Simulate identifyCaller having attached a customerId to the session.
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      session.customerId = 'cust-1';
+
+      await adapter.handleInput(sessionId, 'when is my next visit');
+      expect(callerPlanResolver).toHaveBeenCalledWith(TENANT, 'cust-1');
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      // Base prompt + plan section = 2 system messages (no vertical
+      // resolver wired in this test).
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Caller plan context');
+      expect(systemMessages[1].content).toContain('Gold Membership');
+    });
+
+    it('falls back gracefully when the plan resolver throws', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.92 }),
+      ]);
+      const callerPlanResolver = vi.fn(async () => {
+        throw new Error('agreement repo blew up');
+      });
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        callerPlanResolver,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      session.customerId = 'cust-1';
+
+      await expect(adapter.handleInput(sessionId, 'invoice Acme')).resolves.toBeDefined();
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+  });
 });

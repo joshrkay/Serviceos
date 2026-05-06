@@ -152,6 +152,23 @@ export interface TwilioAdapterDeps {
    * use it for tenant-specific Twilio auth outside this gather loop.
    */
   credentialResolver?: TenantCredentialResolver;
+  /**
+   * §3B + §3D vertical-aware classifier prompt. Same shape as the
+   * in-app adapter's `verticalPromptResolver` — resolves the tenant's
+   * active vertical pack into a prompt-shaped section (vertical block
+   * + intake_questions block) that gets appended as a system message
+   * to `classifyIntent`. Optional: returning undefined leaves the
+   * classifier on its base prompt.
+   */
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  /**
+   * §3C caller-plan / membership classifier prompt. Resolved per
+   * (tenantId, customerId) once the caller is identified.
+   */
+  callerPlanResolver?: (
+    tenantId: string,
+    customerId: string,
+  ) => Promise<string | undefined>;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -340,6 +357,39 @@ export class TwilioGatherAdapter {
   constructor(private deps: TwilioAdapterDeps) {}
 
   /**
+   * §3B + §3D helper. Best-effort vertical-prompt lookup (now also
+   * carries intake_questions per §3D via the resolver). Returns
+   * undefined when the resolver is missing, throws, or the tenant has
+   * no active pack — callers proceed with the base classifier prompt
+   * rather than failing the turn.
+   */
+  private async resolveVerticalPromptSection(tenantId: string): Promise<string | undefined> {
+    if (!this.deps.verticalPromptResolver) return undefined;
+    try {
+      return await this.deps.verticalPromptResolver(tenantId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * §3C helper. Best-effort caller-plan lookup. Returns undefined for
+   * unknown callers or when the customer has no active maintenance
+   * agreement.
+   */
+  private async resolvePlanPromptSection(
+    tenantId: string,
+    customerId: string | undefined,
+  ): Promise<string | undefined> {
+    if (!this.deps.callerPlanResolver || !customerId) return undefined;
+    try {
+      return await this.deps.callerPlanResolver(tenantId, customerId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * P8-012 — Initial /voice handler when Media Streams is enabled.
    *
    * Creates (or replays) the session, then returns a
@@ -490,10 +540,15 @@ export class TwilioGatherAdapter {
       }
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
       let classifierEvent: CallingAgentEvent | null = null;
+      const verticalPromptSection = await this.resolveVerticalPromptSection(opts.tenantId);
+      const planPromptSection = await this.resolvePlanPromptSection(
+        opts.tenantId,
+        session.customerId,
+      );
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          { tenantId: opts.tenantId },
+          { tenantId: opts.tenantId, verticalPromptSection, planPromptSection },
           this.deps.gateway,
         );
         // VQ-003: surface the classifier outcome for the harness.
@@ -864,10 +919,15 @@ export class TwilioGatherAdapter {
       //    (which would hang the caller mid-call).
       let classifierEvent: CallingAgentEvent | null = null;
       let classifiedIntentType: string | undefined;
+      const verticalPromptSection = await this.resolveVerticalPromptSection(opts.tenantId);
+      const planPromptSection = await this.resolvePlanPromptSection(
+        opts.tenantId,
+        session.customerId,
+      );
       try {
         const classification = await classifyIntent(
           opts.speechResult,
-          { tenantId: opts.tenantId },
+          { tenantId: opts.tenantId, verticalPromptSection, planPromptSection },
           this.deps.gateway,
         );
         // VQ-003: surface the classifier outcome for the harness.

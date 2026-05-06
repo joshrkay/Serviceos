@@ -118,6 +118,11 @@ import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './worker
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
+import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
+import {
+  buildCallerPlanContext,
+  formatCallerPlanForPrompt,
+} from './ai/orchestration/caller-plan-context';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
@@ -1191,6 +1196,23 @@ export function createApp(): express.Express {
   // side effect) and the in-app adapter (escalation) share a single
   // implementation. The in-app block below reuses this same instance.
   const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  // §3B + §3D: shared vertical-prompt resolver injected into both
+  // calling-agent adapters so per-tenant equipment terminology AND
+  // intake-question disambiguation reach the classifier.
+  const verticalPromptResolver = buildVerticalPromptResolver({
+    packActivationRepo,
+    canonicalPackRegistry,
+  });
+  // §3C: caller-plan resolver. Returns a prompt-shaped block when the
+  // caller's customerId resolves to an active maintenance agreement.
+  const callerPlanResolver = async (
+    tenantId: string,
+    customerId: string,
+  ): Promise<string | undefined> => {
+    const ctx = await buildCallerPlanContext(tenantId, customerId, agreementRepo);
+    const section = formatCallerPlanForPrompt(ctx);
+    return section.length > 0 ? section : undefined;
+  };
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1216,6 +1238,8 @@ export function createApp(): express.Express {
     // Twilio asynchronously records the entire call and POSTs metadata
     // to /api/telephony/recording on completion.
     recordingCallbackPath: '/api/telephony/recording',
+    verticalPromptResolver,
+    callerPlanResolver,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1838,6 +1862,8 @@ export function createApp(): express.Express {
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    verticalPromptResolver,
+    callerPlanResolver,
   });
   app.use(
     '/api/voice/sessions',

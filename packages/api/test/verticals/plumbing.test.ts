@@ -38,4 +38,23 @@ describe('P4-003 — Plumbing Vertical Pack', () => {
     expect(Number.isInteger(PLUMBING_LINE_ITEM_DEFAULTS.laborRatePerHourCents)).toBe(true);
     expect(PLUMBING_LINE_ITEM_DEFAULTS.drainCleaningCents).toBeGreaterThan(0);
   });
+
+  it('§3D — ships default intake_questions for caller disambiguation', () => {
+    expect(pack.intakeQuestions).toBeDefined();
+    expect((pack.intakeQuestions ?? []).length).toBeGreaterThan(0);
+    const triggers = (pack.intakeQuestions ?? []).map((q) => q.trigger);
+    expect(triggers).toEqual(expect.arrayContaining(['plumbing']));
+    expect((pack.metadata as Record<string, unknown>).intake_questions).toBeDefined();
+  });
+
+  it('§3E — ships default objection_scripts for the calling agent', () => {
+    expect(pack.objectionScripts).toBeDefined();
+    expect((pack.objectionScripts ?? []).length).toBeGreaterThan(0);
+    const ids = (pack.objectionScripts ?? []).map((s) => s.id);
+    // 'minor_issue' is plumbing-specific (slow drain / small leak) —
+    // a useful smoke test that the pack ships its own copy rather
+    // than reusing HVAC defaults.
+    expect(ids).toEqual(expect.arrayContaining(['price', 'dispatch_fee', 'minor_issue']));
+    expect((pack.metadata as Record<string, unknown>).objection_scripts).toBeDefined();
+  });
 });

@@ -397,16 +397,57 @@ async function buildInvoicePayload(
       description: `Invoice ${inv.invoiceNumber}`,
     });
     if (link) {
-      payNowUrl = link.linkUrl;
       try {
         await invoiceRepo.update(tenantId, inv.id, {
           stripePaymentLinkId: link.linkId,
           stripePaymentLinkUrl: link.linkUrl,
           updatedAt: new Date(),
         });
+        payNowUrl = link.linkUrl;
       } catch {
-        // Best effort: a persist failure leaves the link unanchored, but
-        // the read still succeeds. Owner-side workflow can clean up.
+        // Persistence threw — but the throw is ambiguous: the DB may
+        // have actually committed and only the response timed out.
+        //
+        // Codex P2 (PR #315 review): blindly calling deactivateLink
+        // here would create a permanent dead-link footgun. If the DB
+        // commit went through, future reads of this invoice will see
+        // `stripePaymentLinkUrl === link.linkUrl` and serve it — but
+        // the link would already be deactivated, leaving the customer
+        // with a pay button that goes nowhere until manual repair.
+        //
+        // Resolve the ambiguity by re-reading the invoice. Three cases:
+        //   1. Re-read shows our just-minted URL persisted → success
+        //      hidden inside a noisy throw. Use the URL.
+        //   2. Re-read shows no URL (or a different URL) → persist
+        //      genuinely failed. Deactivate to avoid an orphan.
+        //   3. Re-read also throws → can't tell. Don't deactivate
+        //      (avoid the dead-link footgun) and serve no payNowUrl.
+        //      Next refresh will retry persistence on a clean read.
+        let confirmedPersisted = false;
+        let canTellFromReread = true;
+        try {
+          const fresh = await invoiceRepo.findById(tenantId, inv.id);
+          confirmedPersisted = !!fresh && fresh.stripePaymentLinkUrl === link.linkUrl;
+        } catch {
+          canTellFromReread = false;
+        }
+        if (confirmedPersisted) {
+          payNowUrl = link.linkUrl;
+        } else if (canTellFromReread) {
+          // Persist genuinely failed — deactivate the orphan.
+          try {
+            await provider.deactivateLink(link.linkId);
+          } catch {
+            // Stripe deactivate also failed. The just-minted link
+            // stays live until manual cleanup. Next refresh retries.
+          }
+          payNowUrl = null;
+        } else {
+          // Re-read failed too — DB is genuinely degraded. Don't
+          // deactivate (would risk dead-linking a successful persist)
+          // and don't serve a URL we're not sure persisted.
+          payNowUrl = null;
+        }
       }
     }
   }
