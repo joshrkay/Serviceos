@@ -196,6 +196,47 @@ describe('applyDepositCreditToInvoice — Tier 4 deposit (PR 3c)', () => {
     expect(result?.invoice.status).toBe('draft');
   });
 
+  it('rolls back the consumed marker when payment creation throws (PR 319 P1)', async () => {
+    // Simulate a transient paymentRepo failure — the marker should
+    // not stick or the deposit becomes permanently orphaned.
+    const job = await jobRepo.create!(makeJob());
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const originalCreate = paymentRepo.create.bind(paymentRepo);
+    paymentRepo.create = async () => {
+      throw new Error('simulated paymentRepo outage');
+    };
+
+    await expect(
+      applyDepositCreditToInvoice(invoice, job, invoiceRepo, paymentRepo, jobRepo),
+    ).rejects.toThrow(/simulated paymentRepo outage/);
+
+    // Marker rolled back so the deposit is available for a retry.
+    const after = await jobRepo.findById('tenant-deposit-credit', job.id);
+    expect(after?.depositCreditedToInvoiceId).toBeFalsy();
+
+    paymentRepo.create = originalCreate;
+  });
+
+  it('rolls back the consumed marker when invoice update returns null', async () => {
+    const job = await jobRepo.create!(makeJob());
+    const invoice = makeInvoice(job.id, 100000);
+    await invoiceRepo.create(invoice);
+
+    const originalUpdate = invoiceRepo.update.bind(invoiceRepo);
+    invoiceRepo.update = async () => null;
+
+    await expect(
+      applyDepositCreditToInvoice(invoice, job, invoiceRepo, paymentRepo, jobRepo),
+    ).rejects.toThrow(/Failed to update invoice/);
+
+    const after = await jobRepo.findById('tenant-deposit-credit', job.id);
+    expect(after?.depositCreditedToInvoiceId).toBeFalsy();
+
+    invoiceRepo.update = originalUpdate;
+  });
+
   it('uses the atomic consume so concurrent calls cannot double-credit', async () => {
     // PR 319 race: two near-simultaneous invoice creations for the
     // same job. Only one should produce a credit; the other must

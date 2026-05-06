@@ -77,42 +77,69 @@ export async function applyDepositCreditToInvoice(
     });
   }
 
-  const now = new Date();
-  const payment: Payment = {
-    id: uuidv4(),
-    tenantId: invoice.tenantId,
-    invoiceId: invoice.id,
-    amountCents: credit,
-    method: 'other',
-    status: 'completed',
-    providerReference: 'deposit_credit',
-    note: `Deposit credit from job ${job.jobNumber}`,
-    receivedAt: now,
-    processedBy: 'system',
-    createdAt: now,
-    updatedAt: now,
-  };
-  await paymentRepo.create(payment);
+  // PR 319 review (P1 — Codex): the atomic claim above marks the
+  // deposit as consumed BEFORE the payment + invoice updates land.
+  // If either downstream write throws, the marker would otherwise
+  // stick and the customer's deposit becomes permanently orphaned —
+  // future invoices on the same job skip the credit because the
+  // marker is set. Roll the marker back on any failure so the
+  // deposit stays available for a retry / a different invoice.
+  //
+  // Rollback is best-effort: if the marker reset itself fails, we
+  // re-throw the original error and an operator must reconcile via
+  // the failure audit event (see routes/invoices.ts).
+  try {
+    const now = new Date();
+    const payment: Payment = {
+      id: uuidv4(),
+      tenantId: invoice.tenantId,
+      invoiceId: invoice.id,
+      amountCents: credit,
+      method: 'other',
+      status: 'completed',
+      providerReference: 'deposit_credit',
+      note: `Deposit credit from job ${job.jobNumber}`,
+      receivedAt: now,
+      processedBy: 'system',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await paymentRepo.create(payment);
 
-  const newAmountPaid = invoice.amountPaidCents + credit;
-  const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
-  // Status only gets bumped from draft if the credit was the FULL amount.
-  // Otherwise the invoice stays in draft until the operator issues it
-  // (existing flow). For draft → draft we just update the cents fields.
-  const updatedInvoice = await invoiceRepo.update(invoice.tenantId, invoice.id, {
-    amountPaidCents: newAmountPaid,
-    amountDueCents: newAmountDue,
-    updatedAt: now,
-  });
-  if (!updatedInvoice) {
-    throw new Error(
-      `Failed to update invoice ${invoice.id} with deposit credit ${credit}`,
-    );
+    const newAmountPaid = invoice.amountPaidCents + credit;
+    const newAmountDue = Math.max(0, invoice.totals.totalCents - newAmountPaid);
+    // Status only gets bumped from draft if the credit was the FULL
+    // amount. Otherwise the invoice stays in draft until the operator
+    // issues it (existing flow). For draft → draft we just update
+    // the cents fields.
+    const updatedInvoice = await invoiceRepo.update(invoice.tenantId, invoice.id, {
+      amountPaidCents: newAmountPaid,
+      amountDueCents: newAmountDue,
+      updatedAt: now,
+    });
+    if (!updatedInvoice) {
+      throw new Error(
+        `Failed to update invoice ${invoice.id} with deposit credit ${credit}`,
+      );
+    }
+
+    return { invoice: updatedInvoice, payment, creditCents: credit };
+  } catch (err) {
+    // Roll back the consumed marker so the deposit can be re-applied
+    // to a retry. If THIS write also fails, log via the thrown error
+    // — the route's failure-audit handler will record the original.
+    try {
+      // Setting the field to undefined drops to SQL NULL via the
+      // pg-job repo's `value ?? null` translation, which is what we
+      // want — back to "deposit not yet consumed" so a retry picks
+      // it up.
+      await jobRepo.update(job.tenantId, job.id, {
+        depositCreditedToInvoiceId: undefined,
+        updatedAt: new Date(),
+      });
+    } catch {
+      // Best-effort. Original error wins.
+    }
+    throw err;
   }
-
-  // Job marker is already set by the atomic claim above — no second
-  // write needed. The fallback path also wrote the marker via the
-  // legacy `jobRepo.update`, so we're consistent across both branches.
-
-  return { invoice: updatedInvoice, payment, creditCents: credit };
 }
