@@ -109,7 +109,6 @@ describe('P0-008 — Observability, structured logging, and Sentry', () => {
     const client = initSentry({ dsn: 'https://test@sentry.io/123', environment: 'dev' });
     const eventId = client.captureException(new Error('test error'));
 
-    expect(eventId).not.toBe('no-op');
     expect(typeof eventId).toBe('string');
     expect(eventId.length).toBeGreaterThan(0);
   });

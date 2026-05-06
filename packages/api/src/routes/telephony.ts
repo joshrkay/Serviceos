@@ -39,20 +39,25 @@ const logger = createLogger({
 
 export interface TelephonyRouterDeps {
   adapter: TwilioGatherAdapter;
-  /** Returns the Twilio account auth token for signature verification. */
-  authTokenGetter: () => string | undefined;
+  /**
+   * Returns the Twilio account auth token for signature verification.
+   * Receives the AccountSid from Twilio's webhook body so per-tenant
+   * subaccount tokens can be looked up. Legacy single-account callers
+   * may ignore the argument and return the master `TWILIO_AUTH_TOKEN`.
+   */
+  authTokenGetter: (opts: { accountSid?: string }) => Promise<string | undefined> | string | undefined;
   /**
    * Optional explicit base URL Twilio called. When unset, the middleware
    * uses `PUBLIC_API_URL` from env, then falls back to req.protocol+host.
    */
   publicBaseUrl?: string;
   /**
-   * Tenant resolver. For now this is a single-tenant fallback; a proper
-   * "phone number → tenant" lookup is P8-014 territory.
-   *
-   * TODO(P8-014): replace with a real lookup keyed by the `To` field.
+   * Phone-number → tenant lookup. Receives the `to` and `from` numbers
+   * from Twilio's webhook. Async to allow database lookups against
+   * `tenant_integrations.provider_data->>'phoneE164'`. Legacy callers
+   * may return a synchronous fallback (`TWILIO_DEFAULT_TENANT_ID`).
    */
-  resolveTenantId: (opts: { to: string; from: string }) => string | undefined;
+  resolveTenantId: (opts: { to: string; from: string }) => Promise<string | undefined> | string | undefined;
   /**
    * Business name used in the "we'll call you back" copy when the
    * rotation cascade is exhausted. Defaults to a generic phrasing
@@ -159,7 +164,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = deps.resolveTenantId({ to, from });
+    const tenantId = await Promise.resolve(deps.resolveTenantId({ to, from }));
     if (!tenantId) {
       logger.error('telephony/voice: no tenant resolved', { to, from });
       res.status(500).type('text/plain').send('Tenant resolution failed');
@@ -208,10 +213,10 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = deps.resolveTenantId({
+    const tenantId = await Promise.resolve(deps.resolveTenantId({
       to: body.To ?? '',
       from: body.From ?? '',
-    });
+    }));
     if (!tenantId) {
       logger.error('telephony/gather: no tenant resolved', { sessionId });
       res.status(500).type('text/plain').send('Tenant resolution failed');
@@ -275,10 +280,10 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = deps.resolveTenantId({
+    const tenantId = await Promise.resolve(deps.resolveTenantId({
       to: body.To ?? '',
       from: body.From ?? '',
-    });
+    }));
     if (!tenantId) {
       logger.error('telephony/dial-result: no tenant resolved', { sessionId });
       res.status(500).type('text/plain').send('Tenant resolution failed');

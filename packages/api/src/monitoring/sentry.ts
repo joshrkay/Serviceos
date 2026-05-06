@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { redactByTier, redactSentryUser } from '../logging/redact';
 
 export interface SentryConfig {
   dsn?: string;
@@ -20,19 +20,59 @@ export interface SentryTransaction {
   setStatus(status: string): void;
 }
 
+interface SentryModule {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  init(options: any): void;
+  captureException(exception: unknown, hint?: { extra?: Record<string, unknown> }): string;
+  captureMessage(message: string, captureContext?: string): string;
+  setTag(key: string, value: unknown): void;
+  setUser(user: unknown): void;
+}
+
+let redactionProcessorsInstalled = false;
+
+function resolveSentry(): SentryModule | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('@sentry/node') as SentryModule;
+  } catch {
+    return null;
+  }
+}
+
 export function initSentry(config: SentryConfig): SentryClient {
   if (!config.dsn) {
     return createNoOpSentryClient();
   }
 
-  Sentry.init({
+  const sentry = resolveSentry();
+  if (!sentry) {
+    return createNoOpSentryClient();
+  }
+
+  redactionProcessorsInstalled = false;
+
+  sentry.init({
     dsn: config.dsn,
     environment: config.environment,
     release: config.release,
     tracesSampleRate: config.tracesSampleRate ?? (config.environment === 'production' ? 0.1 : 1.0),
-  });
+    beforeSend(event: unknown) {
+      return redactByTier(event, 'strict') as any;
+    },
+    beforeBreadcrumb(breadcrumb: unknown) {
+      return redactByTier(breadcrumb, 'strict') as any;
+    },
+  } as any);
 
-  return createRealSentryClient();
+  redactionProcessorsInstalled = true;
+  return createRealSentryClient(sentry);
+}
+
+export function assertSentryRedactionProcessors(environment: string): void {
+  if (environment !== 'test' && !redactionProcessorsInstalled) {
+    throw new Error('Sentry redaction processors must be installed outside test environments.');
+  }
 }
 
 function createNoOpSentryClient(): SentryClient {
@@ -49,24 +89,21 @@ function createNoOpSentryClient(): SentryClient {
   };
 }
 
-function createRealSentryClient(): SentryClient {
+function createRealSentryClient(sentry: SentryModule): SentryClient {
   return {
     captureException(error: Error, context?: Record<string, unknown>): string {
-      return Sentry.captureException(error, { extra: context });
+      return sentry.captureException(error, { extra: redactByTier(context ?? {}, 'strict') }) as string;
     },
     captureMessage(message: string, level: 'info' | 'warning' | 'error' = 'info'): string {
-      return Sentry.captureMessage(message, level);
+      return sentry.captureMessage(message, level) as string;
     },
     setTag(key: string, value: string): void {
-      Sentry.setTag(key, value);
+      sentry.setTag(key, value);
     },
     setUser(user: { id: string; email?: string }): void {
-      Sentry.setUser(user);
+      sentry.setUser(redactSentryUser(user) as any);
     },
     startTransaction(_name: string): SentryTransaction {
-      // Sentry v8+ deprecated startTransaction in favor of Sentry.startSpan().
-      // Auto-instrumentation handles most tracing; callers needing manual spans
-      // should use Sentry.startSpan() directly at call sites.
       return {
         finish() {},
         setStatus: () => {},

@@ -7,6 +7,8 @@ import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { ValidationError } from '../shared/errors';
+import { Queue } from '../queues/queue';
+import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
@@ -22,12 +24,14 @@ export interface WebhookRouterDeps {
   invoiceRepo?: InvoiceRepository;
   paymentRepo?: PaymentRepository;
   stripeWebhookSecret?: string;
+  queue?: Queue;
+  appBaseUrl?: string;
   webhookEventRepo?: {
     recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean }>;
     markProcessed(provider: string, eventId: string): Promise<void>;
   };
   auditRepo?: AuditRepository;
-  integrationResolver?: (tenantId: string) => Promise<{
+  integrationResolver?: (tenantId: string, provider: 'twilio' | 'sendgrid') => Promise<{
     tenantId: string;
     provider: 'twilio' | 'sendgrid';
     subaccountSid?: string;
@@ -128,6 +132,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             settingsSeeded: Boolean(deps.settingsRepo),
             signupCorrelationId,
           });
+
+          // Enqueue Twilio subaccount provisioning for new tenants only.
+          // Idempotent — the worker checks tenant_integrations.status and
+          // skips if already active, so safe to re-enqueue on webhook replay.
+          if (result.created && deps.queue) {
+            const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
+            // Twilio callbacks land on the API origin and signatures are
+            // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
+            // recordTwilio). Prefer that; fall back to appBaseUrl/APP_PUBLIC_URL
+            // for single-origin dev/staging deployments.
+            const callbackBaseUrl =
+              process.env.PUBLIC_API_URL ??
+              deps.appBaseUrl ??
+              process.env.APP_PUBLIC_URL ??
+              'http://localhost:3000';
+            const payload: ProvisionTwilioPayload = {
+              tenantId: result.tenantId,
+              region: region ?? null,
+              baseUrl: callbackBaseUrl,
+            };
+            await deps.queue.send(
+              PROVISION_TWILIO_JOB_TYPE,
+              payload,
+              `provision-twilio-${result.tenantId}`
+            );
+            logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
+          }
 
           if (deps.auditRepo) {
             await deps.auditRepo.create(createAuditEvent({
@@ -407,7 +438,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   };
   const recordTwilio = async (kind: string, req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
-    const integration = await deps.integrationResolver?.(tenantId);
+    const integration = await deps.integrationResolver?.(tenantId, 'twilio');
     if (!integration || integration.provider !== 'twilio' || integration.tenantId !== tenantId) {
       await rejectBound(tenantId, 'tenant_mismatch', { kind });
       return res.status(403).json({ error: 'Forbidden' });
@@ -444,7 +475,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
     const tenantId = req.params.tenantId;
-    const integration = await deps.integrationResolver?.(tenantId);
+    const integration = await deps.integrationResolver?.(tenantId, 'sendgrid');
     if (!integration || integration.provider !== 'sendgrid' || integration.tenantId !== tenantId) {
       await rejectBound(tenantId, 'tenant_mismatch', { kind: 'sendgrid' });
       return res.status(403).json({ error: 'Forbidden' });
