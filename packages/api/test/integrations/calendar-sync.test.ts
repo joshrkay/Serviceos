@@ -206,6 +206,62 @@ describe('CalendarSyncService — Tier 4 Calendar sync (PR 2)', () => {
     expect(events[0].externalEventId).toBe('evt-2');
   });
 
+  it("persist:false skips the eventRepo upsert (PR 320 P1 — test-push path)", async () => {
+    // Codex flagged that test-push uses a synthetic non-UUID
+    // appointmentId; persisting would fail the FK in Pg and report
+    // 'failed' even when Google succeeds. With persist:false, the
+    // sync should still report 'synced' AND no event row written.
+    await seedConnected();
+    const fetchMock = vi.fn(async () => jsonRes({ id: 'evt-test' }));
+    const svc = new CalendarSyncService({
+      integrationRepo,
+      eventRepo,
+      googleConfig: { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+      googleFetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const outcome = await svc.pushForTechnician(
+      {
+        tenantId: TENANT,
+        appointmentId: 'test-push-xyz', // not a UUID
+        technicianUserId: USER,
+        scheduledStart: new Date(),
+        scheduledEnd: new Date(Date.now() + 60_000),
+        timezone: 'UTC',
+        summary: 'T',
+      },
+      { persist: false },
+    );
+    expect(outcome).toBe('synced');
+
+    // No row written — the test-push doesn't track lifecycle.
+    const events = await eventRepo.findByAppointment(TENANT, 'test-push-xyz');
+    expect(events).toEqual([]);
+  });
+
+  it("persist:false ALSO skips the failure upsert", async () => {
+    await seedConnected();
+    const fetchMock = vi.fn(async () => jsonRes({ error: 'boom' }, 500));
+    const svc = new CalendarSyncService({
+      integrationRepo,
+      eventRepo,
+      googleConfig: { clientId: 'c', clientSecret: 'cs', redirectUri: 'http://x' },
+      googleFetch: fetchMock as unknown as typeof fetch,
+    });
+    const outcome = await svc.pushForTechnician(
+      {
+        tenantId: TENANT, appointmentId: 'test-push-zzz',
+        technicianUserId: USER,
+        scheduledStart: new Date(), scheduledEnd: new Date(Date.now() + 60_000),
+        timezone: 'UTC', summary: 'T',
+      },
+      { persist: false },
+    );
+    expect(outcome).toBe('failed');
+    const events = await eventRepo.findByAppointment(TENANT, 'test-push-zzz');
+    expect(events).toEqual([]);
+  });
+
   it('pushForTechnicians aggregates outcomes across multiple techs', async () => {
     await seedConnected();
     // Second tech is connected too.

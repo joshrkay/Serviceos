@@ -247,19 +247,25 @@ export function createCalendarIntegrationsRouter(
         }
         const start = new Date(Date.now() + 60 * 60 * 1000);
         const end = new Date(start.getTime() + 30 * 60 * 1000);
-        const outcome = await deps.syncService.pushForTechnician({
-          tenantId: req.auth!.tenantId,
-          // Use a synthetic appointment id so the local row tagging
-          // doesn't collide with a real appointment.
-          appointmentId: `test-push-${Date.now()}`,
-          technicianUserId: req.auth!.userId,
-          scheduledStart: start,
-          scheduledEnd: end,
-          timezone: 'UTC',
-          summary: 'ServiceOS test event',
-          description:
-            'This is a test event from ServiceOS confirming your calendar is connected.',
-        });
+        // PR 320 review (P1 — Codex). The synthetic appointmentId
+        // doesn't reference a real `appointments` row, so the
+        // appointment_calendar_events FK + UUID type check would
+        // reject the persist in Pg. Skip persistence — test-push is
+        // a one-shot verification, not appointment lifecycle tracking.
+        const outcome = await deps.syncService.pushForTechnician(
+          {
+            tenantId: req.auth!.tenantId,
+            appointmentId: `test-push-${Date.now()}`,
+            technicianUserId: req.auth!.userId,
+            scheduledStart: start,
+            scheduledEnd: end,
+            timezone: 'UTC',
+            summary: 'ServiceOS test event',
+            description:
+              'This is a test event from ServiceOS confirming your calendar is connected.',
+          },
+          { persist: false },
+        );
         res.json({ outcome });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

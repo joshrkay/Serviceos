@@ -98,10 +98,19 @@ export class CalendarSyncService {
    * Failure mode: any error is captured to the local event row with
    * status='failed' and re-classified as 'failed' in the result, but
    * never thrown — the caller must not be blocked by sync hiccups.
+   *
+   * `options.persist` (default true): when false, skip the
+   * appointment_calendar_events upsert. Used by /test-push, which
+   * passes a synthetic non-UUID appointmentId that would otherwise
+   * fail the FK to appointments(id) in a Postgres deployment
+   * (PR 320 review P1 — Codex). Real appointment-create hooks always
+   * persist so update/delete sync can target the same event later.
    */
   async pushForTechnician(
     input: CalendarEventInput,
+    options: { persist?: boolean } = {},
   ): Promise<'synced' | 'skipped' | 'failed'> {
+    const persist = options.persist !== false;
     const integration = await this.deps.integrationRepo.findByUser(
       input.tenantId,
       input.technicianUserId,
@@ -156,33 +165,37 @@ export class CalendarSyncService {
       const ev = (await res.json()) as { id?: string };
       if (!ev.id) throw new Error('Google Calendar response missing event id');
 
-      await this.deps.eventRepo.upsert({
-        tenantId: input.tenantId,
-        appointmentId: input.appointmentId,
-        userId: input.technicianUserId,
-        provider: 'google',
-        externalEventId: ev.id,
-        externalCalendarId: integration.calendarId,
-        status: 'synced',
-        lastError: null,
-      });
-      return 'synced';
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      try {
+      if (persist) {
         await this.deps.eventRepo.upsert({
           tenantId: input.tenantId,
           appointmentId: input.appointmentId,
           userId: input.technicianUserId,
           provider: 'google',
-          externalEventId: null,
+          externalEventId: ev.id,
           externalCalendarId: integration.calendarId,
-          status: 'failed',
-          lastError: message,
+          status: 'synced',
+          lastError: null,
         });
-      } catch {
-        // Best-effort; the original error is already lost into the
-        // route's audit handler.
+      }
+      return 'synced';
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (persist) {
+        try {
+          await this.deps.eventRepo.upsert({
+            tenantId: input.tenantId,
+            appointmentId: input.appointmentId,
+            userId: input.technicianUserId,
+            provider: 'google',
+            externalEventId: null,
+            externalCalendarId: integration.calendarId,
+            status: 'failed',
+            lastError: message,
+          });
+        } catch {
+          // Best-effort; the original error is already lost into the
+          // route's audit handler.
+        }
       }
       return 'failed';
     }
