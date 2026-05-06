@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
@@ -8,6 +8,7 @@ import {
 import { useUser, useClerk } from '@clerk/clerk-react';
 import { Toaster, toast } from 'sonner';
 import { VoiceBar } from '../shared/VoiceBar';
+import type { VoiceBarHandle } from '../shared/VoiceBar';
 import { CameraCapture, CameraButton } from '../shared/CameraCapture';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useMe, type Mode } from '../../hooks/useMe';
@@ -199,6 +200,25 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
 export function Shell() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
+  const voiceBarRef = useRef<VoiceBarHandle>(null);
+  const isExact = (to: string) =>
+    to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
+
+  // Global keyboard shortcut: press 'V' (outside input/textarea) to activate voice
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const tag = (e.target as HTMLElement).tagName;
+        const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+        if (!isEditable) {
+          e.preventDefault();
+          voiceBarRef.current?.activate();
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
   const { isLoaded, user } = useUser();
   const { signOut } = useClerk();
   const { me, switchMode } = useMe();
@@ -208,9 +228,6 @@ export function Shell() {
   // both→tech), we stash it here and render <ModeSwitchModal>. The
   // modal's onConfirm executes the actual switchMode.
   const [pendingMode, setPendingMode] = useState<Mode | null>(null);
-
-  const isExact = (to: string) =>
-    to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
 
   // Phase 12 — reflect the active mode on document.body so global CSS,
   // analytics, and outer overlays can target it without prop drilling.
@@ -319,7 +336,7 @@ export function Shell() {
         </nav>
 
         {/* Desktop voice bar — lives above user section */}
-        <VoiceBar variant="desktop" />
+        <VoiceBar ref={voiceBarRef} variant="desktop" />
 
         {/* Desktop camera button */}
         <div className="px-2 pb-1">
@@ -411,7 +428,7 @@ export function Shell() {
 
         {/* ── Mobile voice bar (in flow, above tab bar) ── */}
         <div className="md:hidden shrink-0">
-          <VoiceBar variant="mobile" />
+          <VoiceBar ref={voiceBarRef} variant="mobile" />
         </div>
 
         {/* ── Mobile bottom tab bar (in flow, not fixed) ── */}

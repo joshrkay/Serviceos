@@ -50,6 +50,7 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -96,7 +97,7 @@ import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryVoiceRepository } from './voice/voice-service';
+import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
@@ -656,6 +657,10 @@ export function createApp(): express.Express {
     : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
+  // Synchronous transcription function — used by POST /api/voice/transcribe.
+  const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
+
+  // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
@@ -1695,7 +1700,13 @@ export function createApp(): express.Express {
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
+  const voiceLogger = createLogger({
+    service: 'voice',
+    environment: process.env.NODE_ENV || 'development',
+    level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
+  });
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
+  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
