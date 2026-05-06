@@ -66,6 +66,16 @@ export function createPublicEstimatesRouter(
     }
   });
 
+  router.post('/:token/deposit-checkout', async (req: Request, res: Response) => {
+    try {
+      const result = await service.getOrCreateDepositCheckoutUrl(req.params.token);
+      res.status(200).json(result);
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
   router.post('/:token/decline', async (req: Request, res: Response) => {
     try {
       const parsed = declineSchema.parse(req.body ?? {});

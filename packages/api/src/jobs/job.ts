@@ -38,6 +38,14 @@ export interface Job {
    * omit the field; the Pg layer surfaces the default.
    */
   depositStatus?: 'not_required' | 'pending' | 'paid';
+  /**
+   * Tier 4 (Deposit rules — PR 3b). Stripe Payment Link minted to
+   * collect the deposit. Persisted so a re-request from the customer
+   * portal returns the same URL (mirrors invoice pay-now idempotency).
+   * Both fields are populated together when the link is minted.
+   */
+  depositStripePaymentLinkId?: string;
+  depositStripePaymentLinkUrl?: string;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
