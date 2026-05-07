@@ -1,85 +1,25 @@
 /**
- * P0-012 — Voice ingestion: OpenAI Whisper transcription provider.
- *
- * Verifies the provider fetches the audio URL, posts to the Whisper API with
- * the expected auth + form body, surfaces the transcript, and throws on
- * upstream failures.
+ * P0-027 — Hardened Whisper transcription provider tests.
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
-  OpenAiWhisperProvider,
   DevNoopTranscriptionProvider,
-  createTranscriptionProvider,
+  WhisperTranscriptionProvider,
+  WhisperTimeoutError,
+  WhisperFileTooLargeError,
+  WhisperRateLimitError,
+  WhisperServerError,
+  WhisperClientError,
+  WHISPER_MAX_BYTES,
+  createWhisperTranscriptionProvider,
 } from '../../src/voice/transcription-providers';
 
-function audioResponse(ok = true, status = 200): Response {
-  return new Response(new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'audio/webm' }), {
+function audioResponse(ok = true, status = 200, sizeBytes = 1024): Response {
+  return new Response(new Blob([new Uint8Array(sizeBytes)], { type: 'audio/webm' }), {
     status,
     statusText: ok ? 'OK' : 'ERR',
   });
 }
-
-describe('OpenAiWhisperProvider', () => {
-  it('fetches audio then posts to Whisper with bearer auth and form body', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(audioResponse())
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: 'hello world' }), { status: 200 })
-      );
-    const provider = new OpenAiWhisperProvider('sk_test', fetchMock);
-
-    const result = await provider.transcribe('https://cdn.example/audio.webm');
-
-    expect(result.transcript).toBe('hello world');
-    expect(result.metadata.provider).toBe('openai-whisper');
-    expect(result.metadata.model).toBe('whisper-1');
-    expect(result.metadata.processedAt).toBeTruthy();
-
-    // First call fetches the audio URL
-    expect(fetchMock.mock.calls[0][0]).toBe('https://cdn.example/audio.webm');
-
-    // Second call posts to Whisper with the bearer header
-    const [whisperUrl, whisperInit] = fetchMock.mock.calls[1];
-    expect(whisperUrl).toBe('https://api.openai.com/v1/audio/transcriptions');
-    expect(whisperInit.method).toBe('POST');
-    expect((whisperInit.headers as Record<string, string>).Authorization).toBe('Bearer sk_test');
-    expect(whisperInit.body).toBeInstanceOf(FormData);
-  });
-
-  it('throws a descriptive error when the audio URL fails to fetch', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('not found', { status: 404 }));
-    const provider = new OpenAiWhisperProvider('sk_test', fetchMock);
-
-    await expect(provider.transcribe('https://cdn.example/missing.webm')).rejects.toThrow(
-      /Failed to fetch audio.*404/
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('throws with body text when Whisper returns non-OK', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(audioResponse())
-      .mockResolvedValueOnce(new Response('rate limited', { status: 429 }));
-    const provider = new OpenAiWhisperProvider('sk_test', fetchMock);
-
-    await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
-      /Whisper API error 429: rate limited/
-    );
-  });
-
-  it('returns empty transcript when Whisper body has no text', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(audioResponse())
-      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
-    const provider = new OpenAiWhisperProvider('sk_test', fetchMock);
-
-    const result = await provider.transcribe('https://cdn.example/audio.webm');
-    expect(result.transcript).toBe('');
-  });
-});
 
 describe('DevNoopTranscriptionProvider', () => {
   it('returns a deterministic dev-mode placeholder', async () => {
@@ -91,14 +31,118 @@ describe('DevNoopTranscriptionProvider', () => {
   });
 });
 
-describe('createTranscriptionProvider', () => {
-  it('returns OpenAiWhisperProvider when API key is supplied', () => {
-    const provider = createTranscriptionProvider('sk_live');
-    expect(provider).toBeInstanceOf(OpenAiWhisperProvider);
+describe('WhisperTranscriptionProvider', () => {
+  it('fetches audio then posts to Whisper with bearer auth and form body', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(audioResponse())
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: 'hello world' }), { status: 200 })
+      );
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    const result = await provider.transcribe('https://cdn.example/audio.webm');
+
+    expect(result.transcript).toBe('hello world');
+    expect(result.metadata.provider).toBe('openai-whisper');
+    expect(result.metadata.model).toBe('whisper-1');
+    expect(result.metadata.processedAt).toBeTruthy();
+
+    expect(fetchMock.mock.calls[0][0]).toBe('https://cdn.example/audio.webm');
+
+    const [whisperUrl, whisperInit] = fetchMock.mock.calls[1];
+    expect(whisperUrl).toBe('https://api.openai.com/v1/audio/transcriptions');
+    expect(whisperInit.method).toBe('POST');
+    expect((whisperInit.headers as Record<string, string>).Authorization).toBe('Bearer sk_test');
+    expect(whisperInit.body).toBeInstanceOf(FormData);
   });
 
-  it('returns DevNoopTranscriptionProvider when API key is missing', () => {
-    expect(createTranscriptionProvider(undefined)).toBeInstanceOf(DevNoopTranscriptionProvider);
-    expect(createTranscriptionProvider('')).toBeInstanceOf(DevNoopTranscriptionProvider);
+  it('throws WhisperClientError when the audio URL returns non-OK', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('not found', { status: 404 }));
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    await expect(provider.transcribe('https://cdn.example/missing.webm')).rejects.toThrow(
+      WhisperClientError
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws WhisperRateLimitError on 429', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(audioResponse())
+      .mockResolvedValueOnce(new Response('rate limited', { status: 429 }));
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
+      WhisperRateLimitError
+    );
+  });
+
+  it('throws WhisperServerError on 5xx', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(audioResponse())
+      .mockResolvedValueOnce(new Response('internal error', { status: 503 }));
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
+      WhisperServerError
+    );
+  });
+
+  it('throws WhisperFileTooLargeError when audio exceeds size limit', async () => {
+    const oversizedBlob = new Blob([new Uint8Array(WHISPER_MAX_BYTES + 1)], {
+      type: 'audio/webm',
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(oversizedBlob, { status: 200 }));
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
+      WhisperFileTooLargeError
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns empty transcript when Whisper body has no text field', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(audioResponse())
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    const result = await provider.transcribe('https://cdn.example/audio.webm');
+    expect(result.transcript).toBe('');
+  });
+
+  it('includes language param when provided', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(audioResponse())
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: 'hola mundo' }), { status: 200 })
+      );
+    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+
+    await provider.transcribe('https://cdn.example/audio.webm', { language: 'es' });
+
+    const formData = fetchMock.mock.calls[1][1].body as FormData;
+    expect(formData.get('language')).toBe('es');
+  });
+});
+
+describe('createWhisperTranscriptionProvider', () => {
+  it('returns WhisperTranscriptionProvider when OPENAI_API_KEY is set', () => {
+    const provider = createWhisperTranscriptionProvider({ OPENAI_API_KEY: 'sk_live' });
+    expect(provider).toBeInstanceOf(WhisperTranscriptionProvider);
+  });
+
+  it('returns DevNoopTranscriptionProvider and warns when OPENAI_API_KEY is missing', () => {
+    const warnMock = vi.fn();
+    const provider = createWhisperTranscriptionProvider({}, { logger: { warn: warnMock } });
+    expect(provider).toBeInstanceOf(DevNoopTranscriptionProvider);
+    expect(warnMock).toHaveBeenCalledWith(expect.stringContaining('OPENAI_API_KEY missing'));
   });
 });
