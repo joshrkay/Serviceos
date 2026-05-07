@@ -410,6 +410,10 @@ export function createApp(): express.Express {
   // Body parsing for all other routes
   app.use(express.json());
 
+  // Serve static frontend files from the built React app
+  const frontendPath = require('path').join(__dirname, '../../web/dist');
+  app.use(express.static(frontendPath));
+
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
@@ -2111,6 +2115,14 @@ export function createApp(): express.Express {
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const { statusCode, body } = toErrorResponse(err);
     res.status(statusCode).json(body);
+  });
+
+  // Catch-all route for client-side routing — serves index.html for all non-API routes
+  // This allows the React SPA to handle routing on the client side
+  app.get('*', (req, res) => {
+    const frontendPath = require('path').join(__dirname, '../../web/dist');
+    const indexPath = require('path').join(frontendPath, 'index.html');
+    res.sendFile(indexPath);
   });
 
   // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so
