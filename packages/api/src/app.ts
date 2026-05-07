@@ -680,6 +680,15 @@ export function createApp(): express.Express {
     const s = await settingsRepo.findByTenant(tenantId);
     return s?.ttsVoiceId ?? undefined;
   };
+  // Single shared TTS provider — reused by the settings voice-preview
+  // endpoint, the Twilio media-stream adapter, and the in-app voice
+  // adapter so all three stay in sync (one ElevenLabs key, one factory
+  // path) and a tenant's preview matches what callers actually hear.
+  const sharedTtsProviderForRoutes = createTtsProvider({
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+  });
   const auditRepo          = webhookAuditRepo;
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter
@@ -1917,6 +1926,7 @@ export function createApp(): express.Express {
     createSettingsRouter(settingsRepo, {
       activationRepo: packActivationRepo,
       verticalPackRegistry: canonicalPackRegistry,
+      ...(sharedTtsProviderForRoutes ? { ttsProvider: sharedTtsProviderForRoutes } : {}),
     }),
   );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));

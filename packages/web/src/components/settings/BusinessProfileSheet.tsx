@@ -9,8 +9,8 @@
  *
  * Pattern: GET on open, PUT on save, Sonner toast on success/failure.
  */
-import { useEffect, useState } from 'react';
-import { X, Building2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { X, Building2, Play, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -30,6 +30,9 @@ const EMPTY: BusinessProfileFields = {
   ttsVoiceId: '',
 };
 
+// Mirror of packages/api/src/voice/voice-personas.ts — keep in sync.
+// (Cross-package imports are blocked by tsconfig rootDir; the API enforces
+// this exact list when validating /api/settings/voice-preview requests.)
 const VOICE_OPTIONS = [
   { id: '', label: 'Rachel — warm, professional female (default)' },
   { id: 'pNInz6obpgDQGcFmaJgB', label: 'Adam — calm, authoritative male' },
@@ -57,7 +60,59 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
   const [fields, setFields] = useState<BusinessProfileFields>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [error, setError] = useState<string>('');
+  const previewUrlRef = useRef<string | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  async function previewVoice() {
+    if (previewing) return;
+    setPreviewing(true);
+    try {
+      const res = await apiFetch('/api/settings/voice-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voiceId: fields.ttsVoiceId }),
+      });
+      if (!res.ok) {
+        let msg = `Preview failed (${res.status})`;
+        try {
+          const body = await res.json();
+          if (typeof body?.message === 'string') msg = body.message;
+        } catch {
+          /* non-JSON */
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      previewUrlRef.current = url;
+      if (previewAudioRef.current) previewAudioRef.current.pause();
+      const audio = new Audio(url);
+      previewAudioRef.current = audio;
+      audio.onended = () => setPreviewing(false);
+      audio.onerror = () => setPreviewing(false);
+      await audio.play();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not play preview';
+      toast.error(msg);
+      setPreviewing(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -218,21 +273,39 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
                 </select>
               </label>
 
-              <label htmlFor="bp-voice" className="block">
-                <span className="text-sm text-slate-700">AI calling voice</span>
-                <select
-                  id="bp-voice"
-                  value={fields.ttsVoiceId}
-                  onChange={(e) => setFields((f) => ({ ...f, ttsVoiceId: e.target.value }))}
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
-                >
-                  {VOICE_OPTIONS.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="block">
+                <label htmlFor="bp-voice" className="text-sm text-slate-700">
+                  AI calling voice
+                </label>
+                <div className="mt-1.5 flex items-stretch gap-2">
+                  <select
+                    id="bp-voice"
+                    value={fields.ttsVoiceId}
+                    onChange={(e) => setFields((f) => ({ ...f, ttsVoiceId: e.target.value }))}
+                    className="min-w-0 flex-1 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
+                  >
+                    {VOICE_OPTIONS.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={previewVoice}
+                    disabled={previewing}
+                    aria-label="Preview voice"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {previewing ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Play size={14} />
+                    )}
+                    <span>{previewing ? 'Playing…' : 'Preview'}</span>
+                  </button>
+                </div>
+              </div>
 
               {error && (
                 <p className="text-sm text-red-600" role="alert">

@@ -12,10 +12,17 @@ import {
   SettingsRepository,
   validateTerminologyPreferences,
 } from '../settings/settings';
+import type { TtsProvider } from '../ai/tts/tts-provider';
+import {
+  isAllowedVoiceId,
+  VOICE_PREVIEW_SAMPLE_TEXT,
+} from '../voice/voice-personas';
 
 interface SettingsRouterDependencies {
   activationRepo: PackActivationRepository;
   verticalPackRegistry: VerticalPackRegistry;
+  /** Optional — when present, enables the POST /voice-preview endpoint. */
+  ttsProvider?: TtsProvider;
 }
 
 export function createSettingsRouter(
@@ -90,6 +97,46 @@ export function createSettingsRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // Synthesizes a fixed sample line in the requested voice so tenants can
+  // hear a persona before saving it. Restricted to the curated allowlist
+  // so this endpoint can't be turned into a free TTS proxy.
+  router.post(
+    '/voice-preview',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps?.ttsProvider) {
+          res.status(503).json({
+            error: 'TTS_NOT_CONFIGURED',
+            message: 'Voice preview unavailable — TTS provider not configured.',
+          });
+          return;
+        }
+        const rawVoiceId = typeof req.body?.voiceId === 'string' ? req.body.voiceId : '';
+        if (!isAllowedVoiceId(rawVoiceId)) {
+          res.status(400).json({
+            error: 'INVALID_VOICE_ID',
+            message: 'voiceId must be one of the curated personas.',
+          });
+          return;
+        }
+        const synth = await deps.ttsProvider.synthesize({
+          text: VOICE_PREVIEW_SAMPLE_TEXT,
+          tenantId: req.auth!.tenantId,
+          ...(rawVoiceId ? { voice: rawVoiceId } : {}),
+        });
+        res.setHeader('Content-Type', synth.contentType);
+        res.setHeader('Cache-Control', 'no-store');
+        res.send(synth.audio);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
