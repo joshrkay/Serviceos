@@ -290,6 +290,9 @@ export const updateSettingsSchema = z.object({
   // ('before_approval') or AFTER ('after_approval'). Default behavior
   // is 'after_approval'; existing tenants keep current flow.
   depositTimingPolicy: z.enum(['before_approval', 'after_approval']).optional(),
+  // Migration 088 — ElevenLabs voice persona for the calling agent.
+  // Null clears back to the deployment default (Rachel).
+  ttsVoiceId: z.string().nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

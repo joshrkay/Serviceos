@@ -111,8 +111,9 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     // English falls back to the constructor default (turbo).
     const modelId =
       input.language === 'es' ? 'eleven_multilingual_v2' : this.modelId;
+    const voiceId = input.voice ?? this.voiceId;
     const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
       {
         method: 'POST',
         headers: {

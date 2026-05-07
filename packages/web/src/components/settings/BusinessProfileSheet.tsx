@@ -19,6 +19,7 @@ interface BusinessProfileFields {
   businessPhone: string;
   businessEmail: string;
   timezone: string;
+  ttsVoiceId: string;
 }
 
 const EMPTY: BusinessProfileFields = {
@@ -26,7 +27,17 @@ const EMPTY: BusinessProfileFields = {
   businessPhone: '',
   businessEmail: '',
   timezone: '',
+  ttsVoiceId: '',
 };
+
+const VOICE_OPTIONS = [
+  { id: '', label: 'Rachel — warm, professional female (default)' },
+  { id: 'pNInz6obpgDQGcFmaJgB', label: 'Adam — calm, authoritative male' },
+  { id: 'EXAVITQu4vr4xnSDxMaL', label: 'Bella — friendly, approachable female' },
+  { id: 'TxGEqnHWrfWFTfGW9XjX', label: 'Josh — conversational male' },
+  { id: 'MF3mGyEYCl7XYWbV9V6O', label: 'Elli — clear, young female' },
+  { id: 'XB0fDUnXU5powFXDhCwa', label: 'Charlotte — professional, British female' },
+];
 
 const TIMEZONE_OPTIONS = [
   'America/New_York',
@@ -61,6 +72,7 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
           businessPhone: data.businessPhone ?? '',
           businessEmail: data.businessEmail ?? '',
           timezone: data.timezone ?? '',
+          ttsVoiceId: (data as { ttsVoiceId?: string | null }).ttsVoiceId ?? '',
         });
       } catch (err) {
         if (cancelled) return;
@@ -95,6 +107,7 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
           businessPhone: fields.businessPhone.trim() || null,
           businessEmail: fields.businessEmail.trim() || null,
           timezone: fields.timezone || null,
+          ttsVoiceId: fields.ttsVoiceId || null,
         }),
       });
       if (!res.ok) {
@@ -200,6 +213,22 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
                   {TIMEZONE_OPTIONS.map((tz) => (
                     <option key={tz} value={tz}>
                       {tz}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label htmlFor="bp-voice" className="block">
+                <span className="text-sm text-slate-700">AI calling voice</span>
+                <select
+                  id="bp-voice"
+                  value={fields.ttsVoiceId}
+                  onChange={(e) => setFields((f) => ({ ...f, ttsVoiceId: e.target.value }))}
+                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
+                >
+                  {VOICE_OPTIONS.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
                     </option>
                   ))}
                 </select>

@@ -112,6 +112,8 @@ export interface MediaStreamAdapterDeps {
   store: VoiceSessionStore;
   streamingProvider: StreamingTranscriptionProvider;
   ttsProvider?: TtsProvider;
+  /** Resolves the tenant's preferred ElevenLabs voice ID. Undefined = use provider default. */
+  voiceResolver?: (tenantId: string) => Promise<string | undefined>;
   speechTurn: SpeechTurnHandler;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
@@ -419,9 +421,14 @@ export class TwilioMediaStreamAdapter {
       const turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
       try {
+        const tenantId = this.state.tenantId ?? undefined;
+        const voice = this.deps.voiceResolver && tenantId
+          ? await this.deps.voiceResolver(tenantId)
+          : undefined;
         const result = await ttsProvider.synthesize({
           text,
-          tenantId: this.state.tenantId ?? undefined,
+          tenantId,
+          ...(voice ? { voice } : {}),
         });
         // If the caller barged in while we were synthesizing, drop this
         // chunk so we don't speak over them.

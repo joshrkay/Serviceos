@@ -70,6 +70,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // the safe pre-existing flow.
     depositTimingPolicy:
       (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
+    // Migration 088 — per-tenant ElevenLabs voice persona.
+    ttsVoiceId: (row.tts_voice_id as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -199,6 +201,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositRequiredAboveCents: 'deposit_required_above_cents',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // Migration 088 — per-tenant ElevenLabs voice persona.
+        ttsVoiceId: 'tts_voice_id',
         updatedAt: 'updated_at',
       };
 

@@ -106,6 +106,8 @@ export interface TenantSettings {
    * 'after_approval' (preserves existing flow).
    */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /** ElevenLabs voice ID for the calling agent. NULL = use deployment default (Rachel). */
+  ttsVoiceId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -153,6 +155,8 @@ export interface UpdateSettingsInput {
   depositRequiredAboveCents?: number | null;
   /** Tier 4 — when the deposit is collected relative to approval. */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /** ElevenLabs voice ID for the calling agent. Null clears back to deployment default. */
+  ttsVoiceId?: string | null;
 }
 
 export interface SettingsRepository {

@@ -676,6 +676,10 @@ export function createApp(): express.Express {
   // worker) so settings hits the DB at most once per tenant per TTL
   // window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
+  const voiceResolver = async (tenantId: string): Promise<string | undefined> => {
+    const s = await settingsRepo.findByTenant(tenantId);
+    return s?.ttsVoiceId ?? undefined;
+  };
   const auditRepo          = webhookAuditRepo;
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter
@@ -1588,6 +1592,7 @@ export function createApp(): express.Express {
             store: voiceSessionStore,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            voiceResolver,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
@@ -2064,6 +2069,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voiceResolver,
   });
   app.use(
     '/api/voice/sessions',

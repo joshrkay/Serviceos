@@ -2385,6 +2385,14 @@ export const MIGRATIONS = {
       ON tenants(stripe_connect_account_id)
       WHERE stripe_connect_account_id IS NOT NULL;
   `,
+  '088_tenant_settings_tts_voice_id': `
+    -- Per-tenant ElevenLabs voice persona. NULL means "use the deployment
+    -- default" (Rachel, 21m00Tcm4TlvDq8ikWAM). When set, the calling
+    -- agent uses this voice ID for all TTS synthesis on the tenant's
+    -- calls instead of the hard-coded constructor default.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS tts_voice_id TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

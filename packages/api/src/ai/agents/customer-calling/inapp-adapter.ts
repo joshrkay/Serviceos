@@ -86,6 +86,8 @@ export interface InAppAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /** Resolves the tenant's preferred ElevenLabs voice ID. Undefined = use provider default. */
+  voiceResolver?: (tenantId: string) => Promise<string | undefined>;
 }
 
 export interface StartSessionResult {
@@ -229,9 +231,11 @@ export class InAppVoiceAdapter {
     let greetingAudio: Buffer | undefined;
     if (this.deps.ttsProvider) {
       try {
+        const voice = this.deps.voiceResolver ? await this.deps.voiceResolver(tenantId) : undefined;
         const synth = await this.deps.ttsProvider.synthesize({
           text: GREETING_TEXT_INAPP,
           tenantId,
+          ...(voice ? { voice } : {}),
         });
         greetingAudio = synth.audio;
       } catch {
@@ -412,9 +416,13 @@ export class InAppVoiceAdapter {
       session.transcript.push(`agent: ${ttsText}`);
       if (this.deps.ttsProvider) {
         try {
+          const voice = this.deps.voiceResolver
+            ? await this.deps.voiceResolver(session.tenantId)
+            : undefined;
           const synth = await this.deps.ttsProvider.synthesize({
             text: ttsText,
             tenantId: session.tenantId,
+            ...(voice ? { voice } : {}),
           });
           ttsAudio = synth.audio;
         } catch {
