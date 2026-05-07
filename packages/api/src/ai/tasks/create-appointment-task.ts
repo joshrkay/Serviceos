@@ -1,7 +1,9 @@
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
-import { createProposal, CreateProposalInput } from '../../proposals/proposal';
+import { createProposal, CreateProposalInput, Proposal } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence } from '../guardrails/confidence';
+import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
+import { AvailabilityFinder, OpenSlot } from './availability-finder';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -15,6 +17,13 @@ import { assessConfidence } from '../guardrails/confidence';
  * Produces the same proposal type (`create_appointment`) so the
  * downstream CreateAppointmentExecutionHandler doesn't care which
  * task handler built the payload.
+ *
+ * P0-035: when a SlotConflictChecker is provided, the task calls it
+ * BEFORE producing the proposal. On a conflict, the task swaps the
+ * `create_appointment` proposal for a `voice_clarification` so the
+ * dispatcher is asked to pick another time / technician (with the
+ * conflicting appointment id surfaced for context) instead of
+ * approving an already-broken appointment.
  */
 
 const APPOINTMENT_SYSTEM_PROMPT = `You are an appointment scheduling assistant for a field service operating system.
@@ -62,6 +71,7 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
   if (typeof parsed.customerId === 'string') payload.customerId = parsed.customerId;
   if (typeof parsed.jobId === 'string') payload.jobId = parsed.jobId;
   if (typeof parsed.summary === 'string') payload.summary = parsed.summary;
+  if (typeof parsed.technicianId === 'string') payload.technicianId = parsed.technicianId;
 
   // Strict ISO validation — refuse garbage dates rather than hand
   // them to the execution handler where they'd blow up at execute time.
@@ -71,12 +81,120 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
   return payload;
 }
 
+function buildClarificationProposal(
+  context: TaskContext,
+  conflict: Exclude<SlotConflictResult, { ok: true }>,
+  proposedPayload: Record<string, unknown>,
+  alternatives?: OpenSlot[]
+): Proposal {
+  const explanation = explanationForConflict(conflict, alternatives);
+  const sourceContext: Record<string, unknown> = {
+    source: 'voice',
+    transcript: context.message,
+    proposedAppointment: proposedPayload,
+    conflict: serializeConflict(conflict),
+    ...(alternatives && alternatives.length > 0
+      ? {
+          alternatives: alternatives.map((s) => ({
+            start: s.start.toISOString(),
+            end: s.end.toISOString(),
+          })),
+        }
+      : {}),
+    ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+  };
+
+  // The voice_clarification payload schema is Tier 1 LOCKED — reuse
+  // the existing reasons rather than invent a new one. 'missing_entities'
+  // is the closest semantic match: the operator needs to provide a
+  // different time or technician for the proposal to be valid.
+  const payload: Record<string, unknown> = {
+    transcript: context.message,
+    reason: 'missing_entities',
+    ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+  };
+
+  const input: CreateProposalInput = {
+    tenantId: context.tenantId,
+    proposalType: 'voice_clarification',
+    payload,
+    summary: summaryForConflict(conflict),
+    explanation,
+    sourceContext,
+    createdBy: context.userId,
+    // Deliberately NO sourceTrustTier. A clarification is never
+    // auto-approved — the operator must answer it explicitly.
+  };
+
+  return createProposal(input);
+}
+
+function summaryForConflict(
+  conflict: Exclude<SlotConflictResult, { ok: true }>
+): string {
+  switch (conflict.conflict) {
+    case 'technician_busy':
+      return `Technician is already booked at that time (conflicts with appointment ${conflict.appointmentId})`;
+    case 'customer_busy':
+      return `Customer is already booked at that time (conflicts with appointment ${conflict.appointmentId})`;
+    case 'could_not_verify':
+      return `Could not verify availability — please confirm manually`;
+  }
+}
+
+function explanationForConflict(
+  conflict: Exclude<SlotConflictResult, { ok: true }>,
+  alternatives?: OpenSlot[]
+): string {
+  const base = (() => {
+    switch (conflict.conflict) {
+      case 'technician_busy':
+        return 'I drafted this appointment, but the proposed technician is already booked during that window. Please pick a different technician or another time.';
+      case 'customer_busy':
+        return 'I drafted this appointment, but the customer already has an appointment that overlaps that window. Please pick another time.';
+      case 'could_not_verify':
+        return "I couldn't verify availability for that slot — please confirm there's no conflict before approving.";
+    }
+  })();
+
+  if (!alternatives || alternatives.length === 0) return base;
+
+  const altList = alternatives
+    .map((s) => `${s.start.toISOString()} – ${s.end.toISOString()}`)
+    .join('; ');
+  return `${base} Suggested alternative slot${alternatives.length === 1 ? '' : 's'}: ${altList}.`;
+}
+
+function serializeConflict(
+  conflict: Exclude<SlotConflictResult, { ok: true }>
+): Record<string, unknown> {
+  if (conflict.conflict === 'could_not_verify') {
+    return { type: 'could_not_verify', reason: conflict.reason };
+  }
+  return {
+    type: conflict.conflict,
+    appointmentId: conflict.appointmentId,
+    conflictWindow: {
+      start: conflict.conflictWindow.start.toISOString(),
+      end: conflict.conflictWindow.end.toISOString(),
+    },
+  };
+}
+
 export class CreateAppointmentAITaskHandler implements TaskHandler {
   readonly taskType = 'create_appointment' as const;
   private readonly gateway: LLMGateway;
+  private readonly slotConflictChecker?: SlotConflictChecker;
+  private readonly availabilityFinder?: AvailabilityFinder;
 
-  constructor(gateway: LLMGateway) {
+  constructor(
+    gateway: LLMGateway,
+    slotConflictChecker?: SlotConflictChecker,
+    availabilityFinder?: AvailabilityFinder
+  ) {
     this.gateway = gateway;
+    this.slotConflictChecker = slotConflictChecker;
+    this.availabilityFinder = availabilityFinder;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -95,6 +213,47 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);
 
+    // P0-035: pre-check slot availability if the checker is wired AND
+    // we have enough payload to ask the question. We need a customerId
+    // and both ISO timestamps. If any of those are missing, fall back
+    // to the original create_appointment behavior — the proposal will
+    // still go to dispatcher review, who will catch the issue.
+    const checker = this.slotConflictChecker;
+    const customerId = typeof payload.customerId === 'string' ? payload.customerId : undefined;
+    const scheduledStart = typeof payload.scheduledStart === 'string' ? payload.scheduledStart : undefined;
+    const scheduledEnd = typeof payload.scheduledEnd === 'string' ? payload.scheduledEnd : undefined;
+    const technicianId = typeof payload.technicianId === 'string' ? payload.technicianId : undefined;
+
+    if (checker && customerId && scheduledStart && scheduledEnd) {
+      const result = await checker.check({
+        tenantId: context.tenantId,
+        windowStart: new Date(scheduledStart),
+        windowEnd: new Date(scheduledEnd),
+        technicianId,
+        customerId,
+      });
+
+      if (!result.ok) {
+        // Per-tech filter is only safe when the conflict is the tech
+        // being busy. For `customer_busy`, the conflicting appointment
+        // is with a DIFFERENT tech — passing `technicianId` would let
+        // the finder filter that appointment out and re-suggest the
+        // very slot the customer is double-booked on. For
+        // `could_not_verify`, drop the tech filter defensively (we
+        // don't know what the underlying problem was).
+        const altTechId =
+          result.conflict === 'technician_busy' ? technicianId : undefined;
+        const alternatives = await this.findAlternatives(
+          context.tenantId,
+          new Date(scheduledStart),
+          new Date(scheduledEnd),
+          altTechId
+        );
+        const proposal = buildClarificationProposal(context, result, payload, alternatives);
+        return { proposal, taskType: 'voice_clarification' };
+      }
+    }
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: this.taskType,
@@ -107,6 +266,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       // Appointments are capture-class — schedule changes are reversible
       // and the undo window provides the human-in-the-loop check. See D3.
       sourceTrustTier: 'autonomous',
+      // PR B — propagate tenant override from context.
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };
@@ -119,6 +282,47 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       parts.push(`Known entities: ${JSON.stringify(context.existingEntities)}`);
     }
     return parts.join('\n');
+  }
+
+  /**
+   * Look up alternative open slots when the proposed time conflicts.
+   * Failure-open: any error returns `undefined`, and the clarification
+   * proposal falls back to the no-alternatives wording. Search window
+   * spans from the conflicted slot's start through the end of the next
+   * day, which covers same-day reschedules and "first thing tomorrow"
+   * without scanning the full calendar.
+   */
+  private async findAlternatives(
+    tenantId: string,
+    proposedStart: Date,
+    proposedEnd: Date,
+    technicianId: string | undefined
+  ): Promise<OpenSlot[] | undefined> {
+    const finder = this.availabilityFinder;
+    if (!finder) return undefined;
+
+    const durationMs = proposedEnd.getTime() - proposedStart.getTime();
+    if (durationMs <= 0) return undefined;
+
+    // 36h is enough to catch "later today" + "first thing tomorrow"
+    // without an unreasonably large repo scan.
+    const SEARCH_WINDOW_MS = 36 * 60 * 60 * 1000;
+    const searchTo = new Date(proposedStart.getTime() + SEARCH_WINDOW_MS);
+
+    try {
+      const result = await finder.find({
+        tenantId,
+        searchFrom: proposedStart,
+        searchTo,
+        durationMs,
+        technicianId,
+        count: 3,
+      });
+      if (!result.ok) return undefined;
+      return result.slots.length > 0 ? result.slots : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }
 

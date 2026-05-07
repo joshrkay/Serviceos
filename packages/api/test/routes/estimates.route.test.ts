@@ -105,14 +105,65 @@ describe('POST /api/estimates', () => {
     expect(r2.body.estimateNumber).toBe('EST-0002');
   });
 
-  it('returns an error when lineItems is empty', async () => {
+  it('returns 400 with field errors when lineItems is empty', async () => {
     const res = await request(app).post('/api/estimates').send({
       jobId: 'job-1',
       estimateNumber: 'PLACEHOLDER',
       lineItems: [],  // fails min(1) validation
     });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.body).toHaveProperty('error');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details).toHaveProperty('fields');
+    expect(res.body.details.fields).toHaveProperty('lineItems');
+  });
+
+  it('returns 400 when required fields are missing', async () => {
+    const res = await request(app).post('/api/estimates').send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fields).toHaveProperty('jobId');
+  });
+});
+
+describe('PATCH /api/estimates/:id', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('updates a draft estimate and recalculates totals', async () => {
+    const created = await createEstimate(app, { taxRateBps: 0 });
+    const res = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .send({
+        lineItems: [
+          { id: 'li-1', description: 'Revised', quantity: 2, unitPriceCents: 5000, totalCents: 10000, category: 'labor', sortOrder: 0, taxable: false },
+        ],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.totals.subtotalCents).toBe(10000);
+    expect(res.body.totals.totalCents).toBe(10000);
+  });
+
+  it('returns 400 when editing an estimate that has been sent', async () => {
+    const created = await createEstimate(app);
+    await request(app)
+      .post(`/api/estimates/${created.body.id}/transition`)
+      .send({ status: 'sent' });
+
+    const res = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .send({ customerMessage: 'too late' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 404 for unknown id', async () => {
+    const res = await request(app)
+      .patch('/api/estimates/nope')
+      .send({ customerMessage: 'x' });
+    expect(res.status).toBe(404);
   });
 });
 
@@ -135,6 +186,83 @@ describe('GET /api/estimates/:id', () => {
     const res = await request(app).get('/api/estimates/does-not-exist');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
+describe('GET /api/estimates', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns an empty array when no estimates exist', async () => {
+    const res = await request(app).get('/api/estimates');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('returns all estimates for the tenant', async () => {
+    await createEstimate(app);
+    await createEstimate(app);
+    const res = await request(app).get('/api/estimates');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0]).toHaveProperty('estimateNumber');
+  });
+
+  it('filters by jobId when the query parameter is provided', async () => {
+    await createEstimate(app, { jobId: 'job-1' });
+    await createEstimate(app, { jobId: 'job-2' });
+    const res = await request(app).get('/api/estimates?jobId=job-1');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].jobId).toBe('job-1');
+  });
+});
+
+describe('P1-018 — listEstimates filter + pagination', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('filter by status=draft returns only drafts', async () => {
+    const e1 = await createEstimate(app);
+    await createEstimate(app);
+    // Transition e1 to sent
+    await request(app).post(`/api/estimates/${e1.body.id}/transition`).send({ status: 'sent' });
+
+    const res = await request(app).get('/api/estimates?status=draft');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].status).toBe('draft');
+  });
+
+  it('pagination with limit/offset returns { data, total }', async () => {
+    for (let i = 0; i < 3; i++) {
+      await createEstimate(app);
+    }
+    const res = await request(app).get('/api/estimates?limit=2&offset=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.total).toBe(3);
+  });
+
+  it('rejects limit > 200 with 400', async () => {
+    const res = await request(app).get('/api/estimates?limit=500');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('legacy ?jobId= without other params still returns bare array', async () => {
+    await createEstimate(app, { jobId: 'job-a' });
+    await createEstimate(app, { jobId: 'job-b' });
+    const res = await request(app).get('/api/estimates?jobId=job-a');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(1);
   });
 });
 
@@ -172,15 +300,14 @@ describe('POST /api/estimates/:id/transition', () => {
     expect(res.body.status).toBe('accepted');
   });
 
-  it('returns an error for invalid transition', async () => {
+  it('returns 400 for an invalid transition', async () => {
     const created = await createEstimate(app);
     expect(created.status).toBe(201);
-    // draft → accepted is not a valid transition.
-    // The lifecycle throws a plain Error so the server returns 5xx.
     const res = await request(app)
       .post(`/api/estimates/${created.body.id}/transition`)
       .send({ status: 'accepted' });
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
   it('returns 400 when status is missing', async () => {

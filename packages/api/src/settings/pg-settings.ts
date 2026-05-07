@@ -31,6 +31,45 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     defaultPaymentTermDays: row.default_payment_term_days as number,
     terminologyPreferences,
     activeVerticalPacks,
+    // Phase 12 — columns added in migration 063 (P12-001).
+    backupSupervisorUserId: (row.backup_supervisor_user_id as string) ?? null,
+    unsupervisedProposalRouting:
+      (row.unsupervised_proposal_routing as
+        | 'queue_and_sms'
+        | 'queue_only'
+        | 'escalate_to_oncall'
+        | null) ?? undefined,
+    // Tier 4 — migration 075. Booleans default at the column level so
+    // a row created before this migration reads as the migration's
+    // DEFAULT value.
+    autoApplyInternalUpdates: row.auto_apply_internal_updates as boolean | undefined,
+    autoSendAppointmentReminders: row.auto_send_appointment_reminders as boolean | undefined,
+    // Tier 4 — migration 076. JSONB column; pg returns the parsed
+    // object directly. Empty object means "no overrides" — surface as
+    // undefined so consumers can rely on the same shape across both
+    // repositories.
+    autoApproveThreshold: (() => {
+      const raw = row.auto_approve_threshold as
+        | Partial<Record<'supervisor' | 'tech' | 'both', number>>
+        | null
+        | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
+      return raw;
+    })(),
+    // Tier 4 — migration 077. Deposit rule columns. NULL columns
+    // surface as undefined to match the InMemory repo shape; consumers
+    // distinguish "rule not configured" from "rule cleared" via the
+    // explicit `null` sent on update payloads.
+    depositStrategy: (row.deposit_strategy as 'percentage' | 'fixed' | null) ?? undefined,
+    depositPercentageBps: (row.deposit_percentage_bps as number | null) ?? undefined,
+    depositFixedCents: (row.deposit_fixed_cents as number | null) ?? undefined,
+    depositRequiredAboveCents:
+      (row.deposit_required_above_cents as number | null) ?? undefined,
+    // Tier 4 — migration 079. Default 'after_approval' applies at the
+    // column level so any row written before this migration reads as
+    // the safe pre-existing flow.
+    depositTimingPolicy:
+      (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -145,6 +184,21 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         nextEstimateNumber: 'next_estimate_number',
         nextInvoiceNumber: 'next_invoice_number',
         defaultPaymentTermDays: 'default_payment_term_days',
+        // Phase 12 — migration 063.
+        backupSupervisorUserId: 'backup_supervisor_user_id',
+        unsupervisedProposalRouting: 'unsupervised_proposal_routing',
+        // Tier 4 — migration 075.
+        autoApplyInternalUpdates: 'auto_apply_internal_updates',
+        autoSendAppointmentReminders: 'auto_send_appointment_reminders',
+        // Tier 4 — migration 077. Deposit rules. Each accepts an
+        // explicit `null` to clear the value (vs `undefined` which
+        // means "don't touch this field on update").
+        depositStrategy: 'deposit_strategy',
+        depositPercentageBps: 'deposit_percentage_bps',
+        depositFixedCents: 'deposit_fixed_cents',
+        depositRequiredAboveCents: 'deposit_required_above_cents',
+        // Tier 4 — migration 079.
+        depositTimingPolicy: 'deposit_timing_policy',
         updatedAt: 'updated_at',
       };
 
@@ -154,6 +208,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
 
       for (const [key, value] of Object.entries(updates)) {
         if (key === 'terminologyPreferences' || key === 'activeVerticalPacks') continue;
+        // Tier 4 — auto_approve_threshold is JSONB; pg expects a string
+        // for parameterized JSONB writes. Pass `'{}'` for cleared
+        // (undefined / empty object) so the column matches its DEFAULT
+        // and downstream reads surface as undefined per mapRow.
+        if (key === 'autoApproveThreshold') {
+          setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
+          const v = value as Record<string, number> | undefined | null;
+          params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
         const column = fieldMap[key];
         if (column) {
           setClauses.push(`${column} = $${paramIndex}`);

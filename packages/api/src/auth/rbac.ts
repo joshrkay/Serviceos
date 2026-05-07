@@ -5,6 +5,10 @@ export type Permission =
   | 'users:invite'
   | 'users:remove'
   | 'users:list'
+  // Tier 4 (Team members — PR 2). Edit a teammate's role / display
+  // name / can_field_serve flag. Owner-only to keep dispatchers from
+  // demoting the owner or escalating their own role.
+  | 'users:edit_role'
   | 'jobs:create'
   | 'jobs:assign'
   | 'jobs:view'
@@ -66,6 +70,7 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'users:invite',
     'users:remove',
     'users:list',
+    'users:edit_role',
     'jobs:create',
     'jobs:assign',
     'jobs:view',

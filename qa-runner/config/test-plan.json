@@ -1,0 +1,98 @@
+{
+  "stages": [
+    {
+      "name": "estimates",
+      "tests": [
+        {
+          "id": "EST-API-HEALTH",
+          "module": "estimates",
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/health",
+            "expect_statuses": [200]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "EST-CREATE-CUSTOMER",
+          "module": "estimates",
+          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/customers",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "name": "QA Customer {{timestamp}}",
+              "phone": "555{{rand4}}",
+              "email": "qa+{{timestamp}}@example.com",
+              "address": "123 QA Way"
+            },
+            "expect_statuses": [200, 201, 409]
+          },
+          "ui_check": {
+            "path": "/customers",
+            "expect_text": "Customers"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "invoices",
+      "tests": [
+        {
+          "id": "INV-API-HEALTH",
+          "module": "invoices",
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/health",
+            "expect_statuses": [200]
+          },
+          "ui_check": {
+            "path": "/signup",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "assistant",
+      "depends_on": ["estimates", "invoices"],
+      "tests": [
+        {
+          "id": "AST-API-HEALTH",
+          "module": "assistant",
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/health",
+            "expect_statuses": [200]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    }
+  ]
+}

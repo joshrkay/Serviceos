@@ -1,0 +1,71 @@
+{
+  "id": "lookup-invoices-balance",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550105",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_invoices",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_invoices_fiona",
+        "tenantId": "t_01_lookup_invoices",
+        "firstName": "Fiona",
+        "lastName": "O'Brien",
+        "displayName": "Fiona O'Brien",
+        "companyName": null,
+        "primaryPhone": "+15555550105",
+        "secondaryPhone": null,
+        "email": "fiona.obrien@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-20T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "invoices": [
+      {
+        "id": "inv_01_invoices_balance_1",
+        "tenantId": "t_01_lookup_invoices",
+        "jobId": "job_01_invoices_1",
+        "estimateId": null,
+        "invoiceNumber": "INV-3001",
+        "status": "sent",
+        "lineItems": [
+          { "description": "Compressor replacement", "quantity": 1, "unitPriceCents": 75000 },
+          { "description": "Refrigerant recharge", "quantity": 1, "unitPriceCents": 15000 }
+        ],
+        "totals": { "subtotalCents": 90000, "discountCents": 0, "taxCents": 7200, "totalCents": 97200 },
+        "amountPaidCents": 0,
+        "amountDueCents": 97200,
+        "issuedAt": "2026-04-15T10:00:00.000Z",
+        "dueDate": "2026-05-15T10:00:00.000Z",
+        "customerMessage": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-04-15T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What do I owe?",
+      "expected": {
+        "intent": "lookup_invoices",
+        "spokenAnswerMatches": "Fiona's outstanding balance is $972.00 on invoice INV-3001"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": true
+}

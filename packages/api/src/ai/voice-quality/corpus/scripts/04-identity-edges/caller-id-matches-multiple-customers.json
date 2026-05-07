@@ -1,0 +1,69 @@
+{
+  "id": "caller-id-matches-multiple-customers",
+  "bucket": "04-identity-edges",
+  "callerId": "+15555550402",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_04_identity_multi_match",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_04_multi_match_jane",
+        "tenantId": "t_04_identity_multi_match",
+        "firstName": "Jane",
+        "lastName": "Doe",
+        "displayName": "Jane Doe",
+        "companyName": null,
+        "primaryPhone": "+15555550402",
+        "secondaryPhone": null,
+        "email": "jane.doe@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": "Shared household line with John Doe.",
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "cust_04_multi_match_john",
+        "tenantId": "t_04_identity_multi_match",
+        "firstName": "John",
+        "lastName": "Doe",
+        "displayName": "John Doe",
+        "companyName": null,
+        "primaryPhone": "+15555550402",
+        "secondaryPhone": null,
+        "email": "john.doe@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": "Shared household line with Jane Doe.",
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, I'd like to check on my account please.",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "escalates": true,
+        "spokenAnswerMatches": "agent recognizes that the caller-id matches more than one customer (Jane Doe and John Doe) and asks the caller to clarify which account they mean, or escalates; no duplicate customer is created"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 5, 6],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

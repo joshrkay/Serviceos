@@ -11,6 +11,8 @@ export class SecretsStack extends cdk.Stack {
   public readonly clerkSecret: secretsmanager.Secret;
   public readonly openAiSecret: secretsmanager.Secret;
   public readonly stripeSecret: secretsmanager.Secret;
+  public readonly twilioSecret: secretsmanager.Secret;
+  public readonly sendGridSecret: secretsmanager.Secret;
 
   constructor(scope: Construct, id: string, props: SecretsStackProps) {
     super(scope, id, props);
@@ -64,6 +66,42 @@ export class SecretsStack extends cdk.Stack {
         : cdk.RemovalPolicy.DESTROY,
     });
 
+    // ── Twilio master credentials ──────────────────────────────────────────────
+    // Used ONLY by the provisioning worker to create per-tenant subaccounts.
+    // The runtime API task must NOT have IAM access to this secret — it
+    // resolves per-tenant auth tokens from the tenant_integrations table.
+    // Also stores TENANT_ENCRYPTION_KEY for AES-256-GCM at-rest encryption
+    // of subaccount auth tokens.
+
+    this.twilioSecret = new secretsmanager.Secret(this, 'TwilioSecret', {
+      secretName: `/serviceos/${envConfig.environment}/twilio`,
+      description: 'Twilio master credentials for ServiceOS subaccount provisioning',
+      secretObjectValue: {
+        TWILIO_ACCOUNT_SID: cdk.SecretValue.unsafePlainText('REPLACE_ME'),
+        TWILIO_AUTH_TOKEN: cdk.SecretValue.unsafePlainText('REPLACE_ME'),
+        TENANT_ENCRYPTION_KEY: cdk.SecretValue.unsafePlainText('REPLACE_ME_64_HEX_CHARS'),
+      },
+      removalPolicy: envConfig.enableDeletionProtection
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ── SendGrid master credentials ──────────────────────────────────────────
+    // Used to create per-tenant subusers (Pro+ plan required).
+
+    this.sendGridSecret = new secretsmanager.Secret(this, 'SendGridSecret', {
+      secretName: `/serviceos/${envConfig.environment}/sendgrid`,
+      description: 'SendGrid master API key for ServiceOS subuser provisioning',
+      secretObjectValue: {
+        SENDGRID_API_KEY: cdk.SecretValue.unsafePlainText('REPLACE_ME'),
+        SENDGRID_FROM_EMAIL: cdk.SecretValue.unsafePlainText('REPLACE_ME'),
+        SENDGRID_FROM_NAME: cdk.SecretValue.unsafePlainText('REPLACE_ME'),
+      },
+      removalPolicy: envConfig.enableDeletionProtection
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
     // ── Outputs ───────────────────────────────────────────────────────────────
 
     new cdk.CfnOutput(this, 'ClerkSecretArn', {
@@ -84,11 +122,25 @@ export class SecretsStack extends cdk.Stack {
       exportName: `ServiceOS-${envConfig.environment}-StripeSecretArn`,
     });
 
+    new cdk.CfnOutput(this, 'TwilioSecretArn', {
+      value: this.twilioSecret.secretArn,
+      description: 'ARN of the Twilio master credentials secret',
+      exportName: `ServiceOS-${envConfig.environment}-TwilioSecretArn`,
+    });
+
+    new cdk.CfnOutput(this, 'SendGridSecretArn', {
+      value: this.sendGridSecret.secretArn,
+      description: 'ARN of the SendGrid master API key secret',
+      exportName: `ServiceOS-${envConfig.environment}-SendGridSecretArn`,
+    });
+
     new cdk.CfnOutput(this, 'SecretsSummary', {
       value: [
         `Clerk: ${this.clerkSecret.secretArn}`,
         `OpenAI: ${this.openAiSecret.secretArn}`,
         `Stripe: ${this.stripeSecret.secretArn}`,
+        `Twilio: ${this.twilioSecret.secretArn}`,
+        `SendGrid: ${this.sendGridSecret.secretArn}`,
       ].join(' | '),
       description: 'All secret ARNs for this environment',
     });

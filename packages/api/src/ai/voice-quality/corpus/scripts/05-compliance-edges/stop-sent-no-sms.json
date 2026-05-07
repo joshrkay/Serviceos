@@ -1,0 +1,70 @@
+{
+  "id": "stop-sent-no-sms",
+  "bucket": "05-compliance-edges",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0503",
+      "name": "VQ Bucket 05 — STOP-Sent Tenant",
+      "timezone": "America/Los_Angeles",
+      "smsConsent": {
+        "revoked": true,
+        "revokedFor": ["+15555550503"]
+      }
+    },
+    "customers": [
+      {
+        "id": "cust_05_stop_sent_taylor",
+        "tenantId": "00000000-0000-0000-0000-0000000c0503",
+        "firstName": "Taylor",
+        "lastName": "Brooks",
+        "displayName": "Taylor Brooks",
+        "companyName": null,
+        "primaryPhone": "+15555550503",
+        "secondaryPhone": null,
+        "email": "taylor.brooks@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": "Caller texted STOP on 2026-04-20; SMS consent revoked.",
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-10T10:00:00.000Z",
+        "updatedAt": "2026-04-20T18:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_05_stop_sent_1",
+        "tenantId": "00000000-0000-0000-0000-0000000c0503",
+        "jobId": "job_05_stop_sent_1",
+        "scheduledStart": "2026-05-12T17:00:00.000Z",
+        "scheduledEnd": "2026-05-12T19:00:00.000Z",
+        "arrivalWindowStart": "2026-05-12T17:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-12T17:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "notes": "Furnace inspection",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-30T10:00:00.000Z",
+        "updatedAt": "2026-04-30T10:00:00.000Z"
+      }
+    ],
+    "invoices": []
+  },
+  "callerId": "+15555550503",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, this is Taylor Brooks. Can you confirm my upcoming appointment?",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 7],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

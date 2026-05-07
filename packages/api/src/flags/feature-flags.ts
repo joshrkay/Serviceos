@@ -61,3 +61,54 @@ export function isFeatureEnabled(
 
   return true;
 }
+
+/**
+ * P7-015 — async persistence layer for feature flags.
+ *
+ * FeatureFlagStore stays synchronous (hot path — checked on every request
+ * that gates on a flag). Persistence is async: a FeatureFlagRepository
+ * provides durability, and a bootstrap call hydrates the sync store on
+ * startup. Admin APIs go through the repository so writes survive restarts.
+ */
+export interface FeatureFlagRepository {
+  list(): Promise<FeatureFlag[]>;
+  get(name: string): Promise<FeatureFlag | null>;
+  upsert(flag: FeatureFlag): Promise<FeatureFlag>;
+  delete(name: string): Promise<boolean>;
+}
+
+export class InMemoryFeatureFlagRepository implements FeatureFlagRepository {
+  private flags: Map<string, FeatureFlag> = new Map();
+
+  async list(): Promise<FeatureFlag[]> {
+    return Array.from(this.flags.values()).map((f) => ({ ...f }));
+  }
+
+  async get(name: string): Promise<FeatureFlag | null> {
+    const f = this.flags.get(name);
+    return f ? { ...f } : null;
+  }
+
+  async upsert(flag: FeatureFlag): Promise<FeatureFlag> {
+    if (!flag.name || flag.name.trim().length === 0) {
+      throw new Error('Flag name is required');
+    }
+    const stored = { ...flag };
+    this.flags.set(flag.name, stored);
+    return { ...stored };
+  }
+
+  async delete(name: string): Promise<boolean> {
+    return this.flags.delete(name);
+  }
+}
+
+export async function hydrateStoreFromRepository(
+  store: FeatureFlagStore,
+  repo: FeatureFlagRepository
+): Promise<void> {
+  const flags = await repo.list();
+  for (const flag of flags) {
+    store.setFlag(flag);
+  }
+}

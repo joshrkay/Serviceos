@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Job, JobStatus, JobRepository } from './job';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { NotFoundError } from '../shared/errors';
+import { NotFoundError, ValidationError } from '../shared/errors';
 
 export interface JobTimelineEntry {
   id: string;
@@ -26,6 +26,17 @@ export const JOB_TIMELINE_EVENT_TYPES = {
   STATUS_CHANGE: 'status_change',
   DELAY_ACKNOWLEDGED: 'delay_acknowledged',
 } as const;
+
+export interface DelayAcknowledgmentMetadata extends Record<string, unknown> {
+  appointmentId: string;
+  isRunningBehind: boolean;
+  delayMinutes?: 10 | 15 | 20 | 60;
+  reasonCode?: string;
+  actorId: string;
+  actorRole: string;
+  timestamp: string;
+  inferredTriggerState: 'running_behind' | 'on_time';
+}
 
 export const JOB_STATUS_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
   new: ['scheduled', 'canceled'],
@@ -53,7 +64,7 @@ export async function transitionJobStatus(
   if (!job) throw new NotFoundError('Job', jobId);
 
   if (!isValidTransition(job.status, newStatus)) {
-    throw new Error(`Invalid transition from ${job.status} to ${newStatus}`);
+    throw new ValidationError(`Invalid transition from ${job.status} to ${newStatus}`);
   }
 
   const oldStatus = job.status;
@@ -117,6 +128,34 @@ export async function addTimelineEntry(
   };
 
   return timelineRepo.create(entry);
+}
+
+export async function addDelayAcknowledgmentTimelineEntry(
+  tenantId: string,
+  jobId: string,
+  actorId: string,
+  actorRole: string,
+  timelineRepo: JobTimelineRepository,
+  metadata: DelayAcknowledgmentMetadata
+): Promise<JobTimelineEntry> {
+  if (metadata.isRunningBehind && metadata.delayMinutes === undefined) {
+    throw new ValidationError('delayMinutes is required when isRunningBehind is true');
+  }
+
+  const description = metadata.isRunningBehind
+    ? `Delay acknowledged (${metadata.delayMinutes}m)`
+    : 'Delay cleared';
+
+  return addTimelineEntry(
+    tenantId,
+    jobId,
+    JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED,
+    description,
+    actorId,
+    actorRole,
+    timelineRepo,
+    metadata
+  );
 }
 
 export class InMemoryJobTimelineRepository implements JobTimelineRepository {

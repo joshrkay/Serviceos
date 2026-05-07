@@ -20,6 +20,20 @@ export interface DelayNotificationService {
   }): Promise<{ providerMessageId?: string }>;
 }
 
+export class NoopDelayNotificationService implements DelayNotificationService {
+  async sendDelayNotice(_request: {
+    tenantId: string;
+    customerId: string;
+    channel: 'sms' | 'email';
+    destination: string;
+    message: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ providerMessageId?: string }> {
+    return { providerMessageId: 'noop-delay-notice' };
+  }
+}
+
 export class DelayNotificationTransientError extends Error {
   readonly transient = true;
 }
@@ -35,6 +49,7 @@ export interface DelayNoticeDeliveryState {
   maxAttempts: number;
   lastError?: string;
   providerMessageId?: string;
+  triggerContext?: Record<string, unknown>;
   updatedAt: Date;
 }
 
@@ -206,6 +221,36 @@ export interface EnqueueDelayNoticeInput {
   delayMinutes: number;
   technicianName?: string;
   etaWindow?: { start: Date; end: Date; timezone?: string };
+  triggerContext?: {
+    thresholdMinutes?: number;
+    confidenceScore?: number;
+    pingSampleCount?: number;
+    reason?: string;
+  };
+}
+
+export interface InternalAlertSink {
+  createDelayAlert(input: {
+    tenantId: string;
+    appointmentId: string;
+    customerId: string;
+    message: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void>;
+}
+
+export class NoopInternalAlertSink implements InternalAlertSink {
+  async createDelayAlert(_input: {
+    tenantId: string;
+    appointmentId: string;
+    customerId: string;
+    message: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    // Intentionally empty.
+  }
 }
 
 export class DelayNotificationCoordinator {
@@ -215,6 +260,7 @@ export class DelayNotificationCoordinator {
     private readonly queue: Queue,
     private readonly selector: NextCustomerSelector,
     private readonly stateRepo: DelayNoticeStateRepository,
+    private readonly internalAlertSink: InternalAlertSink = new NoopInternalAlertSink(),
   ) {}
 
   async enqueueDelayNotice(input: EnqueueDelayNoticeInput): Promise<string | null> {
@@ -222,6 +268,11 @@ export class DelayNotificationCoordinator {
     if (!target) return null;
 
     const idempotencyKey = `${target.appointment.id}:${input.delayVersion}`;
+    const existing = await this.stateRepo.findByKey(idempotencyKey);
+    if (existing?.status === 'queued' || existing?.status === 'retrying' || existing?.status === 'sent') {
+      return idempotencyKey;
+    }
+
     const variants = renderDelayTemplateVariants({
       customerName: target.customer.firstName || target.customer.displayName,
       technicianName: input.technicianName,
@@ -239,10 +290,23 @@ export class DelayNotificationCoordinator {
       channel: target.channel,
       attempts: 0,
       maxAttempts: this.queue.getConfig().maxRetries,
+      triggerContext: input.triggerContext,
       updatedAt: new Date(),
     });
 
     if (target.channel === 'in_app') {
+      await this.internalAlertSink.createDelayAlert({
+        tenantId: input.tenantId,
+        appointmentId: target.appointment.id,
+        customerId: target.customer.id,
+        message,
+        idempotencyKey,
+        metadata: {
+          delayVersion: input.delayVersion,
+          delayMinutes: input.delayMinutes,
+          sourceAppointmentId: input.currentAppointmentId,
+        },
+      });
       return idempotencyKey;
     }
 

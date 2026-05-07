@@ -27,6 +27,10 @@ function mapRow(row: Record<string, unknown>): Proposal {
     approvedAt: row.approved_at ? new Date(row.approved_at as string) : undefined,
     executedAt: row.executed_at ? new Date(row.executed_at as string) : undefined,
     executedBy: (row.executed_by as string) ?? undefined,
+    claimedBy: (row.claimed_by as string) ?? undefined,
+    claimedAt: row.claimed_at ? new Date(row.claimed_at as string) : undefined,
+    executionRetryCount:
+      row.execution_retry_count != null ? Number(row.execution_retry_count) : undefined,
     undoneAt: row.undone_at ? new Date(row.undone_at as string) : undefined,
     undoneBy: (row.undone_by as string) ?? undefined,
     createdBy: row.created_by as string,
@@ -275,6 +279,48 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         [windowMs]
       );
       return result.rows.map(mapRow);
+    });
+  }
+
+  async claimForExecution(proposalId: string, workerId: string): Promise<Proposal | null> {
+    return this.withClient(async (client) => {
+      const result = await client.query(
+        `UPDATE proposals
+         SET status = 'executing', claimed_by = $2, claimed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status = 'approved'
+         RETURNING *`,
+        [proposalId, workerId]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async resetStaleExecuting(
+    staleMinutes: number,
+    maxRetries: number
+  ): Promise<{ resetToApproved: number; movedToFailed: number }> {
+    return this.withClient(async (client) => {
+      const failed = await client.query(
+        `UPDATE proposals
+         SET status = 'execution_failed', updated_at = NOW()
+         WHERE status = 'executing'
+           AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
+           AND execution_retry_count >= $2`,
+        [staleMinutes, maxRetries]
+      );
+      const reset = await client.query(
+        `UPDATE proposals
+         SET status = 'approved',
+             claimed_by = NULL,
+             claimed_at = NULL,
+             execution_retry_count = execution_retry_count + 1,
+             updated_at = NOW()
+         WHERE status = 'executing'
+           AND claimed_at < NOW() - ($1 || ' minutes')::INTERVAL
+           AND execution_retry_count < $2`,
+        [staleMinutes, maxRetries]
+      );
+      return { resetToApproved: reset.rowCount ?? 0, movedToFailed: failed.rowCount ?? 0 };
     });
   }
 }

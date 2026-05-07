@@ -118,6 +118,22 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
     expect(failed).toBe(0);
   });
 
+  it('claim lock prevents duplicate execution across sweeps', async () => {
+    let proposal = createProposal({ ...baseInput, idempotencyKey: 'claim-lock' });
+    proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+    proposal = transitionProposal(proposal, 'approved', 'user-1');
+    proposal = { ...proposal, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
+    await repo.create(proposal);
+
+    const first = await runExecutionSweep(makeDeps(repo));
+    const second = await runExecutionSweep(makeDeps(repo));
+
+    expect(first.executed).toBe(1);
+    expect(second.executed).toBe(0);
+    const updated = await repo.findById('tenant-1', proposal.id);
+    expect(updated?.status).toBe('executed');
+  });
+
   it('ignores proposals in non-approved statuses', async () => {
     // Draft proposal — should not be picked up.
     const draft = createProposal(baseInput);
@@ -133,5 +149,22 @@ describe('Execution auto-delivery worker (D9 undo window complement)', () => {
     const { executed, failed } = await runExecutionSweep(makeDeps(repo));
     expect(executed).toBe(0);
     expect(failed).toBe(0);
+  });
+
+  it('resets stale executing proposals and retries them', async () => {
+    let proposal = createProposal({ ...baseInput, idempotencyKey: 'stale-reset' });
+    proposal = transitionProposal(proposal, 'ready_for_review', 'user-1');
+    proposal = transitionProposal(proposal, 'approved', 'user-1');
+    proposal = {
+      ...proposal,
+      status: 'executing',
+      claimedAt: new Date(Date.now() - 11 * 60 * 1000),
+      executionRetryCount: 0,
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    };
+    await repo.create(proposal);
+
+    const { executed } = await runExecutionSweep(makeDeps(repo));
+    expect(executed).toBe(1);
   });
 });

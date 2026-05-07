@@ -96,4 +96,48 @@ describe('P0-009 — Async job processing with SQS', () => {
     const msg = await queue.receive();
     expect(msg!.idempotencyKey).toBe('custom-key');
   });
+
+  it('AC#3 — moveToDeadLetter persists the message with error context', async () => {
+    const msg: QueueMessage = {
+      id: 'msg-1',
+      type: 'test.job',
+      payload: { k: 'v' },
+      attempts: 3,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-dlq-1',
+      createdAt: new Date().toISOString(),
+    };
+    await queue.moveToDeadLetter(msg, 'max attempts exceeded');
+
+    const dlq = await queue.listDeadLetter();
+    expect(dlq).toHaveLength(1);
+    expect(dlq[0].messageId).toBe('msg-1');
+    expect(dlq[0].type).toBe('test.job');
+    expect(dlq[0].attempts).toBe(3);
+    expect(dlq[0].error).toBe('max attempts exceeded');
+    expect(dlq[0].failedAt).toBeTruthy();
+  });
+
+  it('AC#3 — listDeadLetter starts empty and grows with each failure', async () => {
+    expect(await queue.listDeadLetter()).toHaveLength(0);
+
+    for (let i = 0; i < 3; i++) {
+      await queue.moveToDeadLetter(
+        {
+          id: `msg-${i}`,
+          type: 'test.job',
+          payload: { i },
+          attempts: 3,
+          maxAttempts: 3,
+          idempotencyKey: `idem-${i}`,
+          createdAt: new Date().toISOString(),
+        },
+        'handler error'
+      );
+    }
+
+    const dlq = await queue.listDeadLetter();
+    expect(dlq).toHaveLength(3);
+    expect(queue.dlqSize()).toBe(3);
+  });
 });

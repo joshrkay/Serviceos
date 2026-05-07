@@ -1,6 +1,9 @@
 import {
   assembleVerticalContext,
   buildContextPromptSection,
+  formatVerticalForCallerPrompt,
+  formatIntakeQuestionsForPrompt,
+  formatObjectionScriptsForPrompt,
   ContextAssemblyDependencies,
 } from '../../src/verticals/context-assembly';
 import { InMemoryVerticalPackRepository } from '../../src/verticals/registry';
@@ -178,5 +181,138 @@ describe('P4-009 — Vertical-Aware Context Assembly', () => {
     expect(context.matchedTemplate).toBeNull(); // tenant-scoped
     expect(context.matchedBundles).toHaveLength(0); // tenant-scoped
     expect(context.wordingGuidelines).toBe(''); // tenant-scoped
+  });
+});
+
+describe('formatVerticalForCallerPrompt — §3B caller-prompt section', () => {
+  it('returns empty string when pack is null', () => {
+    expect(formatVerticalForCallerPrompt(null)).toBe('');
+    expect(formatVerticalForCallerPrompt(undefined)).toBe('');
+  });
+
+  it('emits vertical name + industry context for a real pack', () => {
+    const pack = createHvacPack();
+    const out = formatVerticalForCallerPrompt(pack);
+    expect(out).toContain('Service vertical: HVAC Professional');
+    expect(out).toContain('Industry context: Heating, ventilation');
+  });
+
+  it('lists equipment terminology with aliases', () => {
+    const pack = createHvacPack();
+    const out = formatVerticalForCallerPrompt(pack);
+    expect(out).toContain('Equipment and terminology recognized:');
+    // Furnace + its aliases — caller may say "heater" or "heating unit".
+    expect(out).toMatch(/Furnace.*heater.*heating unit/);
+    // Air Conditioner + its colloquial names — "central air", "a/c", etc.
+    expect(out).toMatch(/Air Conditioner.*air conditioner.*central air/);
+    // Thermostat + smart-home synonyms.
+    expect(out).toMatch(/Thermostat.*smart thermostat/);
+  });
+
+  it('lists service categories', () => {
+    const pack = createHvacPack();
+    const out = formatVerticalForCallerPrompt(pack);
+    expect(out).toContain('Service types offered:');
+    expect(out).toContain('Installation');
+    expect(out).toContain('Repair');
+    expect(out).toContain('Maintenance');
+  });
+
+  it('omits sections cleanly when terminology or categories are empty', () => {
+    const pack = createHvacPack();
+    const stripped = { ...pack, terminology: {}, categories: [] };
+    const out = formatVerticalForCallerPrompt(stripped);
+    expect(out).toContain('Service vertical: HVAC Professional');
+    expect(out).not.toContain('Equipment and terminology recognized:');
+    expect(out).not.toContain('Service types offered:');
+  });
+
+  it('handles a terminology entry with no aliases without producing dangling parens', () => {
+    const pack = createHvacPack();
+    const noAliases = {
+      ...pack,
+      terminology: {
+        widget: { displayName: 'Widget', aliases: [], description: 'A widget' },
+      },
+    };
+    const out = formatVerticalForCallerPrompt(noAliases);
+    expect(out).toContain('  - Widget');
+    expect(out).not.toContain('Widget ()');
+  });
+});
+
+describe('formatIntakeQuestionsForPrompt — §3D disambiguation block', () => {
+  it('returns empty string when pack is null/undefined', () => {
+    expect(formatIntakeQuestionsForPrompt(null)).toBe('');
+    expect(formatIntakeQuestionsForPrompt(undefined)).toBe('');
+  });
+
+  it('returns empty string when pack has no intakeQuestions', () => {
+    const pack = createHvacPack();
+    const stripped = { ...pack, intakeQuestions: [] };
+    expect(formatIntakeQuestionsForPrompt(stripped)).toBe('');
+  });
+
+  it('renders questions and intent labels for the HVAC default pack', () => {
+    const pack = createHvacPack();
+    const out = formatIntakeQuestionsForPrompt(pack);
+    expect(out).toContain('Disambiguation questions');
+    expect(out).toContain('Is this for heating or cooling?');
+    expect(out).toContain('[intent: service_disambiguation]');
+    expect(out).toContain('How old is the unit?');
+  });
+
+  it('omits the intent label when no intent is set', () => {
+    const pack = createHvacPack();
+    const stripped = {
+      ...pack,
+      intakeQuestions: [{ trigger: 't', question: 'Plain question?' }],
+    };
+    const out = formatIntakeQuestionsForPrompt(stripped);
+    expect(out).toContain('"Plain question?"');
+    expect(out).not.toContain('[intent:');
+  });
+});
+
+describe('formatObjectionScriptsForPrompt — §3E objection-handling block', () => {
+  it('returns empty string when pack is null/undefined', () => {
+    expect(formatObjectionScriptsForPrompt(null)).toBe('');
+    expect(formatObjectionScriptsForPrompt(undefined)).toBe('');
+  });
+
+  it('returns empty string when pack has no objectionScripts', () => {
+    const pack = createHvacPack();
+    const stripped = { ...pack, objectionScripts: [] };
+    expect(formatObjectionScriptsForPrompt(stripped)).toBe('');
+  });
+
+  it('renders id, triggers, and reframe for each script in the HVAC default pack', () => {
+    const pack = createHvacPack();
+    const out = formatObjectionScriptsForPrompt(pack);
+    expect(out).toContain('Objection-handling scripts');
+    expect(out).toContain('id: price');
+    expect(out).toContain('triggers:');
+    expect(out).toContain('too expensive');
+    expect(out).toContain('reframe:');
+    expect(out).toContain('carry common parts on the truck');
+    expect(out).toContain('id: dispatch_fee');
+    expect(out).toContain('id: phone_quote');
+    expect(out).toContain('id: hesitation');
+  });
+
+  it('quotes the reframe so the LLM treats it as verbatim copy', () => {
+    const pack = createHvacPack();
+    const stripped = {
+      ...pack,
+      objectionScripts: [
+        {
+          id: 'test',
+          patterns: ['p1'],
+          reframe: 'Some response text.',
+        },
+      ],
+    };
+    const out = formatObjectionScriptsForPrompt(stripped);
+    expect(out).toContain('reframe: "Some response text."');
   });
 });

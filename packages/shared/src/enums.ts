@@ -76,6 +76,7 @@ export enum EstimateSourceType {
 export enum ApprovalStatus {
   PENDING = 'pending',
   APPROVED = 'approved',
+  EXECUTING = 'executing',
   APPROVED_WITH_EDITS = 'approved_with_edits',
   REJECTED = 'rejected',
 }
@@ -125,6 +126,7 @@ export enum ProposalStatus {
   DRAFT = 'draft',
   READY_FOR_REVIEW = 'ready_for_review',
   APPROVED = 'approved',
+  EXECUTING = 'executing',
   REJECTED = 'rejected',
   EXPIRED = 'expired',
   EXECUTED = 'executed',
@@ -212,6 +214,7 @@ export enum AuditEventType {
   ARCHIVED = 'archived',
   STATUS_CHANGED = 'status_changed',
   APPROVED = 'approved',
+  EXECUTING = 'executing',
   REJECTED = 'rejected',
   EXECUTED = 'executed',
   ASSIGNED = 'assigned',

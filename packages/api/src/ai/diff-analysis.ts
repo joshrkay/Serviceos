@@ -1,5 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
-import { WorkerHandler, QueueMessage } from '../queues/queue';
+import { Queue, WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { DocumentRevision, DocumentRevisionRepository } from './document-revision';
 
@@ -108,6 +107,84 @@ export interface DiffAnalysisJobPayload {
   documentId: string;
   fromRevisionId: string;
   toRevisionId: string;
+}
+
+export interface EnqueueDiffAnalysisInput {
+  tenantId: string;
+  documentType: string;
+  documentId: string;
+  fromRevisionId: string;
+  toRevisionId: string;
+}
+
+/**
+ * Create a pending DiffAnalysis row and enqueue the worker to process it.
+ *
+ * The id is derived deterministically from (tenantId, documentType,
+ * documentId, fromRevisionId, toRevisionId) so re-enqueueing the same pair
+ * is idempotent end-to-end: the repo's findById returns the existing row
+ * instead of a duplicate create, and the queue's UNIQUE idempotency_key
+ * rejects the second queue row.
+ */
+export function diffAnalysisIdFor(input: EnqueueDiffAnalysisInput): string {
+  return `diff:${input.tenantId}:${input.documentType}:${input.documentId}:${input.fromRevisionId}:${input.toRevisionId}`;
+}
+
+export async function enqueueDiffAnalysis(
+  diffRepository: DiffAnalysisRepository,
+  queue: Queue,
+  input: EnqueueDiffAnalysisInput
+): Promise<DiffAnalysis> {
+  const id = diffAnalysisIdFor(input);
+
+  const existing = await diffRepository.findById(input.tenantId, id);
+  if (existing) {
+    // Still enqueue with the same idempotency key — the queue will dedupe
+    // if the previous job is still pending, otherwise re-kick processing
+    // (e.g., if the row is in 'failed' status and the caller wants a retry).
+    await queue.send<DiffAnalysisJobPayload>(
+      'diff_analysis',
+      {
+        tenantId: input.tenantId,
+        analysisId: id,
+        documentType: input.documentType,
+        documentId: input.documentId,
+        fromRevisionId: input.fromRevisionId,
+        toRevisionId: input.toRevisionId,
+      },
+      id
+    );
+    return existing;
+  }
+
+  const analysis: DiffAnalysis = {
+    id,
+    tenantId: input.tenantId,
+    documentType: input.documentType,
+    documentId: input.documentId,
+    fromRevisionId: input.fromRevisionId,
+    toRevisionId: input.toRevisionId,
+    diff: [],
+    status: 'pending',
+    createdAt: new Date(),
+  };
+
+  await diffRepository.create(analysis);
+
+  await queue.send<DiffAnalysisJobPayload>(
+    'diff_analysis',
+    {
+      tenantId: input.tenantId,
+      analysisId: id,
+      documentType: input.documentType,
+      documentId: input.documentId,
+      fromRevisionId: input.fromRevisionId,
+      toRevisionId: input.toRevisionId,
+    },
+    id
+  );
+
+  return analysis;
 }
 
 export function createDiffAnalysisWorker(

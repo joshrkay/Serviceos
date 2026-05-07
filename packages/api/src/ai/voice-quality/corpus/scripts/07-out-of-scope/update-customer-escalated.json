@@ -1,0 +1,50 @@
+{
+  "id": "update-customer-escalated",
+  "bucket": "07-out-of-scope",
+  "callerId": "+15555550702",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_07_oos_update",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_07_update_jane",
+        "tenantId": "t_07_oos_update",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550702",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. I need to update my email address.",
+      "expected": {
+        "escalates": true,
+        "spokenAnswerMatches": "agent acknowledges the request to change contact info, explains that voice MVP cannot edit customer records, and offers to connect Jane with someone who can help; no update_customer proposal is drafted"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

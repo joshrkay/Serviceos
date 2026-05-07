@@ -1,8 +1,8 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { classifyIntent } from '../ai/orchestration/intent-classifier';
@@ -226,6 +226,8 @@ async function generateAssistantReply(
       taskType,
       model: response.model,
       usage: response.tokenUsage,
+      degraded: response.degraded ?? false,
+      fallbackStage: response.fallbackStage,
       message: {
         role: 'assistant' as const,
         ...parsed,
@@ -237,6 +239,8 @@ async function generateAssistantReply(
       taskType,
       model: 'fallback',
       usage: { input: 0, output: 0, total: 0 },
+      degraded: true,
+      fallbackStage: 'error-envelope',
       message: {
         role: 'assistant' as const,
         content: 'I can help with invoices, scheduling, follow-ups, estimates, and creating customers. Tell me what you want to do next.',
@@ -259,33 +263,69 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const parsed = assistantChatRequestSchema.parse(req.body);
-      const result = await generateAssistantReply(
-        parsed.messages,
-        req.auth!.tenantId,
-        req.auth!.userId,
-        deps
-      );
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = assistantChatRequestSchema.parse(req.body);
+        const result = await generateAssistantReply(
+          parsed.messages,
+          req.auth!.tenantId,
+          req.auth!.userId,
+          deps
+        );
 
-      if (parsed.stream) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.flushHeaders();
+        if (parsed.stream) {
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache, no-transform');
+          res.setHeader('Connection', 'keep-alive');
+          res.flushHeaders();
 
-        const content = result.message.content;
-        const chunks = content.match(/.{1,18}(\s|$)/g) ?? [content];
-        for (const chunk of chunks) {
-          writeSse(res, 'token', { delta: chunk });
+          const content = result.message.content;
+          const chunks = content.match(/.{1,18}(\s|$)/g) ?? [content];
+          // Mirror the SSE token stream onto the client WS gateway,
+          // scoped to the user-specific target so concurrent operators
+          // in the same tenant don't see each other's tokens.
+          const { publish } = await import('../ws/client-gateway');
+          const userTarget = req.auth!.userId;
+          const correlationId = `assistant-${userTarget}-${Date.now()}`;
+          for (const chunk of chunks) {
+            writeSse(res, 'token', { delta: chunk });
+            publish(
+              'assistant',
+              userTarget,
+              {
+                kind: 'assistant.token',
+                channel: 'assistant',
+                delta: chunk,
+                correlationId,
+                degraded: result.degraded ?? false,
+              },
+              req.auth!.tenantId,
+            );
+          }
+          writeSse(res, 'done', result);
+          publish(
+            'assistant',
+            userTarget,
+            {
+              kind: 'assistant.done',
+              channel: 'assistant',
+              finalText: content,
+              correlationId,
+              degraded: result.degraded ?? false,
+              fallbackStage: result.fallbackStage,
+            },
+            req.auth!.tenantId,
+          );
+          res.end();
+          return;
         }
-        writeSse(res, 'done', result);
-        res.end();
-        return;
-      }
 
-      res.json(result);
-    })
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
   );
 
   return router;

@@ -1,0 +1,30 @@
+{
+  "id": "find-or-create-lead-unknown-caller",
+  "bucket": "03-lead-capture",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0301",
+      "name": "VQ Bucket 03 — Unknown Caller Tenant"
+    },
+    "customers": [],
+    "appointments": [],
+    "invoices": []
+  },
+  "callerId": "+15555550301",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, I'd like to schedule service for my home.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": true
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

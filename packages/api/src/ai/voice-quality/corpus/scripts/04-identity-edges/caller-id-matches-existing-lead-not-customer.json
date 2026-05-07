@@ -1,0 +1,49 @@
+{
+  "id": "caller-id-matches-existing-lead-not-customer",
+  "bucket": "04-identity-edges",
+  "callerId": "+15555550405",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_04_identity_lead_match",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [],
+    "leads": [
+      {
+        "id": "lead_04_existing_robin",
+        "tenantId": "t_04_identity_lead_match",
+        "firstName": "Robin",
+        "lastName": "Lee",
+        "displayName": "Robin Lee",
+        "primaryPhone": "+15555550405",
+        "email": null,
+        "source": "inbound_voice",
+        "status": "open",
+        "notes": "Called last week asking about furnace service; did not book.",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-25T10:00:00.000Z",
+        "updatedAt": "2026-04-25T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi, I called last week — I wanted to follow up about my furnace.",
+      "expected": {
+        "intent": "lookup_account_summary",
+        "escalates": false,
+        "spokenAnswerMatches": "caller-id matches an existing lead (Robin Lee) rather than a customer; agent recognizes the existing lead and does NOT create a new lead, does NOT auto-create a customer, and continues the conversation referencing the prior contact"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 5, 6],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

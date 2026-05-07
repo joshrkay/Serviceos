@@ -4,12 +4,14 @@ import {
   Send, Mic, Paperclip, Sparkles, Check, Zap,
   Square, Image, FileText, X, ThumbsUp, ThumbsDown,
   Copy, ChevronDown, Clock, Briefcase, Receipt, Calendar,
-  AlertCircle, Volume2,
+  AlertCircle, Volume2, VolumeX, PhoneCall,
 } from 'lucide-react';
+import { VoiceSessionPanel } from './VoiceSessionPanel';
 import { useSearchParams } from 'react-router';
 import { type Message, type AIProposal } from '../../data/mock-data';
 import { AIProposalCard } from '../shared/AIProposalCard';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { useTTS } from '../../hooks/useTTS';
 
 interface ApiMessage {
   id: string;
@@ -699,9 +701,13 @@ export function AssistantPage() {
   const [typing, setTyping]           = useState(false);
   const [typingReason, setTypingReason] = useState('');
   const [voiceMode, setVoiceMode]     = useState(false);
+  const [liveSessionOpen, setLiveSessionOpen] = useState(false);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState<Message['attachments']>([]);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const [ttsEnabled, setTtsEnabled]   = useState(() => localStorage.getItem('fieldly:tts-enabled') === 'true');
+  const { speak, stop: stopTTS, isSpeaking } = useTTS({ rate: 1.0 });
+  const lastInputWasVoiceRef = useRef(false);
 
   const endRef    = useRef<HTMLDivElement>(null);
   const inputRef  = useRef<HTMLTextAreaElement>(null);
@@ -755,6 +761,7 @@ export function AssistantPage() {
   const send = useCallback(async (text: string, opts?: { inputMode?: 'voice' | 'photo'; voiceDuration?: number; attachments?: Message['attachments'] }) => {
     if (!text.trim() && !opts?.attachments?.length) return;
     const t = now();
+    lastInputWasVoiceRef.current = opts?.inputMode === 'voice';
 
     const userMsg: Message = {
       id: uid(),
@@ -794,6 +801,11 @@ export function AssistantPage() {
         autoApplied: reply.autoApplied,
       };
       setMessages(prev => [...prev, aiMsg]);
+
+      // Speak the response if TTS enabled or input was via voice
+      if ((ttsEnabled || lastInputWasVoiceRef.current) && reply.content) {
+        speak(reply.content);
+      }
     } catch {
       setMessages(prev => [...prev, {
         id: uid(),
@@ -805,7 +817,7 @@ export function AssistantPage() {
       setTyping(false);
       setTypingReason('');
     }
-  }, [conversationId]);
+  }, [conversationId, ttsEnabled, speak]);
 
   function handleSend() {
     if (pendingAttachment && pendingAttachment.length > 0) {
@@ -859,9 +871,39 @@ export function AssistantPage() {
             </div>
           </div>
 
-          <button className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
-            <ChevronDown size={12} /> Context
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const next = !ttsEnabled;
+                setTtsEnabled(next);
+                localStorage.setItem('fieldly:tts-enabled', String(next));
+                if (!next) stopTTS();
+              }}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                ttsEnabled
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-600'
+                  : 'border-slate-200 bg-white text-slate-400 hover:bg-slate-50'
+              }`}
+              title={ttsEnabled ? 'Voice responses on' : 'Voice responses off'}
+            >
+              {ttsEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
+              {isSpeaking && <span className="size-1.5 rounded-full bg-indigo-400 animate-pulse" />}
+            </button>
+            <button
+              onClick={() => setLiveSessionOpen(v => !v)}
+              title="Live voice session"
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                liveSessionOpen
+                  ? 'border-blue-300 bg-blue-50 text-blue-700'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              <PhoneCall size={12} /> Live session
+            </button>
+            <button className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
+              <ChevronDown size={12} /> Context
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1034,6 +1076,13 @@ export function AssistantPage() {
               <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-500">↵ Enter</kbd> to send &nbsp;·&nbsp; <kbd className="rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-slate-500">⇧ Shift+Enter</kbd> for new line
             </p>
           </div>
+        </div>
+      )}
+
+      {/* ── Live voice session panel (P8-009) ───────────────── */}
+      {liveSessionOpen && (
+        <div className="fixed bottom-24 right-6 z-50 w-96">
+          <VoiceSessionPanel />
         </div>
       )}
 

@@ -1,0 +1,44 @@
+{
+  "id": "known-customer-no-signup",
+  "bucket": "03-lead-capture",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0303",
+      "name": "VQ Bucket 03 — Known Customer Tenant"
+    },
+    "customers": [
+      {
+        "id": "10000000-0000-0000-0000-0000000c0303",
+        "tenantId": "00000000-0000-0000-0000-0000000c0303",
+        "firstName": "Maria",
+        "lastName": "Alvarez",
+        "displayName": "Maria Alvarez",
+        "primaryPhone": "+15555550303",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "isArchived": false,
+        "createdBy": "system:vq-fixture",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "callerId": "+15555550303",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, can I sign up?",
+      "expected": {
+        "intent": "lookup_account_summary"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 4, 5, 6],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": true
+}

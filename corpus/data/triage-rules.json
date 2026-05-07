@@ -1,0 +1,307 @@
+{
+  "_meta": {
+    "description": "Emergency classification rules, trigger word lists, urgency tiers, and triage question flows for the inbound AI agent. Drive dispatch decisions from customer intake.",
+    "version": "1.0.0",
+    "urgency_tiers": ["TIER_1_EVACUATE", "TIER_2_EMERGENCY_DISPATCH", "TIER_3_SAME_DAY_URGENT", "TIER_4_SCHEDULE"]
+  },
+  "trigger_words": {
+    "TIER_1_EVACUATE": {
+      "description": "Evacuate customer immediately. Call 911 and gas/utility company. Do NOT dispatch tech alone. Do NOT have customer use phones/light switches inside.",
+      "phrases": [
+        "smell gas",
+        "smells like gas",
+        "gas smell",
+        "rotten eggs smell",
+        "sulfur smell",
+        "might be a gas leak",
+        "think there's a gas leak",
+        "carbon monoxide",
+        "CO detector",
+        "CO alarm",
+        "carbon monoxide alarm",
+        "carbon monoxide detector going off"
+      ],
+      "secondary_escalation": [
+        "sparks from HVAC",
+        "electrical burning smell",
+        "sparks near water"
+      ],
+      "response_script": "This sounds like it could be a gas leak or carbon monoxide issue — please leave the building immediately without using light switches or your phone inside. Once you're safely outside, call 911 and your gas company. Do not go back inside until authorities clear the building. I'm going to flag this for immediate follow-up."
+    },
+    "TIER_2_EMERGENCY_DISPATCH": {
+      "description": "Dispatch emergency tech immediately, 24/7. Do not put customer on hold.",
+      "phrases": [
+        "flooding",
+        "flooded",
+        "flooded basement",
+        "water everywhere",
+        "water pouring",
+        "water gushing",
+        "water spraying",
+        "burst pipe",
+        "pipe burst",
+        "pipe broke",
+        "pipe exploded",
+        "sewage backup",
+        "sewage in the house",
+        "sewage in my basement",
+        "sewage on the floor",
+        "sewage coming up",
+        "sewage coming through the floor",
+        "sewage coming up through the drain",
+        "toilet overflowing and won't stop",
+        "toilet won't stop overflowing",
+        "water coming through the ceiling",
+        "water coming from the ceiling",
+        "ceiling is leaking",
+        "water near the electrical panel",
+        "water by outlets",
+        "water by electrical",
+        "frozen pipe",
+        "pipes froze",
+        "pipe might burst",
+        "water heater exploding",
+        "water heater making loud banging and leaking",
+        "main line backed up",
+        "main drain backed up"
+      ],
+      "conditional_phrases": [
+        {
+          "phrase": "no heat",
+          "condition": "outdoor_temp_below_40f OR indoor_temp_below_55f",
+          "escalate_to": "TIER_2_EMERGENCY_DISPATCH",
+          "otherwise": "TIER_3_SAME_DAY_URGENT"
+        },
+        {
+          "phrase": "pipes frozen",
+          "condition": "any",
+          "escalate_to": "TIER_2_EMERGENCY_DISPATCH"
+        }
+      ],
+      "response_script": "I'm going to get someone out to you right away — this sounds like an emergency. Can you shut off the main water supply while we get a technician dispatched? The main shutoff is usually near your water meter or where the main line enters the house."
+    },
+    "TIER_3_SAME_DAY_URGENT": {
+      "description": "Schedule same-day appointment within 4 hours. Check technician availability immediately.",
+      "phrases": [
+        "slow leak under the sink",
+        "active leak",
+        "no hot water",
+        "multiple drains backing up",
+        "several drains slow",
+        "AC not working at all",
+        "air conditioning completely out",
+        "no air conditioning",
+        "toilet won't flush",
+        "only toilet in the house",
+        "furnace keeps shutting off",
+        "furnace won't stay on",
+        "water heater pilot won't relight",
+        "can't relight the pilot",
+        "drain backing up into tub",
+        "water coming up in the tub",
+        "AC making loud grinding noise",
+        "loud grinding from the AC",
+        "outside unit making loud noise"
+      ],
+      "conditional_phrases": [
+        {
+          "phrase": "no AC",
+          "condition": "outdoor_temp_above_90f AND (elderly OR infant OR medical_equipment_in_home)",
+          "escalate_to": "TIER_2_EMERGENCY_DISPATCH",
+          "otherwise": "TIER_3_SAME_DAY_URGENT"
+        },
+        {
+          "phrase": "no hot water",
+          "condition": "winter OR single_family_home",
+          "escalate_to": "TIER_3_SAME_DAY_URGENT"
+        }
+      ]
+    },
+    "TIER_4_SCHEDULE": {
+      "description": "Schedule next available appointment. No urgency escalation needed.",
+      "phrases": [
+        "dripping faucet",
+        "faucet drips",
+        "slow drain",
+        "drain is slow",
+        "running toilet",
+        "toilet runs sometimes",
+        "low water pressure",
+        "annual maintenance",
+        "tune-up",
+        "replace filter",
+        "filter replacement",
+        "rust stain",
+        "rust stain in the tub",
+        "noisy pipes",
+        "banging pipes",
+        "garbage disposal humming",
+        "disposal not working",
+        "dishwasher not draining well",
+        "want to replace old water heater",
+        "looking to upgrade",
+        "minor leak from toilet base occasionally",
+        "sometimes a little wet near the toilet",
+        "AC not as cold as it used to be",
+        "could be more efficient"
+      ]
+    }
+  },
+  "multi_fixture_rule": {
+    "description": "When multiple fixtures or drains are affected simultaneously, reclassify to main line job and escalate urgency.",
+    "trigger": "multiple_drains_slow_or_backing_up",
+    "detection_phrases": [
+      "multiple drains",
+      "all my drains",
+      "every drain",
+      "kitchen and bathroom both backing up",
+      "sink AND toilet",
+      "when I flush the toilet the sink gurgles",
+      "water comes up in the bathtub when I run the dishwasher",
+      "water comes up in the bathtub when I flush the toilet",
+      "sewage smell throughout the house",
+      "slow drains everywhere"
+    ],
+    "action": "reclassify job type from individual drain to MAIN_LINE, escalate to TIER_3_SAME_DAY_URGENT minimum"
+  },
+  "seasonal_adjustments": [
+    {
+      "season": "winter",
+      "rule": "Lower threshold for no-heat calls — treat as TIER_2_EMERGENCY if outdoor temp below 40°F or indoor temp falling below 55°F"
+    },
+    {
+      "season": "summer",
+      "rule": "Lower threshold for no-AC calls when household includes elderly (65+), infants under 2, or medical equipment — treat as TIER_2_EMERGENCY"
+    },
+    {
+      "season": "spring_freeze_warning",
+      "rule": "Treat all frozen pipe reports as TIER_2_EMERGENCY even if no active break confirmed yet"
+    },
+    {
+      "season": "post_storm_power_outage",
+      "rule": "Elevate all HVAC won't-turn-on calls from TIER_4 to TIER_3 urgency"
+    }
+  ],
+  "triage_questions": {
+    "plumbing": [
+      {
+        "question": "Is water actively running, spraying, or gushing right now?",
+        "purpose": "Detect active uncontrolled water release — escalate to TIER_2 if yes",
+        "if_yes": "TIER_2_EMERGENCY_DISPATCH"
+      },
+      {
+        "question": "Do you smell anything like rotten eggs or sulfur?",
+        "purpose": "Gas leak detection — escalate to TIER_1 if yes",
+        "if_yes": "TIER_1_EVACUATE"
+      },
+      {
+        "question": "Can you shut off the water? The shutoff is usually under the sink, behind the toilet, or near your water meter.",
+        "purpose": "Immediate mitigation — reduces damage while tech is dispatched"
+      },
+      {
+        "question": "Is sewage visible anywhere in the living areas of your home?",
+        "purpose": "Health hazard + TIER_2 indicator",
+        "if_yes": "TIER_2_EMERGENCY_DISPATCH"
+      },
+      {
+        "question": "Are multiple drains affected, or is it just one?",
+        "purpose": "Multiple drains = main line involvement — reclassify job and elevate urgency",
+        "if_multiple": "reclassify_to_main_line"
+      },
+      {
+        "question": "Is there any water near electrical outlets, panels, or appliances?",
+        "purpose": "Electrocution risk — escalate to TIER_2 if yes",
+        "if_yes": "TIER_2_EMERGENCY_DISPATCH"
+      }
+    ],
+    "hvac": [
+      {
+        "question": "What is the current temperature inside your home right now?",
+        "purpose": "Temperature-based urgency assessment for heating/cooling failures"
+      },
+      {
+        "question": "What is the outdoor temperature where you are?",
+        "purpose": "Context for winter no-heat and summer no-AC escalations"
+      },
+      {
+        "question": "Do you smell anything burning, or do you smell gas?",
+        "purpose": "Fire/CO/gas hazard detection",
+        "if_gas": "TIER_1_EVACUATE",
+        "if_burning_persistent": "TIER_2_EMERGENCY_DISPATCH"
+      },
+      {
+        "question": "Are there any sparks, smoke, or unusual sounds coming from the unit?",
+        "purpose": "Fire risk or imminent mechanical failure",
+        "if_yes": "TIER_2_EMERGENCY_DISPATCH"
+      },
+      {
+        "question": "Is anyone in the home elderly, very young, or dependent on medical equipment?",
+        "purpose": "Vulnerability assessment — lowers threshold for no-heat and no-AC escalation"
+      },
+      {
+        "question": "When did it last work properly?",
+        "purpose": "Duration of problem — helps differentiate acute failure from gradual degradation"
+      }
+    ]
+  },
+  "job_type_intake_questions": {
+    "clogged_toilet": [
+      {
+        "question": "Are other drains in the home also backing up or running slow?",
+        "purpose": "If YES, reclassify as main line — not just a toilet clog"
+      }
+    ],
+    "main_line": [
+      {
+        "question": "Is any sewage visible in the living areas of your home?",
+        "purpose": "If YES, escalate to TIER_2_EMERGENCY_DISPATCH"
+      }
+    ],
+    "no_ac": [
+      { "question": "What type of system do you have — central air, window unit, or mini-split?" },
+      { "question": "What is the current indoor temperature?" },
+      { "question": "Has the system made any unusual sounds before stopping?" }
+    ],
+    "no_heat": [
+      { "question": "What is the outdoor temperature right now?" },
+      { "question": "What does your thermostat display show?" },
+      { "question": "Is there any burning smell or visible smoke?" },
+      { "question": "Do you have any alternative heat source available?" }
+    ],
+    "water_heater": [
+      { "question": "Is the unit gas or electric?" },
+      { "question": "Is there any visible water leaking from the unit?" },
+      { "question": "How old is the water heater approximately?" }
+    ]
+  },
+  "false_positive_guards": [
+    {
+      "trigger_phrase": "steam coming off the outdoor unit",
+      "context": "winter / cold weather",
+      "classification": "NORMAL — heat pump defrost cycle",
+      "action": "Do not escalate. Explain to customer that this is normal operation.",
+      "response_script": "That's actually completely normal! When your heat pump is in heating mode, it periodically runs a defrost cycle which causes steam or vapor to appear from the outdoor unit. It should clear up within a few minutes. Is the unit still heating your home properly?"
+    },
+    {
+      "trigger_phrase": "burning smell from furnace",
+      "context": "first time turning on furnace for the season",
+      "classification": "LIKELY BENIGN — dust burnoff",
+      "action": "Clarify with follow-up questions before escalating. If smell persists beyond 30 min or is accompanied by smoke, escalate.",
+      "clarifying_questions": [
+        "Is this the first time you've turned on the heat this season?",
+        "Is there any visible smoke, or is it just a smell?",
+        "Has the smell gone away in the last few minutes?"
+      ]
+    },
+    {
+      "trigger_phrase": "water dripping outside from white pipe",
+      "context": "AC condensate drain — normal in humid conditions",
+      "classification": "LIKELY NORMAL — condensate drainage",
+      "action": "Clarify — if it's a white PVC pipe with slow drip from AC/air handler, this is normal. If it's the T&P valve on water heater, escalate.",
+      "clarifying_questions": [
+        "Is the dripping pipe near your outdoor AC unit or near your water heater?",
+        "Is it a slow drip or steady flow?"
+      ]
+    }
+  ]
+}

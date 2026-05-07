@@ -4,11 +4,33 @@ import { AppointmentCard, AppointmentCardData } from './AppointmentCard';
 export interface UnassignedQueueProps {
   appointments: AppointmentCardData[];
   onDragStart?: (e: React.DragEvent, appointmentId: string) => void;
+  /** P6-025 — drop target props. Drops here become `cancel_assignment` proposals. */
+  isDragOver?: boolean;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
+  /** P6-026 — conflicting appointment ids; forwarded to AppointmentCard. */
+  conflictIds?: ReadonlySet<string>;
 }
 
-export function UnassignedQueue({ appointments, onDragStart }: UnassignedQueueProps) {
+export function UnassignedQueue({
+  appointments,
+  onDragStart,
+  isDragOver = false,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  conflictIds,
+}: UnassignedQueueProps) {
   return (
-    <div className="unassigned-queue" data-testid="unassigned-queue">
+    <div
+      className={`unassigned-queue ${isDragOver ? 'unassigned-queue--drag-over' : ''}`}
+      data-testid="unassigned-queue"
+      data-drop-kind="unassigned"
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <div className="unassigned-queue__header" data-testid="unassigned-queue-header">
         <h3>Unassigned</h3>
         <span className="unassigned-queue__count" data-testid="unassigned-queue-count">
@@ -28,6 +50,7 @@ export function UnassignedQueue({ appointments, onDragStart }: UnassignedQueuePr
               appointment={appointment}
               draggable={true}
               onDragStart={onDragStart}
+              hasConflict={conflictIds?.has(appointment.id) ?? false}
             />
           ))
         )}

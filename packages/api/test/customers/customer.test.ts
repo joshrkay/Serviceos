@@ -212,3 +212,193 @@ describe('P1-001 — Customer entity + CRUD', () => {
     expect(found).toBeNull();
   });
 });
+
+describe('P1-019 — createCustomer attaches dedup warnings (advisory, never blocks)', () => {
+  let repo: InMemoryCustomerRepository;
+
+  beforeEach(async () => {
+    repo = new InMemoryCustomerRepository();
+    await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        primaryPhone: '(415) 555-1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+  });
+
+  it('createCustomer.duplicate — phone match attaches a warning but still creates the customer', async () => {
+    const created = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Different',
+        lastName: 'Person',
+        primaryPhone: '4155551234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+
+    expect(created.id).toBeTruthy();
+    expect(created.firstName).toBe('Different');
+    expect(created.warnings).toBeDefined();
+    expect(created.warnings!.length).toBeGreaterThanOrEqual(1);
+    const phoneWarning = created.warnings!.find((w) => w.matchType === 'phone');
+    expect(phoneWarning).toBeDefined();
+    expect(phoneWarning!.score).toBe(1.0);
+  });
+
+  it('createCustomer.duplicate — email match attaches a warning (case-insensitive)', async () => {
+    const created = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Different',
+        lastName: 'Person',
+        email: 'JOHN@EXAMPLE.COM',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    expect(created.warnings).toBeDefined();
+    const emailWarning = created.warnings!.find((w) => w.matchType === 'email');
+    expect(emailWarning).toBeDefined();
+    expect(emailWarning!.confidence).toBe('high');
+  });
+
+  it('createCustomer.duplicate — unique customer has NO warnings field', async () => {
+    const created = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Unique',
+        lastName: 'Person',
+        email: 'unique@example.com',
+        primaryPhone: '555-999-0000',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    expect(created.warnings).toBeUndefined();
+  });
+
+  it('createCustomer.duplicate — cross-tenant duplicate is NOT flagged (defense-in-depth on tenant scoping)', async () => {
+    const created = await createCustomer(
+      {
+        tenantId: 'tenant-other',
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        primaryPhone: '(415) 555-1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    expect(created.warnings).toBeUndefined();
+  });
+
+  it('createCustomer.duplicate — multiple matches surface multiple warnings', async () => {
+    const created = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'New',
+        lastName: 'Person',
+        email: 'john@example.com',
+        primaryPhone: '4155551234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    expect(created.warnings).toBeDefined();
+    // Same record matches both phone and email → 2 warnings.
+    expect(created.warnings!.length).toBe(2);
+    const types = created.warnings!.map((w) => w.matchType).sort();
+    expect(types).toEqual(['email', 'phone']);
+  });
+
+  describe('findByPhoneNormalized (PR #265 review — repo-side phone lookup)', () => {
+    it('returns customers whose phone matches the trailing 10 digits', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Bob',
+          lastName: 'Jones',
+          primaryPhone: '(555) 234-5678',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '15552345678');
+      expect(matches).toHaveLength(1);
+      expect(matches[0].displayName).toBe('Bob Jones');
+    });
+
+    it('is tenant-isolated', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-A',
+          firstName: 'Alice',
+          lastName: 'A',
+          primaryPhone: '+15558888888',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const fromB = await repo.findByPhoneNormalized('tenant-B', '5558888888');
+      expect(fromB).toEqual([]);
+    });
+
+    it('returns multiple matches when the phone is shared (household line)', async () => {
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Mom',
+          lastName: 'Smith',
+          primaryPhone: '+15559999999',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      await createCustomer(
+        {
+          tenantId: 'tenant-1',
+          firstName: 'Dad',
+          lastName: 'Smith',
+          primaryPhone: '+15559999999',
+          createdBy: 'u-1',
+        },
+        repo
+      );
+      const matches = await repo.findByPhoneNormalized('tenant-1', '5559999999');
+      expect(matches).toHaveLength(2);
+    });
+
+    it('returns [] for inputs shorter than 7 digits', async () => {
+      const matches = await repo.findByPhoneNormalized('tenant-1', '12345');
+      expect(matches).toEqual([]);
+    });
+  });
+
+  it('createCustomer.duplicate — creation is NEVER blocked (advisory only)', async () => {
+    // Even when both phone AND email exactly match an existing record,
+    // the new customer is still persisted. This is the contract.
+    const before = await repo.findByTenant('tenant-1');
+    const beforeCount = before.length;
+    const created = await createCustomer(
+      {
+        tenantId: 'tenant-1',
+        firstName: 'Duplicate',
+        lastName: 'Twin',
+        email: 'john@example.com',
+        primaryPhone: '(415) 555-1234',
+        createdBy: 'user-1',
+      },
+      repo
+    );
+    const after = await repo.findByTenant('tenant-1');
+    expect(after.length).toBe(beforeCount + 1);
+    expect(created.warnings!.length).toBeGreaterThan(0);
+  });
+});
