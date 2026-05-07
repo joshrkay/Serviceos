@@ -1,8 +1,8 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { classifyIntent } from '../ai/orchestration/intent-classifier';
@@ -259,38 +259,33 @@ export function createAssistantRouter(deps: AssistantRouterDeps): Router {
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = assistantChatRequestSchema.parse(req.body);
-        const result = await generateAssistantReply(
-          parsed.messages,
-          req.auth!.tenantId,
-          req.auth!.userId,
-          deps
-        );
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = assistantChatRequestSchema.parse(req.body);
+      const result = await generateAssistantReply(
+        parsed.messages,
+        req.auth!.tenantId,
+        req.auth!.userId,
+        deps
+      );
 
-        if (parsed.stream) {
-          res.setHeader('Content-Type', 'text/event-stream');
-          res.setHeader('Cache-Control', 'no-cache, no-transform');
-          res.setHeader('Connection', 'keep-alive');
-          res.flushHeaders();
+      if (parsed.stream) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
 
-          const content = result.message.content;
-          const chunks = content.match(/.{1,18}(\s|$)/g) ?? [content];
-          for (const chunk of chunks) {
-            writeSse(res, 'token', { delta: chunk });
-          }
-          writeSse(res, 'done', result);
-          res.end();
-          return;
+        const content = result.message.content;
+        const chunks = content.match(/.{1,18}(\s|$)/g) ?? [content];
+        for (const chunk of chunks) {
+          writeSse(res, 'token', { delta: chunk });
         }
-
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+        writeSse(res, 'done', result);
+        res.end();
+        return;
       }
-    }
+
+      res.json(result);
+    })
   );
 
   return router;

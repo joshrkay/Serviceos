@@ -1,8 +1,9 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
-import { toErrorResponse, ValidationError } from '../shared/errors';
+import { ValidationError } from '../shared/errors';
 import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
@@ -29,19 +30,14 @@ export function createSettingsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await getSettings(req.auth!.tenantId, settingsRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await getSettings(req.auth!.tenantId, settingsRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.put(
@@ -49,47 +45,42 @@ export function createSettingsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = updateSettingsSchema.parse(req.body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = updateSettingsSchema.parse(req.body);
 
-        if (parsed.terminologyPreferences) {
-          if (!deps) {
-            throw new ValidationError('Unable to validate terminologyPreferences without vertical configuration');
-          }
-
-          const activePackConfigs = await loadActivePackConfigs(
-            req.auth!.tenantId,
-            deps.activationRepo,
-            deps.verticalPackRegistry
-          );
-          const validTermKeys = new Set(
-            activePackConfigs.flatMap((config) => Object.keys(config.terminology))
-          );
-          const validationErrors = validateTerminologyPreferences(
-            parsed.terminologyPreferences,
-            Array.from(validTermKeys)
-          );
-
-          if (validationErrors.length > 0) {
-            throw new ValidationError('Invalid terminologyPreferences payload', {
-              field: 'terminologyPreferences',
-              errors: validationErrors,
-            });
-          }
+      if (parsed.terminologyPreferences) {
+        if (!deps) {
+          throw new ValidationError('Unable to validate terminologyPreferences without vertical configuration');
         }
 
-        const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
-          return;
+        const activePackConfigs = await loadActivePackConfigs(
+          req.auth!.tenantId,
+          deps.activationRepo,
+          deps.verticalPackRegistry
+        );
+        const validTermKeys = new Set(
+          activePackConfigs.flatMap((config) => Object.keys(config.terminology))
+        );
+        const validationErrors = validateTerminologyPreferences(
+          parsed.terminologyPreferences,
+          Array.from(validTermKeys)
+        );
+
+        if (validationErrors.length > 0) {
+          throw new ValidationError('Invalid terminologyPreferences payload', {
+            field: 'terminologyPreferences',
+            errors: validationErrors,
+          });
         }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
       }
-    }
+
+      const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
+        return;
+      }
+      res.json(result);
+    })
   );
 
   return router;

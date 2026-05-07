@@ -28,6 +28,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createAssistantRouter } from './routes/assistant';
+import { createProposalExecutionRouter } from './routes/proposals-execute';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
 import { createDispatchRoutes } from './dispatch/routes';
@@ -111,6 +112,10 @@ export function createApp() {
 
   // Body parsing
   app.use(express.json());
+
+  // Serve static frontend files from the built React app
+  const frontendPath = require('path').join(__dirname, '../../web/dist');
+  app.use(express.static(frontendPath));
 
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
@@ -462,11 +467,24 @@ export function createApp() {
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
+  app.use('/api/proposals', createProposalExecutionRouter({
+    proposalRepo,
+    customerRepo,
+    auditRepo,
+  }));
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const { statusCode, body } = toErrorResponse(err);
     res.status(statusCode).json(body);
+  });
+
+  // Catch-all route for client-side routing — serves index.html for all non-API routes
+  // This allows the React SPA to handle routing on the client side
+  app.get('*', (req, res) => {
+    const frontendPath = require('path').join(__dirname, '../../web/dist');
+    const indexPath = require('path').join(frontendPath, 'index.html');
+    res.sendFile(indexPath);
   });
 
   return app;

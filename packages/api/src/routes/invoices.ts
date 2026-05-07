@@ -1,8 +1,8 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createInvoiceSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoice,
@@ -28,33 +28,25 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:create'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createInvoiceSchema.parse(req.body);
-        // Cross-entity tenant guard: jobId must belong to the
-        // requesting tenant. estimateId is optional — guard it only
-        // when present.
-        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
-        if (parsed.estimateId) {
-          await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
-        }
-        const invoiceNumber = await getNextInvoiceNumber(req.auth!.tenantId, settingsRepo);
-        const result = await createInvoice(
-          {
-            ...parsed,
-            tenantId: req.auth!.tenantId,
-            invoiceNumber,
-            createdBy: req.auth!.userId,
-          },
-          invoiceRepo,
-          auditRepo
-        );
-        res.status(201).json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createInvoiceSchema.parse(req.body);
+      await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
+      if (parsed.estimateId) {
+        await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
       }
-    }
+      const invoiceNumber = await getNextInvoiceNumber(req.auth!.tenantId, settingsRepo);
+      const result = await createInvoice(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          invoiceNumber,
+          createdBy: req.auth!.userId,
+        },
+        invoiceRepo,
+        auditRepo
+      );
+      res.status(201).json(result);
+    })
   );
 
   router.get(
@@ -62,19 +54,14 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await getInvoice(req.auth!.tenantId, req.params.id, invoiceRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await getInvoice(req.auth!.tenantId, req.params.id, invoiceRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.put(
@@ -82,19 +69,14 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await updateInvoice(req.auth!.tenantId, req.params.id, req.body, invoiceRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await updateInvoice(req.auth!.tenantId, req.params.id, req.body, invoiceRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.post(
@@ -102,20 +84,15 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const paymentTermDays = req.body.paymentTermDays ?? 30;
-        const result = await issueInvoice(req.auth!.tenantId, req.params.id, paymentTermDays, invoiceRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const paymentTermDays = req.body.paymentTermDays ?? 30;
+      const result = await issueInvoice(req.auth!.tenantId, req.params.id, paymentTermDays, invoiceRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.post(
@@ -123,24 +100,19 @@ export function createInvoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('invoices:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const { status } = req.body;
-        if (!status) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'status is required' });
-          return;
-        }
-        const result = await transitionInvoiceStatus(req.auth!.tenantId, req.params.id, status, invoiceRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const { status } = req.body;
+      if (!status) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'status is required' });
+        return;
       }
-    }
+      const result = await transitionInvoiceStatus(req.auth!.tenantId, req.params.id, status, invoiceRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
+        return;
+      }
+      res.json(result);
+    })
   );
 
   return router;

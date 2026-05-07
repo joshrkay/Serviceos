@@ -1,62 +1,47 @@
 import { NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
-import { getTenantId } from '@/lib/tenant';
+import {
+  apiCustomerToMobile,
+  mobileCreateBodyToApi,
+  type ApiCustomerJson,
+} from '@/lib/customer-api-adapters';
+import { serviceOsFetch } from '@/lib/service-os-api-client';
 
 export async function GET() {
-  const tenantId = await getTenantId();
-  if (!tenantId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  const supabase = createServerClient();
-  const { data, error } = await supabase
-    .from('customers')
-    .select('*')
-    .eq('tenant_id', tenantId)
-    .order('name');
-
-  if (error) {
-    console.error('Supabase error listing customers:', error.message);
-    return NextResponse.json({ error: 'Failed to load customers' }, { status: 500 });
+  const res = await serviceOsFetch('/api/customers');
+  if (!res.ok) {
+    const body = await res.text();
+    return new NextResponse(body, { status: res.status, headers: { 'Content-Type': 'application/json' } });
   }
-  return NextResponse.json(data);
+  const data = (await res.json()) as ApiCustomerJson[];
+  const mapped = Array.isArray(data) ? data.map(apiCustomerToMobile) : [];
+  return NextResponse.json(mapped);
 }
 
 export async function POST(req: Request) {
-  const tenantId = await getTenantId();
-  if (!tenantId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const body = await req.json();
-  const { name, phone, email, address } = body;
+  const { name, phone, email, address } = body as Record<string, string | undefined>;
 
-  if (!name) return NextResponse.json({ error: 'Name is required' }, { status: 400 });
-
-  const supabase = createServerClient();
-
-  // Duplicate phone check
-  if (phone) {
-    const { data: existing } = await supabase
-      .from('customers')
-      .select('id, name')
-      .eq('tenant_id', tenantId)
-      .eq('phone', phone)
-      .single();
-
-    if (existing) {
-      return NextResponse.json(
-        { error: `Phone already used by ${existing.name}`, duplicate: true },
-        { status: 409 },
-      );
-    }
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return NextResponse.json({ error: 'Name is required' }, { status: 400 });
   }
 
-  const { data, error } = await supabase
-    .from('customers')
-    .insert({ tenant_id: tenantId, name, phone, email, address })
-    .select()
-    .single();
+  const payload = mobileCreateBodyToApi({
+    name: name.trim(),
+    phone: phone?.trim(),
+    email: email?.trim(),
+    address: address?.trim(),
+  });
 
-  if (error) {
-    console.error('Supabase error creating customer:', error.message);
-    return NextResponse.json({ error: 'Failed to create customer' }, { status: 500 });
+  const res = await serviceOsFetch('/api/customers', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    return new NextResponse(errBody, { status: res.status, headers: { 'Content-Type': 'application/json' } });
   }
-  return NextResponse.json(data, { status: 201 });
+
+  const created = (await res.json()) as ApiCustomerJson;
+  return NextResponse.json(apiCustomerToMobile(created), { status: 201 });
 }

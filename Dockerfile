@@ -36,5 +36,6 @@ COPY packages/web/package.json packages/web/
 RUN npm ci --omit=dev --ignore-scripts
 COPY --from=api-build /app/packages/api/dist packages/api/dist
 COPY --from=api-build /app/packages/api/package.json packages/api/
+COPY --from=web-build /app/packages/web/dist packages/web/dist
 EXPOSE 3000
 CMD ["node", "packages/api/dist/src/index.js"]
