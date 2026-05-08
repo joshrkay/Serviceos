@@ -397,6 +397,12 @@ class InMemoryWebhookEventRepository {
 export function createApp(): express.Express {
   const app = express();
 
+  // Behind Railway / Cloudflare / any reverse proxy: trust the immediate
+  // hop so req.ip + X-Forwarded-For resolve correctly. Without this,
+  // express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on every
+  // request (500 with empty body) because it can't identify the real client.
+  app.set('trust proxy', 1);
+
   // Stripe webhook needs the raw body for signature verification.
   // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
   // and the global json() middleware skips it (body-parser sets req._body = true).
