@@ -139,10 +139,20 @@ describe('createWhisperTranscriptionProvider', () => {
     expect(provider).toBeInstanceOf(WhisperTranscriptionProvider);
   });
 
-  it('returns DevNoopTranscriptionProvider and warns when OPENAI_API_KEY is missing', () => {
+  it('returns DevNoopTranscriptionProvider and warns when neither key is set', () => {
     const warnMock = vi.fn();
     const provider = createWhisperTranscriptionProvider({}, { logger: { warn: warnMock } });
     expect(provider).toBeInstanceOf(DevNoopTranscriptionProvider);
-    expect(warnMock).toHaveBeenCalledWith(expect.stringContaining('OPENAI_API_KEY missing'));
+    expect(warnMock).toHaveBeenCalledWith(expect.stringContaining('AI_PROVIDER_API_KEY'));
+  });
+
+  it('falls back to AI_PROVIDER_API_KEY when OPENAI_API_KEY is missing', () => {
+    const warnMock = vi.fn();
+    const provider = createWhisperTranscriptionProvider(
+      { AI_PROVIDER_API_KEY: 'sk-test-fallback' },
+      { logger: { warn: warnMock } },
+    );
+    expect(provider).not.toBeInstanceOf(DevNoopTranscriptionProvider);
+    expect(warnMock).not.toHaveBeenCalled();
   });
 });

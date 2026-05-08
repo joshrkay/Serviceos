@@ -338,27 +338,34 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 }
 
 /**
- * P0-027 factory — returns the hardened Whisper provider when the OpenAI key
- * is configured, otherwise returns the dev no-op (NOT a fake-data mock) and
- * logs a warning so missing-key in production is loud.
+ * P0-027 factory — returns the hardened Whisper provider when an OpenAI-
+ * compatible key is configured, otherwise returns the dev no-op (NOT a
+ * fake-data mock) and logs a warning so missing-key in production is loud.
+ *
+ * Falls back to AI_PROVIDER_API_KEY (the documented production secret in
+ * shared/config.ts) when OPENAI_API_KEY is unset, so deployments that only
+ * set the canonical key still get real transcription instead of placeholder
+ * text.
  *
  * Wiring into `app.ts` is owed to P0-023 (Wave 1C).
  */
 export function createWhisperTranscriptionProvider(
-  env: { OPENAI_API_KEY?: string; WHISPER_MODEL?: string },
+  env: { OPENAI_API_KEY?: string; AI_PROVIDER_API_KEY?: string; WHISPER_MODEL?: string },
   deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
-  if (env.OPENAI_API_KEY) {
+  const apiKey = env.OPENAI_API_KEY ?? env.AI_PROVIDER_API_KEY;
+  if (apiKey) {
     return new WhisperTranscriptionProvider(
-      env.OPENAI_API_KEY,
+      apiKey,
       env.WHISPER_MODEL ?? 'whisper-1',
       deps.fetchImpl
     );
   }
   logger.warn(
-    '[transcription] OPENAI_API_KEY missing — using DevNoopTranscriptionProvider. ' +
-      'STT will return placeholder text. Set OPENAI_API_KEY in production.'
+    '[transcription] Neither OPENAI_API_KEY nor AI_PROVIDER_API_KEY set — ' +
+      'using DevNoopTranscriptionProvider. STT will return placeholder text. ' +
+      'Set AI_PROVIDER_API_KEY in production.'
   );
   return new DevNoopTranscriptionProvider();
 }

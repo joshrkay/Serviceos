@@ -1991,23 +1991,52 @@ export class TwilioGatherAdapter {
    */
   private async runSummary(session: VoiceSession): Promise<void> {
     const durationMs = Date.now() - session.createdAt.getTime();
-    try {
+
+    // Skip when the caller hung up before speaking — there's nothing to
+    // summarize and the LLM call wastes tokens generating filler. The
+    // outcome stamp below still runs.
+    if (session.transcript.length === 0) {
+      logger.info('runSummary: skipping (empty transcript)', {
+        sessionId: session.id,
+      });
+    } else {
       const intentDetected = session.machine.currentContext.currentIntent;
-      await summarizeSession({
-        tenantId: session.tenantId,
-        sessionId: session.id,
-        transcript: session.transcript,
-        proposalIds: session.proposalIds,
-        durationMs,
-        gateway: this.deps.gateway,
-        ...(intentDetected ? { intentDetected } : {}),
-        ...(this.deps.pool ? { pool: this.deps.pool } : {}),
-      });
-    } catch (err) {
-      logger.warn('summarizeSession failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
+      const SUMMARY_RETRY_DELAYS_MS = [200, 800];
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt <= SUMMARY_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          await summarizeSession({
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            transcript: session.transcript,
+            proposalIds: session.proposalIds,
+            durationMs,
+            gateway: this.deps.gateway,
+            ...(intentDetected ? { intentDetected } : {}),
+            ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+          });
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < SUMMARY_RETRY_DELAYS_MS.length) {
+            await new Promise((r) => {
+              const t = setTimeout(r, SUMMARY_RETRY_DELAYS_MS[attempt]);
+              if (typeof t.unref === 'function') t.unref();
+            });
+          }
+        }
+      }
+      if (lastErr) {
+        // After bounded retries, don't bubble — the call has ended and the
+        // outcome stamp + audit log carry the operationally important data.
+        // Logged at warn so on-call sees a visible signal in metrics.
+        logger.warn('summarizeSession failed after retries', {
+          error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+          sessionId: session.id,
+          attempts: SUMMARY_RETRY_DELAYS_MS.length + 1,
+        });
+      }
     }
 
     const callSid = session.machine.currentContext.callSid;
