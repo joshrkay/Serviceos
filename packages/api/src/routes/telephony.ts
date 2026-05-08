@@ -97,6 +97,32 @@ export interface TelephonyRouterDeps {
    * env read flapping mid-call).
    */
   mediaStreamsEnabled?: boolean;
+  /**
+   * Optional health snapshot factory. When set, mounts a public
+   * `GET /health` route that returns which voice capabilities are
+   * wired (TTS, STT, recording, delivery, etc.). Surfaces booleans
+   * only — no secret values — so it's safe to leave unauthenticated.
+   * Useful for verifying a Railway deploy without grepping logs.
+   */
+  getHealth?: () => TelephonyHealthReport;
+}
+
+export interface TelephonyHealthReport {
+  ok: boolean;
+  capabilities: {
+    mediaStreams: boolean;
+    tts: boolean;
+    stt: boolean;
+    recording: boolean;
+    messageDelivery: boolean;
+    database: boolean;
+    llmGateway: boolean;
+  };
+  config: {
+    publicBaseUrl: string | null;
+    businessName: string | null;
+  };
+  warnings: string[];
 }
 
 export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
@@ -131,6 +157,24 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         deps.recording.options ?? {},
       ),
     );
+  }
+
+  // Public health endpoint — registered BEFORE the body parser and
+  // signature middleware below so it accepts an unsigned GET. Returns
+  // booleans only; safe to leave unauthenticated. Useful after a deploy
+  // to confirm which voice capabilities are wired.
+  if (deps.getHealth) {
+    const getHealth = deps.getHealth;
+    router.get('/health', (_req: Request, res: Response) => {
+      try {
+        res.status(200).json(getHealth());
+      } catch (err) {
+        logger.error('telephony/health: failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(500).json({ ok: false, error: 'health_check_failed' });
+      }
+    });
   }
 
   // Twilio sends application/x-www-form-urlencoded. The global
