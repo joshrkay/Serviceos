@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/api/package.json packages/api/
 COPY packages/web/package.json packages/web/
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts --no-cache
 
 # Build Web
 FROM base AS web-build
