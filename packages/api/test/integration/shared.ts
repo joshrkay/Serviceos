@@ -7,7 +7,11 @@ let sharedPool: Pool | null = null;
 
 export async function getSharedTestDb(): Promise<Pool> {
   if (!sharedContainer || !sharedPool) {
-    const image = process.env.POSTGRES_IMAGE || 'postgres:16-alpine';
+    // pgvector/pgvector:pg16 is the canonical Postgres 16 image with the
+    // `vector` extension preloaded — required by migration 062
+    // (knowledge_chunks). The plain `postgres:16-alpine` image lacks the
+    // extension and fails `CREATE EXTENSION vector` at schema apply time.
+    const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
     sharedContainer = await new PostgreSqlContainer(image)
       .withDatabase('serviceos_test')
       .start();
