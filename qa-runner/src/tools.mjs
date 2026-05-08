@@ -170,10 +170,27 @@ export async function runDbCheck({ testId, check, artifactDir }) {
     const artifactPath = path.join(artifactDir, `${testId}-${ts()}.txt`);
     await fs.mkdir(path.dirname(artifactPath), { recursive: true });
     await fs.writeFile(artifactPath, `CMD: ${finalCmd}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}\n`);
+
+    // When expect_count is set, extract the last integer from stdout
+    // (psql format: header / dashes / value / row count) and compare.
+    let countStatus = 'pass';
+    let countNotes = '';
+    if (check.expect_count !== undefined) {
+      const match = stdout.match(/^\s*(\d+)\s*$/m);
+      const actual = match ? parseInt(match[1], 10) : null;
+      if (actual === null) {
+        countStatus = 'blocked';
+        countNotes = `Could not parse count from output: ${stdout.trim().slice(0, 200)}`;
+      } else if (actual !== check.expect_count) {
+        countStatus = 'fail';
+        countNotes = `Expected count ${check.expect_count}, got ${actual}`;
+      }
+    }
+
     return {
-      status: 'pass',
+      status: countStatus,
       evidence_path: artifactPath,
-      notes: '',
+      notes: countNotes,
     };
   } catch (error) {
     const artifactPath = path.join(artifactDir, `${testId}-${ts()}-error.txt`);

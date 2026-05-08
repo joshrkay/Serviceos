@@ -91,6 +91,7 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/customers",
+            "no_auth": true,
             "expect_statuses": [
               401,
               403
@@ -112,6 +113,7 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/estimates",
+            "no_auth": true,
             "expect_statuses": [
               401,
               403
@@ -1114,6 +1116,7 @@
           },
           "db_check": {
             "query": "RESET app.current_tenant_id; SELECT COUNT(*) AS c FROM customers;",
+            "expect_count": 0,
             "required": false
           }
         },
@@ -1134,6 +1137,7 @@
           },
           "db_check": {
             "query": "SET app.current_tenant_id = '00000000-0000-0000-0000-000000000000'; SELECT COUNT(*) AS c FROM estimates;",
+            "expect_count": 0,
             "required": false
           }
         }
