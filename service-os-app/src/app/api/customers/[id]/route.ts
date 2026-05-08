@@ -1,44 +1,44 @@
 import { NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
-import { getTenantId } from '@/lib/tenant';
+import {
+  apiCustomerToMobile,
+  mobilePatchBodyToApi,
+  type ApiCustomerJson,
+} from '@/lib/customer-api-adapters';
+import { serviceOsFetch } from '@/lib/service-os-api-client';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const tenantId = await getTenantId();
-  if (!tenantId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const { id } = await params;
-  const supabase = createServerClient();
-  const { data, error } = await supabase
-    .from('customers')
-    .select('*')
-    .eq('tenant_id', tenantId)
-    .eq('id', id)
-    .single();
-
-  if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  return NextResponse.json(data);
+  const res = await serviceOsFetch(`/api/customers/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    const body = await res.text();
+    return new NextResponse(body, { status: res.status, headers: { 'Content-Type': 'application/json' } });
+  }
+  const data = (await res.json()) as ApiCustomerJson;
+  return NextResponse.json(apiCustomerToMobile(data));
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const tenantId = await getTenantId();
-  if (!tenantId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const { id } = await params;
   const body = await req.json();
-  const { name, phone, email, address } = body;
+  const { name, phone, email, address } = body as Record<string, string | undefined>;
 
-  const supabase = createServerClient();
-  const { data, error } = await supabase
-    .from('customers')
-    .update({ name, phone, email, address, updated_at: new Date().toISOString() })
-    .eq('tenant_id', tenantId)
-    .eq('id', id)
-    .select()
-    .single();
+  const payload = mobilePatchBodyToApi({
+    name,
+    phone,
+    email,
+    address,
+  });
 
-  if (error) {
-    console.error('Supabase error updating customer:', error.message);
-    return NextResponse.json({ error: 'Failed to update customer' }, { status: 500 });
+  const res = await serviceOsFetch(`/api/customers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    return new NextResponse(errBody, { status: res.status, headers: { 'Content-Type': 'application/json' } });
   }
-  return NextResponse.json(data);
+
+  const updated = (await res.json()) as ApiCustomerJson;
+  return NextResponse.json(apiCustomerToMobile(updated));
 }

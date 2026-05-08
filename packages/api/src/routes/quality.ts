@@ -1,7 +1,8 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse, ValidationError } from '../shared/errors';
+import { ValidationError } from '../shared/errors';
 import {
   QualityMetricsRepository,
   evaluateBetaReadiness,
@@ -84,173 +85,143 @@ async function findFilteredEstimateIds(
 export function createQualityRouter({ metricsRepo, approvalRepo, deltaRepo }: QualityRouterDeps): Router {
   const router = Router();
 
-  // Get latest quality metrics
   router.get(
     '/metrics',
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const metrics = await metricsRepo.getLatestMetrics(req.auth!.tenantId);
-        if (!metrics) {
-          res.json({ message: 'No metrics available yet' });
-          return;
-        }
-        res.json(metrics);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const metrics = await metricsRepo.getLatestMetrics(req.auth!.tenantId);
+      if (!metrics) {
+        res.json({ message: 'No metrics available yet' });
+        return;
       }
-    }
+      res.json(metrics);
+    })
   );
 
-  // Get beta readiness assessment
   router.get(
     '/beta-readiness',
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const metrics = await metricsRepo.getLatestMetrics(req.auth!.tenantId);
-        if (!metrics) {
-          res.json({
-            isReady: false,
-            message: 'Insufficient data — no quality metrics recorded yet',
-            checks: [],
-            overallScore: 0,
-          });
-          return;
-        }
-        const readiness = evaluateBetaReadiness(metrics);
-        res.json(readiness);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const metrics = await metricsRepo.getLatestMetrics(req.auth!.tenantId);
+      if (!metrics) {
+        res.json({
+          isReady: false,
+          message: 'Insufficient data — no quality metrics recorded yet',
+          checks: [],
+          overallScore: 0,
+        });
+        return;
       }
-    }
+      const readiness = evaluateBetaReadiness(metrics);
+      res.json(readiness);
+    })
   );
 
-  // Get metric time series
   router.get(
     '/metrics/:metricName',
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const startDate = req.query.startDate
-          ? new Date(req.query.startDate as string)
-          : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // default 30 days
-        const endDate = req.query.endDate
-          ? new Date(req.query.endDate as string)
-          : new Date();
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const startDate = req.query.startDate
+        ? new Date(req.query.startDate as string)
+        : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const endDate = req.query.endDate
+        ? new Date(req.query.endDate as string)
+        : new Date();
 
-        const series = await metricsRepo.getMetricTimeSeries(
-          req.auth!.tenantId,
-          req.params.metricName,
-          startDate,
-          endDate
-        );
-        res.json(series);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+      const series = await metricsRepo.getMetricTimeSeries(
+        req.auth!.tenantId,
+        req.params.metricName,
+        startDate,
+        endDate
+      );
+      res.json(series);
+    })
   );
 
-  // Vertical-aware quality metrics endpoint
   router.get(
     '/vertical/:verticalType/metrics',
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const filters = parseVerticalAnalyticsFilters(req);
-        const estimateIds = await findFilteredEstimateIds(req.auth!.tenantId, approvalRepo, filters);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const filters = parseVerticalAnalyticsFilters(req);
+      const estimateIds = await findFilteredEstimateIds(req.auth!.tenantId, approvalRepo, filters);
 
-        const metrics = await computeVerticalQualityMetrics(
-          req.auth!.tenantId,
-          filters.verticalType,
-          approvalRepo,
-          deltaRepo,
-          estimateIds,
-          {
-            serviceCategory: filters.serviceCategory,
-            promptVersion: filters.promptVersion,
-            periodStart: filters.periodStart,
-            periodEnd: filters.periodEnd,
-          }
-        );
+      const metrics = await computeVerticalQualityMetrics(
+        req.auth!.tenantId,
+        filters.verticalType,
+        approvalRepo,
+        deltaRepo,
+        estimateIds,
+        {
+          serviceCategory: filters.serviceCategory,
+          promptVersion: filters.promptVersion,
+          periodStart: filters.periodStart,
+          periodEnd: filters.periodEnd,
+        }
+      );
 
-        res.json({
-          hasData: metrics.sampleSize > 0,
-          message:
-            metrics.sampleSize > 0
-              ? 'Metrics computed successfully'
-              : 'No estimate analytics data found for the requested filters',
-          metrics,
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+      res.json({
+        hasData: metrics.sampleSize > 0,
+        message:
+          metrics.sampleSize > 0
+            ? 'Metrics computed successfully'
+            : 'No estimate analytics data found for the requested filters',
+        metrics,
+      });
+    })
   );
 
-  // Vertical-aware acceleration benchmark endpoint
   router.get(
     '/vertical/:verticalType/benchmark',
     requireAuth,
     requireTenant,
     requirePermission('estimates:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const filters = parseVerticalAnalyticsFilters(req);
-        const estimateIds = await findFilteredEstimateIds(req.auth!.tenantId, approvalRepo, filters);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const filters = parseVerticalAnalyticsFilters(req);
+      const estimateIds = await findFilteredEstimateIds(req.auth!.tenantId, approvalRepo, filters);
 
-        const metrics = await computeVerticalQualityMetrics(
-          req.auth!.tenantId,
-          filters.verticalType,
-          approvalRepo,
-          deltaRepo,
-          estimateIds,
-          {
-            serviceCategory: filters.serviceCategory,
-            promptVersion: filters.promptVersion,
-            periodStart: filters.periodStart,
-            periodEnd: filters.periodEnd,
-          }
-        );
+      const metrics = await computeVerticalQualityMetrics(
+        req.auth!.tenantId,
+        filters.verticalType,
+        approvalRepo,
+        deltaRepo,
+        estimateIds,
+        {
+          serviceCategory: filters.serviceCategory,
+          promptVersion: filters.promptVersion,
+          periodStart: filters.periodStart,
+          periodEnd: filters.periodEnd,
+        }
+      );
 
-        const manualEstimateTimeMs = req.query.manualEstimateTimeMs
-          ? Number(req.query.manualEstimateTimeMs)
-          : undefined;
-        const aiAssistedEstimateTimeMs = req.query.aiAssistedEstimateTimeMs
-          ? Number(req.query.aiAssistedEstimateTimeMs)
-          : undefined;
+      const manualEstimateTimeMs = req.query.manualEstimateTimeMs
+        ? Number(req.query.manualEstimateTimeMs)
+        : undefined;
+      const aiAssistedEstimateTimeMs = req.query.aiAssistedEstimateTimeMs
+        ? Number(req.query.aiAssistedEstimateTimeMs)
+        : undefined;
 
-        const benchmark = computeAccelerationBenchmark(req.auth!.tenantId, filters.verticalType, metrics, {
-          manualEstimateTimeMs,
-          aiAssistedEstimateTimeMs,
-        });
+      const benchmark = computeAccelerationBenchmark(req.auth!.tenantId, filters.verticalType, metrics, {
+        manualEstimateTimeMs,
+        aiAssistedEstimateTimeMs,
+      });
 
-        res.json({
-          hasData: benchmark.sampleSize > 0,
-          message:
-            benchmark.sampleSize > 0
-              ? 'Benchmark computed successfully'
-              : 'No estimate analytics data found for the requested filters',
-          benchmark,
-        });
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+      res.json({
+        hasData: benchmark.sampleSize > 0,
+        message:
+          benchmark.sampleSize > 0
+            ? 'Benchmark computed successfully'
+            : 'No estimate analytics data found for the requested filters',
+        benchmark,
+      });
+    })
   );
 
   return router;

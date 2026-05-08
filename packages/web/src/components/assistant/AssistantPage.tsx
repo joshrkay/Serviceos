@@ -247,7 +247,23 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
         {/* Proposal card */}
         {msg.proposal && (
           <div className="mt-2">
-            <AIProposalCard proposal={msg.proposal} />
+            <AIProposalCard
+              proposal={msg.proposal}
+              onApprove={async () => {
+                try {
+                  // Call the proposal approval endpoint
+                  const response = await fetch(`/api/proposals/${msg.proposal!.id}/approve`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                  });
+                  if (!response.ok) {
+                    console.error('Failed to approve proposal:', response.statusText);
+                  }
+                } catch (error) {
+                  console.error('Error approving proposal:', error);
+                }
+              }}
+            />
           </div>
         )}
 

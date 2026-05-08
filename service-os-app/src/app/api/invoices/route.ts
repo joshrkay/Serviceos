@@ -1,3 +1,9 @@
+/**
+ * Still uses Supabase directly: packages/api createInvoiceSchema requires jobId,
+ * invoiceNumber, and lineItems — the mobile UI posts a simplified shape
+ * (customer_id, amount_cents, description). Consolidate when a thin
+ * “draft invoice” API exists on the Express service.
+ */
 import { NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { getTenantId } from '@/lib/tenant';

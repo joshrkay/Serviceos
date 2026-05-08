@@ -14,7 +14,9 @@ dist/
 *.tsbuildinfo
 coverage/
 
-
+# Training corpus pipeline (local venv)
+serviceos_training/.venv/
+serviceos_training/.pytest_cache/
 
 # Playwright
 /playwright-report/

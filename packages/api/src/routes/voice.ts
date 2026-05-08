@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import {
   createVoiceRecording,
@@ -198,7 +199,7 @@ export function createVoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
-    async (req: AuthenticatedRequest, res: Response) => {
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = req.body as CreateVoiceRecordingBody;
       if (!body?.audioUrl) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'audioUrl is required' });
@@ -240,7 +241,7 @@ export function createVoiceRouter(
         recording,
         queueMessageId,
       });
-    }
+    })
   );
 
   router.get(
@@ -248,14 +249,14 @@ export function createVoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('files:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const recording = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
       if (!recording) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
         return;
       }
       res.json(recording);
-    }
+    })
   );
 
   router.post(
@@ -263,7 +264,7 @@ export function createVoiceRouter(
     requireAuth,
     requireTenant,
     requirePermission('files:upload'),
-    async (req: AuthenticatedRequest, res: Response) => {
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = req.body as RetryTranscriptionBody;
       if (!body?.audioUrl) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'audioUrl is required' });
@@ -293,7 +294,7 @@ export function createVoiceRouter(
         recording: updated,
         queueMessageId,
       });
-    }
+    })
   );
 
   return router;
