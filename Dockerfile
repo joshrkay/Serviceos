@@ -11,7 +11,7 @@ RUN npm ci --ignore-scripts
 FROM base AS web-build
 COPY tsconfig.base.json ./
 COPY packages/web/ packages/web/
-RUN cd packages/web && npx vite build
+RUN cd packages/web && rm -rf dist && npx vite build --outDir dist --emptyOutDir
 
 # Build API
 FROM base AS api-build
