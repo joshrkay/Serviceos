@@ -2403,6 +2403,16 @@ export const MIGRATIONS = {
       ADD CONSTRAINT tenant_settings_region_format_check
         CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$');
   `,
+
+  '089_drop_vertical_packs_type_check': `
+    -- The vertical_packs.type column was originally CHECK (type IN ('hvac',
+    -- 'plumbing')) but the registry stores packId values ('hvac-v1',
+    -- 'plumbing-v1') in this column, so seedCanonicalVerticalPacks has been
+    -- silently failing in production (errors swallowed by .catch()). Drop the
+    -- stale check; UNIQUE on type still enforces one row per packId.
+    ALTER TABLE vertical_packs
+      DROP CONSTRAINT IF EXISTS vertical_packs_type_check;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
