@@ -2107,6 +2107,12 @@ export class TwilioGatherAdapter {
     }
     if (session.proposalIds.length > 0) return 'completed';
     if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
+    // No escalation, no proposal, no classified intent. Distinguish "caller
+    // hung up before saying anything" (dropped) from "caller spoke but we
+    // couldn't classify" (no_intent) by whether any caller turns landed in
+    // the transcript.
+    const hadCallerSpeech = session.transcript.some((line) => line.startsWith('caller:'));
+    if (!hadCallerSpeech) return 'dropped';
     return 'no_intent';
   }
 }
