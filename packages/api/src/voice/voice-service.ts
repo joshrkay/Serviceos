@@ -31,6 +31,8 @@ export interface VoiceRecording {
   tenantId: string;
   fileId: string;
   conversationId?: string;
+  /** Twilio CallSid — set for inbound call recordings, absent for uploads. */
+  callSid?: string;
   status: TranscriptionStatus;
   transcript?: string;
   transcriptMetadata?: Record<string, unknown>;
@@ -74,6 +76,15 @@ export interface VoiceRepository {
   stampOutcome?(
     tenantId: string,
     id: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null>;
+  /**
+   * Convenience variant that looks up by callSid instead of row UUID.
+   * Optional; falls back to no-op when absent.
+   */
+  stampOutcomeByCallSid?(
+    tenantId: string,
+    callSid: string,
     outcome: CallOutcome,
   ): Promise<VoiceRecording | null>;
   /**
@@ -235,6 +246,22 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     rec.updatedAt = new Date();
     this.recordings.set(id, rec);
     return { ...rec };
+  }
+
+  async stampOutcomeByCallSid(
+    tenantId: string,
+    callSid: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    for (const [, rec] of this.recordings) {
+      if (rec.tenantId === tenantId && rec.callSid === callSid) {
+        rec.outcome = outcome;
+        rec.updatedAt = new Date();
+        this.recordings.set(rec.id, rec);
+        return { ...rec };
+      }
+    }
+    return null;
   }
 }
 

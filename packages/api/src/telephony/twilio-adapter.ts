@@ -69,6 +69,7 @@ import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
+import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -179,6 +180,11 @@ export interface TwilioAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * When wired, the call outcome is stamped on the voice_recordings row
+   * at session end (by callSid). Without this, analytics remain blind.
+   */
+  voiceRepo?: VoiceRepository;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -1987,9 +1993,6 @@ export class TwilioGatherAdapter {
     const durationMs = Date.now() - session.createdAt.getTime();
     try {
       const intentDetected = session.machine.currentContext.currentIntent;
-      // recordingId intentionally omitted: voice_recordings rows are
-      // created by the P8-014 recording webhook. Until that lands,
-      // summaries persist with NULL call_id.
       await summarizeSession({
         tenantId: session.tenantId,
         sessionId: session.id,
@@ -2006,5 +2009,32 @@ export class TwilioGatherAdapter {
         sessionId: session.id,
       });
     }
+
+    const callSid = session.machine.currentContext.callSid;
+    if (this.deps.voiceRepo?.stampOutcomeByCallSid && callSid) {
+      try {
+        await this.deps.voiceRepo.stampOutcomeByCallSid(
+          session.tenantId,
+          callSid,
+          this.deriveCallOutcome(session),
+        );
+      } catch (err) {
+        logger.warn('stampOutcomeByCallSid failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid,
+        });
+      }
+    }
+  }
+
+  private deriveCallOutcome(session: VoiceSession): CallOutcome {
+    const ctx = session.machine.currentContext;
+    if (ctx.escalationReason) {
+      if (ctx.escalationReason.startsWith('callback_required')) return 'callback_required';
+      return 'escalated_to_human';
+    }
+    if (session.proposalIds.length > 0) return 'completed';
+    if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
+    return 'no_intent';
   }
 }
