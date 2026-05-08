@@ -39,6 +39,8 @@ import {
 import { TAU_INT } from './transitions';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
+import type { VoiceSessionRepository } from '../../../voice/voice-session';
+import { deriveCallOutcome } from './outcome-mapper';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -86,6 +88,13 @@ export interface InAppAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B2 — persistent outcome stamping. When wired, the adapter inserts a
+   * voice_sessions row on session start and stamps the typed CallOutcome
+   * + ended_reason on session end (before store.delete()). Optional so
+   * pre-existing test fixtures continue to work without DI'ing a stub.
+   */
+  voiceSessionRepo?: VoiceSessionRepository;
 }
 
 export interface StartSessionResult {
@@ -203,6 +212,21 @@ export class InAppVoiceAdapter {
   async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
     const session = this.deps.store.create(tenantId, 'inapp');
     const convId = conversationId ?? session.id;
+
+    // B2: persist a voice_sessions row at session start. Fire-and-forget
+    // so a transient repo error never blocks the call.
+    if (this.deps.voiceSessionRepo) {
+      void this.deps.voiceSessionRepo
+        .create({
+          id: session.id,
+          tenantId,
+          channel: 'inapp_voice',
+          state: session.machine.currentState,
+        })
+        .catch(() => {
+          /* swallow — outcome stamping is best-effort */
+        });
+    }
 
     // Drive: idle → greeting → identifying. We treat the in-app caller
     // as already identified (they're authenticated via the API client),
@@ -470,9 +494,43 @@ export class InAppVoiceAdapter {
         /* swallow — summary is best-effort */
       });
     }
+    // B2: derive + stamp the typed terminal outcome BEFORE delete().
+    await this.finalizeTerminalOutcome(session, 'session_ended');
     session.events.emit('voice-event', { type: 'ended', reason: 'manual_end' });
     // store.delete() also drops the per-session lock entry.
     this.deps.store.delete(sessionId);
+  }
+
+  /**
+   * B2 — compute the typed CallOutcome from FSM state, stash it on the
+   * session, and persist to voice_sessions. Idempotent: a second call
+   * is a no-op because markEnded uses `ended_at IS NULL` as a guard.
+   */
+  private async finalizeTerminalOutcome(
+    session: VoiceSession,
+    endedReason: string,
+  ): Promise<void> {
+    if (session.terminalOutcome) return;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = endedReason;
+    if (this.deps.voiceSessionRepo) {
+      try {
+        await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+          endedAt: new Date(),
+          endedReason,
+          outcome,
+        });
+      } catch {
+        /* swallow — outcome stamping is best-effort */
+      }
+    }
   }
 
   /**

@@ -57,6 +57,8 @@ import {
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import { deriveCallOutcome } from '../ai/agents/customer-calling/outcome-mapper';
+import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
@@ -179,6 +181,13 @@ export interface TwilioAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B2 — persistent outcome stamping. When wired, the adapter inserts a
+   * voice_sessions row on session start and stamps the typed CallOutcome
+   * + ended_reason on session end (before store.delete()). Optional so
+   * existing test fixtures continue to work without DI'ing a stub.
+   */
+  voiceSessionRepo?: VoiceSessionRepository;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -444,7 +453,27 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    this.persistVoiceSessionRow(session, opts.callSid);
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+  }
+
+  /**
+   * B2 — fire-and-forget insert into voice_sessions. Best-effort: a repo
+   * error never blocks call setup.
+   */
+  private persistVoiceSessionRow(session: VoiceSession, callSid: string | undefined): void {
+    if (!this.deps.voiceSessionRepo) return;
+    void this.deps.voiceSessionRepo
+      .create({
+        id: session.id,
+        tenantId: session.tenantId,
+        channel: 'voice_inbound',
+        ...(callSid ? { callSid } : {}),
+        state: session.machine.currentState,
+      })
+      .catch(() => {
+        /* swallow — outcome stamping is best-effort */
+      });
   }
 
   /**
@@ -654,6 +683,7 @@ export class TwilioGatherAdapter {
     }
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      await this.finalizeTerminatedSession(session, sideEffectsAll, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -692,6 +722,7 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    this.persistVoiceSessionRow(session, opts.callSid);
 
     // P18-001: record the caller-id (or "" when blocked/withheld) so
     // the create_customer voice flow can use it as the new customer's
@@ -832,6 +863,7 @@ export class TwilioGatherAdapter {
     //    captures even calls that never reached intent_capture.
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      await this.finalizeTerminatedSession(session, expanded, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1093,11 +1125,11 @@ export class TwilioGatherAdapter {
    * the end-of-call summary in the background. Centralizes the
    * end-of-handler wrap-up shared by handleGather and handleInbound.
    */
-  private finalizeTwiml(
+  private async finalizeTwiml(
     session: VoiceSession,
     sideEffects: SideEffect[],
     sessionId: string,
-  ): string {
+  ): Promise<string> {
     // P8-013: when a notify_oncall side effect produced a <Dial>
     // transfer descriptor, we hand back that TwiML directly instead
     // of looping into another <Gather>. Twilio will POST the dial
@@ -1130,6 +1162,7 @@ export class TwilioGatherAdapter {
     }
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      await this.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1869,6 +1902,49 @@ export class TwilioGatherAdapter {
    * Persist an end-of-call summary to call_summaries. Best-effort —
    * failures are logged but never bubble out (the call already ended).
    */
+  /**
+   * B2 — derive the typed CallOutcome from FSM state, stash it on the
+   * session, and persist to voice_sessions. Called from every site that
+   * detects `terminated`. Idempotent: a second call no-ops because both
+   * `session.terminalOutcome` and the repo's `ended_at IS NULL` guard
+   * short-circuit a duplicate stamp.
+   *
+   * Public so the mediastream adapter can delegate finalize through the
+   * twilio adapter rather than DI'ing voiceSessionRepo separately.
+   */
+  async finalizeTerminatedSession(
+    session: VoiceSession,
+    sideEffects: ReadonlyArray<SideEffect>,
+    fallbackReason: string,
+  ): Promise<void> {
+    if (session.terminalOutcome) return;
+    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
+    const reason =
+      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
+        ? endSessionEffect.payload.reason
+        : undefined) ?? fallbackReason;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason: reason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = reason;
+    if (this.deps.voiceSessionRepo) {
+      try {
+        await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+          endedAt: new Date(),
+          endedReason: reason,
+          outcome,
+        });
+      } catch {
+        /* swallow — outcome stamping is best-effort */
+      }
+    }
+  }
+
   private async runSummary(session: VoiceSession): Promise<void> {
     const durationMs = Date.now() - session.createdAt.getTime();
     try {

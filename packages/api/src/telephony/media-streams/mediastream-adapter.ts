@@ -120,6 +120,13 @@ export interface MediaStreamAdapterDeps {
    * Override for tests to keep counters isolated between cases.
    */
   connectionRegistry?: ConnectionRegistry;
+  /**
+   * B2 — invoked from `handleClose` so the host (typically TwilioGatherAdapter)
+   * can derive + persist the typed CallOutcome to voice_sessions BEFORE
+   * the WS tears down. Best-effort: errors are swallowed by the host.
+   * Optional — when omitted, the close path is unchanged.
+   */
+  finalizeOnClose?: (session: VoiceSession, reason: string) => Promise<void>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -168,6 +175,18 @@ const TWILIO_MAX_UNACKED_MARKS = 3;
 const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 /** Slow-consumer EWMA send latency threshold. */
 const TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS = 250;
+
+/**
+ * B2 — map handleClose's `reason` into a CallOutcome-compatible
+ * endedReason recognised by `deriveCallOutcome`. Anything that isn't a
+ * known mapper input falls through to `caller_hangup` so we still get a
+ * typed outcome rather than the defensive `failed`.
+ */
+function mapCloseReasonToFinalize(reason: string): string {
+  if (reason === 'audio_idle_timeout') return 'idle_timeout';
+  if (reason === 'end_session') return 'session_ended';
+  return 'caller_hangup';
+}
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
@@ -557,6 +576,18 @@ export class TwilioMediaStreamAdapter {
   private handleClose(reason: string): void {
     if (this.state.closed) return;
     this.state.closed = true;
+    // B2: fire-and-forget the outcome stamp BEFORE we tear down. The
+    // host's `finalizeOnClose` is responsible for any DB writes and
+    // swallows its own errors, so we just need to invoke it.
+    if (this.deps.finalizeOnClose && this.state.session) {
+      const session = this.state.session;
+      const finalizeReason = mapCloseReasonToFinalize(reason);
+      void this.deps
+        .finalizeOnClose(session, finalizeReason)
+        .catch(() => {
+          /* swallow — outcome stamping is best-effort */
+        });
+    }
     if (this.state.audioIdleTimer) {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;

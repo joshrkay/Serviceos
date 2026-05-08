@@ -204,6 +204,33 @@ describe('transcript-ingestion-worker', () => {
     expect(stampSpy).not.toHaveBeenCalled();
   });
 
+  it('does NOT call stampOutcome when payload omits outcome (B2 no-op path)', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const stampSpy = vi.spyOn(voiceRepo, 'stampOutcome');
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+    });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        transcript: ['agent: hi', 'caller: thanks'],
+        // outcome intentionally omitted
+      }),
+      logger,
+    );
+
+    expect(stampSpy).not.toHaveBeenCalled();
+  });
+
   it('stamps voice_recordings.outcome when provided', async () => {
     const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
     const voiceRepo = new InMemoryVoiceRepository();

@@ -167,6 +167,8 @@ import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
+import { InMemoryVoiceSessionRepository } from './voice/voice-session';
+import { PgVoiceSessionRepository } from './voice/pg-voice-session';
 import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
@@ -701,6 +703,7 @@ export function createApp(): express.Express {
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
+  const voiceSessionRepo   = pool ? new PgVoiceSessionRepository(pool)   : new InMemoryVoiceSessionRepository();
   const technicianLocationPingRepo = pool
     ? new PgTechnicianLocationPingRepository(pool)
     : new InMemoryTechnicianLocationPingRepository();
@@ -1412,6 +1415,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voiceSessionRepo,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1539,6 +1543,13 @@ export function createApp(): express.Express {
                         ...(session.machine.currentContext.currentIntent
                           ? { intent: session.machine.currentContext.currentIntent }
                           : {}),
+                        // B2: thread the typed CallOutcome into the worker
+                        // payload so voice_recordings.outcome gets stamped
+                        // alongside voice_sessions.outcome. Optional —
+                        // the worker no-ops when undefined.
+                        ...(session.terminalOutcome
+                          ? { outcome: session.terminalOutcome }
+                          : {}),
                         durationMs: Date.now() - session.createdAt.getTime(),
                       },
                       `transcript:${event.voiceRecordingId}:v1`,
@@ -1646,6 +1657,12 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
+            // B2: delegate outcome stamping to the gather adapter so all
+            // close paths (caller hangup, idle timeout, end_session, WS
+            // teardown, slow-consumer disconnect) stamp the same typed
+            // CallOutcome onto voice_sessions.
+            finalizeOnClose: (session, reason) =>
+              twilioAdapter.finalizeTerminatedSession(session, [], reason),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).
@@ -2115,6 +2132,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voiceSessionRepo,
   });
   app.use(
     '/api/voice/sessions',

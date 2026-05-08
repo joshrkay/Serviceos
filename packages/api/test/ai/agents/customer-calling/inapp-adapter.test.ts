@@ -4,6 +4,7 @@ import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/vo
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
+import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
 
@@ -366,6 +367,105 @@ describe('InAppVoiceAdapter', () => {
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
       expect(systemMessages).toHaveLength(1);
+    });
+  });
+
+  describe('B2 — voiceSessionRepo outcome stamping', () => {
+    it('inserts a voice_sessions row on startSession with channel=inapp_voice', async () => {
+      const gateway = scriptedGateway([]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Microtask flush — fire-and-forget create.
+      await Promise.resolve();
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row).not.toBeNull();
+      expect(row?.channel).toBe('inapp_voice');
+      expect(row?.callSid).toBeUndefined();
+      expect(row?.outcome).toBeUndefined();
+    });
+
+    it('stamps outcome=no_intent on endSession when caller spoke but no intent crossed TAU_INT', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+      ]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'umm uh');
+      await adapter.endSession(sessionId);
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row?.outcome).toBe('no_intent');
+      expect(row?.endedReason).toBe('session_ended');
+      expect(row?.endedAt).toBeInstanceOf(Date);
+    });
+
+    it('stamps outcome=completed on endSession after a proposal queued', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_invoice',
+          confidence: 0.94,
+          extractedEntities: { customerName: 'Acme', amount: 45000 },
+        }),
+      ]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+      await adapter.endSession(sessionId);
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row?.outcome).toBe('completed');
+    });
+
+    it('endSession works without voiceSessionRepo (legacy fixtures stay green)', async () => {
+      const gateway = scriptedGateway([]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await expect(adapter.endSession(sessionId)).resolves.toBeUndefined();
+    });
+
+    it('repo.create() failure is non-fatal', async () => {
+      const gateway = scriptedGateway([]);
+      const voiceSessionRepo: InMemoryVoiceSessionRepository = new InMemoryVoiceSessionRepository();
+      voiceSessionRepo.create = vi.fn(async () => {
+        throw new Error('boom');
+      }) as typeof voiceSessionRepo.create;
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      await expect(adapter.startSession(TENANT, USER)).resolves.toBeDefined();
     });
   });
 });

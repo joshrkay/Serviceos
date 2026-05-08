@@ -14,6 +14,7 @@ import {
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
+import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { MEDIA_STREAM_PATH } from '../../src/telephony/media-streams/twilio-mediastream-server';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -858,5 +859,112 @@ describe('TwilioGatherAdapter.handleGather', () => {
     // After confirmed → proposal_draft → (no proposal_queued event yet) so we
     // remain in proposal_draft.
     expect(['proposal_draft', 'closing']).toContain(snap?.state);
+  });
+});
+
+describe('B2 — voiceSessionRepo outcome stamping (Twilio adapter)', () => {
+  it('inserts a voice_sessions row with channel=voice_inbound + callSid on handleInbound', async () => {
+    const store = new VoiceSessionStore();
+    const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      publicBaseUrl: 'https://example.com',
+      voiceSessionRepo,
+    });
+    await adapter.handleInbound({
+      callSid: 'CA-b2-1',
+      from: '+15555550100',
+      to: '+15555550200',
+      tenantId: 'tenant-b2',
+    });
+    await Promise.resolve();
+    const sess = store.findByCallSid('CA-b2-1');
+    expect(sess).toBeDefined();
+    const row = await voiceSessionRepo.findById('tenant-b2', sess!.id);
+    expect(row?.channel).toBe('voice_inbound');
+    expect(row?.callSid).toBe('CA-b2-1');
+    expect(row?.outcome).toBeUndefined();
+  });
+
+  it('finalizeTerminatedSession derives outcome from the side-effect reason', async () => {
+    const store = new VoiceSessionStore();
+    const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      publicBaseUrl: 'https://example.com',
+      voiceSessionRepo,
+    });
+    const session = store.create('tenant-b2', 'telephony', { callSid: 'CA-b2-2' });
+    await voiceSessionRepo.create({
+      id: session.id,
+      tenantId: 'tenant-b2',
+      channel: 'voice_inbound',
+      callSid: 'CA-b2-2',
+      state: session.machine.currentState,
+    });
+    session.transcript.push('agent: hi');
+    await adapter.finalizeTerminatedSession(
+      session,
+      [{ type: 'end_session', payload: { reason: 'caller_hangup' } }],
+      'caller_hangup',
+    );
+    expect(session.terminalOutcome).toBe('dropped');
+    const row = await voiceSessionRepo.findById('tenant-b2', session.id);
+    expect(row?.outcome).toBe('dropped');
+    expect(row?.endedReason).toBe('caller_hangup');
+    expect(row?.endedAt).toBeInstanceOf(Date);
+  });
+
+  it('finalizeTerminatedSession is idempotent: a second call is a no-op', async () => {
+    const store = new VoiceSessionStore();
+    const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      voiceSessionRepo,
+    });
+    const session = store.create('tenant-b2', 'telephony', { callSid: 'CA-b2-3' });
+    await voiceSessionRepo.create({
+      id: session.id,
+      tenantId: 'tenant-b2',
+      channel: 'voice_inbound',
+      callSid: 'CA-b2-3',
+      state: session.machine.currentState,
+    });
+    session.transcript.push('agent: hi');
+    await adapter.finalizeTerminatedSession(
+      session,
+      [{ type: 'end_session', payload: { reason: 'caller_hangup' } }],
+      'caller_hangup',
+    );
+    const firstOutcome = session.terminalOutcome;
+    await adapter.finalizeTerminatedSession(
+      session,
+      [{ type: 'end_session', payload: { reason: 'normal_close' } }],
+      'normal_close',
+    );
+    expect(session.terminalOutcome).toBe(firstOutcome);
+  });
+
+  it('handleInbound works without voiceSessionRepo (legacy fixtures)', async () => {
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+    });
+    await expect(
+      adapter.handleInbound({
+        callSid: 'CA-b2-4',
+        from: '+15555550100',
+        to: '+15555550200',
+        tenantId: 'tenant-b2',
+      }),
+    ).resolves.toBeDefined();
   });
 });
