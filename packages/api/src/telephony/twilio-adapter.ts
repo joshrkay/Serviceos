@@ -2040,7 +2040,11 @@ export class TwilioGatherAdapter {
     callSid: string;
   }): Promise<void> {
     if (!this.deps.voiceRepo?.stampOutcomeByCallSid) return;
-    const session = this.deps.store.findByCallSid(opts.callSid);
+    // Use the ended-inclusive lookup: by the time the recording webhook
+    // fires onPersisted, the FSM is typically already terminated and
+    // session.ended === true, so findByCallSid would return undefined
+    // and we'd skip the stamp.
+    const session = this.deps.store.findByCallSidIncludingEnded(opts.callSid);
     if (!session) return;
     try {
       await this.deps.voiceRepo.stampOutcomeByCallSid(
