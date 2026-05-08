@@ -907,7 +907,7 @@ describe('B2 — voiceSessionRepo outcome stamping (Twilio adapter)', () => {
       state: session.machine.currentState,
     });
     session.transcript.push('agent: hi');
-    await adapter.finalizeTerminatedSession(
+    adapter.finalizeTerminatedSession(
       session,
       [{ type: 'end_session', payload: { reason: 'caller_hangup' } }],
       'caller_hangup',
@@ -937,13 +937,13 @@ describe('B2 — voiceSessionRepo outcome stamping (Twilio adapter)', () => {
       state: session.machine.currentState,
     });
     session.transcript.push('agent: hi');
-    await adapter.finalizeTerminatedSession(
+    adapter.finalizeTerminatedSession(
       session,
       [{ type: 'end_session', payload: { reason: 'caller_hangup' } }],
       'caller_hangup',
     );
     const firstOutcome = session.terminalOutcome;
-    await adapter.finalizeTerminatedSession(
+    adapter.finalizeTerminatedSession(
       session,
       [{ type: 'end_session', payload: { reason: 'normal_close' } }],
       'normal_close',

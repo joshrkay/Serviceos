@@ -122,11 +122,12 @@ export interface MediaStreamAdapterDeps {
   connectionRegistry?: ConnectionRegistry;
   /**
    * B2 — invoked from `handleClose` so the host (typically TwilioGatherAdapter)
-   * can derive + persist the typed CallOutcome to voice_sessions BEFORE
-   * the WS tears down. Best-effort: errors are swallowed by the host.
+   * can derive + stash the typed CallOutcome on the session before the
+   * WS tears down. The host is expected to fire-and-forget any DB write
+   * internally; this hook is sync so we never block close on Postgres.
    * Optional — when omitted, the close path is unchanged.
    */
-  finalizeOnClose?: (session: VoiceSession, reason: string) => Promise<void>;
+  finalizeOnClose?: (session: VoiceSession, reason: string) => void;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -576,17 +577,19 @@ export class TwilioMediaStreamAdapter {
   private handleClose(reason: string): void {
     if (this.state.closed) return;
     this.state.closed = true;
-    // B2: fire-and-forget the outcome stamp BEFORE we tear down. The
-    // host's `finalizeOnClose` is responsible for any DB writes and
-    // swallows its own errors, so we just need to invoke it.
+    // B2: stash the outcome BEFORE we tear down. The host's
+    // `finalizeOnClose` is sync (sets session.terminalOutcome and
+    // kicks off the DB write in the background), so close stays
+    // non-blocking.
     if (this.deps.finalizeOnClose && this.state.session) {
-      const session = this.state.session;
-      const finalizeReason = mapCloseReasonToFinalize(reason);
-      void this.deps
-        .finalizeOnClose(session, finalizeReason)
-        .catch(() => {
-          /* swallow — outcome stamping is best-effort */
-        });
+      try {
+        this.deps.finalizeOnClose(
+          this.state.session,
+          mapCloseReasonToFinalize(reason),
+        );
+      } catch {
+        /* swallow — outcome stamping is best-effort */
+      }
     }
     if (this.state.audioIdleTimer) {
       clearTimeout(this.state.audioIdleTimer);

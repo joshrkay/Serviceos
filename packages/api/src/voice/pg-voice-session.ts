@@ -49,15 +49,35 @@ export class PgVoiceSessionRepository
     input: MarkVoiceSessionEndedInput,
   ): Promise<VoiceSessionRow | null> {
     return this.withTenant(tenantId, async (client) => {
+      // Upsert so a fire-and-forget `create()` that hasn't committed
+      // (or that failed transiently) doesn't drop the terminal stamp.
+      // ON CONFLICT updates iff the row is still open; the WHERE on the
+      // DO UPDATE clause makes a duplicate finalize a no-op (RETURNING
+      // returns zero rows → null → caller treats it as already-stamped).
       const result = await client.query(
-        `UPDATE voice_sessions
-            SET ended_at     = $1,
-                ended_reason = $2,
-                outcome      = $3,
-                updated_at   = NOW()
-          WHERE id = $4 AND tenant_id = $5 AND ended_at IS NULL
+        `INSERT INTO voice_sessions
+            (id, tenant_id, channel, call_sid, state, context, started_at,
+             ended_at, ended_reason, outcome)
+          VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, NOW(), $6, $7, $8)
+          ON CONFLICT (id) DO UPDATE
+             SET state        = EXCLUDED.state,
+                 ended_at     = EXCLUDED.ended_at,
+                 ended_reason = EXCLUDED.ended_reason,
+                 outcome      = EXCLUDED.outcome,
+                 updated_at   = NOW()
+           WHERE voice_sessions.tenant_id = EXCLUDED.tenant_id
+             AND voice_sessions.ended_at IS NULL
           RETURNING *`,
-        [input.endedAt, input.endedReason, input.outcome, id, tenantId],
+        [
+          id,
+          tenantId,
+          input.channel,
+          input.callSid ?? null,
+          input.state,
+          input.endedAt,
+          input.endedReason,
+          input.outcome,
+        ],
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);

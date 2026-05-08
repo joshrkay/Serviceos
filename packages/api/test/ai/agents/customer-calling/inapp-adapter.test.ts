@@ -408,10 +408,18 @@ describe('InAppVoiceAdapter', () => {
       const { sessionId } = await adapter.startSession(TENANT, USER);
       await adapter.handleInput(sessionId, 'umm uh');
       await adapter.endSession(sessionId);
+      // persistSessionEnded is fire-and-forget; flush microtasks so the
+      // InMemory repo write completes before we assert on it.
+      await Promise.resolve();
+      await Promise.resolve();
       const row = await voiceSessionRepo.findById(TENANT, sessionId);
       expect(row?.outcome).toBe('no_intent');
       expect(row?.endedReason).toBe('session_ended');
       expect(row?.endedAt).toBeInstanceOf(Date);
+      // session_ended is ignored from intent_capture so the FSM stays
+      // in intent_capture; the column reflects whatever final state the
+      // FSM actually reached at finalize time (no synthetic terminated).
+      expect(row?.state).toBe('intent_capture');
     });
 
     it('stamps outcome=completed on endSession after a proposal queued', async () => {
@@ -434,6 +442,8 @@ describe('InAppVoiceAdapter', () => {
       const { sessionId } = await adapter.startSession(TENANT, USER);
       await adapter.handleInput(sessionId, 'Invoice Acme for 450');
       await adapter.endSession(sessionId);
+      await Promise.resolve();
+      await Promise.resolve();
       const row = await voiceSessionRepo.findById(TENANT, sessionId);
       expect(row?.outcome).toBe('completed');
     });

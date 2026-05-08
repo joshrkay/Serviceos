@@ -33,7 +33,7 @@ describe('InMemoryVoiceSessionRepository', () => {
     expect(row.callSid).toBe('CA-123');
   });
 
-  it('markEnded stamps endedAt + endedReason + outcome', async () => {
+  it('markEnded stamps endedAt + endedReason + outcome + final state', async () => {
     const repo = new InMemoryVoiceSessionRepository();
     await repo.create({ id: 's-3', tenantId: TENANT, channel: 'inapp_voice', state: 'idle' });
     const at = new Date();
@@ -41,10 +41,13 @@ describe('InMemoryVoiceSessionRepository', () => {
       endedAt: at,
       endedReason: 'caller_hangup',
       outcome: 'completed',
+      state: 'terminated',
+      channel: 'inapp_voice',
     });
     expect(updated?.endedAt).toEqual(at);
     expect(updated?.endedReason).toBe('caller_hangup');
     expect(updated?.outcome).toBe('completed');
+    expect(updated?.state).toBe('terminated');
   });
 
   it('markEnded is idempotent: a second call returns null without overwriting', async () => {
@@ -54,11 +57,15 @@ describe('InMemoryVoiceSessionRepository', () => {
       endedAt: new Date(),
       endedReason: 'caller_hangup',
       outcome: 'no_intent',
+      state: 'terminated',
+      channel: 'inapp_voice',
     });
     const second = await repo.markEnded(TENANT, 's-4', {
       endedAt: new Date(),
       endedReason: 'session_ended',
       outcome: 'completed',
+      state: 'terminated',
+      channel: 'inapp_voice',
     });
     expect(second).toBeNull();
     const fetched = await repo.findById(TENANT, 's-4');
@@ -66,13 +73,35 @@ describe('InMemoryVoiceSessionRepository', () => {
     expect(fetched?.endedReason).toBe('caller_hangup');
   });
 
-  it('markEnded returns null on tenant mismatch', async () => {
+  it('markEnded UPSERTs when no create() row exists (race recovery)', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    const at = new Date();
+    const result = await repo.markEnded(TENANT, 's-race', {
+      endedAt: at,
+      endedReason: 'caller_hangup',
+      outcome: 'dropped',
+      state: 'terminated',
+      channel: 'voice_inbound',
+      callSid: 'CA-race',
+    });
+    expect(result).not.toBeNull();
+    expect(result?.outcome).toBe('dropped');
+    expect(result?.callSid).toBe('CA-race');
+    expect(result?.channel).toBe('voice_inbound');
+    expect(result?.state).toBe('terminated');
+    const fetched = await repo.findById(TENANT, 's-race');
+    expect(fetched?.outcome).toBe('dropped');
+  });
+
+  it('markEnded returns null on tenant mismatch (does NOT upsert under wrong tenant)', async () => {
     const repo = new InMemoryVoiceSessionRepository();
     await repo.create({ id: 's-5', tenantId: TENANT, channel: 'inapp_voice', state: 'idle' });
     const result = await repo.markEnded('other-tenant', 's-5', {
       endedAt: new Date(),
       endedReason: 'caller_hangup',
       outcome: 'completed',
+      state: 'terminated',
+      channel: 'inapp_voice',
     });
     expect(result).toBeNull();
   });

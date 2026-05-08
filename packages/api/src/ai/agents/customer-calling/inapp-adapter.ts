@@ -40,6 +40,7 @@ import { TAU_INT } from './transitions';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
+import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 
 export interface InAppAdapterDeps {
@@ -494,8 +495,11 @@ export class InAppVoiceAdapter {
         /* swallow — summary is best-effort */
       });
     }
-    // B2: derive + stamp the typed terminal outcome BEFORE delete().
-    await this.finalizeTerminalOutcome(session, 'session_ended');
+    // B2: derive + stash the typed terminal outcome BEFORE delete() so
+    // the recording-webhook → onPersisted path can still read it. The DB
+    // write is fire-and-forget so a slow Postgres can't delay session
+    // teardown (route returns 204 immediately on the inapp channel).
+    this.finalizeTerminalOutcome(session, 'session_ended');
     session.events.emit('voice-event', { type: 'ended', reason: 'manual_end' });
     // store.delete() also drops the per-session lock entry.
     this.deps.store.delete(sessionId);
@@ -503,13 +507,12 @@ export class InAppVoiceAdapter {
 
   /**
    * B2 — compute the typed CallOutcome from FSM state, stash it on the
-   * session, and persist to voice_sessions. Idempotent: a second call
-   * is a no-op because markEnded uses `ended_at IS NULL` as a guard.
+   * session synchronously, and kick off the persist to voice_sessions
+   * in the background. Idempotent: `session.terminalOutcome` short-
+   * circuits a duplicate derive, and `markEnded`'s upsert+endedAt guard
+   * makes the DB write idempotent too.
    */
-  private async finalizeTerminalOutcome(
-    session: VoiceSession,
-    endedReason: string,
-  ): Promise<void> {
+  private finalizeTerminalOutcome(session: VoiceSession, endedReason: string): void {
     if (session.terminalOutcome) return;
     const outcome = deriveCallOutcome({
       finalState: session.machine.currentState,
@@ -520,16 +523,30 @@ export class InAppVoiceAdapter {
     });
     session.terminalOutcome = outcome;
     session.terminalReason = endedReason;
-    if (this.deps.voiceSessionRepo) {
-      try {
-        await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
-          endedAt: new Date(),
-          endedReason,
-          outcome,
-        });
-      } catch {
-        /* swallow — outcome stamping is best-effort */
-      }
+    void this.persistSessionEnded(session, endedReason, outcome);
+  }
+
+  /**
+   * B2 — async DB-write half of `finalizeTerminalOutcome`. Always
+   * fire-and-forget; errors are swallowed because outcome stamping is
+   * best-effort and must never break a call flow.
+   */
+  private async persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!this.deps.voiceSessionRepo) return;
+    try {
+      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel: 'inapp_voice',
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
     }
   }
 

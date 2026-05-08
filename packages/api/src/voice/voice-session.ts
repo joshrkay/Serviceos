@@ -32,10 +32,33 @@ export interface MarkVoiceSessionEndedInput {
   endedAt: Date;
   endedReason: string;
   outcome: CallOutcome;
+  /**
+   * Final FSM state at finalize time (`session.machine.currentState`).
+   * Persisted alongside outcome so the row reflects the terminal state
+   * rather than the initial state captured at session start. Required
+   * because `markEnded` upserts — when the create() insert was lost or
+   * still in-flight, this is the only state value we have.
+   */
+  state: string;
+  /**
+   * Channel + callSid + tenantId from the in-memory session, needed
+   * for the upsert path (when the create() row hasn't landed yet, the
+   * markEnded upsert has to be able to insert a complete row).
+   */
+  channel: VoiceSessionChannel;
+  callSid?: string;
 }
 
 export interface VoiceSessionRepository {
   create(input: CreateVoiceSessionInput): Promise<VoiceSessionRow>;
+  /**
+   * Upsert: if a row for `id` exists and is still open (`endedAt IS NULL`),
+   * stamp it with the terminal outcome; if it doesn't exist (e.g. the
+   * fire-and-forget `create()` failed or hasn't committed yet), insert
+   * a fully-formed terminal row. Returns the resulting row, or null if
+   * the row already had `endedAt` set (idempotent — a duplicate finalize
+   * is a no-op).
+   */
   markEnded(
     tenantId: string,
     id: string,
@@ -65,9 +88,18 @@ export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
     id: string,
     input: MarkVoiceSessionEndedInput,
   ): Promise<VoiceSessionRow | null> {
-    const row = this.rows.get(id);
-    if (!row || row.tenantId !== tenantId) return null;
-    if (row.endedAt) return null;
+    const existing = this.rows.get(id);
+    if (existing && existing.tenantId !== tenantId) return null;
+    if (existing && existing.endedAt) return null;
+    const row: VoiceSessionRow = existing ?? {
+      id,
+      tenantId,
+      channel: input.channel,
+      ...(input.callSid !== undefined ? { callSid: input.callSid } : {}),
+      state: input.state,
+      startedAt: new Date(),
+    };
+    row.state = input.state;
     row.endedAt = input.endedAt;
     row.endedReason = input.endedReason;
     row.outcome = input.outcome;

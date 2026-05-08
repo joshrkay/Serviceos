@@ -9,15 +9,6 @@ export interface DeriveOutcomeInput {
   proposalIds: ReadonlyArray<string>;
 }
 
-const ESCALATION_REASONS_HUMAN: ReadonlySet<string> = new Set([
-  'cost_cap_exceeded',
-  'caller_identification_failed',
-  'caller_identity_unresolved',
-  'low_confidence_intent',
-  'entity_not_found',
-  'emergency_dispatch',
-]);
-
 function callerSpoke(transcript: ReadonlyArray<string>): boolean {
   return transcript.some((line) => line.toLowerCase().startsWith('caller:'));
 }
@@ -33,20 +24,16 @@ export function deriveCallOutcome(input: DeriveOutcomeInput): CallOutcome {
   }
 
   if (finalState === 'escalating' || finalState === 'degraded') {
-    if (context.escalationReason && context.escalationReason.startsWith('system_failure:')) {
+    if (context.escalationReason?.startsWith('system_failure:')) {
       return 'failed';
     }
     if (hasProposal) return 'callback_required';
-    if (context.escalationReason && ESCALATION_REASONS_HUMAN.has(context.escalationReason)) {
-      return 'escalated_to_human';
-    }
     return 'escalated_to_human';
   }
 
   if (endedReason === 'caller_hangup') {
     if (!spoke) return 'dropped';
     if (hasProposal) return 'completed';
-    if (!intentSet) return 'no_intent';
     return 'no_intent';
   }
 
