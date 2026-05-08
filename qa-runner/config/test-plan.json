@@ -482,14 +482,18 @@
       "tests": [
         {
           "id": "NOTIF-001",
-          "description": "Dispatch board returns 200 (notifications infra check)",
+          "description": "Dispatch board returns 200 (notifications/dispatch surface check)",
           "module": "notifications",
           "requires_env": [
-            "AUTH_BEARER_TOKEN"
+            "AUTH_BEARER_TOKEN",
+            "TENANT_ID"
           ],
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/me",
+            "endpoint": "/api/dispatch/board?date={{today}}",
+            "headers": {
+              "x-tenant-id": "{{TENANT_ID}}"
+            },
             "expect_statuses": [200]
           },
           "ui_check": {

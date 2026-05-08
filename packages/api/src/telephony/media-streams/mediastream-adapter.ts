@@ -122,7 +122,6 @@ export interface MediaStreamAdapterDeps {
   initializeSession?: (opts: {
     callSid: string;
     tenantId: string;
-    session: VoiceSession;
   }) => Promise<SideEffect[]>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
@@ -355,7 +354,6 @@ export class TwilioMediaStreamAdapter {
           this.deps.initializeSession!({
             callSid,
             tenantId: session.tenantId,
-            session,
           }),
         );
         await this.emitSideEffects(initEffects);

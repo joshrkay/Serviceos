@@ -255,7 +255,8 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     outcome: CallOutcome,
   ): Promise<VoiceRecording | null> {
     for (const [, rec] of this.recordings) {
-      if (rec.tenantId === tenantId && rec.callSid === callSid) {
+      // Only stamp when outcome is currently unset — replay-safe semantics.
+      if (rec.tenantId === tenantId && rec.callSid === callSid && !rec.outcome) {
         rec.outcome = outcome;
         rec.updatedAt = new Date();
         this.recordings.set(rec.id, rec);

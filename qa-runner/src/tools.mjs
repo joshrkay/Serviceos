@@ -13,9 +13,11 @@ export function ts() {
 function templateString(value) {
   const timestamp = Date.now();
   const rand4 = Math.floor(1000 + Math.random() * 9000);
+  const today = new Date().toISOString().slice(0, 10);
   return String(value)
     .replaceAll('{{timestamp}}', String(timestamp))
     .replaceAll('{{rand4}}', String(rand4))
+    .replaceAll('{{today}}', today)
     .replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, name) => process.env[name] ?? `{{${name}}}`);
 }
 

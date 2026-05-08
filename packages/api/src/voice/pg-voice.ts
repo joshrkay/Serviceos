@@ -6,7 +6,7 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
   return {
     id: row.id as string,
     tenantId: row.tenant_id as string,
-    fileId: row.file_id as string,
+    fileId: (row.file_id as string | null) ?? undefined,
     conversationId: row.conversation_id as string | undefined,
     callSid: (row.call_sid as string | null) ?? undefined,
     status: row.status as TranscriptionStatus,
@@ -36,7 +36,7 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
         [
           recording.id,
           recording.tenantId,
-          recording.fileId,
+          recording.fileId ?? null,
           recording.conversationId ?? null,
           recording.status,
           recording.transcript ?? null,
@@ -124,7 +124,7 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
         `UPDATE voice_recordings
             SET outcome    = $1,
                 updated_at = NOW()
-          WHERE tenant_id = $2 AND call_sid = $3
+          WHERE tenant_id = $2 AND call_sid = $3 AND outcome IS NULL
           RETURNING *`,
         [outcome, tenantId, callSid],
       );

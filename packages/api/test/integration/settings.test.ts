@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
@@ -11,6 +11,10 @@ describe('Postgres integration — settings', () => {
   beforeAll(async () => {
     pool = await getSharedTestDb();
     settingsRepo = new PgSettingsRepository(pool);
+  });
+
+  beforeEach(async () => {
+    // tenant_settings has UNIQUE(tenant_id), so each test needs its own tenant.
     tenant = await createTestTenant(pool);
   });
 

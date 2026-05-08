@@ -12,12 +12,7 @@ describe('Postgres integration — verticals', () => {
     pool = await getSharedTestDb();
     verticalRepo = new PgVerticalPackRegistry(pool);
     // Seed canonical packs — normally done by createApp() at startup.
-    await new Promise<void>((resolve) => {
-      seedCanonicalVerticalPacks(verticalRepo);
-      // seedCanonicalVerticalPacks fires async .register() calls; give them
-      // a tick to settle before the test assertions run.
-      setTimeout(resolve, 200);
-    });
+    await seedCanonicalVerticalPacks(verticalRepo);
   });
 
   afterAll(async () => {
