@@ -435,6 +435,7 @@ export class TwilioGatherAdapter {
    */
   async handleInboundForStream(opts: {
     callSid: string;
+    from: string;
     tenantId: string;
   }): Promise<string> {
     const existing = this.deps.store.findByCallSid(opts.callSid);
@@ -444,7 +445,120 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    // Store caller-id so initializeStreamSession can pass it to identifyCaller.
+    this.callerIdBySession.set(session.id, opts.from ?? '');
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+  }
+
+  /**
+   * P8-012 — Run greeting initialization for the Media Streams path.
+   *
+   * Called by the WS adapter after Deepgram opens (i.e., once the caller
+   * is actually connected and can hear audio). Mirrors the disclosure +
+   * caller-ID + FSM bootstrap that Gather mode runs inside handleInbound(),
+   * but returns side-effect arrays instead of TwiML so the adapter can
+   * synthesize them via TTS.
+   */
+  async initializeStreamSession(opts: {
+    callSid: string;
+    tenantId: string;
+  }): Promise<SideEffect[]> {
+    const session = this.deps.store.findByCallSid(opts.callSid);
+    if (!session) {
+      return [
+        { type: 'tts_play', payload: { text: `Thank you for calling ${this.deps.businessName}. How can I help you today?` } },
+      ];
+    }
+
+    const from = this.callerIdBySession.get(session.id) ?? '';
+
+    // 1. Recording disclosure (text only — TTS synthesizes the audio).
+    const disclosure = await discloseRecording({
+      tenantId: opts.tenantId,
+      channel: 'telephony',
+      businessName: this.deps.businessName,
+    });
+
+    // 2. Identify caller by phone number.
+    let callerKnown: { customerId: string; customerName: string } | null = null;
+    let identifyFailed = false;
+    if (this.deps.pool && from) {
+      try {
+        const result = await identifyCaller({
+          tenantId: opts.tenantId,
+          fromPhone: from,
+          pool: this.deps.pool,
+        });
+        if (result.status === 'matched') {
+          callerKnown = { customerId: result.customerId, customerName: result.customerName };
+        }
+      } catch (err) {
+        logger.error('initializeStreamSession: identifyCaller failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid: opts.callSid,
+        });
+        identifyFailed = true;
+      }
+    }
+
+    // 3. FSM bootstrap: incoming_call → greeting → identifying.
+    const sideEffects: SideEffect[] = [];
+    sideEffects.push(
+      ...session.machine.dispatch({
+        type: 'incoming_call',
+        callSid: opts.callSid,
+        from,
+        to: '',
+        tenantId: opts.tenantId,
+      }),
+    );
+
+    // 4. Replace 'greeting' placeholder with real greeting + disclosure text.
+    const greetingText =
+      `Thank you for calling ${this.deps.businessName}. ` +
+      disclosure.disclosureText +
+      ' How can I help you today?';
+    for (const fx of sideEffects) {
+      if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
+        fx.payload.text = greetingText;
+      }
+    }
+
+    // 5. Drive FSM forward: greeted_ok → caller_known / unknown_caller.
+    sideEffects.push(...session.machine.dispatch({ type: 'greeted_ok' }));
+
+    if (callerKnown) {
+      session.customerId = callerKnown.customerId;
+      sideEffects.push(
+        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
+      );
+    } else if (identifyFailed) {
+      sideEffects.push(
+        ...session.machine.dispatch({ type: 'caller_identification_failed', reason: 'identify_caller_threw' }),
+      );
+    } else {
+      if (this.deps.leadRepo && from) {
+        try {
+          const result = await findOrCreateLeadByPhone({
+            tenantId: opts.tenantId,
+            fromPhone: from,
+            leadRepo: this.deps.leadRepo,
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.leadId = result.leadId;
+        } catch (err) {
+          logger.error('initializeStreamSession: findOrCreateLeadByPhone failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      sideEffects.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+    }
+
+    await this.executeSideEffects(session, sideEffects, opts.tenantId);
+    return sideEffects;
   }
 
   /**

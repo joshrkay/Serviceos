@@ -1595,6 +1595,8 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
+            initializeSession: async ({ callSid, tenantId }) =>
+              twilioAdapter.initializeStreamSession({ callSid, tenantId }),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).
