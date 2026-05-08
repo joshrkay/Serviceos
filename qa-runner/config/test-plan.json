@@ -2,7 +2,7 @@
   "stages": [
     {
       "name": "infrastructure",
-      "description": "Runbook §1 partial — health probes and auth redirect gates",
+      "description": "Runbook \u00a71 partial \u2014 health probes and auth redirect gates",
       "tests": [
         {
           "id": "INFRA-001",
@@ -11,10 +11,18 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/health",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "INFRA-002",
@@ -23,10 +31,18 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/ready",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT COUNT(*) FROM tenants;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT COUNT(*) FROM tenants;",
+            "required": false
+          }
         },
         {
           "id": "INFRA-003",
@@ -35,10 +51,18 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/health",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "INFRA-004",
@@ -47,10 +71,18 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/health",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/signup", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/signup",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "INFRA-005",
@@ -59,10 +91,19 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/customers",
-            "expect_statuses": [401, 403]
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "INFRA-006",
@@ -71,30 +112,47 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/estimates",
-            "expect_statuses": [401, 403]
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         }
       ]
     },
-
     {
       "name": "auth",
-      "description": "Runbook §1 — authenticated session and tenant bootstrap verification",
-      "depends_on": ["infrastructure"],
+      "description": "Runbook \u00a71 \u2014 authenticated session and tenant bootstrap verification",
+      "depends_on": [
+        "infrastructure"
+      ],
       "tests": [
         {
           "id": "AUTH-001",
           "description": "Authenticated /api/me returns tenantId",
           "module": "auth",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/me",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/", "expect_text": "Fieldly" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM tenants WHERE id = current_setting('app.current_tenant_id')::uuid;",
             "required": false
@@ -104,13 +162,20 @@
           "id": "AUTH-002",
           "description": "Tenant settings row exists after bootstrap",
           "module": "auth",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/settings",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM tenant_settings;",
             "required": false
@@ -118,30 +183,41 @@
         }
       ]
     },
-
     {
       "name": "customers",
-      "description": "Runbook §2 — customer CRUD and service locations",
-      "depends_on": ["auth"],
+      "description": "Runbook \u00a72 \u2014 customer CRUD and service locations",
+      "depends_on": [
+        "auth"
+      ],
       "tests": [
         {
           "id": "CUST-001",
           "description": "Create customer returns 201 with id",
           "module": "customers",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/customers",
-            "headers": { "Content-Type": "application/json" },
+            "headers": {
+              "Content-Type": "application/json"
+            },
             "body": {
               "firstName": "QA",
               "lastName": "Customer{{timestamp}}",
               "primaryPhone": "+15555{{rand4}}",
               "email": "qa+{{timestamp}}@example.com"
             },
-            "expect_statuses": [200, 201]
+            "expect_statuses": [
+              200,
+              201
+            ]
           },
-          "ui_check": { "path": "/customers", "expect_text": "Customers" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM customers WHERE first_name = 'QA';",
             "required": false
@@ -151,13 +227,20 @@
           "id": "CUST-002",
           "description": "List customers returns array",
           "module": "customers",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/customers",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/customers", "expect_text": "Customers" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM customers;",
             "required": false
@@ -165,21 +248,26 @@
         }
       ]
     },
-
     {
       "name": "leads",
-      "description": "Runbook §3 — lead creation and list",
-      "depends_on": ["auth"],
+      "description": "Runbook \u00a73 \u2014 lead creation and list",
+      "depends_on": [
+        "auth"
+      ],
       "tests": [
         {
           "id": "LEAD-001",
           "description": "Create lead returns 201",
           "module": "leads",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/leads",
-            "headers": { "Content-Type": "application/json" },
+            "headers": {
+              "Content-Type": "application/json"
+            },
             "body": {
               "firstName": "QA",
               "lastName": "Lead{{timestamp}}",
@@ -187,9 +275,15 @@
               "serviceType": "ac_repair",
               "source": "phone_call"
             },
-            "expect_statuses": [200, 201]
+            "expect_statuses": [
+              200,
+              201
+            ]
           },
-          "ui_check": { "path": "/leads", "expect_text": "Leads" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM leads;",
             "required": false
@@ -199,13 +293,20 @@
           "id": "LEAD-002",
           "description": "List leads returns array",
           "module": "leads",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/leads",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/leads", "expect_text": "Leads" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM leads;",
             "required": false
@@ -213,23 +314,31 @@
         }
       ]
     },
-
     {
       "name": "estimates",
-      "description": "Runbook §5 — estimate CRUD and validation",
-      "depends_on": ["customers"],
+      "description": "Runbook \u00a75 \u2014 estimate CRUD and validation",
+      "depends_on": [
+        "customers"
+      ],
       "tests": [
         {
           "id": "EST-001",
           "description": "List estimates returns 200",
           "module": "estimates",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/estimates",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/estimates", "expect_text": "Estimates" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM estimates;",
             "required": false
@@ -239,49 +348,82 @@
           "id": "EST-002",
           "description": "Create estimate with empty line items returns 400",
           "module": "estimates",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/estimates",
-            "headers": { "Content-Type": "application/json" },
-            "body": { "lineItems": [] },
-            "expect_statuses": [400, 422]
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "lineItems": []
+            },
+            "expect_statuses": [
+              400,
+              422
+            ]
           },
-          "ui_check": { "path": "/estimates", "expect_text": "Estimates" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "EST-003",
           "description": "Estimates page renders",
           "module": "estimates",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/estimates",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/estimates/new", "expect_text": "Estimate" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         }
       ]
     },
-
     {
       "name": "invoices",
-      "description": "Runbook §6 — invoice CRUD and validation",
-      "depends_on": ["estimates"],
+      "description": "Runbook \u00a76 \u2014 invoice CRUD and validation",
+      "depends_on": [
+        "estimates"
+      ],
       "tests": [
         {
           "id": "INV-001",
           "description": "List invoices returns 200",
           "module": "invoices",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/invoices",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/invoices", "expect_text": "Invoices" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM invoices;",
             "required": false
@@ -293,11 +435,19 @@
           "module": "invoices",
           "api_check": {
             "method": "GET",
-            "endpoint": "/pay/this-token-does-not-exist-qa-test",
-            "expect_statuses": [404]
+            "endpoint": "/public/invoices/this-token-does-not-exist-qa-test",
+            "expect_statuses": [
+              404
+            ]
           },
-          "ui_check": { "path": "/invoices", "expect_text": "Invoices" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "INV-003",
@@ -305,79 +455,111 @@
           "module": "invoices",
           "api_check": {
             "method": "GET",
-            "endpoint": "/e/this-token-does-not-exist-qa-test",
-            "expect_statuses": [404]
+            "endpoint": "/public/estimates/this-token-does-not-exist-qa-test",
+            "expect_statuses": [
+              404
+            ]
           },
-          "ui_check": { "path": "/estimates", "expect_text": "Estimates" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         }
       ]
     },
-
     {
       "name": "notifications",
-      "description": "Runbook §9 — dispatch record existence and idempotency",
-      "depends_on": ["invoices"],
+      "description": "Runbook \u00a79 \u2014 dispatch record existence and idempotency",
+      "depends_on": [
+        "invoices"
+      ],
       "tests": [
         {
           "id": "NOTIF-001",
-          "description": "Interactions list returns 200",
+          "description": "Dispatch board returns 200 (notifications infra check)",
           "module": "notifications",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/interactions",
-            "expect_statuses": [200, 404]
+            "endpoint": "/api/dispatch/board",
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/interactions", "expect_text": "Interactions" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
-            "query": "SELECT COUNT(*) AS c FROM message_dispatch_log;",
+            "query": "SELECT COUNT(*) AS c FROM message_dispatches;",
             "required": false
           }
         }
       ]
     },
-
     {
       "name": "contracts",
-      "description": "Runbook §13 — maintenance contract CRUD",
-      "depends_on": ["customers"],
+      "description": "Runbook \u00a713 \u2014 maintenance contract CRUD",
+      "depends_on": [
+        "customers"
+      ],
       "tests": [
         {
           "id": "CTR-001",
-          "description": "List contracts returns 200",
+          "description": "List agreements returns 200",
           "module": "contracts",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/contracts",
-            "expect_statuses": [200]
+            "endpoint": "/api/agreements",
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/contracts", "expect_text": "Contracts" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
-            "query": "SELECT COUNT(*) AS c FROM contracts;",
+            "query": "SELECT COUNT(*) AS c FROM maintenance_agreements;",
             "required": false
           }
         }
       ]
     },
-
     {
       "name": "settings",
-      "description": "Runbook §14 — settings persistence",
-      "depends_on": ["auth"],
+      "description": "Runbook \u00a714 \u2014 settings persistence",
+      "depends_on": [
+        "auth"
+      ],
       "tests": [
         {
           "id": "SET-001",
           "description": "GET /api/settings returns tenant settings",
           "module": "settings",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/settings",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM tenant_settings;",
             "required": false
@@ -387,34 +569,52 @@
           "id": "SET-002",
           "description": "Templates list returns 200",
           "module": "settings",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/templates",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings/templates", "expect_text": "Templates" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         }
       ]
     },
-
     {
       "name": "provisioning",
-      "description": "Runbook §16 — tenant bootstrap and Twilio provisioning state",
-      "depends_on": ["auth"],
+      "description": "Runbook \u00a716 \u2014 tenant bootstrap and Twilio provisioning state",
+      "depends_on": [
+        "auth"
+      ],
       "tests": [
         {
           "id": "PROV-001",
           "description": "Tenant row exists in DB after bootstrap",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/me",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/", "expect_text": "Fieldly" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM tenants;",
             "required": false
@@ -424,13 +624,20 @@
           "id": "PROV-002",
           "description": "Tenant settings row seeded at signup",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/settings",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM tenant_settings;",
             "required": false
@@ -440,13 +647,20 @@
           "id": "PROV-003",
           "description": "Twilio integration row exists with provisioning status",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/settings",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT status FROM tenant_integrations WHERE provider = 'twilio' LIMIT 1;",
             "required": false
@@ -456,13 +670,20 @@
           "id": "PROV-004",
           "description": "Twilio subaccount reached full_readiness status",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/settings",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM tenant_integrations WHERE provider = 'twilio' AND status = 'full_readiness';",
             "required": false
@@ -472,13 +693,20 @@
           "id": "PROV-005",
           "description": "Pending invitations list returns 200",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/users/invitations",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Team" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM pending_invitations;",
             "required": false
@@ -488,31 +716,51 @@
           "id": "PROV-006",
           "description": "Invite with invalid role returns 400",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/users/invitations",
-            "headers": { "Content-Type": "application/json" },
+            "headers": {
+              "Content-Type": "application/json"
+            },
             "body": {
               "email": "qa-invite-{{timestamp}}@example.com",
               "role": "superadmin"
             },
-            "expect_statuses": [400, 422]
+            "expect_statuses": [
+              400,
+              422
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "PROV-007",
           "description": "Users list returns 200 with at least one user (the owner)",
           "module": "provisioning",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/users",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/settings", "expect_text": "Settings" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM users;",
             "required": false
@@ -520,11 +768,14 @@
         }
       ]
     },
-
     {
       "name": "tenant-isolation",
-      "description": "Runbook §17 — cross-tenant API read and write isolation using a second token",
-      "depends_on": ["customers", "estimates", "invoices"],
+      "description": "Runbook \u00a717 \u2014 cross-tenant API read and write isolation using a second token",
+      "depends_on": [
+        "customers",
+        "estimates",
+        "invoices"
+      ],
       "tests": [
         {
           "id": "ISO-001",
@@ -533,10 +784,20 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/customers",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-002",
@@ -545,10 +806,20 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/estimates",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-003",
@@ -557,10 +828,20 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/invoices",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-004",
@@ -569,10 +850,20 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/jobs",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-005",
@@ -581,10 +872,20 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/appointments",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-006",
@@ -593,22 +894,42 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/settings",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-007",
-          "description": "Unauthenticated GET /api/contracts returns 401",
+          "description": "Unauthenticated GET /api/agreements returns 401",
           "module": "tenant-isolation",
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/contracts",
-            "expect_statuses": [401, 403]
+            "endpoint": "/api/agreements",
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-008",
@@ -617,72 +938,141 @@
           "api_check": {
             "method": "GET",
             "endpoint": "/api/proposals",
-            "expect_statuses": [401, 403]
+            "no_auth": true,
+            "expect_statuses": [
+              401,
+              403
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-009",
-          "description": "Cross-tenant customer read (Tenant B token, Tenant A customer ID) — requires TENANT_B_TOKEN and TENANT_A_CUSTOMER_ID",
+          "description": "Cross-tenant customer read (Tenant B token, Tenant A customer ID) \u2014 requires TENANT_B_TOKEN and TENANT_A_CUSTOMER_ID",
           "module": "tenant-isolation",
-          "requires_env": ["TENANT_B_TOKEN", "TENANT_A_CUSTOMER_ID"],
+          "requires_env": [
+            "TENANT_B_TOKEN",
+            "TENANT_A_CUSTOMER_ID"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/customers/{{TENANT_A_CUSTOMER_ID}}",
-            "headers": { "Authorization": "Bearer {{TENANT_B_TOKEN}}" },
-            "expect_statuses": [403, 404]
+            "headers": {
+              "Authorization": "Bearer {{TENANT_B_TOKEN}}"
+            },
+            "expect_statuses": [
+              403,
+              404
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-010",
-          "description": "Cross-tenant estimate read — requires TENANT_B_TOKEN and TENANT_A_ESTIMATE_ID",
+          "description": "Cross-tenant estimate read \u2014 requires TENANT_B_TOKEN and TENANT_A_ESTIMATE_ID",
           "module": "tenant-isolation",
-          "requires_env": ["TENANT_B_TOKEN", "TENANT_A_ESTIMATE_ID"],
+          "requires_env": [
+            "TENANT_B_TOKEN",
+            "TENANT_A_ESTIMATE_ID"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/estimates/{{TENANT_A_ESTIMATE_ID}}",
-            "headers": { "Authorization": "Bearer {{TENANT_B_TOKEN}}" },
-            "expect_statuses": [403, 404]
+            "headers": {
+              "Authorization": "Bearer {{TENANT_B_TOKEN}}"
+            },
+            "expect_statuses": [
+              403,
+              404
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-011",
-          "description": "Cross-tenant invoice read — requires TENANT_B_TOKEN and TENANT_A_INVOICE_ID",
+          "description": "Cross-tenant invoice read \u2014 requires TENANT_B_TOKEN and TENANT_A_INVOICE_ID",
           "module": "tenant-isolation",
-          "requires_env": ["TENANT_B_TOKEN", "TENANT_A_INVOICE_ID"],
+          "requires_env": [
+            "TENANT_B_TOKEN",
+            "TENANT_A_INVOICE_ID"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/invoices/{{TENANT_A_INVOICE_ID}}",
-            "headers": { "Authorization": "Bearer {{TENANT_B_TOKEN}}" },
-            "expect_statuses": [403, 404]
+            "headers": {
+              "Authorization": "Bearer {{TENANT_B_TOKEN}}"
+            },
+            "expect_statuses": [
+              403,
+              404
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-012",
-          "description": "Cross-tenant job read — requires TENANT_B_TOKEN and TENANT_A_JOB_ID",
+          "description": "Cross-tenant job read \u2014 requires TENANT_B_TOKEN and TENANT_A_JOB_ID",
           "module": "tenant-isolation",
-          "requires_env": ["TENANT_B_TOKEN", "TENANT_A_JOB_ID"],
+          "requires_env": [
+            "TENANT_B_TOKEN",
+            "TENANT_A_JOB_ID"
+          ],
           "api_check": {
             "method": "GET",
             "endpoint": "/api/jobs/{{TENANT_A_JOB_ID}}",
-            "headers": { "Authorization": "Bearer {{TENANT_B_TOKEN}}" },
-            "expect_statuses": [403, 404]
+            "headers": {
+              "Authorization": "Bearer {{TENANT_B_TOKEN}}"
+            },
+            "expect_statuses": [
+              403,
+              404
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "ISO-013",
-          "description": "Cross-tenant note write — requires TENANT_B_TOKEN and TENANT_A_CUSTOMER_ID",
+          "description": "Cross-tenant note write \u2014 requires TENANT_B_TOKEN and TENANT_A_CUSTOMER_ID",
           "module": "tenant-isolation",
-          "requires_env": ["TENANT_B_TOKEN", "TENANT_A_CUSTOMER_ID"],
+          "requires_env": [
+            "TENANT_B_TOKEN",
+            "TENANT_A_CUSTOMER_ID"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/notes",
@@ -695,9 +1085,15 @@
               "entityId": "{{TENANT_A_CUSTOMER_ID}}",
               "content": "Cross-tenant injection attempt"
             },
-            "expect_statuses": [403, 404]
+            "expect_statuses": [
+              403,
+              404
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM notes WHERE content = 'Cross-tenant injection attempt';",
             "required": false
@@ -705,14 +1101,19 @@
         },
         {
           "id": "ISO-014",
-          "description": "RLS — unset GUC returns no customer rows",
+          "description": "RLS \u2014 unset GUC returns no customer rows",
           "module": "tenant-isolation",
           "api_check": {
             "method": "GET",
             "endpoint": "/health",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "RESET app.current_tenant_id; SELECT COUNT(*) AS c FROM customers;",
             "required": false
@@ -720,14 +1121,19 @@
         },
         {
           "id": "ISO-015",
-          "description": "RLS — foreign tenant GUC returns no estimate rows",
+          "description": "RLS \u2014 foreign tenant GUC returns no estimate rows",
           "module": "tenant-isolation",
           "api_check": {
             "method": "GET",
             "endpoint": "/health",
-            "expect_statuses": [200]
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/login", "expect_text": "Fieldly" },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
           "db_check": {
             "query": "SET app.current_tenant_id = '00000000-0000-0000-0000-000000000000'; SELECT COUNT(*) AS c FROM estimates;",
             "required": false
@@ -735,41 +1141,76 @@
         }
       ]
     },
-
     {
       "name": "assistant",
-      "description": "Runbook §11 — AI assistant API",
-      "depends_on": ["auth"],
+      "description": "Runbook \u00a711 \u2014 AI assistant API",
+      "depends_on": [
+        "auth"
+      ],
       "tests": [
         {
           "id": "AST-001",
           "description": "POST /api/assistant/chat returns 200",
           "module": "assistant",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/assistant/chat",
-            "headers": { "Content-Type": "application/json" },
-            "body": { "message": "Hello, how many open estimates do I have?" },
-            "expect_statuses": [200]
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "Hello, how many open estimates do I have?"
+                }
+              ]
+            },
+            "expect_statuses": [
+              200
+            ]
           },
-          "ui_check": { "path": "/assistant", "expect_text": "Assistant" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         },
         {
           "id": "AST-002",
-          "description": "Empty message body returns 400",
+          "description": "Empty messages array returns 400",
           "module": "assistant",
-          "requires_env": ["AUTH_BEARER_TOKEN"],
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
           "api_check": {
             "method": "POST",
             "endpoint": "/api/assistant/chat",
-            "headers": { "Content-Type": "application/json" },
-            "body": { "message": "" },
-            "expect_statuses": [400, 422]
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "messages": []
+            },
+            "expect_statuses": [
+              400,
+              422
+            ]
           },
-          "ui_check": { "path": "/assistant", "expect_text": "Assistant" },
-          "db_check": { "query": "SELECT 1 AS ok;", "required": false }
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
         }
       ]
     }

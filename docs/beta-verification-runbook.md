@@ -290,15 +290,17 @@ Before sending the invoice, verify the entire data trail is navigable in both di
 
 ## Section 8 — Dispatch Board
 
-### 8A — Board layout & assignment
+> **Note:** The `/dispatch` route is not yet registered in the web app (`packages/web/src/routes.ts`). Steps 8.1–8.7 are aspirational — skip them for the initial beta launch and do not mark them as required launch criteria. Dispatch board functionality is tracked in a separate story. Confirm the `GET /api/dispatch/board` API responds correctly instead.
 
-- [ ] **8.1** Navigate to the dispatch board.
-- [ ] **8.2** The board shows technician lanes for today. Each lane shows the technician's name and assigned appointment count.
-- [ ] **8.3** Unassigned appointments appear in the unassigned queue on the left or top.
-- [ ] **8.4** Drag an unassigned appointment into a technician's lane. The appointment moves and the unassigned count decrements.
-- [ ] **8.5** Drag an appointment from Technician 1's lane to Technician 2's lane. The reassignment saves.
-- [ ] **8.6** Open the same dispatch board in a **second browser tab**. The drag-and-drop change from 8.5 is visible in the second tab within a few seconds — no manual refresh needed.
-- [ ] **8.7** Conflict badges render on appointments with time overlap within the same technician's lane.
+### 8A — Board layout & assignment (aspirational — not yet implemented in UI)
+
+- [ ] **8.1** *(Skip — dispatch board UI not yet available)* Navigate to the dispatch board.
+- [ ] **8.2** *(Skip)* The board shows technician lanes for today.
+- [ ] **8.3** *(Skip)* Unassigned appointments appear in the unassigned queue.
+- [ ] **8.4** *(Skip)* Drag an unassigned appointment into a technician's lane.
+- [ ] **8.5** *(Skip)* Drag an appointment between technician lanes.
+- [ ] **8.6** *(Skip)* Real-time updates visible in a second tab.
+- [ ] **8.7** *(Skip)* Conflict badges render.
 
 ### 8B — Technician location (GPS data)
 
@@ -308,7 +310,7 @@ Before sending the invoice, verify the entire data trail is navigable in both di
 
 - [ ] **8.8** From the Technician Day View (`/technician/day`), confirm the technician's device can submit a location ping. Open the page on a mobile device or browser with location permissions. Allow location access.
 - [ ] **8.9** Trigger a location update (this may be automatic on page load or require an explicit action). No error is shown.
-- [ ] **8.10** Verify the ping was stored: call `GET /api/technician-location` (or check the interactions/telemetry log) and confirm a record exists with lat/lng, accuracy, and timestamp within the last 2 minutes.
+- [ ] **8.10** Verify the ping was stored by querying the database directly: `SELECT lat, lng, accuracy, created_at FROM technician_locations ORDER BY created_at DESC LIMIT 5;` and confirm a record exists with lat/lng, accuracy, and timestamp within the last 2 minutes. (There is no `GET /api/technician-location` endpoint — the route only accepts POST.)
 
 ### 8C — Dispatch analytics
 
@@ -546,7 +548,7 @@ Run each of the following as Tenant B using their authenticated session token.
 - [ ] **17.9** `GET /api/invoices/<tenant-a-invoice-id>` → **404 or 403**.
 - [ ] **17.10** `GET /api/appointments` → empty or only Tenant B's appointments. Tenant A's appointment from Section 7 is **not** present.
 - [ ] **17.11** `GET /api/proposals` → empty or only Tenant B's proposals.
-- [ ] **17.12** `GET /api/contracts` → empty or only Tenant B's contracts.
+- [ ] **17.12** `GET /api/agreements` → empty or only Tenant B's agreements. (The endpoint is `/api/agreements`, not `/api/contracts`.)
 - [ ] **17.13** `GET /api/settings` → returns Tenant B's settings (business name set in Section 14, if different), **not** Tenant A's.
 
 ### 17C — Cross-tenant write isolation (Tenant B cannot mutate Tenant A)
@@ -560,8 +562,8 @@ Run each of the following as Tenant B using their authenticated session token.
 
 Run as Tenant C (Technician role, same tenant as A).
 
-- [ ] **17.18** `GET /api/estimates` → **403**. Technicians cannot list estimates.
-- [ ] **17.19** `GET /api/invoices` → **403**. Technicians cannot list invoices.
+- [ ] **17.18** `GET /api/estimates` → **200**. Technicians have `estimates:view` permission and can list estimates (read-only).
+- [ ] **17.19** `GET /api/invoices` → **200**. Technicians have `invoices:view` permission and can list invoices (read-only).
 - [ ] **17.20** `GET /api/settings` → **403**. Technicians cannot read tenant settings.
 - [ ] **17.21** `POST /api/users/invitations` → **403**. Technicians cannot invite other users.
 - [ ] **17.22** `GET /api/jobs` → **200**. Technicians can read jobs.
@@ -600,6 +602,8 @@ Run as Tenant C (Technician role, same tenant as A).
   SELECT * FROM customers LIMIT 5;
   ```
   Result: **error or 0 rows** — the policy requires the GUC to be set. An unset GUC must not default to returning all rows.
+
+  > **Known issue:** The `portal_sessions` table RLS policy (`packages/api/src/db/schema.ts`) uses `current_setting('app.current_tenant_id', true) IS NULL` as a permissive condition, which inadvertently allows access to all portal_sessions rows when the GUC is unset. This is a security gap tracked for a follow-up migration. For the initial beta, verify that `customers`, `estimates`, `invoices`, `jobs`, and `appointments` all return 0 rows; `portal_sessions` may return rows and should be noted as a known exception.
 
 **Notes:** _______________________________________________________________
 

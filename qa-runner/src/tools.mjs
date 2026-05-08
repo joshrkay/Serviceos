@@ -15,7 +15,8 @@ function templateString(value) {
   const rand4 = Math.floor(1000 + Math.random() * 9000);
   return String(value)
     .replaceAll('{{timestamp}}', String(timestamp))
-    .replaceAll('{{rand4}}', String(rand4));
+    .replaceAll('{{rand4}}', String(rand4))
+    .replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, name) => process.env[name] ?? `{{${name}}}`);
 }
 
 function templateObject(value) {
@@ -38,10 +39,13 @@ export async function writeJson(filePath, data) {
 }
 
 export async function runApiCheck({ apiUrl, testId, check, artifactDir }) {
-  const url = `${apiUrl}${check.endpoint}`;
+  const url = templateString(`${apiUrl}${check.endpoint}`);
   const method = check.method || 'GET';
-  const headers = { ...(check.headers || {}) };
-  if (process.env.AUTH_BEARER_TOKEN) headers.Authorization = `Bearer ${process.env.AUTH_BEARER_TOKEN}`;
+  const headers = { ...templateObject(check.headers || {}) };
+  // Inject global auth unless the check opts out (no_auth: true) or supplies its own Authorization.
+  if (!check.no_auth && !headers.Authorization && process.env.AUTH_BEARER_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.AUTH_BEARER_TOKEN}`;
+  }
 
   const requestBody = check.body ? templateObject(check.body) : undefined;
 
