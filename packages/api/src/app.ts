@@ -1546,6 +1546,47 @@ export function createApp(): express.Express {
             }
           : {}),
       },
+      getHealth: () => {
+        const ttsEnabled =
+          !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY;
+        const sttEnabled = !!process.env.DEEPGRAM_API_KEY;
+        const recordingEnabled =
+          !!process.env.TWILIO_ACCOUNT_SID &&
+          !!process.env.TWILIO_AUTH_TOKEN &&
+          !!process.env.STORAGE_BUCKET;
+        const messageDeliveryEnabled = !!sendService;
+        const databaseEnabled = !!pool;
+        const llmGatewayEnabled = !!config.AI_PROVIDER_API_KEY;
+        const warnings: string[] = [];
+        if (mediaStreamsEnabled && !sttEnabled) warnings.push('mediaStreams enabled but DEEPGRAM_API_KEY unset');
+        if (mediaStreamsEnabled && !ttsEnabled) warnings.push('mediaStreams enabled but no TTS key (ELEVENLABS_API_KEY)');
+        if (!process.env.PUBLIC_API_URL) warnings.push('PUBLIC_API_URL unset — Stream URL will be invalid');
+        if (!process.env.TWILIO_BUSINESS_NAME) warnings.push("TWILIO_BUSINESS_NAME unset — greeting says 'our team'");
+        if (!databaseEnabled) warnings.push('DATABASE_URL unset — proposals/outcomes will not persist');
+        if (!recordingEnabled) warnings.push('Recording disabled — STORAGE_* or TWILIO_* missing');
+        if (!messageDeliveryEnabled) warnings.push('send_invoice disabled — TWILIO_FROM_NUMBER / SENDGRID_* missing');
+        const ok =
+          (!mediaStreamsEnabled || (sttEnabled && ttsEnabled)) &&
+          databaseEnabled &&
+          llmGatewayEnabled;
+        return {
+          ok,
+          capabilities: {
+            mediaStreams: mediaStreamsEnabled,
+            tts: ttsEnabled,
+            stt: sttEnabled,
+            recording: recordingEnabled,
+            messageDelivery: messageDeliveryEnabled,
+            database: databaseEnabled,
+            llmGateway: llmGatewayEnabled,
+          },
+          config: {
+            publicBaseUrl: process.env.PUBLIC_API_URL ?? null,
+            businessName: process.env.TWILIO_BUSINESS_NAME ?? null,
+          },
+          warnings,
+        };
+      },
     }),
   );
 
