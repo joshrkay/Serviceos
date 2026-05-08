@@ -2045,12 +2045,20 @@ export class TwilioGatherAdapter {
     // session.ended === true, so findByCallSid would return undefined
     // and we'd skip the stamp.
     const session = this.deps.store.findByCallSidIncludingEnded(opts.callSid);
-    if (!session) return;
+    // When the session is genuinely gone (multi-instance deploy, restart, or
+    // idle reap fired before the recording webhook), default to 'completed'.
+    // The session-cache's lifecycle is per-instance, so a recording callback
+    // landing on a different replica has no FSM context to derive from. The
+    // accurate fix is to persist outcome at runSummary() time instead of
+    // relying on the cache; until then, defaulting beats NULL-forever in
+    // analytics. Escalations / failures will be undercounted in this edge
+    // case — track via separate audit_log dispatches if precision matters.
+    const outcome = session ? this.deriveCallOutcome(session) : 'completed';
     try {
       await this.deps.voiceRepo.stampOutcomeByCallSid(
         opts.tenantId,
         opts.callSid,
-        this.deriveCallOutcome(session),
+        outcome,
       );
     } catch (err) {
       logger.warn('stampCallOutcomeByCallSid failed', {
