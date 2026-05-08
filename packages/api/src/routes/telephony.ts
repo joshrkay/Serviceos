@@ -128,6 +128,26 @@ export interface TelephonyHealthReport {
 export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   const router = Router();
 
+  // Public health endpoint — registered FIRST so it bypasses the
+  // recording sub-router's body parser and signature middleware below
+  // (those router.use(...) calls run on every request, not just /recording,
+  // and would 500/403 a plain GET). Returns booleans only; safe to leave
+  // unauthenticated. Useful after a deploy to confirm which voice
+  // capabilities are wired.
+  if (deps.getHealth) {
+    const getHealth = deps.getHealth;
+    router.get('/health', (_req: Request, res: Response) => {
+      try {
+        res.status(200).json(getHealth());
+      } catch (err) {
+        logger.error('telephony/health: failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(500).json({ ok: false, error: 'health_check_failed' });
+      }
+    });
+  }
+
   // Recording webhook (P8-014) gets its own sub-router so its sig
   // middleware operates on a body parsed independently of the
   // /voice + /gather body parser. Mount it BEFORE the parser/middleware
@@ -157,24 +177,6 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         deps.recording.options ?? {},
       ),
     );
-  }
-
-  // Public health endpoint — registered BEFORE the body parser and
-  // signature middleware below so it accepts an unsigned GET. Returns
-  // booleans only; safe to leave unauthenticated. Useful after a deploy
-  // to confirm which voice capabilities are wired.
-  if (deps.getHealth) {
-    const getHealth = deps.getHealth;
-    router.get('/health', (_req: Request, res: Response) => {
-      try {
-        res.status(200).json(getHealth());
-      } catch (err) {
-        logger.error('telephony/health: failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        res.status(500).json({ ok: false, error: 'health_check_failed' });
-      }
-    });
   }
 
   // Twilio sends application/x-www-form-urlencoded. The global
