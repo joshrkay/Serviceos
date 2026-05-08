@@ -686,6 +686,19 @@ export function createApp(): express.Express {
   // worker) so settings hits the DB at most once per tenant per TTL
   // window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
+  // B1 — per-tenant voice persona. Shared by both the Twilio and
+  // in-app adapters; reads tenant_settings once per session start.
+  const voicePersonaResolver = async (tenantId: string): Promise<{
+    agentName?: string;
+    greeting?: string;
+  } | null> => {
+    const s = await settingsRepo.findByTenant(tenantId);
+    if (!s) return null;
+    const result: { agentName?: string; greeting?: string } = {};
+    if (s.voiceAgentName) result.agentName = s.voiceAgentName;
+    if (s.voiceGreeting) result.greeting = s.voiceGreeting;
+    return Object.keys(result).length > 0 ? result : null;
+  };
   const auditRepo          = webhookAuditRepo;
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter
@@ -1412,6 +1425,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voicePersonaResolver,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -2115,6 +2129,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voicePersonaResolver,
   });
   app.use(
     '/api/voice/sessions',

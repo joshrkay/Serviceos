@@ -179,6 +179,30 @@ export interface TwilioAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B1 — Per-tenant voice persona. When present, consulted during
+   * `handleInbound` to personalize the greeting. Failures fall back
+   * to the static `businessName`-based opener — calls are never
+   * blocked by a settings lookup failure.
+   */
+  voicePersonaResolver?: (tenantId: string) => Promise<{
+    agentName?: string;
+    greeting?: string;
+  } | null>;
+}
+
+function buildTelephonyGreeting(
+  businessName: string,
+  disclosureText: string,
+  persona?: { agentName?: string; greeting?: string } | null
+): string {
+  if (persona?.greeting) {
+    return `${persona.greeting} ${disclosureText}`;
+  }
+  const opener = persona?.agentName
+    ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
+    : `Thank you for calling ${businessName}.`;
+  return `${opener} ${disclosureText} How can I help you today?`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -744,11 +768,20 @@ export class TwilioGatherAdapter {
     );
 
     // 4. Replace the placeholder 'greeting' tts_play with the actual greeting
-    //    + disclosure copy. We do this by post-processing the side-effect list.
-    const greetingText =
-      `Thank you for calling ${this.deps.businessName}. ` +
-      disclosure.disclosureText +
-      ' How can I help you today?';
+    //    + disclosure copy. B1: resolve per-tenant persona first (best-effort).
+    let persona: { agentName?: string; greeting?: string } | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(opts.tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildTelephonyGreeting(
+      this.deps.businessName,
+      disclosure.disclosureText,
+      persona,
+    );
 
     const expanded = sideEffectsAll.map((fx) => {
       if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {

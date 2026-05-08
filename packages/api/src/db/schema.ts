@@ -2385,6 +2385,28 @@ export const MIGRATIONS = {
       ON tenants(stripe_connect_account_id)
       WHERE stripe_connect_account_id IS NOT NULL;
   `,
+
+  '088_tenant_settings_voice_persona': `
+    -- B1 — Per-tenant voice persona.
+    -- voice_agent_name : the name the AI agent uses when greeting callers
+    --                    (e.g. "Alex"). NULL = default generic greeting.
+    -- voice_greeting   : fully-custom greeting text that replaces the
+    --                    default "Thank you for calling..." / "Hi, this is
+    --                    your assistant" openers. For telephony the
+    --                    recording-disclosure sentence is still appended
+    --                    after the custom greeting. NULL = use default.
+    -- Both columns are nullable so existing tenants keep current
+    -- behavior with no backfill required.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_agent_name TEXT,
+      ADD COLUMN IF NOT EXISTS voice_greeting   TEXT;
+    -- Length guards mirror the Zod schema (80 / 500 chars).
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT IF NOT EXISTS tenant_settings_voice_agent_name_length
+        CHECK (char_length(voice_agent_name) <= 80),
+      ADD CONSTRAINT IF NOT EXISTS tenant_settings_voice_greeting_length
+        CHECK (char_length(voice_greeting) <= 500);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
