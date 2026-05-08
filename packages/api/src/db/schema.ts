@@ -2401,10 +2401,15 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS voice_agent_name TEXT,
       ADD COLUMN IF NOT EXISTS voice_greeting   TEXT;
     -- Length guards mirror the Zod schema (80 / 500 chars).
+    -- DROP … IF EXISTS makes the ADD idempotent; Postgres does not
+    -- support ADD CONSTRAINT IF NOT EXISTS.
     ALTER TABLE tenant_settings
-      ADD CONSTRAINT IF NOT EXISTS tenant_settings_voice_agent_name_length
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_agent_name_length,
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT tenant_settings_voice_agent_name_length
         CHECK (char_length(voice_agent_name) <= 80),
-      ADD CONSTRAINT IF NOT EXISTS tenant_settings_voice_greeting_length
+      ADD CONSTRAINT tenant_settings_voice_greeting_length
         CHECK (char_length(voice_greeting) <= 500);
   `,
 };
