@@ -2027,9 +2027,40 @@ export class TwilioGatherAdapter {
     }
   }
 
+  /**
+   * Stamp the call outcome on the voice_recordings row. Called from
+   * runSummary() (best-effort — usually no-ops because Twilio's recording
+   * webhook hasn't fired yet) and again from the recording webhook's
+   * onPersisted hook (the reliable path — the row exists by then).
+   * Idempotent: stampOutcomeByCallSid is a single UPDATE, so duplicate
+   * calls just rewrite the same value.
+   */
+  async stampCallOutcomeByCallSid(opts: {
+    tenantId: string;
+    callSid: string;
+  }): Promise<void> {
+    if (!this.deps.voiceRepo?.stampOutcomeByCallSid) return;
+    const session = this.deps.store.findByCallSid(opts.callSid);
+    if (!session) return;
+    try {
+      await this.deps.voiceRepo.stampOutcomeByCallSid(
+        opts.tenantId,
+        opts.callSid,
+        this.deriveCallOutcome(session),
+      );
+    } catch (err) {
+      logger.warn('stampCallOutcomeByCallSid failed', {
+        error: err instanceof Error ? err.message : String(err),
+        callSid: opts.callSid,
+      });
+    }
+  }
+
   private deriveCallOutcome(session: VoiceSession): CallOutcome {
     const ctx = session.machine.currentContext;
     if (ctx.escalationReason) {
+      if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
+      if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
       if (ctx.escalationReason.startsWith('callback_required')) return 'callback_required';
       return 'escalated_to_human';
     }

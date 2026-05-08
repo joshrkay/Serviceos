@@ -346,13 +346,18 @@ export class TwilioMediaStreamAdapter {
 
     // Play greeting: run disclosure + caller-ID + FSM bootstrap, then
     // synthesize and stream the greeting audio before listening for speech.
+    // Wrapped in withSessionLock so a final transcript that races the
+    // bootstrap (caller speaks before greeting completes) cannot dispatch
+    // FSM events on top of an in-flight `incoming_call` / `greeted_ok`.
     if (this.deps.initializeSession) {
       try {
-        const initEffects = await this.deps.initializeSession({
-          callSid,
-          tenantId: session.tenantId,
-          session,
-        });
+        const initEffects = await this.deps.store.withSessionLock(session.id, () =>
+          this.deps.initializeSession!({
+            callSid,
+            tenantId: session.tenantId,
+            session,
+          }),
+        );
         await this.emitSideEffects(initEffects);
       } catch (err) {
         logger.warn('mediastream: initializeSession failed — continuing without greeting', {

@@ -1506,45 +1506,51 @@ export function createApp(): express.Express {
         // first lands. Skipped on Twilio retries (`inserted=false`) so
         // we don't double-process the same call. Skipped silently when
         // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
-        ...(embeddingProvider
-          ? {
-              options: {
-                onPersisted: async (event) => {
-                  if (!event.inserted) return;
-                  const session = voiceSessionStore.findByCallSid(event.callSid);
-                  if (!session) {
-                    // Session was reaped (>30 min idle) before the
-                    // recording webhook fired. Known data-loss edge
-                    // case from the in-memory session store; not
-                    // something Phase 4a-1 fixes. Phase 4 architecture
-                    // doc covers persistent FSM state as a follow-up.
-                    return;
-                  }
-                  try {
-                    await queue.send(
-                      'transcript_ingestion',
-                      {
-                        tenantId: event.tenantId,
-                        voiceRecordingId: event.voiceRecordingId,
-                        transcript: [...session.transcript],
-                        ...(session.machine.currentContext.currentIntent
-                          ? { intent: session.machine.currentContext.currentIntent }
-                          : {}),
-                        durationMs: Date.now() - session.createdAt.getTime(),
-                      },
-                      `transcript:${event.voiceRecordingId}:v1`,
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.error('app: failed to enqueue transcript_ingestion', {
-                      voiceRecordingId: event.voiceRecordingId,
-                      error: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                },
-              },
+        options: {
+          onPersisted: async (event) => {
+            // Stamp call outcome now that the row exists. The earlier
+            // attempt from runSummary() typically no-ops because Twilio's
+            // recording webhook hasn't fired yet — this is the reliable
+            // stamp path. Runs regardless of insert vs replay (idempotent).
+            await twilioAdapter.stampCallOutcomeByCallSid({
+              tenantId: event.tenantId,
+              callSid: event.callSid,
+            });
+
+            if (!embeddingProvider) return;
+            if (!event.inserted) return;
+            const session = voiceSessionStore.findByCallSid(event.callSid);
+            if (!session) {
+              // Session was reaped (>30 min idle) before the
+              // recording webhook fired. Known data-loss edge
+              // case from the in-memory session store; not
+              // something Phase 4a-1 fixes. Phase 4 architecture
+              // doc covers persistent FSM state as a follow-up.
+              return;
             }
-          : {}),
+            try {
+              await queue.send(
+                'transcript_ingestion',
+                {
+                  tenantId: event.tenantId,
+                  voiceRecordingId: event.voiceRecordingId,
+                  transcript: [...session.transcript],
+                  ...(session.machine.currentContext.currentIntent
+                    ? { intent: session.machine.currentContext.currentIntent }
+                    : {}),
+                  durationMs: Date.now() - session.createdAt.getTime(),
+                },
+                `transcript:${event.voiceRecordingId}:v1`,
+              );
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.error('app: failed to enqueue transcript_ingestion', {
+                voiceRecordingId: event.voiceRecordingId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          },
+        },
       },
       getHealth: () => {
         const ttsEnabled =
