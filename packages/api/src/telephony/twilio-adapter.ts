@@ -69,6 +69,7 @@ import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
+import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -185,16 +186,26 @@ export interface TwilioAdapterDeps {
    * to the static `businessName`-based opener — calls are never
    * blocked by a settings lookup failure.
    */
-  voicePersonaResolver?: (tenantId: string) => Promise<{
-    agentName?: string;
-    greeting?: string;
-  } | null>;
+  voicePersonaResolver?: VoicePersonaResolver;
 }
 
-function buildTelephonyGreeting(
+/**
+ * Build the full telephony greeting.
+ *
+ * When `persona.greeting` is set the tenant owns the entire opening
+ * line — no extra CTA is appended. `disclosureText` (recording notice)
+ * is always appended afterward regardless of which branch is taken,
+ * since disclosure is a compliance requirement that cannot be opted out.
+ *
+ * Branch priority:
+ *   1. Custom greeting → `${greeting} ${disclosureText}`
+ *   2. Agent name only → `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *   3. Neither         → `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ */
+export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
-  persona?: { agentName?: string; greeting?: string } | null
+  persona?: VoicePersona | null
 ): string {
   if (persona?.greeting) {
     return `${persona.greeting} ${disclosureText}`;
@@ -769,7 +780,7 @@ export class TwilioGatherAdapter {
 
     // 4. Replace the placeholder 'greeting' tts_play with the actual greeting
     //    + disclosure copy. B1: resolve per-tenant persona first (best-effort).
-    let persona: { agentName?: string; greeting?: string } | null | undefined;
+    let persona: VoicePersona | null | undefined;
     if (this.deps.voicePersonaResolver) {
       try {
         persona = await this.deps.voicePersonaResolver(opts.tenantId);
