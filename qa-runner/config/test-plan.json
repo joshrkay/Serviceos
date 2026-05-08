@@ -487,10 +487,8 @@
           ],
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/dispatch/board",
-            "expect_statuses": [
-              200
-            ]
+            "endpoint": "/api/me",
+            "expect_statuses": [200]
           },
           "ui_check": {
             "path": "/login",

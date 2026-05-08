@@ -29,7 +29,8 @@ export type CallOutcome =
 export interface VoiceRecording {
   id: string;
   tenantId: string;
-  fileId: string;
+  /** File record ID — present for in-app voice-note uploads, absent for Twilio call recordings. */
+  fileId?: string;
   conversationId?: string;
   /** Twilio CallSid — set for inbound call recordings, absent for uploads. */
   callSid?: string;
@@ -122,7 +123,7 @@ export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
   return {
     id: randomUUID(),
     tenantId: input.tenantId,
-    fileId: input.fileId,
+    fileId: input.fileId ?? undefined,
     conversationId: input.conversationId,
     status: 'pending',
     createdBy: input.createdBy,

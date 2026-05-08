@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, closeSharedTestDb } from './shared';
 import { PgVerticalPackRegistry } from '../../src/shared/pg-vertical-pack-registry';
+import { seedCanonicalVerticalPacks } from '../../src/shared/canonical-vertical-packs';
 
 describe('Postgres integration — verticals', () => {
   let pool: Pool;
@@ -10,6 +11,13 @@ describe('Postgres integration — verticals', () => {
   beforeAll(async () => {
     pool = await getSharedTestDb();
     verticalRepo = new PgVerticalPackRegistry(pool);
+    // Seed canonical packs — normally done by createApp() at startup.
+    await new Promise<void>((resolve) => {
+      seedCanonicalVerticalPacks(verticalRepo);
+      // seedCanonicalVerticalPacks fires async .register() calls; give them
+      // a tick to settle before the test assertions run.
+      setTimeout(resolve, 200);
+    });
   });
 
   afterAll(async () => {

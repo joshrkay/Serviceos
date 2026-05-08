@@ -354,7 +354,7 @@ export function createWhisperTranscriptionProvider(
   deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
-  const apiKey = env.OPENAI_API_KEY ?? env.AI_PROVIDER_API_KEY;
+  const apiKey = env.OPENAI_API_KEY || env.AI_PROVIDER_API_KEY;
   if (apiKey) {
     return new WhisperTranscriptionProvider(
       apiKey,

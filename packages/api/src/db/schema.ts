@@ -2385,6 +2385,24 @@ export const MIGRATIONS = {
       ON tenants(stripe_connect_account_id)
       WHERE stripe_connect_account_id IS NOT NULL;
   `,
+
+  '088_fix_schema_constraints': `
+    -- Make voice_recordings.file_id nullable. The original schema assumed
+    -- recordings always come from an in-app file upload (voice notes), but
+    -- Twilio inbound-call recordings do not have a pre-created file row.
+    ALTER TABLE voice_recordings
+      ALTER COLUMN file_id DROP NOT NULL;
+
+    -- Relax the US-region check on tenant_settings. The constraint was added
+    -- aspirationally but no application path currently sets country/region, so
+    -- every tenant_settings INSERT was violating it. Allow region to be null
+    -- while still validating the format when a value IS provided.
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT tenant_settings_region_format_check
+        CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
