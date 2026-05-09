@@ -34,7 +34,6 @@ describe('Postgres integration — voice', () => {
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
         fileId: sharedFileId,
-        conversationId: crypto.randomUUID(),
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),
