@@ -16,6 +16,9 @@ import {
   parseClassifierJson,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
+import { createHvacPack } from '../../../src/verticals/packs/hvac';
+import { createPlumbingPack } from '../../../src/verticals/packs/plumbing';
 
 function mockGateway(jsonContent: string): LLMGateway {
   const gateway = {
@@ -312,6 +315,42 @@ describe('intent-classifier — classifyIntent', () => {
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
       expect(systemMessages).toHaveLength(1);
+    });
+
+    // End-to-end producer → consumer seam. The other tests in this block
+    // hand-craft the vertical string. This one threads the real
+    // formatVerticalForCallerPrompt() output for HVAC vs. plumbing packs
+    // through classifyIntent() so a regression in either side
+    // (helper renames, missing terminology, dropped wire-up) flips this
+    // test red — locking the §3B integration the calling agent depends on.
+    it('integration — HVAC vs plumbing pack output reaches the classifier prompt', async () => {
+      const hvacGateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 }),
+      );
+      await classifyIntent(
+        'my heater is broken',
+        { tenantId, verticalPromptSection: formatVerticalForCallerPrompt(createHvacPack()) },
+        hvacGateway,
+      );
+      const hvacCall = (hvacGateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const hvacSystem = hvacCall.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(hvacSystem).toHaveLength(2);
+      expect(hvacSystem[1].content).toContain('Furnace');
+      expect(hvacSystem[1].content).toContain('Air Conditioner');
+      expect(hvacSystem[1].content).not.toContain('Water Heater');
+
+      const plumbingGateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 }),
+      );
+      await classifyIntent(
+        'my pipe is leaking',
+        { tenantId, verticalPromptSection: formatVerticalForCallerPrompt(createPlumbingPack()) },
+        plumbingGateway,
+      );
+      const plumbingCall = (plumbingGateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const plumbingSystem = plumbingCall.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(plumbingSystem).toHaveLength(2);
+      expect(plumbingSystem[1].content).not.toContain('Furnace');
     });
   });
 

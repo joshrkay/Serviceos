@@ -62,6 +62,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // Enforce required config in production environments
   if (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') {
     validateProductionConfig(cachedConfig);
+    validateFeatureRequiredConfig(env);
   }
 
   return cachedConfig;
@@ -107,6 +108,76 @@ function validateProductionConfig(config: AppConfig): void {
     throw new Error(
       `Production configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
         'Set these environment variables before starting in production.'
+    );
+  }
+}
+
+/**
+ * P7-023 follow-up — feature-required config gate.
+ *
+ * Today the app reads TWILIO_* / SENDGRID_* / R2_* directly from
+ * process.env in `app.ts` and conditionally wires the providers when
+ * present. Missing vars previously caused silent feature degradation
+ * (SMS no-ops, recordings drop, invoice email never sends) with no
+ * boot signal. This gate flips that to fail-loud-by-default in
+ * production / staging: each feature bundle is required unless the
+ * operator has explicitly opted out via a `<FEATURE>_ENABLED=false`
+ * flag. The error message names every missing var so an operator can
+ * fix it directly.
+ */
+function validateFeatureRequiredConfig(env: Record<string, string | undefined>): void {
+  const missing: string[] = [];
+
+  const telephonyEnabled = env.TELEPHONY_ENABLED !== 'false';
+  const emailEnabled = env.EMAIL_ENABLED !== 'false';
+  const storageEnabled = env.STORAGE_ENABLED !== 'false';
+
+  // Twilio credentials are shared between telephony (voice + SMS) and
+  // the email path. TwilioDeliveryProvider in app.ts couples SMS +
+  // SendGrid into a single delivery service: without TWILIO_*, the
+  // delivery provider is null and /invoices/:id/send + /estimates/:id/send
+  // return 503 even when SendGrid is configured. So Twilio is required
+  // whenever either feature is enabled, with a message that names the
+  // opt-out flag(s) the operator can flip.
+  if (telephonyEnabled || emailEnabled) {
+    const optOut =
+      telephonyEnabled && emailEnabled
+        ? '(or set both TELEPHONY_ENABLED=false and EMAIL_ENABLED=false)'
+        : telephonyEnabled
+          ? '(or set TELEPHONY_ENABLED=false)'
+          : '(or set EMAIL_ENABLED=false)';
+    if (!env.TWILIO_ACCOUNT_SID) missing.push(`TWILIO_ACCOUNT_SID ${optOut}`);
+    if (!env.TWILIO_AUTH_TOKEN) missing.push(`TWILIO_AUTH_TOKEN ${optOut}`);
+    if (!env.TWILIO_FROM_NUMBER) missing.push(`TWILIO_FROM_NUMBER ${optOut}`);
+  }
+
+  // Default tenant id is required when telephony is on so inbound
+  // calls resolve to a tenant before the multi-tenant phone-lookup
+  // ships (B1 in the launch readiness plan).
+  if (telephonyEnabled && !env.TWILIO_DEFAULT_TENANT_ID) {
+    missing.push('TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)');
+  }
+
+  // SendGrid credentials — invoice + estimate delivery email side.
+  if (emailEnabled) {
+    if (!env.SENDGRID_API_KEY) missing.push('SENDGRID_API_KEY (or set EMAIL_ENABLED=false)');
+    if (!env.SENDGRID_FROM_EMAIL) missing.push('SENDGRID_FROM_EMAIL (or set EMAIL_ENABLED=false)');
+  }
+
+  // Object storage — voice recordings, file/job uploads via Cloudflare R2.
+  // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
+  // falls back to presigned GET URLs when publicUrlBase is unset
+  // (see files/storage-provider.ts:159), so storage works without it.
+  if (storageEnabled) {
+    if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
+    if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
+    if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Production feature configuration is missing required values:\n  ${missing.join('\n  ')}\n` +
+        'Set these env vars before starting, or opt the feature out with the named flag.'
     );
   }
 }

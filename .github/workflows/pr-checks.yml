@@ -53,9 +53,10 @@ jobs:
   # This is the fast PR-time signal that a code change broke the voice
   # agent's orchestration / runner / event-bus / grader pipeline.
   #
-  # `continue-on-error: true` is defensive while Layer 1 stabilizes —
-  # flip to required-check after the first clean main run. The artifact
-  # upload step uses `if: always()` so failures stay visible.
+  # Voice-quality is a required check. Use the override procedure in
+  # docs/superpowers/runbooks/voice-quality-launch-gate.md §4 when CI
+  # is red due to a confirmed test bug rather than an agent regression.
+  # The artifact upload step uses `if: always()` so failures stay visible.
   #
   # The plan calls for `needs: [typecheck]`, but the current pipeline
   # bundles typecheck into the `test` job, so we depend on that.
@@ -63,7 +64,6 @@ jobs:
     needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 8
-    continue-on-error: true # TODO: flip to required-check after first clean main run
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
