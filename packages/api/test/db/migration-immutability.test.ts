@@ -146,7 +146,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['087_tenants_stripe_connect', 'f3cf954e5fccbe1a3650b39dbcd5fd0dd8979ea1a1e909458f53791b23c5dd59'],
   ['088_fix_schema_constraints', '38dbe26a4e3d0389536214d8d4897f0d9e967d6ec8dc6e0638c849e0c9d38512'],
   ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
-  ['090_tenant_settings_voice_persona', '9493426c8836a07d909d63008b6900ad4f7784afb32c1d6cd814def1b2416be3'],
+  ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
 ];
 
 function hashMigration(value: string): string {

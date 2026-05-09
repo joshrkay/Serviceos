@@ -2419,9 +2419,19 @@ export const MIGRATIONS = {
     -- to personalize AI greeting text on both the Twilio Gather and
     -- Media Streams paths. Both columns are optional: when absent the
     -- adapter falls back to the static businessName-based opener.
+    -- Length limits mirror the API contract (contracts.ts) so that internal
+    -- writes (scripts, migrations, direct SQL) are also bounded.
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS voice_agent_name TEXT,
       ADD COLUMN IF NOT EXISTS voice_greeting   TEXT;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_agent_name_length,
+      ADD CONSTRAINT tenant_settings_voice_agent_name_length
+        CHECK (voice_agent_name IS NULL OR length(voice_agent_name) <= 80);
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length,
+      ADD CONSTRAINT tenant_settings_voice_greeting_length
+        CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500);
   `,
 };
 
