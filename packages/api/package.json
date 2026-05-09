@@ -20,6 +20,7 @@
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
     "migrate:apply": "ts-node src/db/migrate.ts",
     "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
+    "smoke-test": "ts-node scripts/smoke-test.ts",
     "lint:log-safety": "node scripts/check-log-safety.js"
   },
   "dependencies": {
