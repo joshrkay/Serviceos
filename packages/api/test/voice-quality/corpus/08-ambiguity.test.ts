@@ -99,6 +99,7 @@ describe('VQ-017 — Bucket 08 ambiguity / reprompt', () => {
     (scriptId) => {
       const golden = loadGoldenForScript(scriptId, CORPUS_ROOT);
       expect(Array.isArray(golden)).toBe(true);
+      if (!Array.isArray(golden)) return;
       if (scriptId === 'partial-info-incomplete') {
         // Turn 1 reprompts (no proposal); turn 2 lands a
         // create_appointment proposal once the slot is provided.
