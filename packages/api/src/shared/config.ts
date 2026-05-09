@@ -165,11 +165,13 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
   }
 
   // Object storage — voice recordings, file/job uploads via Cloudflare R2.
+  // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
+  // falls back to presigned GET URLs when publicUrlBase is unset
+  // (see files/storage-provider.ts:159), so storage works without it.
   if (storageEnabled) {
     if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
     if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
     if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
-    if (!env.R2_PUBLIC_URL) missing.push('R2_PUBLIC_URL (or set STORAGE_ENABLED=false)');
   }
 
   if (missing.length > 0) {

@@ -54,6 +54,14 @@ function parseArgs(argv: string[]): { base: string } {
     if (!url) throw new Error('PRODUCTION_API_URL not set');
     return { base: url.replace(/\/$/, '') };
   }
+  // Reject typos like --env=stagin so a rollback verification doesn't
+  // silently probe localhost while the operator thinks they hit prod.
+  if (env !== undefined) {
+    throw new Error(
+      `Unknown --env value "${env}". Expected one of: staging, prod, production. ` +
+        'Use --base=<url> for arbitrary targets.'
+    );
+  }
   return { base: 'http://localhost:3000' };
 }
 

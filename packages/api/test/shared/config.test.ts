@@ -228,7 +228,23 @@ describe('P0-006 — Secrets/config framework', () => {
           TELEPHONY_ENABLED: 'false',
           EMAIL_ENABLED: 'false',
         })
-      ).toThrow(/R2_ACCOUNT_ID[\s\S]*R2_ACCESS_KEY_ID[\s\S]*R2_SECRET_ACCESS_KEY[\s\S]*R2_PUBLIC_URL/);
+      ).toThrow(/R2_ACCOUNT_ID[\s\S]*R2_ACCESS_KEY_ID[\s\S]*R2_SECRET_ACCESS_KEY/);
+    });
+
+    it('storage — passes without R2_PUBLIC_URL (presigned-URL fallback)', () => {
+      // S3StorageProvider falls back to presigned GET URLs when
+      // publicUrlBase is unset, so R2_PUBLIC_URL is an optimization,
+      // not a hard requirement.
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          EMAIL_ENABLED: 'false',
+          R2_ACCOUNT_ID: 'r2acct',
+          R2_ACCESS_KEY_ID: 'r2key',
+          R2_SECRET_ACCESS_KEY: 'r2secret',
+        })
+      ).not.toThrow();
     });
 
     it('passes when all feature vars are set', () => {
