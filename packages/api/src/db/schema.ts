@@ -2426,10 +2426,17 @@ function makePoliciesIdempotent(sql: string): string {
 export function getMigrationSQL(): string {
   return Object.values(MIGRATIONS)
     .map((migration) =>
-      migration.replace(
-        /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)/g,
-        'DROP POLICY IF EXISTS $1 ON $2;\n    CREATE POLICY $1 ON $2'
-      )
+      migration
+        .replace(
+          /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)/g,
+          'DROP POLICY IF EXISTS $1 ON $2;\n    CREATE POLICY $1 ON $2'
+        )
+        // ADD CONSTRAINT has no IF NOT EXISTS in PostgreSQL; prepend a
+        // DROP CONSTRAINT IF EXISTS so re-runs on the same DB are safe.
+        .replace(
+          /(ALTER TABLE\s+\w+)\s*\n(\s+)(ADD CONSTRAINT\s+(\w+))/g,
+          '$1 DROP CONSTRAINT IF EXISTS $4;\n$1\n$2$3'
+        )
     )
     .join('\n');
 }
