@@ -495,6 +495,10 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    // initializeStreamSession reads callerIdBySession to drive
+    // identifyCaller/lead creation; without this, every media-stream
+    // inbound silently falls through to unknown-caller behavior.
+    this.callerIdBySession.set(session.id, opts.from ?? '');
     this.persistVoiceSessionRow(session, opts.callSid);
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
   }
