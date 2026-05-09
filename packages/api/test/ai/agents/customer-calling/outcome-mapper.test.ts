@@ -244,6 +244,32 @@ describe('deriveCallOutcome — escalating / degraded', () => {
   });
 });
 
+describe('deriveCallOutcome — transport_failure', () => {
+  it("maps transport_failure to 'failed' regardless of state, intent, or proposals", () => {
+    expect(
+      deriveCallOutcome({
+        finalState: TERMINATED,
+        endedReason: 'transport_failure',
+        context: ctx({ currentIntent: 'create_appointment' }),
+        transcript: ['caller: yes'],
+        proposalIds: ['p-1'],
+      }),
+    ).toBe('failed');
+  });
+
+  it('still failed when transport_failure happens in escalating state', () => {
+    expect(
+      deriveCallOutcome({
+        finalState: ESCALATING,
+        endedReason: 'transport_failure',
+        context: ctx({ escalationReason: 'low_confidence_intent' }),
+        transcript: ['caller: hi'],
+        proposalIds: [],
+      }),
+    ).toBe('failed');
+  });
+});
+
 describe('deriveCallOutcome — defensive default', () => {
   it("returns 'failed' for unrecognised reason in terminated state", () => {
     expect(

@@ -200,13 +200,30 @@ const TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS = 250;
 
 /**
  * B2 — map handleClose's `reason` into a CallOutcome-compatible
- * endedReason recognised by `deriveCallOutcome`. Anything that isn't a
- * known mapper input falls through to `caller_hangup` so we still get a
- * typed outcome rather than the defensive `failed`.
+ * endedReason recognised by `deriveCallOutcome`. Transport-layer
+ * failures (WS errors, slow-consumer disconnects, outbound-queue
+ * overflow) are stamped as `failed` rather than being flattened into
+ * caller-driven outcomes — otherwise an infra regression looks like
+ * normal call abandonment in the dashboards.
+ *
+ * `twilio_stop` is the protocol-correct end-of-call signal from
+ * Twilio; treat as caller-hangup. `ws_closed` only reaches the mapper
+ * when the WS closed BEFORE a `stop` frame arrived (a `stop` would
+ * have set state.closed and short-circuited this path), which is also
+ * a transport failure.
  */
 function mapCloseReasonToFinalize(reason: string): string {
   if (reason === 'audio_idle_timeout') return 'idle_timeout';
   if (reason === 'end_session') return 'session_ended';
+  if (reason === 'twilio_stop') return 'caller_hangup';
+  if (
+    reason === 'ws_error' ||
+    reason === 'ws_closed' ||
+    reason === 'slow_consumer' ||
+    reason === 'queue_overflow_terminal'
+  ) {
+    return 'transport_failure';
+  }
   return 'caller_hangup';
 }
 

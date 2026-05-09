@@ -23,6 +23,14 @@ export function deriveCallOutcome(input: DeriveOutcomeInput): CallOutcome {
     return 'escalated_to_human';
   }
 
+  // Transport-layer failures emitted by the mediastream adapter
+  // (ws_error / ws_closed-before-stop / slow_consumer / queue_overflow).
+  // Stamping these as 'failed' keeps voice_sessions.outcome analytics
+  // honest — otherwise infra regressions hide as caller abandonment.
+  if (endedReason === 'transport_failure') {
+    return 'failed';
+  }
+
   if (finalState === 'escalating' || finalState === 'degraded') {
     if (context.escalationReason?.startsWith('system_failure:')) {
       return 'failed';
