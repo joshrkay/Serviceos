@@ -44,7 +44,7 @@ describe('Postgres integration — verticals', () => {
     it('retrieves pack by ID', async () => {
       const pack = await verticalRepo.get(seededPackId);
       expect(pack).not.toBeNull();
-      expect(pack!.packId).toBe('hvac-residential-v1');
+      expect(pack!.packId).toBe('hvac');
     });
 
     it('finds packs by vertical type', async () => {
