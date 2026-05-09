@@ -6,10 +6,26 @@ import { PgVerticalPackRegistry } from '../../src/shared/pg-vertical-pack-regist
 describe('Postgres integration — verticals', () => {
   let pool: Pool;
   let verticalRepo: PgVerticalPackRegistry;
+  let seededPackId: string;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     verticalRepo = new PgVerticalPackRegistry(pool);
+
+    // The vertical_packs table is global (not tenant-scoped) and starts
+    // empty in the testcontainer. Seed one pack so list/findByVertical
+    // assertions have something to find.
+    seededPackId = crypto.randomUUID();
+    await verticalRepo.register({
+      id: seededPackId,
+      packId: 'hvac-residential-v1',
+      version: '1.0.0',
+      verticalType: 'hvac',
+      status: 'active',
+      displayName: 'HVAC Residential',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
   });
 
   afterAll(async () => {
@@ -23,17 +39,15 @@ describe('Postgres integration — verticals', () => {
     });
 
     it('retrieves pack by ID', async () => {
-      const allPacks = await verticalRepo.list();
-      if (allPacks.length > 0) {
-        const pack = await verticalRepo.get(allPacks[0].id);
-        expect(pack).not.toBeNull();
-        expect(pack!.packId).toBe(allPacks[0].packId);
-      }
+      const pack = await verticalRepo.get(seededPackId);
+      expect(pack).not.toBeNull();
+      expect(pack!.packId).toBe('hvac-residential-v1');
     });
 
     it('finds packs by vertical type', async () => {
       const hvacPacks = await verticalRepo.findByVertical('hvac' as any);
       expect(Array.isArray(hvacPacks)).toBe(true);
+      expect(hvacPacks.length).toBeGreaterThanOrEqual(1);
     });
   });
 });

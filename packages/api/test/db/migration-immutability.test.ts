@@ -145,6 +145,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['086_create_appointment_calendar_events', '766a31919b81cb02372b34c5ba610b1fec70c800c6d56cf565cf99bc77ab5172'],
   ['087_tenants_stripe_connect', 'f3cf954e5fccbe1a3650b39dbcd5fd0dd8979ea1a1e909458f53791b23c5dd59'],
   ['088_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
+  ['089_drop_tenant_settings_us_region_check', '76fac3f7db7f77c81e9af32dc0dba99a92fec7d83a8ff6c43d4f35b3d9d77307'],
 ];
 
 function hashMigration(value: string): string {

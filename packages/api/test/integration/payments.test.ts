@@ -71,7 +71,7 @@ describe('Postgres integration — payments', () => {
     });
 
     const lineItems = [
-      buildLineItem('item-1', 'Labor', 2, 7500, 1, true, 'labor'),
+      buildLineItem(crypto.randomUUID(), 'Labor', 2, 7500, 1, true, 'labor'),
     ];
     const totals = calculateDocumentTotals(lineItems, 0, 825);
 

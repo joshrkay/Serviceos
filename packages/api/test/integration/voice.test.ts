@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import { getSharedTestDb, createTestTenant, createTestFile, closeSharedTestDb } from './shared';
 import { PgVoiceRepository } from '../../src/voice/pg-voice';
 
 describe('Postgres integration — voice', () => {
@@ -20,10 +20,11 @@ describe('Postgres integration — voice', () => {
 
   describe('CRUD', () => {
     it('creates voice recording and retrieves via findById', async () => {
+      const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: crypto.randomUUID(),
+        fileId,
         conversationId: crypto.randomUUID(),
         status: 'pending',
         createdBy: tenant.userId,
@@ -37,10 +38,11 @@ describe('Postgres integration — voice', () => {
     });
 
     it('updates voice recording status', async () => {
+      const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: crypto.randomUUID(),
+        fileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),
@@ -63,10 +65,11 @@ describe('Postgres integration — voice', () => {
   describe('tenant isolation', () => {
     it('rejects cross-tenant access', async () => {
       const otherTenant = await createTestTenant(pool);
+      const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: crypto.randomUUID(),
+        fileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),

@@ -65,3 +65,23 @@ export async function setTenantContext(pool: Pool, tenantId: string): Promise<Po
   await client.query(`SET LOCAL app.current_tenant_id = '${tenantId}'`);
   return client;
 }
+
+/**
+ * Insert a `files` row and return its id. Useful as the FK target for
+ * `voice_recordings.file_id` (and other entity tables that FK into
+ * files). Defaults are intentionally generic so individual tests can
+ * call it without spelling out s3 / content-type metadata.
+ */
+export async function createTestFile(
+  pool: Pool,
+  tenantId: string,
+  userId: string,
+): Promise<string> {
+  const fileId = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO files (id, tenant_id, filename, content_type, size_bytes, s3_bucket, s3_key, uploaded_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [fileId, tenantId, 'test.wav', 'audio/wav', 1024, 'test-bucket', `test-key-${fileId}`, userId],
+  );
+  return fileId;
+}
