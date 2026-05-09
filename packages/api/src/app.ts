@@ -1566,17 +1566,9 @@ export function createApp(): express.Express {
                     });
                   }
                 },
-                `transcript:${event.voiceRecordingId}:v1`,
-              );
-            } catch (err) {
-              // eslint-disable-next-line no-console
-              console.error('app: failed to enqueue transcript_ingestion', {
-                voiceRecordingId: event.voiceRecordingId,
-                error: err instanceof Error ? err.message : String(err),
-              });
+              },
             }
-          },
-        },
+          : {}),
       },
       getHealth: () => {
         const ttsEnabled =

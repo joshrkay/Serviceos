@@ -2441,7 +2441,7 @@ export const MIGRATIONS = {
   // outcome is the dashboard-grade enum derived by deriveCallOutcome at
   // FSM hangup. call_sid is added so analytics can join voice_sessions
   // ↔ voice_recordings on telephony calls.
-  '090_voice_session_outcome': `
+  '091_voice_session_outcome': `
     ALTER TABLE voice_sessions
       ADD COLUMN IF NOT EXISTS outcome TEXT
         CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));

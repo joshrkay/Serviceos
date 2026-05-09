@@ -59,7 +59,6 @@ import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-callin
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import { deriveCallOutcome } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
-import type { CallOutcome } from '../voice/voice-service';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
@@ -191,6 +190,7 @@ export interface TwilioAdapterDeps {
    * existing test fixtures continue to work without DI'ing a stub.
    */
   voiceSessionRepo?: VoiceSessionRepository;
+  /**
    * When wired, the call outcome is stamped on the voice_recordings row
    * at session end (by callSid). Without this, analytics remain blind.
    */
@@ -516,6 +516,9 @@ export class TwilioGatherAdapter {
       .catch(() => {
         /* swallow — outcome stamping is best-effort */
       });
+  }
+
+  /**
    * P8-012 — Run greeting initialization for the Media Streams path.
    *
    * Called by the WS adapter after Deepgram opens (i.e., once the caller

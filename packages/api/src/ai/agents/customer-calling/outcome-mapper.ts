@@ -31,6 +31,15 @@ export function deriveCallOutcome(input: DeriveOutcomeInput): CallOutcome {
     return 'failed';
   }
 
+  // Successful dispatcher transfer: the /dial-result route stamps this
+  // when DialCallStatus=completed/answered. The call IS resolved (a
+  // human answered), but no real proposal_id was persisted so the
+  // generic hasProposal/intent heuristics below would mis-classify as
+  // 'dropped'. An explicit reason short-circuits that.
+  if (endedReason === 'transferred') {
+    return 'completed';
+  }
+
   if (finalState === 'escalating' || finalState === 'degraded') {
     if (context.escalationReason?.startsWith('system_failure:')) {
       return 'failed';
