@@ -24,8 +24,15 @@ interface Probe {
 
 const PROBES: Probe[] = [
   { name: 'liveness', path: '/health', expectStatus: 200, expectBodyContains: '"status"' },
-  { name: 'readiness', path: '/ready', expectStatus: [200, 503] },
-  { name: 'telephony-health', path: '/api/telephony/health', expectStatus: 200 },
+  // /ready returns 503 when a critical dependency is down — that is
+  // exactly the signal a smoke check must fail on, not paper over.
+  { name: 'readiness', path: '/ready', expectStatus: 200 },
+  // /api/telephony/health always returns 200 even when capabilities are
+  // degraded; the structured payload sets `ok: false` with `warnings`
+  // in that case (see TelephonyHealthReport in routes/telephony.ts).
+  // Require `"ok":true` in the body so a degraded subsystem fails the
+  // probe instead of silently passing.
+  { name: 'telephony-health', path: '/api/telephony/health', expectStatus: 200, expectBodyContains: '"ok":true' },
 ];
 
 function parseArgs(argv: string[]): { base: string } {
