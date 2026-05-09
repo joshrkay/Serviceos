@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { InAppVoiceAdapter } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
+import { InAppVoiceAdapter, buildInappGreeting } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
@@ -366,6 +366,94 @@ describe('InAppVoiceAdapter', () => {
       const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
       expect(systemMessages).toHaveLength(1);
+    });
+  });
+
+  // ─── B1: per-tenant voice persona ────────────────────────────────────────
+
+  describe('buildInappGreeting', () => {
+    it('returns the default greeting when persona is null', () => {
+      expect(buildInappGreeting(null)).toMatch(/your assistant/i);
+    });
+
+    it('returns the default greeting when persona is undefined', () => {
+      expect(buildInappGreeting(undefined)).toMatch(/your assistant/i);
+    });
+
+    it('uses agentName when set', () => {
+      expect(buildInappGreeting({ agentName: 'Alex' })).toBe("Hi, I'm Alex. How can I help today?");
+    });
+
+    it('uses custom greeting verbatim when set (no extra CTA appended)', () => {
+      expect(buildInappGreeting({ greeting: 'Welcome to Acme! How can we help?' }))
+        .toBe('Welcome to Acme! How can we help?');
+    });
+
+    it('prefers greeting over agentName when both set', () => {
+      expect(buildInappGreeting({ agentName: 'Alex', greeting: 'Custom text.' }))
+        .toBe('Custom text.');
+    });
+  });
+
+  describe('voicePersonaResolver wire-up', () => {
+    it('uses agentName from resolver in greeting', async () => {
+      const gateway = scriptedGateway([]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        ttsProvider: noopTts(),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voicePersonaResolver: async () => ({ agentName: 'Sam' }),
+      });
+      const result = await adapter.startSession(TENANT, USER);
+      expect(result.greetingText).toBe("Hi, I'm Sam. How can I help today?");
+    });
+
+    it('uses custom greeting from resolver verbatim', async () => {
+      const gateway = scriptedGateway([]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        ttsProvider: noopTts(),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voicePersonaResolver: async () => ({ greeting: 'Thanks for calling Acme!' }),
+      });
+      const result = await adapter.startSession(TENANT, USER);
+      expect(result.greetingText).toBe('Thanks for calling Acme!');
+    });
+
+    it('falls back to default greeting when resolver returns null', async () => {
+      const gateway = scriptedGateway([]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        ttsProvider: noopTts(),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voicePersonaResolver: async () => null,
+      });
+      const result = await adapter.startSession(TENANT, USER);
+      expect(result.greetingText).toMatch(/your assistant/i);
+    });
+
+    it('falls back to default greeting when resolver throws', async () => {
+      const gateway = scriptedGateway([]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        ttsProvider: noopTts(),
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voicePersonaResolver: async () => { throw new Error('db error'); },
+      });
+      const result = await adapter.startSession(TENANT, USER);
+      expect(result.greetingText).toMatch(/your assistant/i);
     });
   });
 });

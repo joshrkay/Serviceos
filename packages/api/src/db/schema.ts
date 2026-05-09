@@ -2385,6 +2385,43 @@ export const MIGRATIONS = {
       ON tenants(stripe_connect_account_id)
       WHERE stripe_connect_account_id IS NOT NULL;
   `,
+
+  '088_tenant_settings_voice_persona': `
+    -- B1 — Per-tenant voice persona.
+    -- voice_agent_name : the name the AI agent uses when greeting callers
+    --                    (e.g. "Alex"). NULL = default generic greeting.
+    -- voice_greeting   : fully-custom greeting text that replaces the
+    --                    default "Thank you for calling..." / "Hi, this is
+    --                    your assistant" openers. For telephony the
+    --                    recording-disclosure sentence is still appended
+    --                    after the custom greeting. NULL = use default.
+    -- Both columns are nullable so existing tenants keep current
+    -- behavior with no backfill required.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_agent_name TEXT,
+      ADD COLUMN IF NOT EXISTS voice_greeting   TEXT;
+    -- Length guards mirror the Zod schema (80 / 500 chars).
+    -- DROP … IF EXISTS makes the ADD idempotent; Postgres does not
+    -- support ADD CONSTRAINT IF NOT EXISTS.
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_agent_name_length,
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT tenant_settings_voice_agent_name_length
+        CHECK (char_length(voice_agent_name) <= 80),
+      ADD CONSTRAINT tenant_settings_voice_greeting_length
+        CHECK (char_length(voice_greeting) <= 500);
+  `,
+
+  '089_drop_us_region_check': `
+    -- The tenant_settings_us_region_check constraint (migration 070)
+    -- requires country='US' rows to have a 2-char region. The settings
+    -- create() path doesn't set country/region, so initial tenant setup
+    -- always violated it. Drop the constraint; region validation belongs
+    -- at the application layer (the Zod contract / UI form), not the DB.
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

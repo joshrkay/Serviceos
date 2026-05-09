@@ -290,6 +290,9 @@ export const updateSettingsSchema = z.object({
   // ('before_approval') or AFTER ('after_approval'). Default behavior
   // is 'after_approval'; existing tenants keep current flow.
   depositTimingPolicy: z.enum(['before_approval', 'after_approval']).optional(),
+  // B1 — Per-tenant voice persona. null clears the field.
+  voiceAgentName: z.string().min(1).max(80).nullable().optional(),
+  voiceGreeting: z.string().min(1).max(500).nullable().optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

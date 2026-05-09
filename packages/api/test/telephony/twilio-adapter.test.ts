@@ -3,6 +3,7 @@ import {
   TwilioGatherAdapter,
   buildTwiML,
   xmlEscape,
+  buildTelephonyGreeting,
 } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -858,5 +859,39 @@ describe('TwilioGatherAdapter.handleGather', () => {
     // After confirmed → proposal_draft → (no proposal_queued event yet) so we
     // remain in proposal_draft.
     expect(['proposal_draft', 'closing']).toContain(snap?.state);
+  });
+});
+
+// ─── B1: buildTelephonyGreeting ───────────────────────────────────────────────
+
+describe('buildTelephonyGreeting', () => {
+  const BIZ = 'Acme Plumbing';
+  const DISC = 'This call may be recorded.';
+
+  it('returns default opener when persona is null', () => {
+    const g = buildTelephonyGreeting(BIZ, DISC, null);
+    expect(g).toBe(`Thank you for calling ${BIZ}. ${DISC} How can I help you today?`);
+  });
+
+  it('returns default opener when persona is undefined', () => {
+    const g = buildTelephonyGreeting(BIZ, DISC, undefined);
+    expect(g).toBe(`Thank you for calling ${BIZ}. ${DISC} How can I help you today?`);
+  });
+
+  it('injects agentName into default opener', () => {
+    const g = buildTelephonyGreeting(BIZ, DISC, { agentName: 'Sam' });
+    expect(g).toBe(`Thank you for calling ${BIZ}. This is Sam. ${DISC} How can I help you today?`);
+  });
+
+  it('uses custom greeting verbatim and still appends disclosure', () => {
+    const g = buildTelephonyGreeting(BIZ, DISC, { greeting: 'Hi! Thanks for calling.' });
+    expect(g).toBe(`Hi! Thanks for calling. ${DISC}`);
+    // No extra CTA — tenant owns the full opening line.
+    expect(g).not.toContain('How can I help you today?');
+  });
+
+  it('prefers greeting over agentName when both set', () => {
+    const g = buildTelephonyGreeting(BIZ, DISC, { agentName: 'Sam', greeting: 'Custom.' });
+    expect(g).toBe(`Custom. ${DISC}`);
   });
 });

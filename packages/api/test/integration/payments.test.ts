@@ -71,7 +71,7 @@ describe('Postgres integration — payments', () => {
     });
 
     const lineItems = [
-      buildLineItem('item-1', 'Labor', 2, 7500, 1, true, 'labor'),
+      buildLineItem(crypto.randomUUID(), 'Labor', 2, 7500, 1, true, 'labor'),
     ];
     const totals = calculateDocumentTotals(lineItems, 0, 825);
 
@@ -103,7 +103,7 @@ describe('Postgres integration — payments', () => {
         tenantId: tenant.tenantId,
         invoiceId: invoiceId,
         amountCents: 15000,
-        method: 'credit_card',
+        method: 'stripe',
         status: 'completed',
         receivedAt: new Date(),
         processedBy: tenant.userId,
@@ -145,7 +145,7 @@ describe('Postgres integration — payments', () => {
         tenantId: tenant.tenantId,
         invoiceId: invoiceId,
         amountCents: 99999,
-        method: 'credit_card',
+        method: 'stripe',
         status: 'completed',
         receivedAt: new Date(),
         processedBy: tenant.userId,

@@ -69,6 +69,7 @@ import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
+import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -179,6 +180,40 @@ export interface TwilioAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B1 — Per-tenant voice persona. When present, consulted during
+   * `handleInbound` to personalize the greeting. Failures fall back
+   * to the static `businessName`-based opener — calls are never
+   * blocked by a settings lookup failure.
+   */
+  voicePersonaResolver?: VoicePersonaResolver;
+}
+
+/**
+ * Build the full telephony greeting.
+ *
+ * When `persona.greeting` is set the tenant owns the entire opening
+ * line — no extra CTA is appended. `disclosureText` (recording notice)
+ * is always appended afterward regardless of which branch is taken,
+ * since disclosure is a compliance requirement that cannot be opted out.
+ *
+ * Branch priority:
+ *   1. Custom greeting → `${greeting} ${disclosureText}`
+ *   2. Agent name only → `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *   3. Neither         → `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ */
+export function buildTelephonyGreeting(
+  businessName: string,
+  disclosureText: string,
+  persona?: VoicePersona | null
+): string {
+  if (persona?.greeting) {
+    return `${persona.greeting} ${disclosureText}`;
+  }
+  const opener = persona?.agentName
+    ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
+    : `Thank you for calling ${businessName}.`;
+  return `${opener} ${disclosureText} How can I help you today?`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -744,11 +779,20 @@ export class TwilioGatherAdapter {
     );
 
     // 4. Replace the placeholder 'greeting' tts_play with the actual greeting
-    //    + disclosure copy. We do this by post-processing the side-effect list.
-    const greetingText =
-      `Thank you for calling ${this.deps.businessName}. ` +
-      disclosure.disclosureText +
-      ' How can I help you today?';
+    //    + disclosure copy. B1: resolve per-tenant persona first (best-effort).
+    let persona: VoicePersona | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(opts.tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildTelephonyGreeting(
+      this.deps.businessName,
+      disclosure.disclosureText,
+      persona,
+    );
 
     const expanded = sideEffectsAll.map((fx) => {
       if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
