@@ -7,9 +7,6 @@ import {
 } from '../../src/files/storage-provider';
 
 describe('signS3Request (pure SigV4)', () => {
-  // AWS SigV4 reference: GetObject with query string authentication.
-  // https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
-  // (Section: "Example: GET Object")
   it('matches the AWS SigV4 reference test vector', () => {
     const url = signS3Request({
       method: 'GET',
@@ -61,7 +58,6 @@ describe('signS3Request (pure SigV4)', () => {
       pathStyle: false,
     });
     expect(new URL(withoutCt).searchParams.get('X-Amz-SignedHeaders')).toBe('host');
-    // Signatures must differ — content-type is part of the canonical request.
     expect(new URL(url).searchParams.get('X-Amz-Signature')).not.toBe(
       new URL(withoutCt).searchParams.get('X-Amz-Signature')
     );
@@ -123,7 +119,6 @@ describe('S3StorageProvider', () => {
     expect(parsed.searchParams.get('X-Amz-Algorithm')).toBe('AWS4-HMAC-SHA256');
     expect(parsed.searchParams.get('X-Amz-Credential')).toContain('AKIATEST');
     expect(parsed.searchParams.get('X-Amz-Expires')).toBe('300');
-    // Content-type must be bound into PUT signatures to prevent MIME spoof.
     expect(parsed.searchParams.get('X-Amz-SignedHeaders')).toBe('content-type;host');
     expect(parsed.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -170,7 +165,7 @@ describe('DevStorageProvider', () => {
       bucket: 'serviceos-dev',
       publicUrlBase: 'http://localhost:3000/storage-dev',
     });
-    expect(await provider.getObjectMetadata('serviceos-dev', 'k')).toBeNull();
+    expect(await (provider as unknown as { getObjectMetadata(): Promise<null> }).getObjectMetadata()).toBeNull();
   });
 });
 
