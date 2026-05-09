@@ -16,9 +16,12 @@ describe('Postgres integration — verticals', () => {
     // empty in the testcontainer. Seed one pack so list/findByVertical
     // assertions have something to find.
     seededPackId = crypto.randomUUID();
+    // The repo stores `packId` in the `type` column, which is constrained
+    // to 'hvac' or 'plumbing' by the CHECK in migration 032. The
+    // verticalType is stored inside the terminology JSONB.
     await verticalRepo.register({
       id: seededPackId,
-      packId: 'hvac-residential-v1',
+      packId: 'hvac',
       version: '1.0.0',
       verticalType: 'hvac',
       status: 'active',

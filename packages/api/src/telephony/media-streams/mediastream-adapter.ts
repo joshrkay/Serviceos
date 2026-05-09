@@ -125,9 +125,22 @@ export interface MediaStreamAdapterDeps {
    * can derive + stash the typed CallOutcome on the session before the
    * WS tears down. The host is expected to fire-and-forget any DB write
    * internally; this hook is sync so we never block close on Postgres.
+   *
+   * `sideEffects` carries the most recent FSM dispatch's effects when
+   * the close was triggered by an `end_session` SideEffect — the host
+   * uses these to read the FSM-supplied `payload.reason` (e.g.
+   * 'abuse_detected:profanity'), which is more specific than the
+   * coarse mediastream close reason and drives the right `CallOutcome`
+   * for non-hangup terminations. Empty for non-FSM close paths
+   * (idle timeout, WS error, slow consumer).
+   *
    * Optional — when omitted, the close path is unchanged.
    */
-  finalizeOnClose?: (session: VoiceSession, reason: string) => void;
+  finalizeOnClose?: (
+    session: VoiceSession,
+    reason: string,
+    sideEffects: ReadonlyArray<SideEffect>,
+  ) => void;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -165,6 +178,14 @@ interface RuntimeState {
   slowConsumerTimer: NodeJS.Timeout | null;
   /** True after we've released our slot in the connection registry. */
   registryReleased: boolean;
+  /**
+   * B2 — captures the most recent FSM dispatch's SideEffect[] when an
+   * `end_session` effect was emitted. Threaded through `finalizeOnClose`
+   * so the host can read the FSM-supplied `payload.reason` for outcome
+   * derivation (e.g. 'abuse_detected:*' → escalated_to_human).
+   * Empty for non-FSM close paths (idle timer, slow consumer, WS error).
+   */
+  pendingFinalizeEffects: ReadonlyArray<SideEffect>;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -227,6 +248,7 @@ export class TwilioMediaStreamAdapter {
       unackedMarks: 0,
       slowConsumerTimer: null,
       registryReleased: true,
+      pendingFinalizeEffects: [],
     };
   }
 
@@ -423,6 +445,10 @@ export class TwilioMediaStreamAdapter {
 
     // FSM may have terminated this turn — close the call.
     if (sideEffects.some((fx) => fx.type === 'end_session')) {
+      // B2: stash the dispatch's effects so the finalize hook can read
+      // the FSM-supplied end_session.payload.reason — handleClose itself
+      // only carries a coarse mediastream label suitable for metrics.
+      this.state.pendingFinalizeEffects = sideEffects;
       this.handleClose('end_session');
     }
   }
@@ -580,12 +606,16 @@ export class TwilioMediaStreamAdapter {
     // B2: stash the outcome BEFORE we tear down. The host's
     // `finalizeOnClose` is sync (sets session.terminalOutcome and
     // kicks off the DB write in the background), so close stays
-    // non-blocking.
+    // non-blocking. `pendingFinalizeEffects` carries the FSM
+    // dispatch's effects (with `end_session.payload.reason`) when the
+    // close was triggered by an FSM end_session — empty otherwise, in
+    // which case the host falls back to the mapped close reason.
     if (this.deps.finalizeOnClose && this.state.session) {
       try {
         this.deps.finalizeOnClose(
           this.state.session,
           mapCloseReasonToFinalize(reason),
+          this.state.pendingFinalizeEffects,
         );
       } catch {
         /* swallow — outcome stamping is best-effort */

@@ -21,11 +21,13 @@ describe('Postgres integration — voice', () => {
   describe('CRUD', () => {
     it('creates voice recording and retrieves via findById', async () => {
       const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
+      // conversationId is intentionally omitted: the FK target is the
+      // conversations table, and seeding a conversation here is more
+      // setup than the test needs to exercise voice_recordings CRUD.
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
         fileId,
-        conversationId: crypto.randomUUID(),
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),

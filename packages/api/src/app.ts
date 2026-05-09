@@ -1660,9 +1660,12 @@ export function createApp(): express.Express {
             // B2: delegate outcome stamping to the gather adapter so all
             // close paths (caller hangup, idle timeout, end_session, WS
             // teardown, slow-consumer disconnect) stamp the same typed
-            // CallOutcome onto voice_sessions.
-            finalizeOnClose: (session, reason) =>
-              twilioAdapter.finalizeTerminatedSession(session, [], reason),
+            // CallOutcome onto voice_sessions. Forward the FSM
+            // sideEffects so the actual `end_session.payload.reason`
+            // (e.g. 'abuse_detected:profanity') reaches deriveCallOutcome
+            // for non-hangup terminations.
+            finalizeOnClose: (session, reason, sideEffects) =>
+              twilioAdapter.finalizeTerminatedSession(session, sideEffects, reason),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).

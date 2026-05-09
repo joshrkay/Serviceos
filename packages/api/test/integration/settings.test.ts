@@ -6,22 +6,24 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 describe('Postgres integration — settings', () => {
   let pool: Pool;
   let settingsRepo: PgSettingsRepository;
-  let tenant: { tenantId: string; userId: string };
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     settingsRepo = new PgSettingsRepository(pool);
-    tenant = await createTestTenant(pool);
   });
 
   afterAll(async () => {
     await closeSharedTestDb();
   });
 
+  // tenant_settings has UNIQUE(tenant_id), so each test creates its own
+  // tenant to avoid duplicate-key conflicts when multiple tests in the
+  // suite each call settingsRepo.create().
   describe('CRUD', () => {
     it('creates settings and retrieves via findByTenant', async () => {
+      const tenant = await createTestTenant(pool);
       const now = new Date();
-      const settings = await settingsRepo.create({
+      await settingsRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
         businessName: 'Test Business',
@@ -44,6 +46,7 @@ describe('Postgres integration — settings', () => {
     });
 
     it('updates settings and reflects in findByTenant', async () => {
+      const tenant = await createTestTenant(pool);
       const now = new Date();
       await settingsRepo.create({
         id: crypto.randomUUID(),
@@ -75,6 +78,7 @@ describe('Postgres integration — settings', () => {
 
   describe('tenant isolation', () => {
     it('rejects cross-tenant access', async () => {
+      const tenant = await createTestTenant(pool);
       const otherTenant = await createTestTenant(pool);
       const now = new Date();
       await settingsRepo.create({
