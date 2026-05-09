@@ -147,6 +147,7 @@ import {
   formatCallerPlanForPrompt,
 } from './ai/orchestration/caller-plan-context';
 import { createThresholdResolver } from './proposals/threshold-resolver';
+import { createVoicePersonaResolver } from './settings/voice-persona-resolver';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
@@ -688,6 +689,9 @@ export function createApp(): express.Express {
   // worker) so settings hits the DB at most once per tenant per TTL
   // window across the whole process.
   const thresholdResolver = createThresholdResolver(settingsRepo);
+  // B1 — per-tenant voice persona. 60-second LRU cache; shared by
+  // both the Twilio and in-app adapters.
+  const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
   const auditRepo          = webhookAuditRepo;
   // P11-001: voice lookup-skill audit log. The skills write one row
   // per invocation through `LookupEventService` and the Twilio adapter

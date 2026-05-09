@@ -70,6 +70,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // the safe pre-existing flow.
     depositTimingPolicy:
       (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
+    // B1 — migration 088. NULL from DB → undefined in TS (same
+    // convention as all other nullable optional columns here).
+    voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
+    voiceGreeting: (row.voice_greeting as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -199,6 +203,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositRequiredAboveCents: 'deposit_required_above_cents',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // B1 — migration 088.
+        voiceAgentName: 'voice_agent_name',
+        voiceGreeting: 'voice_greeting',
         updatedAt: 'updated_at',
       };
 

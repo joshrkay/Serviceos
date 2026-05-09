@@ -96,6 +96,12 @@ export interface InAppAdapterDeps {
    * pre-existing test fixtures continue to work without DI'ing a stub.
    */
   voiceSessionRepo?: VoiceSessionRepository;
+   * B1 — Per-tenant voice persona. When present, consulted during
+   * `startSession` to personalize the greeting. Failures fall back to
+   * the default text — voice service is never blocked by a settings
+   * lookup failure.
+   */
+  voicePersonaResolver?: VoicePersonaResolver;
 }
 
 export interface StartSessionResult {
@@ -114,7 +120,13 @@ export interface HandleInputResult {
   ended: boolean;
 }
 
-const GREETING_TEXT_INAPP = 'Hi, this is your assistant. How can I help today?';
+const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
+
+export function buildInappGreeting(persona?: VoicePersona | null): string {
+  if (persona?.greeting) return persona.greeting;
+  if (persona?.agentName) return `Hi, I'm ${persona.agentName}. How can I help today?`;
+  return DEFAULT_GREETING_INAPP;
+}
 
 /**
  * Map a classifier intent + entities into the FSM event shape.
@@ -249,15 +261,23 @@ export class InAppVoiceAdapter {
     });
     await this.executeSideEffects(session, callerKnownEffects);
 
-    session.transcript.push(`agent: ${GREETING_TEXT_INAPP}`);
+    // B1 — resolve per-tenant voice persona (best-effort).
+    let persona: VoicePersona | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildInappGreeting(persona);
+
+    session.transcript.push(`agent: ${greetingText}`);
 
     let greetingAudio: Buffer | undefined;
     if (this.deps.ttsProvider) {
       try {
-        const synth = await this.deps.ttsProvider.synthesize({
-          text: GREETING_TEXT_INAPP,
-          tenantId,
-        });
+        const synth = await this.deps.ttsProvider.synthesize({ text: greetingText, tenantId });
         greetingAudio = synth.audio;
       } catch {
         // TTS is best-effort: callers always get the greeting text back.
@@ -267,7 +287,7 @@ export class InAppVoiceAdapter {
     const result: StartSessionResult = {
       sessionId: session.id,
       state: session.machine.currentState,
-      greetingText: GREETING_TEXT_INAPP,
+      greetingText,
     };
     if (greetingAudio) result.greetingAudio = greetingAudio;
     return result;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { InAppVoiceAdapter } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
+import { InAppVoiceAdapter, buildInappGreeting } from '../../../../src/ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';

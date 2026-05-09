@@ -106,6 +106,20 @@ export interface TenantSettings {
    * 'after_approval' (preserves existing flow).
    */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /**
+   * B1 — Per-tenant voice persona. When set, the calling agent uses
+   * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
+   * help?"). Null = use the default generic opener.
+   */
+  voiceAgentName?: string | null;
+  /**
+   * B1 — Per-tenant voice persona. When set, this text replaces the
+   * entire static portion of the greeting (the "Thank you for calling
+   * …" or "Hi, this is your assistant" segment). For the telephony
+   * channel the recording-disclosure sentence is still appended after
+   * the custom greeting text. Null = use default.
+   */
+  voiceGreeting?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -153,6 +167,10 @@ export interface UpdateSettingsInput {
   depositRequiredAboveCents?: number | null;
   /** Tier 4 — when the deposit is collected relative to approval. */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /** B1 — voice persona name; null clears the field. */
+  voiceAgentName?: string | null;
+  /** B1 — custom greeting text; null clears the field. */
+  voiceGreeting?: string | null;
 }
 
 export interface SettingsRepository {
