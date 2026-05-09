@@ -192,6 +192,35 @@ describe('P0-006 — Secrets/config framework', () => {
       ).toThrow(/SENDGRID_API_KEY/);
     });
 
+    // Codex review (PR #328): TwilioDeliveryProvider in app.ts couples
+    // SMS + SendGrid. With TELEPHONY_ENABLED=false and EMAIL_ENABLED=true,
+    // the gate must still require TWILIO_* — otherwise startup passes
+    // but /invoices/:id/send + /estimates/:id/send 503 at runtime.
+    it('email — requires Twilio creds even with TELEPHONY_ENABLED=false (delivery coupling)', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+          SENDGRID_API_KEY: 'SG.x',
+          SENDGRID_FROM_EMAIL: 'noreply@example.com',
+        })
+      ).toThrow(
+        /TWILIO_ACCOUNT_SID[\s\S]*EMAIL_ENABLED=false[\s\S]*TWILIO_AUTH_TOKEN[\s\S]*TWILIO_FROM_NUMBER/
+      );
+    });
+
+    it('email + telephony off — no Twilio creds required', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          EMAIL_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+        })
+      ).not.toThrow();
+    });
+
     it('storage — fails when R2 vars missing and STORAGE_ENABLED not set to false', () => {
       expect(() =>
         loadConfig({

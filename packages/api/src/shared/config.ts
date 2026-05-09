@@ -128,26 +128,44 @@ function validateProductionConfig(config: AppConfig): void {
 function validateFeatureRequiredConfig(env: Record<string, string | undefined>): void {
   const missing: string[] = [];
 
-  // Telephony — Twilio voice + SMS. Default tenant id is required when
-  // telephony is on so inbound calls resolve to a tenant before the
-  // multi-tenant phone-lookup ships (B1 in the launch readiness plan).
-  if (env.TELEPHONY_ENABLED !== 'false') {
-    if (!env.TWILIO_ACCOUNT_SID) missing.push('TWILIO_ACCOUNT_SID (or set TELEPHONY_ENABLED=false)');
-    if (!env.TWILIO_AUTH_TOKEN) missing.push('TWILIO_AUTH_TOKEN (or set TELEPHONY_ENABLED=false)');
-    if (!env.TWILIO_FROM_NUMBER) missing.push('TWILIO_FROM_NUMBER (or set TELEPHONY_ENABLED=false)');
-    if (!env.TWILIO_DEFAULT_TENANT_ID) {
-      missing.push('TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)');
-    }
+  const telephonyEnabled = env.TELEPHONY_ENABLED !== 'false';
+  const emailEnabled = env.EMAIL_ENABLED !== 'false';
+  const storageEnabled = env.STORAGE_ENABLED !== 'false';
+
+  // Twilio credentials are shared between telephony (voice + SMS) and
+  // the email path. TwilioDeliveryProvider in app.ts couples SMS +
+  // SendGrid into a single delivery service: without TWILIO_*, the
+  // delivery provider is null and /invoices/:id/send + /estimates/:id/send
+  // return 503 even when SendGrid is configured. So Twilio is required
+  // whenever either feature is enabled, with a message that names the
+  // opt-out flag(s) the operator can flip.
+  if (telephonyEnabled || emailEnabled) {
+    const optOut =
+      telephonyEnabled && emailEnabled
+        ? '(or set both TELEPHONY_ENABLED=false and EMAIL_ENABLED=false)'
+        : telephonyEnabled
+          ? '(or set TELEPHONY_ENABLED=false)'
+          : '(or set EMAIL_ENABLED=false)';
+    if (!env.TWILIO_ACCOUNT_SID) missing.push(`TWILIO_ACCOUNT_SID ${optOut}`);
+    if (!env.TWILIO_AUTH_TOKEN) missing.push(`TWILIO_AUTH_TOKEN ${optOut}`);
+    if (!env.TWILIO_FROM_NUMBER) missing.push(`TWILIO_FROM_NUMBER ${optOut}`);
   }
 
-  // Email delivery — invoice + estimate notifications via SendGrid.
-  if (env.EMAIL_ENABLED !== 'false') {
+  // Default tenant id is required when telephony is on so inbound
+  // calls resolve to a tenant before the multi-tenant phone-lookup
+  // ships (B1 in the launch readiness plan).
+  if (telephonyEnabled && !env.TWILIO_DEFAULT_TENANT_ID) {
+    missing.push('TWILIO_DEFAULT_TENANT_ID (or set TELEPHONY_ENABLED=false)');
+  }
+
+  // SendGrid credentials — invoice + estimate delivery email side.
+  if (emailEnabled) {
     if (!env.SENDGRID_API_KEY) missing.push('SENDGRID_API_KEY (or set EMAIL_ENABLED=false)');
     if (!env.SENDGRID_FROM_EMAIL) missing.push('SENDGRID_FROM_EMAIL (or set EMAIL_ENABLED=false)');
   }
 
   // Object storage — voice recordings, file/job uploads via Cloudflare R2.
-  if (env.STORAGE_ENABLED !== 'false') {
+  if (storageEnabled) {
     if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
     if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
     if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
