@@ -926,20 +926,20 @@
         },
         {
           "id": "CTR-004",
-          "description": "Generate-job on nonexistent agreement returns 404",
+          "description": "Run-now on nonexistent agreement returns 404",
           "module": "contracts",
           "requires_env": [
             "AUTH_BEARER_TOKEN"
           ],
           "api_check": {
             "method": "POST",
-            "endpoint": "/api/agreements/00000000-0000-0000-0000-000000000000/generate-job",
+            "endpoint": "/api/agreements/00000000-0000-0000-0000-000000000000/run-now",
             "headers": {
               "Content-Type": "application/json"
             },
             "body": {},
             "expect_statuses": [
-              400,
+              403,
               404
             ]
           },
@@ -990,7 +990,7 @@
           "module": "technician",
           "api_check": {
             "method": "POST",
-            "endpoint": "/api/technician/location",
+            "endpoint": "/api/technician-location",
             "no_auth": true,
             "headers": {
               "Content-Type": "application/json"
@@ -1001,8 +1001,7 @@
             },
             "expect_statuses": [
               401,
-              403,
-              404
+              403
             ]
           },
           "ui_check": {
@@ -1027,10 +1026,8 @@
             },
             "body": {},
             "expect_statuses": [
-              400,
               401,
-              403,
-              404
+              403
             ]
           },
           "ui_check": {

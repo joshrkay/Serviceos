@@ -320,7 +320,7 @@ Before sending the invoice, verify the entire data trail is navigable in both di
 
 - [ ] **8.8** From the Technician Day View (`/technician/day`), confirm the technician's device can submit a location ping. Open the page on a mobile device or browser with location permissions. Allow location access.
 - [ ] **8.9** Trigger a location update (this may be automatic on page load or require an explicit action). No error is shown.
-- [ ] **8.10** Verify the ping was stored by querying the database directly: `SELECT lat, lng, accuracy, created_at FROM technician_locations ORDER BY created_at DESC LIMIT 5;` and confirm a record exists with lat/lng, accuracy, and timestamp within the last 2 minutes. (There is no `GET /api/technician-location` endpoint — the route only accepts POST.)
+- [ ] **8.10** Verify the ping was stored by querying the database directly: `SELECT lat, lng, accuracy_meters, recorded_at FROM technician_location_pings ORDER BY recorded_at DESC LIMIT 5;` and confirm a record exists with lat/lng, accuracy, and timestamp within the last 2 minutes. (There is no `GET /api/technician-location` endpoint — the route only accepts POST.)
 
 ### 8C — Dispatch analytics
 
