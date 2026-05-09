@@ -2098,6 +2098,8 @@ export class TwilioGatherAdapter {
       if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
       if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
       if (ctx.escalationReason.startsWith('callback_required')) return 'callback_required';
+      // abuse_detected terminates the call immediately with no human handoff
+      if (ctx.escalationReason.startsWith('abuse_detected')) return 'failed';
       return 'escalated_to_human';
     }
     if (session.proposalIds.length > 0) return 'completed';
