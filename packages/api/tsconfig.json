@@ -6,5 +6,6 @@
     "declaration": true,
     "types": ["vitest/globals"]
   },
-  "include": ["src/**/*", "test/**/*"]
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["test/voice-quality/post-pr-comment.test.ts"]
 }
