@@ -37,14 +37,18 @@ import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 class FakeWs implements WsLike {
   sent: unknown[] = [];
   closed = false;
+  closeCode: number | undefined;
+  closeReason: string | undefined;
   private listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
 
   send(data: string): void {
     this.sent.push(JSON.parse(data));
   }
 
-  close(): void {
+  close(code?: number, reason?: string): void {
     this.closed = true;
+    this.closeCode = code;
+    this.closeReason = reason;
     this.fire('close');
   }
 
@@ -209,6 +213,35 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     });
     await new Promise((r) => setImmediate(r));
     expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toBe(1008);
+    expect(ws.closeReason).toBe('unknown_callsid');
+  });
+
+  it('closes WS with 1008 when customParameters.tenantId does not match session tenantId', async () => {
+    store.create('real-tenant', 'telephony', { callSid: 'CA-tenant' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-tenant',
+      start: {
+        callSid: 'CA-tenant',
+        accountSid: 'AC',
+        streamSid: 'MZ-tenant',
+        tracks: ['inbound'],
+        customParameters: { tenantId: 'spoofed-tenant' },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toBe(1008);
+    expect(ws.closeReason).toBe('tenant_mismatch');
   });
 
   it('B2: forwards FSM sideEffects to finalizeOnClose so abuse_detected reason reaches the host', async () => {
