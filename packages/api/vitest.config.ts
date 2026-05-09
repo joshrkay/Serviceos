@@ -6,7 +6,11 @@ export default defineConfig({
     globals: true,
     root: '.',
     include: ['test/**/*.test.ts'],
-    exclude: ['test/integration/**'],
+    // Integration tests run under vitest.integration.config.ts, which owns
+    // the testcontainer lifecycle via globalSetup. Excluding them here means
+    // `npm test` (and `npm run test:coverage`) cover unit tests only and
+    // don't need Docker.
+    exclude: ['node_modules/**', 'dist/**', 'test/integration/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
@@ -18,9 +22,6 @@ export default defineConfig({
         lines: 50,
       },
     },
-    // Integration tests also run under this config (test/**/*.test.ts includes
-    // test/integration/**). Set hookTimeout high enough to survive a cold Docker
-    // image pull (~30-120 s for pgvector/pgvector:pg16 on a fresh CI runner).
     testTimeout: 30000,
     hookTimeout: 120000,
   },

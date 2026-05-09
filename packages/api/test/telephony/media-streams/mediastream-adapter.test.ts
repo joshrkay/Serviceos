@@ -338,6 +338,63 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(ws.closed).toBe(true);
   });
 
+  it('B2: forwards FSM sideEffects to finalizeOnClose so abuse_detected reason reaches the host', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-abuse' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const abuseSideEffects: SideEffect[] = [
+      { type: 'audit_log', payload: {} },
+      { type: 'end_session', payload: { reason: 'abuse_detected:profanity' } },
+    ];
+    const speechTurn = vi.fn().mockResolvedValue(abuseSideEffects);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-abuse',
+      start: { callSid: 'CA-abuse', accountSid: 'AC', streamSid: 'MZ-abuse', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'profanity here', confidence: 0.99 });
+    await new Promise((r) => setImmediate(r));
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual(abuseSideEffects);
+  });
+
+  it('B2: passes empty sideEffects to finalizeOnClose for non-FSM close paths', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-idle' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        finalizeOnClose,
+        audioIdleTimeoutMs: 1,
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-idle',
+      start: { callSid: 'CA-idle', accountSid: 'AC', streamSid: 'MZ-idle', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finalizeOnClose).toHaveBeenCalled();
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('idle_timeout');
+    expect(sideEffects).toEqual([]);
+  });
+
   it('malformed inbound JSON is silently dropped', async () => {
     store.create('t', 'telephony', { callSid: 'CA-5' });
     const ws = new FakeWs();

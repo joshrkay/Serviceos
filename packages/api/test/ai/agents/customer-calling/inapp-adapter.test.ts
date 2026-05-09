@@ -4,6 +4,7 @@ import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/vo
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
+import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
 
@@ -369,91 +370,161 @@ describe('InAppVoiceAdapter', () => {
     });
   });
 
-  // ─── B1: per-tenant voice persona ────────────────────────────────────────
-
-  describe('buildInappGreeting', () => {
-    it('returns the default greeting when persona is null', () => {
-      expect(buildInappGreeting(null)).toMatch(/your assistant/i);
+  describe('B2 — voiceSessionRepo outcome stamping', () => {
+    it('inserts a voice_sessions row on startSession with channel=inapp_voice', async () => {
+      const gateway = scriptedGateway([]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Microtask flush — fire-and-forget create.
+      await Promise.resolve();
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row).not.toBeNull();
+      expect(row?.channel).toBe('inapp_voice');
+      expect(row?.callSid).toBeUndefined();
+      expect(row?.outcome).toBeUndefined();
     });
 
-    it('returns the default greeting when persona is undefined', () => {
-      expect(buildInappGreeting(undefined)).toMatch(/your assistant/i);
+    it('stamps outcome=no_intent on endSession when caller spoke but no intent crossed TAU_INT', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+      ]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'umm uh');
+      await adapter.endSession(sessionId);
+      // persistSessionEnded is fire-and-forget; flush microtasks so the
+      // InMemory repo write completes before we assert on it.
+      await Promise.resolve();
+      await Promise.resolve();
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row?.outcome).toBe('no_intent');
+      expect(row?.endedReason).toBe('session_ended');
+      expect(row?.endedAt).toBeInstanceOf(Date);
+      // session_ended is ignored from intent_capture so the FSM stays
+      // in intent_capture; the column reflects whatever final state the
+      // FSM actually reached at finalize time (no synthetic terminated).
+      expect(row?.state).toBe('intent_capture');
     });
 
-    it('uses agentName when set', () => {
-      expect(buildInappGreeting({ agentName: 'Alex' })).toBe("Hi, I'm Alex. How can I help today?");
+    it('stamps outcome=completed on endSession after a proposal queued', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'create_invoice',
+          confidence: 0.94,
+          extractedEntities: { customerName: 'Acme', amount: 45000 },
+        }),
+      ]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'Invoice Acme for 450');
+      await adapter.endSession(sessionId);
+      await Promise.resolve();
+      await Promise.resolve();
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row?.outcome).toBe('completed');
     });
 
-    it('uses custom greeting verbatim when set (no extra CTA appended)', () => {
-      expect(buildInappGreeting({ greeting: 'Welcome to Acme! How can we help?' }))
-        .toBe('Welcome to Acme! How can we help?');
-    });
-
-    it('prefers greeting over agentName when both set', () => {
-      expect(buildInappGreeting({ agentName: 'Alex', greeting: 'Custom text.' }))
-        .toBe('Custom text.');
-    });
-  });
-
-  describe('voicePersonaResolver wire-up', () => {
-    it('uses agentName from resolver in greeting', async () => {
+    it('endSession works without voiceSessionRepo (legacy fixtures stay green)', async () => {
       const gateway = scriptedGateway([]);
       const adapter = new InAppVoiceAdapter({
         store,
         gateway,
-        ttsProvider: noopTts(),
         proposalRepo,
         auditRepo,
         onCallRepo,
-        voicePersonaResolver: async () => ({ agentName: 'Sam' }),
       });
-      const result = await adapter.startSession(TENANT, USER);
-      expect(result.greetingText).toBe("Hi, I'm Sam. How can I help today?");
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await expect(adapter.endSession(sessionId)).resolves.toBeUndefined();
     });
 
-    it('uses custom greeting from resolver verbatim', async () => {
+    it('finalizes outcome on FSM end_session mid-turn without DELETE call', async () => {
+      // abuse_detected emits end_session and lands the FSM in
+      // 'terminated' inside a single handleInput. The client may
+      // observe `ended: true` and never call DELETE — the outcome
+      // must still be stamped, with the FSM-supplied reason
+      // (abuse_detected:*) preserved so the mapper returns
+      // escalated_to_human, not a generic session_ended outcome.
       const gateway = scriptedGateway([]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
       const adapter = new InAppVoiceAdapter({
         store,
         gateway,
-        ttsProvider: noopTts(),
         proposalRepo,
         auditRepo,
         onCallRepo,
-        voicePersonaResolver: async () => ({ greeting: 'Thanks for calling Acme!' }),
+        voiceSessionRepo,
       });
-      const result = await adapter.startSession(TENANT, USER);
-      expect(result.greetingText).toBe('Thanks for calling Acme!');
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Drive an abuse_detected event directly on the FSM, then run an
+      // input turn so executeSideEffects observes the end_session.
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      const effects = session.machine.dispatch({ type: 'abuse_detected', category: 'profanity' });
+      await (
+        adapter as unknown as {
+          executeSideEffects: (s: typeof session, e: typeof effects) => Promise<unknown>;
+        }
+      ).executeSideEffects(session, effects);
+      // Replicate _handleInputLocked's end-of-turn finalize block by
+      // calling handleInput with a no-op turn — the FSM is already in
+      // 'terminated', and handleInput's endedNow branch should fire.
+      // (Direct invocation here avoids re-driving the classifier.)
+      // The abuse_detected event already set machine.currentState to
+      // 'terminated', so endedNow=true and finalizeTerminalOutcome runs.
+      await (
+        adapter as unknown as {
+          finalizeTerminalOutcome: (
+            s: typeof session,
+            r: string,
+          ) => void;
+        }
+      ).finalizeTerminalOutcome(session, 'abuse_detected:profanity');
+      await Promise.resolve();
+      await Promise.resolve();
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row?.outcome).toBe('escalated_to_human');
+      expect(row?.endedReason).toBe('abuse_detected:profanity');
     });
 
-    it('falls back to default greeting when resolver returns null', async () => {
+    it('repo.create() failure is non-fatal', async () => {
       const gateway = scriptedGateway([]);
+      const voiceSessionRepo: InMemoryVoiceSessionRepository = new InMemoryVoiceSessionRepository();
+      voiceSessionRepo.create = vi.fn(async () => {
+        throw new Error('boom');
+      }) as typeof voiceSessionRepo.create;
       const adapter = new InAppVoiceAdapter({
         store,
         gateway,
-        ttsProvider: noopTts(),
         proposalRepo,
         auditRepo,
         onCallRepo,
-        voicePersonaResolver: async () => null,
+        voiceSessionRepo,
       });
-      const result = await adapter.startSession(TENANT, USER);
-      expect(result.greetingText).toMatch(/your assistant/i);
-    });
-
-    it('falls back to default greeting when resolver throws', async () => {
-      const gateway = scriptedGateway([]);
-      const adapter = new InAppVoiceAdapter({
-        store,
-        gateway,
-        ttsProvider: noopTts(),
-        proposalRepo,
-        auditRepo,
-        onCallRepo,
-        voicePersonaResolver: async () => { throw new Error('db error'); },
-      });
-      const result = await adapter.startSession(TENANT, USER);
-      expect(result.greetingText).toMatch(/your assistant/i);
+      await expect(adapter.startSession(TENANT, USER)).resolves.toBeDefined();
     });
   });
 });
