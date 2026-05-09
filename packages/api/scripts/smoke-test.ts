@@ -35,11 +35,24 @@ const PROBES: Probe[] = [
   { name: 'telephony-health', path: '/api/telephony/health', expectStatus: 200, expectBodyContains: '"ok":true' },
 ];
 
+const ALLOWED_FLAGS = new Set(['env', 'base']);
+
 function parseArgs(argv: string[]): { base: string } {
   const args = new Map<string, string>();
   for (const arg of argv.slice(2)) {
     const m = arg.match(/^--([^=]+)=(.+)$/);
-    if (m) args.set(m[1], m[2]);
+    // Reject malformed args (e.g. --env staging, bare --prod) and
+    // unknown flag names (e.g. --evn=prod) so a typo can't silently
+    // drop through to the localhost fallback during deploy verification.
+    if (!m) {
+      throw new Error(`Unrecognized smoke-test argument "${arg}". Expected --env=<name> or --base=<url>.`);
+    }
+    if (!ALLOWED_FLAGS.has(m[1])) {
+      throw new Error(
+        `Unknown smoke-test flag "--${m[1]}". Allowed: ${[...ALLOWED_FLAGS].map((f) => `--${f}`).join(', ')}.`
+      );
+    }
+    args.set(m[1], m[2]);
   }
   const env = args.get('env');
   const base = args.get('base');
@@ -65,6 +78,12 @@ function parseArgs(argv: string[]): { base: string } {
   return { base: 'http://localhost:3000' };
 }
 
+// Per-probe timeout. Three probes × 10s keeps the worst-case wall time
+// inside the 30s rollback verification budget documented at the top.
+// Without this, a stalled SYN or hanging upstream blocks for OS-level
+// timeouts (often 60s+) and starves CI/job runners of a fail signal.
+const PROBE_TIMEOUT_MS = 10_000;
+
 async function main(): Promise<void> {
   const { base } = parseArgs(process.argv);
   console.log(`Smoke test → ${base}`);
@@ -74,7 +93,10 @@ async function main(): Promise<void> {
     const url = `${base}${probe.path}`;
     const t0 = Date.now();
     try {
-      const res = await fetch(url, { method: 'GET' });
+      const res = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      });
       const body = await res.text();
       const expected = Array.isArray(probe.expectStatus) ? probe.expectStatus : [probe.expectStatus];
       const statusOk = expected.includes(res.status);
