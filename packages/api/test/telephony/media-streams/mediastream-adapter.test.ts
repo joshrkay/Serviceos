@@ -22,6 +22,7 @@ import type {
   StreamingSession,
   StreamingTranscriptionProvider,
   StreamingTranscriptCallback,
+  StreamingTranscriptEvent,
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
@@ -66,7 +67,7 @@ class FakeWs implements WsLike {
 }
 
 type StreamHandle = {
-  emit: (evt: { type: string; isFinal: boolean; transcript: string; confidence: number }) => void;
+  emit: (evt: StreamingTranscriptEvent) => void;
 };
 
 function makeStreamingProvider(): {
@@ -76,11 +77,12 @@ function makeStreamingProvider(): {
   let cb: StreamingTranscriptCallback | null = null;
   const session: StreamingSession = {
     send: vi.fn(),
-    close: vi.fn(),
+    finish: vi.fn(),
+    destroy: vi.fn(),
   };
   const provider: StreamingTranscriptionProvider = {
-    startSession: vi.fn((_opts, callback) => {
-      cb = callback;
+    openSession: vi.fn((onEvent, _onError, _onClose) => {
+      cb = onEvent;
       return Promise.resolve(session);
     }),
   };
@@ -92,11 +94,12 @@ function makeStreamingProvider(): {
   };
 }
 
-function makeTtsProvider(chunks: string[]): TtsProvider {
+function makeTtsProvider(): TtsProvider {
   return {
     synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
-      audioChunks: chunks.map((c) => Buffer.from(c, 'base64')),
-      durationMs: chunks.length * 100,
+      audio: Buffer.alloc(640),
+      contentType: 'audio/mulaw',
+      provider: 'test',
     })),
   };
 }
@@ -126,7 +129,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       start: { callSid: 'CA-1', accountSid: 'AC', streamSid: 'MZ-1', tracks: ['inbound'] },
     });
     await new Promise((r) => setImmediate(r));
-    expect(provider.startSession).toHaveBeenCalledTimes(1);
+    expect(provider.openSession).toHaveBeenCalledTimes(1);
   });
 
   it('forwards base64 audio to the Deepgram session', async () => {
@@ -146,7 +149,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     });
     await new Promise((r) => setImmediate(r));
 
-    const deepgramSession = (provider.startSession as ReturnType<typeof vi.fn>).mock.results[0]
+    const deepgramSession = (provider.openSession as ReturnType<typeof vi.fn>).mock.results[0]
       .value as Promise<StreamingSession>;
     const session = await deepgramSession;
 
@@ -164,14 +167,14 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     store.create('t', 'telephony', { callSid: 'CA-3' });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
-    const tts = makeTtsProvider(['Y2h1bms=', 'Y2h1bmsyCg==']);
+    const tts = makeTtsProvider();
     const adapter = new TwilioMediaStreamAdapter(
       {
         store,
         streamingProvider: provider,
         speechTurn: async () => [],
         ttsProvider: tts,
-        agentGreeting: 'Hello!',
+        initializeSession: async () => [{ type: 'tts_play', payload: { text: 'Hello!' } }],
       },
       ws,
     );
@@ -204,8 +207,6 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       streamSid: 'MZ-4',
       start: { callSid: 'CA-4', accountSid: 'AC', streamSid: 'MZ-4', tracks: ['inbound'] },
     });
-    await new Promise((r) => setImmediate(r));
-    handle.emit({ type: 'final', isFinal: true, transcript: 'goodbye', confidence: 0.99 });
     await new Promise((r) => setImmediate(r));
     expect(ws.closed).toBe(true);
   });
@@ -300,7 +301,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         streamingProvider: provider,
         speechTurn: async () => [],
         ttsProvider: tts,
-        agentGreeting: 'Hello there',
+        initializeSession: async () => [{ type: 'tts_play', payload: { text: 'Hello there' } }],
       },
       ws,
     );
@@ -314,7 +315,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     await new Promise((r) => setImmediate(r));
 
     // Barge-in interim transcript.
-    handle.emit({ type: 'interim', isFinal: false, transcript: 'hey', confidence: 0.5 });
+    handle.emit({ type: 'partial', isFinal: false, transcript: 'hey', confidence: 0.5 });
     await new Promise((r) => setImmediate(r));
 
     const clearFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear');
