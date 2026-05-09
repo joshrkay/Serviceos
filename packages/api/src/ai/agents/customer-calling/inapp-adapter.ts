@@ -39,6 +39,9 @@ import {
 import { TAU_INT } from './transitions';
 import type { CallingAgentEvent, SideEffect } from './types';
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
+import type { VoiceSessionRepository } from '../../../voice/voice-session';
+import type { CallOutcome } from '../../../voice/voice-service';
+import { deriveCallOutcome } from './outcome-mapper';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 
 export interface InAppAdapterDeps {
@@ -87,6 +90,13 @@ export interface InAppAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B2 — persistent outcome stamping. When wired, the adapter inserts a
+   * voice_sessions row on session start and stamps the typed CallOutcome
+   * + ended_reason on session end (before store.delete()). Optional so
+   * pre-existing test fixtures continue to work without DI'ing a stub.
+   */
+  voiceSessionRepo?: VoiceSessionRepository;
   /**
    * B1 — Per-tenant voice persona. When present, consulted during
    * `startSession` to personalize the greeting. Failures fall back to
@@ -217,6 +227,21 @@ export class InAppVoiceAdapter {
   async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
     const session = this.deps.store.create(tenantId, 'inapp');
     const convId = conversationId ?? session.id;
+
+    // B2: persist a voice_sessions row at session start. Fire-and-forget
+    // so a transient repo error never blocks the call.
+    if (this.deps.voiceSessionRepo) {
+      void this.deps.voiceSessionRepo
+        .create({
+          id: session.id,
+          tenantId,
+          channel: 'inapp_voice',
+          state: session.machine.currentState,
+        })
+        .catch(() => {
+          /* swallow — outcome stamping is best-effort */
+        });
+    }
 
     // Drive: idle → greeting → identifying. We treat the in-app caller
     // as already identified (they're authenticated via the API client),
@@ -450,7 +475,21 @@ export class InAppVoiceAdapter {
       session.machine.currentState === 'terminated';
     if (endedNow) {
       session.ended = true;
-      session.events.emit('voice-event', { type: 'ended', reason: typeof last?.payload?.reason === 'string' ? last.payload.reason : 'closed' });
+      // B2: extract the FSM-supplied end_session.payload.reason (e.g.
+      // 'abuse_detected:profanity') so deriveCallOutcome maps it to the
+      // correct CallOutcome — flattening to 'session_ended' here would
+      // lose abuse / system_failure signal.
+      const endFx = [...allSideEffects].reverse().find((e) => e.type === 'end_session');
+      const endReason =
+        endFx && typeof endFx.payload.reason === 'string'
+          ? endFx.payload.reason
+          : 'closed';
+      session.events.emit('voice-event', { type: 'ended', reason: endReason });
+      // Stamp voice_sessions.outcome here so a client that drops the
+      // connection after seeing `ended: true` (without calling DELETE)
+      // still produces a finalized row. _endSessionLocked's later call
+      // is short-circuited by the session.terminalOutcome guard.
+      this.finalizeTerminalOutcome(session, endReason);
       // Best-effort summary (P8-010 — skill is already in tree).
       void this.runSummary(session).catch(() => {
         /* never block the response on summary failures */
@@ -492,9 +531,59 @@ export class InAppVoiceAdapter {
         /* swallow — summary is best-effort */
       });
     }
+    // B2: derive + stash the typed terminal outcome BEFORE delete() so
+    // the recording-webhook → onPersisted path can still read it. The DB
+    // write is fire-and-forget so a slow Postgres can't delay session
+    // teardown (route returns 204 immediately on the inapp channel).
+    this.finalizeTerminalOutcome(session, 'session_ended');
     session.events.emit('voice-event', { type: 'ended', reason: 'manual_end' });
     // store.delete() also drops the per-session lock entry.
     this.deps.store.delete(sessionId);
+  }
+
+  /**
+   * B2 — compute the typed CallOutcome from FSM state, stash it on the
+   * session synchronously, and kick off the persist to voice_sessions
+   * in the background. Idempotent: `session.terminalOutcome` short-
+   * circuits a duplicate derive, and `markEnded`'s upsert+endedAt guard
+   * makes the DB write idempotent too.
+   */
+  private finalizeTerminalOutcome(session: VoiceSession, endedReason: string): void {
+    if (session.terminalOutcome) return;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = endedReason;
+    void this.persistSessionEnded(session, endedReason, outcome);
+  }
+
+  /**
+   * B2 — async DB-write half of `finalizeTerminalOutcome`. Always
+   * fire-and-forget; errors are swallowed because outcome stamping is
+   * best-effort and must never break a call flow.
+   */
+  private async persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!this.deps.voiceSessionRepo) return;
+    try {
+      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel: 'inapp_voice',
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
+    }
   }
 
   /**

@@ -57,6 +57,8 @@ import {
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import { deriveCallOutcome } from '../ai/agents/customer-calling/outcome-mapper';
+import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
@@ -69,6 +71,7 @@ import type { DispatcherPhoneResolver } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
+import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 
 const logger = createLogger({
@@ -180,6 +183,18 @@ export interface TwilioAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B2 — persistent outcome stamping. When wired, the adapter inserts a
+   * voice_sessions row on session start and stamps the typed CallOutcome
+   * + ended_reason on session end (before store.delete()). Optional so
+   * existing test fixtures continue to work without DI'ing a stub.
+   */
+  voiceSessionRepo?: VoiceSessionRepository;
+  /**
+   * When wired, the call outcome is stamped on the voice_recordings row
+   * at session end (by callSid). Without this, analytics remain blind.
+   */
+  voiceRepo?: VoiceRepository;
   /**
    * B1 — Per-tenant voice persona. When present, consulted during
    * `handleInbound` to personalize the greeting. Failures fall back
@@ -470,6 +485,7 @@ export class TwilioGatherAdapter {
    */
   async handleInboundForStream(opts: {
     callSid: string;
+    from: string;
     tenantId: string;
   }): Promise<string> {
     const existing = this.deps.store.findByCallSid(opts.callSid);
@@ -479,7 +495,151 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    // initializeStreamSession reads callerIdBySession to drive
+    // identifyCaller/lead creation; without this, every media-stream
+    // inbound silently falls through to unknown-caller behavior.
+    this.callerIdBySession.set(session.id, opts.from ?? '');
+    this.persistVoiceSessionRow(session, opts.callSid);
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+  }
+
+  /**
+   * B2 — fire-and-forget insert into voice_sessions. Best-effort: a repo
+   * error never blocks call setup.
+   */
+  private persistVoiceSessionRow(session: VoiceSession, callSid: string | undefined): void {
+    if (!this.deps.voiceSessionRepo) return;
+    void this.deps.voiceSessionRepo
+      .create({
+        id: session.id,
+        tenantId: session.tenantId,
+        channel: 'voice_inbound',
+        ...(callSid ? { callSid } : {}),
+        state: session.machine.currentState,
+      })
+      .catch(() => {
+        /* swallow — outcome stamping is best-effort */
+      });
+  }
+
+  /**
+   * P8-012 — Run greeting initialization for the Media Streams path.
+   *
+   * Called by the WS adapter after Deepgram opens (i.e., once the caller
+   * is actually connected and can hear audio). Mirrors the disclosure +
+   * caller-ID + FSM bootstrap that Gather mode runs inside handleInbound(),
+   * but returns side-effect arrays instead of TwiML so the adapter can
+   * synthesize them via TTS.
+   */
+  async initializeStreamSession(opts: {
+    callSid: string;
+    tenantId: string;
+  }): Promise<SideEffect[]> {
+    const session = this.deps.store.findByCallSid(opts.callSid);
+    if (!session) {
+      return [
+        { type: 'tts_play', payload: { text: `Thank you for calling ${this.deps.businessName}. How can I help you today?` } },
+      ];
+    }
+
+    const from = this.callerIdBySession.get(session.id) ?? '';
+
+    // 1. Recording disclosure (text only — TTS synthesizes the audio).
+    const disclosure = await discloseRecording({
+      tenantId: opts.tenantId,
+      channel: 'telephony',
+      businessName: this.deps.businessName,
+    });
+
+    // 2. Identify caller by phone number.
+    let callerKnown: { customerId: string; customerName: string } | null = null;
+    let identifyFailed = false;
+    if (this.deps.pool && from) {
+      try {
+        const result = await identifyCaller({
+          tenantId: opts.tenantId,
+          fromPhone: from,
+          pool: this.deps.pool,
+        });
+        if (result.status === 'matched') {
+          callerKnown = { customerId: result.customerId, customerName: result.customerName };
+        }
+      } catch (err) {
+        logger.error('initializeStreamSession: identifyCaller failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid: opts.callSid,
+        });
+        identifyFailed = true;
+      }
+    }
+
+    // 3. FSM bootstrap: incoming_call → greeting → identifying.
+    const sideEffects: SideEffect[] = [];
+    sideEffects.push(
+      ...session.machine.dispatch({
+        type: 'incoming_call',
+        callSid: opts.callSid,
+        from,
+        to: '',
+        tenantId: opts.tenantId,
+      }),
+    );
+
+    // 4. Replace 'greeting' placeholder with real greeting + disclosure text.
+    let persona: VoicePersona | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(opts.tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildTelephonyGreeting(
+      this.deps.businessName,
+      disclosure.disclosureText,
+      persona,
+    );
+    for (const fx of sideEffects) {
+      if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
+        fx.payload.text = greetingText;
+      }
+    }
+
+    // 5. Drive FSM forward: greeted_ok → caller_known / unknown_caller.
+    sideEffects.push(...session.machine.dispatch({ type: 'greeted_ok' }));
+
+    if (callerKnown) {
+      session.customerId = callerKnown.customerId;
+      sideEffects.push(
+        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnown.customerId }),
+      );
+    } else if (identifyFailed) {
+      sideEffects.push(
+        ...session.machine.dispatch({ type: 'caller_identification_failed', reason: 'identify_caller_threw' }),
+      );
+    } else {
+      if (this.deps.leadRepo && from) {
+        try {
+          const result = await findOrCreateLeadByPhone({
+            tenantId: opts.tenantId,
+            fromPhone: from,
+            leadRepo: this.deps.leadRepo,
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.leadId = result.leadId;
+        } catch (err) {
+          logger.error('initializeStreamSession: findOrCreateLeadByPhone failed', {
+            callSid: opts.callSid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      sideEffects.push(...session.machine.dispatch({ type: 'unknown_caller' }));
+    }
+
+    await this.executeSideEffects(session, sideEffects, opts.tenantId);
+    return sideEffects;
   }
 
   /**
@@ -689,6 +849,7 @@ export class TwilioGatherAdapter {
     }
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      this.finalizeTerminatedSession(session, sideEffectsAll, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -727,6 +888,7 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    this.persistVoiceSessionRow(session, opts.callSid);
 
     // P18-001: record the caller-id (or "" when blocked/withheld) so
     // the create_customer voice flow can use it as the new customer's
@@ -876,6 +1038,7 @@ export class TwilioGatherAdapter {
     //    captures even calls that never reached intent_capture.
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      this.finalizeTerminatedSession(session, expanded, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1137,11 +1300,11 @@ export class TwilioGatherAdapter {
    * the end-of-call summary in the background. Centralizes the
    * end-of-handler wrap-up shared by handleGather and handleInbound.
    */
-  private finalizeTwiml(
+  private async finalizeTwiml(
     session: VoiceSession,
     sideEffects: SideEffect[],
     sessionId: string,
-  ): string {
+  ): Promise<string> {
     // P8-013: when a notify_oncall side effect produced a <Dial>
     // transfer descriptor, we hand back that TwiML directly instead
     // of looping into another <Gather>. Twilio will POST the dial
@@ -1174,6 +1337,7 @@ export class TwilioGatherAdapter {
     }
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      this.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1913,28 +2077,191 @@ export class TwilioGatherAdapter {
    * Persist an end-of-call summary to call_summaries. Best-effort —
    * failures are logged but never bubble out (the call already ended).
    */
+  /**
+   * B2 — derive the typed CallOutcome from FSM state, stash it on the
+   * session, and kick off the persist to voice_sessions in the
+   * background. The synchronous part (derive + stash) MUST complete
+   * before `store.delete()` so the recording-webhook → onPersisted
+   * path can still read `session.terminalOutcome`. The async DB write
+   * is deliberately fire-and-forget so a slow Postgres can never delay
+   * a Twilio webhook response (which would trigger Twilio retries).
+   *
+   * Idempotent: `session.terminalOutcome` short-circuits duplicate
+   * derives, and `voiceSessionRepo.markEnded`'s upsert+`ended_at IS NULL`
+   * guard makes the DB write idempotent too.
+   *
+   * Public so the mediastream adapter can delegate finalize through
+   * the twilio adapter rather than DI'ing voiceSessionRepo separately.
+   */
+  finalizeTerminatedSession(
+    session: VoiceSession,
+    sideEffects: ReadonlyArray<SideEffect>,
+    fallbackReason: string,
+  ): void {
+    if (session.terminalOutcome) return;
+    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
+    const reason =
+      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
+        ? endSessionEffect.payload.reason
+        : undefined) ?? fallbackReason;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason: reason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = reason;
+    void this.persistSessionEnded(session, reason, outcome);
+  }
+
+  /**
+   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
+   * fire-and-forget; errors are swallowed (outcome stamping is
+   * best-effort, never breaks a call flow).
+   */
+  private async persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!this.deps.voiceSessionRepo) return;
+    try {
+      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
+    }
+  }
+
   private async runSummary(session: VoiceSession): Promise<void> {
     const durationMs = Date.now() - session.createdAt.getTime();
-    try {
-      const intentDetected = session.machine.currentContext.currentIntent;
-      // recordingId intentionally omitted: voice_recordings rows are
-      // created by the P8-014 recording webhook. Until that lands,
-      // summaries persist with NULL call_id.
-      await summarizeSession({
-        tenantId: session.tenantId,
+
+    // Skip when the caller hung up before speaking — there's nothing to
+    // summarize and the LLM call wastes tokens generating filler. The
+    // outcome stamp below still runs.
+    if (session.transcript.length === 0) {
+      logger.info('runSummary: skipping (empty transcript)', {
         sessionId: session.id,
-        transcript: session.transcript,
-        proposalIds: session.proposalIds,
-        durationMs,
-        gateway: this.deps.gateway,
-        ...(intentDetected ? { intentDetected } : {}),
-        ...(this.deps.pool ? { pool: this.deps.pool } : {}),
       });
+    } else {
+      const intentDetected = session.machine.currentContext.currentIntent;
+      const SUMMARY_RETRY_DELAYS_MS = [200, 800];
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt <= SUMMARY_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          await summarizeSession({
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            transcript: session.transcript,
+            proposalIds: session.proposalIds,
+            durationMs,
+            gateway: this.deps.gateway,
+            ...(intentDetected ? { intentDetected } : {}),
+            ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+          });
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < SUMMARY_RETRY_DELAYS_MS.length) {
+            await new Promise((r) => {
+              const t = setTimeout(r, SUMMARY_RETRY_DELAYS_MS[attempt]);
+              if (typeof t.unref === 'function') t.unref();
+            });
+          }
+        }
+      }
+      if (lastErr) {
+        // After bounded retries, don't bubble — the call has ended and the
+        // outcome stamp + audit log carry the operationally important data.
+        // Logged at warn so on-call sees a visible signal in metrics.
+        logger.warn('summarizeSession failed after retries', {
+          error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+          sessionId: session.id,
+          attempts: SUMMARY_RETRY_DELAYS_MS.length + 1,
+        });
+      }
+    }
+
+    const callSid = session.machine.currentContext.callSid;
+    if (this.deps.voiceRepo?.stampOutcomeByCallSid && callSid) {
+      try {
+        await this.deps.voiceRepo.stampOutcomeByCallSid(
+          session.tenantId,
+          callSid,
+          this.deriveCallOutcome(session),
+        );
+      } catch (err) {
+        logger.warn('stampOutcomeByCallSid failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid,
+        });
+      }
+    }
+  }
+
+  /**
+   * Stamp the call outcome on the voice_recordings row. Called from
+   * runSummary() (best-effort — usually no-ops because Twilio's recording
+   * webhook hasn't fired yet) and again from the recording webhook's
+   * onPersisted hook (the reliable path — the row exists by then).
+   * Idempotent: stampOutcomeByCallSid is a single UPDATE, so duplicate
+   * calls just rewrite the same value.
+   */
+  async stampCallOutcomeByCallSid(opts: {
+    tenantId: string;
+    callSid: string;
+  }): Promise<void> {
+    if (!this.deps.voiceRepo?.stampOutcomeByCallSid) return;
+    // Use the ended-inclusive lookup: by the time the recording webhook
+    // fires onPersisted, the FSM is typically already terminated and
+    // session.ended === true, so findByCallSid would return undefined.
+    const session = this.deps.store.findByCallSidIncludingEnded(opts.callSid);
+    // When the session is genuinely gone (multi-instance deploy, restart, or
+    // idle reap), we cannot derive the outcome — leave the column NULL rather
+    // than defaulting to 'completed', which would silently overwrite or mask
+    // real failed/escalated outcomes in analytics.
+    if (!session) return;
+    try {
+      await this.deps.voiceRepo.stampOutcomeByCallSid(
+        opts.tenantId,
+        opts.callSid,
+        this.deriveCallOutcome(session),
+      );
     } catch (err) {
-      logger.warn('summarizeSession failed', {
+      logger.warn('stampCallOutcomeByCallSid failed', {
         error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
+        callSid: opts.callSid,
       });
     }
+  }
+
+  private deriveCallOutcome(session: VoiceSession): CallOutcome {
+    const ctx = session.machine.currentContext;
+    if (ctx.escalationReason) {
+      if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
+      if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
+      if (ctx.escalationReason.startsWith('callback_required')) return 'callback_required';
+      // abuse_detected terminates the call immediately with no human handoff
+      if (ctx.escalationReason.startsWith('abuse_detected')) return 'failed';
+      return 'escalated_to_human';
+    }
+    if (session.proposalIds.length > 0) return 'completed';
+    if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
+    // No escalation, no proposal, no classified intent. Distinguish "caller
+    // hung up before saying anything" (dropped) from "caller spoke but we
+    // couldn't classify" (no_intent) by whether any caller turns landed in
+    // the transcript.
+    const hadCallerSpeech = session.transcript.some((line) => line.startsWith('caller:'));
+    if (!hadCallerSpeech) return 'dropped';
+    return 'no_intent';
   }
 }

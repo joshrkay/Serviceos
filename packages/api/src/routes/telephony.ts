@@ -219,7 +219,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     try {
       const twiml = deps.mediaStreamsEnabled
-        ? await deps.adapter.handleInboundForStream({ callSid, tenantId })
+        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId })
         : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
@@ -372,6 +372,13 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       }
       adapterDeps.callControl?.clearCursor(sessionId);
       session.ended = true;
+      // B2 — stamp voice_sessions.outcome before Twilio hangs up. The
+      // synthetic proposal_queued dispatched above moved the FSM to
+      // `closing` but no real proposal id is on session.proposalIds, so
+      // we pass the explicit `transferred` reason that the mapper resolves
+      // to 'completed' regardless of the heuristics. Without this, the
+      // dial-success branch would leave voice_sessions.ended_at NULL.
+      adapter.finalizeTerminatedSession(session, [], 'transferred');
       res
         .status(200)
         .type('text/xml')
@@ -448,6 +455,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       `Thank you for calling.`;
 
     session.ended = true;
+    // B2 — stamp voice_sessions.outcome on rotation-exhausted hangup.
+    // queueCallbackProposal pushed a callback proposal onto session.proposalIds
+    // and FSM stays at `escalating`, so deriveCallOutcome maps
+    // escalating + hasProposal → 'callback_required'.
+    adapter.finalizeTerminatedSession(session, [], 'normal_close');
     res
       .status(200)
       .type('text/xml')

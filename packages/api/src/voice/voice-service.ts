@@ -16,7 +16,9 @@ export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'fail
  *   - no_intent             — caller stayed on but classifier never crossed TAU_INT
  *   - failed                — system_failure event landed the FSM in escalating
  *
- * NULL until stamped (Phase 2 ships the column; FSM stamping lands in 4a).
+ * Stamped by both adapter finalize hooks (B2): voice_sessions.outcome
+ * always, voice_recordings.outcome when a recording exists. Derivation
+ * lives in `ai/agents/customer-calling/outcome-mapper.ts`.
  */
 export type CallOutcome =
   | 'completed'
@@ -29,8 +31,11 @@ export type CallOutcome =
 export interface VoiceRecording {
   id: string;
   tenantId: string;
-  fileId: string;
+  /** File record ID — present for in-app voice-note uploads, absent for Twilio call recordings. */
+  fileId?: string;
   conversationId?: string;
+  /** Twilio CallSid — set for inbound call recordings, absent for uploads. */
+  callSid?: string;
   status: TranscriptionStatus;
   transcript?: string;
   transcriptMetadata?: Record<string, unknown>;
@@ -77,6 +82,15 @@ export interface VoiceRepository {
     outcome: CallOutcome,
   ): Promise<VoiceRecording | null>;
   /**
+   * Convenience variant that looks up by callSid instead of row UUID.
+   * Optional; falls back to no-op when absent.
+   */
+  stampOutcomeByCallSid?(
+    tenantId: string,
+    callSid: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null>;
+  /**
    * Phase 4c: stamp the detected language (BCP-47 short code, e.g. 'en'
    * or 'es'). Called once per call from the FSM's end-of-session hook
    * after the joined transcript runs through `LanguageDetector`.
@@ -111,7 +125,7 @@ export function createVoiceRecording(input: IngestVoiceInput): VoiceRecording {
   return {
     id: randomUUID(),
     tenantId: input.tenantId,
-    fileId: input.fileId,
+    fileId: input.fileId ?? undefined,
     conversationId: input.conversationId,
     status: 'pending',
     createdBy: input.createdBy,
@@ -235,6 +249,23 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     rec.updatedAt = new Date();
     this.recordings.set(id, rec);
     return { ...rec };
+  }
+
+  async stampOutcomeByCallSid(
+    tenantId: string,
+    callSid: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    for (const [, rec] of this.recordings) {
+      // Only stamp when outcome is currently unset — replay-safe semantics.
+      if (rec.tenantId === tenantId && rec.callSid === callSid && !rec.outcome) {
+        rec.outcome = outcome;
+        rec.updatedAt = new Date();
+        this.recordings.set(rec.id, rec);
+        return { ...rec };
+      }
+    }
+    return null;
   }
 }
 

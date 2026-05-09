@@ -113,6 +113,16 @@ export interface MediaStreamAdapterDeps {
   streamingProvider: StreamingTranscriptionProvider;
   ttsProvider?: TtsProvider;
   speechTurn: SpeechTurnHandler;
+  /**
+   * Called once after Deepgram opens — runs disclosure, caller-ID lookup,
+   * and FSM bootstrap (incoming_call → greeted_ok → caller_known/unknown).
+   * Returns side effects including the real greeting tts_play text.
+   * When omitted the adapter starts silently and waits for the first utterance.
+   */
+  initializeSession?: (opts: {
+    callSid: string;
+    tenantId: string;
+  }) => Promise<SideEffect[]>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
   /**
@@ -120,6 +130,27 @@ export interface MediaStreamAdapterDeps {
    * Override for tests to keep counters isolated between cases.
    */
   connectionRegistry?: ConnectionRegistry;
+  /**
+   * B2 — invoked from `handleClose` so the host (typically TwilioGatherAdapter)
+   * can derive + stash the typed CallOutcome on the session before the
+   * WS tears down. The host is expected to fire-and-forget any DB write
+   * internally; this hook is sync so we never block close on Postgres.
+   *
+   * `sideEffects` carries the most recent FSM dispatch's effects when
+   * the close was triggered by an `end_session` SideEffect — the host
+   * uses these to read the FSM-supplied `payload.reason` (e.g.
+   * 'abuse_detected:profanity'), which is more specific than the
+   * coarse mediastream close reason and drives the right `CallOutcome`
+   * for non-hangup terminations. Empty for non-FSM close paths
+   * (idle timeout, WS error, slow consumer).
+   *
+   * Optional — when omitted, the close path is unchanged.
+   */
+  finalizeOnClose?: (
+    session: VoiceSession,
+    reason: string,
+    sideEffects: ReadonlyArray<SideEffect>,
+  ) => void;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -157,6 +188,14 @@ interface RuntimeState {
   slowConsumerTimer: NodeJS.Timeout | null;
   /** True after we've released our slot in the connection registry. */
   registryReleased: boolean;
+  /**
+   * B2 — captures the most recent FSM dispatch's SideEffect[] when an
+   * `end_session` effect was emitted. Threaded through `finalizeOnClose`
+   * so the host can read the FSM-supplied `payload.reason` for outcome
+   * derivation (e.g. 'abuse_detected:*' → escalated_to_human).
+   * Empty for non-FSM close paths (idle timer, slow consumer, WS error).
+   */
+  pendingFinalizeEffects: ReadonlyArray<SideEffect>;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -168,6 +207,35 @@ const TWILIO_MAX_UNACKED_MARKS = 3;
 const TWILIO_SLOW_CONSUMER_GRACE_MS = 8_000;
 /** Slow-consumer EWMA send latency threshold. */
 const TWILIO_SLOW_CONSUMER_EWMA_THRESHOLD_MS = 250;
+
+/**
+ * B2 — map handleClose's `reason` into a CallOutcome-compatible
+ * endedReason recognised by `deriveCallOutcome`. Transport-layer
+ * failures (WS errors, slow-consumer disconnects, outbound-queue
+ * overflow) are stamped as `failed` rather than being flattened into
+ * caller-driven outcomes — otherwise an infra regression looks like
+ * normal call abandonment in the dashboards.
+ *
+ * `twilio_stop` is the protocol-correct end-of-call signal from
+ * Twilio; treat as caller-hangup. `ws_closed` only reaches the mapper
+ * when the WS closed BEFORE a `stop` frame arrived (a `stop` would
+ * have set state.closed and short-circuited this path), which is also
+ * a transport failure.
+ */
+function mapCloseReasonToFinalize(reason: string): string {
+  if (reason === 'audio_idle_timeout') return 'idle_timeout';
+  if (reason === 'end_session') return 'session_ended';
+  if (reason === 'twilio_stop') return 'caller_hangup';
+  if (
+    reason === 'ws_error' ||
+    reason === 'ws_closed' ||
+    reason === 'slow_consumer' ||
+    reason === 'queue_overflow_terminal'
+  ) {
+    return 'transport_failure';
+  }
+  return 'caller_hangup';
+}
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
@@ -207,6 +275,7 @@ export class TwilioMediaStreamAdapter {
       unackedMarks: 0,
       slowConsumerTimer: null,
       registryReleased: true,
+      pendingFinalizeEffects: [],
     };
   }
 
@@ -330,6 +399,29 @@ export class TwilioMediaStreamAdapter {
         callSid,
       });
       this.closeWs(1011, 'deepgram_open_failed');
+      return;
+    }
+
+    // Play greeting: run disclosure + caller-ID + FSM bootstrap, then
+    // synthesize and stream the greeting audio before listening for speech.
+    // Wrapped in withSessionLock so a final transcript that races the
+    // bootstrap (caller speaks before greeting completes) cannot dispatch
+    // FSM events on top of an in-flight `incoming_call` / `greeted_ok`.
+    if (this.deps.initializeSession) {
+      try {
+        const initEffects = await this.deps.store.withSessionLock(session.id, () =>
+          this.deps.initializeSession!({
+            callSid,
+            tenantId: session.tenantId,
+          }),
+        );
+        await this.emitSideEffects(initEffects);
+      } catch (err) {
+        logger.warn('mediastream: initializeSession failed — continuing without greeting', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid,
+        });
+      }
     }
   }
 
@@ -403,6 +495,10 @@ export class TwilioMediaStreamAdapter {
 
     // FSM may have terminated this turn — close the call.
     if (sideEffects.some((fx) => fx.type === 'end_session')) {
+      // B2: stash the dispatch's effects so the finalize hook can read
+      // the FSM-supplied end_session.payload.reason — handleClose itself
+      // only carries a coarse mediastream label suitable for metrics.
+      this.state.pendingFinalizeEffects = sideEffects;
       this.handleClose('end_session');
     }
   }
@@ -415,7 +511,7 @@ export class TwilioMediaStreamAdapter {
     for (const fx of sideEffects) {
       if (fx.type !== 'tts_play') continue;
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
-      if (!text || text === 'greeting' || text === 'intent_confirm') continue;
+      if (!text) continue;
       const turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
       try {
@@ -557,6 +653,24 @@ export class TwilioMediaStreamAdapter {
   private handleClose(reason: string): void {
     if (this.state.closed) return;
     this.state.closed = true;
+    // B2: stash the outcome BEFORE we tear down. The host's
+    // `finalizeOnClose` is sync (sets session.terminalOutcome and
+    // kicks off the DB write in the background), so close stays
+    // non-blocking. `pendingFinalizeEffects` carries the FSM
+    // dispatch's effects (with `end_session.payload.reason`) when the
+    // close was triggered by an FSM end_session — empty otherwise, in
+    // which case the host falls back to the mapped close reason.
+    if (this.deps.finalizeOnClose && this.state.session) {
+      try {
+        this.deps.finalizeOnClose(
+          this.state.session,
+          mapCloseReasonToFinalize(reason),
+          this.state.pendingFinalizeEffects,
+        );
+      } catch {
+        /* swallow — outcome stamping is best-effort */
+      }
+    }
     if (this.state.audioIdleTimer) {
       clearTimeout(this.state.audioIdleTimer);
       this.state.audioIdleTimer = null;

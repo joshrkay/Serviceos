@@ -21,6 +21,7 @@ import type {
   SideEffect,
 } from './types';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
+import type { CallOutcome } from '../../../voice/voice-service';
 
 /** Session is reaped this many ms after last activity. */
 export const DEFAULT_IDLE_TTL_MS = 30 * 60 * 1000;
@@ -97,6 +98,18 @@ export interface VoiceSession {
   customerId?: string;
   /** Set after `endSession()` to short-circuit further input. */
   ended: boolean;
+  /**
+   * Typed CallOutcome derived by `deriveCallOutcome` at FSM finalize. Set
+   * by the adapter's finalize step BEFORE `store.delete()` so the
+   * recording-webhook → transcript_ingestion enqueue can read it off the
+   * session and stamp it onto voice_recordings.outcome.
+   */
+  terminalOutcome?: CallOutcome;
+  /**
+   * Free-text reason (the `end_session` SideEffect's payload). Stored
+   * alongside outcome on the voice_sessions row as a breadcrumb.
+   */
+  terminalReason?: string;
   createdAt: Date;
   lastActivityAt: Date;
   events: EventEmitter;
@@ -216,6 +229,20 @@ export class VoiceSessionStore {
     const session = this.sessions.get(id);
     if (!session || session.ended) return undefined;
     return session;
+  }
+
+  /**
+   * Variant of findByCallSid that also returns sessions marked `ended`.
+   * Used by post-call hooks (recording webhook → outcome stamp, transcript
+   * ingestion) that legitimately need the FSM context AFTER the FSM has
+   * terminated. The session is still in the map until idle reaping; the
+   * `ended` flag only suppresses NEW dispatches, not lookup of historical
+   * state.
+   */
+  findByCallSidIncludingEnded(callSid: string): VoiceSession | undefined {
+    const id = this.callSidIndex.get(callSid);
+    if (!id) return undefined;
+    return this.sessions.get(id);
   }
 
   /**

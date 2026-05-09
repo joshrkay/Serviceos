@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
+import { getSharedTestDb, createTestTenant, createTestFile, closeSharedTestDb } from './shared';
 import { PgVoiceRepository } from '../../src/voice/pg-voice';
 
 describe('Postgres integration — voice', () => {
@@ -30,10 +30,14 @@ describe('Postgres integration — voice', () => {
 
   describe('CRUD', () => {
     it('creates voice recording and retrieves via findById', async () => {
+      const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
+      // conversationId is intentionally omitted: the FK target is the
+      // conversations table, and seeding a conversation here is more
+      // setup than the test needs to exercise voice_recordings CRUD.
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: sharedFileId,
+        fileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),
@@ -46,10 +50,11 @@ describe('Postgres integration — voice', () => {
     });
 
     it('updates voice recording status', async () => {
+      const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: sharedFileId,
+        fileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),
@@ -72,10 +77,11 @@ describe('Postgres integration — voice', () => {
   describe('tenant isolation', () => {
     it('rejects cross-tenant access', async () => {
       const otherTenant = await createTestTenant(pool);
+      const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: sharedFileId,
+        fileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),

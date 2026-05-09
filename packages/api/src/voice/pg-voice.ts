@@ -6,8 +6,9 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
   return {
     id: row.id as string,
     tenantId: row.tenant_id as string,
-    fileId: row.file_id as string,
+    fileId: (row.file_id as string | null) ?? undefined,
     conversationId: row.conversation_id as string | undefined,
+    callSid: (row.call_sid as string | null) ?? undefined,
     status: row.status as TranscriptionStatus,
     transcript: row.transcript as string | undefined,
     transcriptMetadata: row.transcript_metadata as Record<string, unknown> | undefined,
@@ -35,7 +36,7 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
         [
           recording.id,
           recording.tenantId,
-          recording.fileId,
+          recording.fileId ?? null,
           recording.conversationId ?? null,
           recording.status,
           recording.transcript ?? null,
@@ -107,6 +108,25 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
           WHERE id = $2 AND tenant_id = $3
           RETURNING *`,
         [outcome, id, tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
+  async stampOutcomeByCallSid(
+    tenantId: string,
+    callSid: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET outcome    = $1,
+                updated_at = NOW()
+          WHERE tenant_id = $2 AND call_sid = $3 AND outcome IS NULL
+          RETURNING *`,
+        [outcome, tenantId, callSid],
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);

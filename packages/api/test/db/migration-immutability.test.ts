@@ -144,8 +144,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['085_create_oauth_states', '32616c9ce0945fab815e7c4b2de968720a30c2533efdb3c53ce59d6332218c17'],
   ['086_create_appointment_calendar_events', '766a31919b81cb02372b34c5ba610b1fec70c800c6d56cf565cf99bc77ab5172'],
   ['087_tenants_stripe_connect', 'f3cf954e5fccbe1a3650b39dbcd5fd0dd8979ea1a1e909458f53791b23c5dd59'],
-  ['088_tenant_settings_voice_persona', 'fd7d335af8f267b99d559618b4da54eeadd7c3b79b76bba61fd6f5cf19894b10'],
-  ['089_drop_us_region_check', 'ef08cf5dc48f9cbfbc51e915341584690666db88f2515b341ee4561a35c2e56e'],
+  ['088_fix_schema_constraints', '38dbe26a4e3d0389536214d8d4897f0d9e967d6ec8dc6e0638c849e0c9d38512'],
+  ['089_drop_vertical_packs_type_check', 'dd41709b4300eb0ed03b2a477bdbe163440c76a557d5c07cdbe3e02910a803b8'],
+  ['090_tenant_settings_voice_persona', '95805b86eb94d010c5c231ae4ab641e05debba20464a61888a42ac4809b0dcfb'],
+  ['091_voice_session_outcome', '6fea1ddb8c3725191aff36013b7134fe7bf91af7392cc815da7f9c041fcfc59c'],
 ];
 
 function hashMigration(value: string): string {

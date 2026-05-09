@@ -8,56 +8,7 @@ export interface TranscriptionResult {
 }
 
 /**
- * Production transcription provider backed by OpenAI Whisper.
- *
- * Accepts a signed audio URL (typically an R2 presigned GET), streams the
- * bytes into the Whisper API, and returns the transcript + provenance
- * metadata. `fetchImpl` is injectable so tests can exercise the request
- * shape and error handling without a network.
- */
-export class OpenAiWhisperProvider implements TranscriptionProvider {
-  constructor(
-    private readonly apiKey: string,
-    private readonly fetchImpl: FetchLike = fetch
-  ) {}
-
-  async transcribe(audioUrl: string): Promise<TranscriptionResult> {
-    const audioResponse = await this.fetchImpl(audioUrl);
-    if (!audioResponse.ok) {
-      throw new Error(
-        `Failed to fetch audio from ${audioUrl}: ${audioResponse.status}`
-      );
-    }
-    const audioBlob = await audioResponse.blob();
-
-    const fd = new FormData();
-    fd.append('file', audioBlob, 'audio.webm');
-    fd.append('model', 'whisper-1');
-
-    const res = await this.fetchImpl('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      body: fd,
-    });
-    if (!res.ok) {
-      const errBody = await res.text();
-      throw new Error(`Whisper API error ${res.status}: ${errBody}`);
-    }
-
-    const data = (await res.json()) as { text?: string };
-    return {
-      transcript: data.text ?? '',
-      metadata: {
-        provider: 'openai-whisper',
-        model: 'whisper-1',
-        processedAt: new Date().toISOString(),
-      },
-    };
-  }
-}
-
-/**
- * Dev/test fallback — used when no AI_PROVIDER_API_KEY is configured so the
+ * Dev/test fallback — used when no OPENAI_API_KEY is configured so the
  * app can boot and the voice pipeline exercises end-to-end without a network.
  */
 export class DevNoopTranscriptionProvider implements TranscriptionProvider {
@@ -70,13 +21,6 @@ export class DevNoopTranscriptionProvider implements TranscriptionProvider {
       },
     };
   }
-}
-
-export function createTranscriptionProvider(apiKey: string | undefined): TranscriptionProvider {
-  if (apiKey) {
-    return new OpenAiWhisperProvider(apiKey);
-  }
-  return new DevNoopTranscriptionProvider();
 }
 
 /**
@@ -394,27 +338,34 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 }
 
 /**
- * P0-027 factory — returns the hardened Whisper provider when the OpenAI key
- * is configured, otherwise returns the dev no-op (NOT a fake-data mock) and
- * logs a warning so missing-key in production is loud.
+ * P0-027 factory — returns the hardened Whisper provider when an OpenAI-
+ * compatible key is configured, otherwise returns the dev no-op (NOT a
+ * fake-data mock) and logs a warning so missing-key in production is loud.
+ *
+ * Falls back to AI_PROVIDER_API_KEY (the documented production secret in
+ * shared/config.ts) when OPENAI_API_KEY is unset, so deployments that only
+ * set the canonical key still get real transcription instead of placeholder
+ * text.
  *
  * Wiring into `app.ts` is owed to P0-023 (Wave 1C).
  */
 export function createWhisperTranscriptionProvider(
-  env: { OPENAI_API_KEY?: string; WHISPER_MODEL?: string },
+  env: { OPENAI_API_KEY?: string; AI_PROVIDER_API_KEY?: string; WHISPER_MODEL?: string },
   deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
-  if (env.OPENAI_API_KEY) {
+  const apiKey = env.OPENAI_API_KEY || env.AI_PROVIDER_API_KEY;
+  if (apiKey) {
     return new WhisperTranscriptionProvider(
-      env.OPENAI_API_KEY,
+      apiKey,
       env.WHISPER_MODEL ?? 'whisper-1',
       deps.fetchImpl
     );
   }
   logger.warn(
-    '[transcription] OPENAI_API_KEY missing — using DevNoopTranscriptionProvider. ' +
-      'STT will return placeholder text. Set OPENAI_API_KEY in production.'
+    '[transcription] Neither OPENAI_API_KEY nor AI_PROVIDER_API_KEY set — ' +
+      'using DevNoopTranscriptionProvider. STT will return placeholder text. ' +
+      'Set AI_PROVIDER_API_KEY in production.'
   );
   return new DevNoopTranscriptionProvider();
 }
