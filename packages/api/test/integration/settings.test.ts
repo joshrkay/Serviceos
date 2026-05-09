@@ -10,26 +10,6 @@ describe('Postgres integration — settings', () => {
   beforeAll(async () => {
     pool = await getSharedTestDb();
     settingsRepo = new PgSettingsRepository(pool);
-    tenant = await createTestTenant(pool);
-
-    // Each tenant can have at most one settings row (unique constraint).
-    // Create it once here; individual tests read or update it.
-    const now = new Date();
-    await settingsRepo.create({
-      id: crypto.randomUUID(),
-      tenantId: tenant.tenantId,
-      businessName: 'Test Business',
-      businessPhone: '555-1234',
-      businessEmail: 'test@business.com',
-      timezone: 'America/Chicago',
-      estimatePrefix: 'EST',
-      invoicePrefix: 'INV',
-      nextEstimateNumber: 1,
-      nextInvoiceNumber: 1,
-      defaultPaymentTermDays: 30,
-      createdAt: now,
-      updatedAt: now,
-    });
   });
 
   afterAll(async () => {

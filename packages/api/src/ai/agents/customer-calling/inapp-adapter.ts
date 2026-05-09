@@ -42,6 +42,7 @@ import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
+import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -96,6 +97,7 @@ export interface InAppAdapterDeps {
    * pre-existing test fixtures continue to work without DI'ing a stub.
    */
   voiceSessionRepo?: VoiceSessionRepository;
+  /**
    * B1 — Per-tenant voice persona. When present, consulted during
    * `startSession` to personalize the greeting. Failures fall back to
    * the default text — voice service is never blocked by a settings

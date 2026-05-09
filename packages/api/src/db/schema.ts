@@ -2386,42 +2386,6 @@ export const MIGRATIONS = {
       WHERE stripe_connect_account_id IS NOT NULL;
   `,
 
-  // B2 — Persistent outcome stamping. Mirrors voice_recordings.outcome
-  // (migration 060) so in-app sessions, which never get a voice_recordings
-  // row, also have a typed terminal-state column. The free-text
-  // ended_reason column from migration 066 is preserved as a breadcrumb;
-  // outcome is the dashboard-grade enum derived by deriveCallOutcome at
-  // FSM hangup. call_sid is added so analytics can join voice_sessions
-  // ↔ voice_recordings on telephony calls.
-  '088_voice_session_outcome': `
-    ALTER TABLE voice_sessions
-      ADD COLUMN IF NOT EXISTS outcome TEXT
-        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
-    ALTER TABLE voice_sessions
-      ADD COLUMN IF NOT EXISTS call_sid TEXT;
-    CREATE INDEX IF NOT EXISTS idx_voice_sessions_tenant_outcome
-      ON voice_sessions (tenant_id, outcome) WHERE outcome IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_voice_sessions_call_sid
-      ON voice_sessions (call_sid) WHERE call_sid IS NOT NULL;
-  `,
-
-  // Drop tenant_settings_us_region_check (added in migration 070).
-  //
-  // The original constraint required US tenants to have a non-null,
-  // 2-letter region whenever the row was inserted. But the canonical
-  // creation paths (\`ensureTenantSettings\` in settings/settings.ts and
-  // the onboarding route) don't supply region — they create a default
-  // settings row at user signup, and region is collected later via
-  // explicit settings UI flows. The constraint was intended as a
-  // backstop for the provisioning-requested code path; that path
-  // already enforces the same rule in application code via
-  // \`assertProvisioningPrerequisites\` (auth/clerk.ts). Without this
-  // migration, every fresh-tenant signup fails at the DB layer.
-  //
-  // The application-level guard remains in place, so provisioning a
-  // Twilio subaccount or any other location-gated capability still
-  // requires region to be set first.
-  '089_drop_tenant_settings_us_region_check': `
   '088_tenant_settings_voice_persona': `
     -- B1 — Per-tenant voice persona.
     -- voice_agent_name : the name the AI agent uses when greeting callers
@@ -2457,6 +2421,25 @@ export const MIGRATIONS = {
     -- at the application layer (the Zod contract / UI form), not the DB.
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+  `,
+
+  // B2 — Persistent outcome stamping. Mirrors voice_recordings.outcome
+  // (migration 060) so in-app sessions, which never get a voice_recordings
+  // row, also have a typed terminal-state column. The free-text
+  // ended_reason column from migration 066 is preserved as a breadcrumb;
+  // outcome is the dashboard-grade enum derived by deriveCallOutcome at
+  // FSM hangup. call_sid is added so analytics can join voice_sessions
+  // ↔ voice_recordings on telephony calls.
+  '090_voice_session_outcome': `
+    ALTER TABLE voice_sessions
+      ADD COLUMN IF NOT EXISTS outcome TEXT
+        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
+    ALTER TABLE voice_sessions
+      ADD COLUMN IF NOT EXISTS call_sid TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_sessions_tenant_outcome
+      ON voice_sessions (tenant_id, outcome) WHERE outcome IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_voice_sessions_call_sid
+      ON voice_sessions (call_sid) WHERE call_sid IS NOT NULL;
   `,
 };
 

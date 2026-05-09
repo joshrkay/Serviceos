@@ -190,6 +190,7 @@ export interface TwilioAdapterDeps {
    * existing test fixtures continue to work without DI'ing a stub.
    */
   voiceSessionRepo?: VoiceSessionRepository;
+  /**
    * B1 — Per-tenant voice persona. When present, consulted during
    * `handleInbound` to personalize the greeting. Failures fall back
    * to the static `businessName`-based opener — calls are never
