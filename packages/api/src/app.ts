@@ -1417,6 +1417,7 @@ export function createApp(): express.Express {
     callerPlanResolver,
     thresholdResolver,
     voiceRepo,
+    voicePersonaResolver,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only

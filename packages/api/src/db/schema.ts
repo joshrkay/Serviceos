@@ -2413,6 +2413,16 @@ export const MIGRATIONS = {
     ALTER TABLE vertical_packs
       DROP CONSTRAINT IF EXISTS vertical_packs_type_check;
   `,
+
+  '090_tenant_settings_voice_persona': `
+    -- Per-tenant voice persona fields used by the voice-persona-resolver
+    -- to personalize AI greeting text on both the Twilio Gather and
+    -- Media Streams paths. Both columns are optional: when absent the
+    -- adapter falls back to the static businessName-based opener.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_agent_name TEXT,
+      ADD COLUMN IF NOT EXISTS voice_greeting   TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
