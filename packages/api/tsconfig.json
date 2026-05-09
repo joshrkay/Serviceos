@@ -2,10 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": ".",
+    "rootDir": "../..",
     "declaration": true,
     "types": ["vitest/globals"]
   },
-  "include": ["src/**/*", "test/**/*"],
-  "exclude": ["test/voice-quality/post-pr-comment.test.ts"]
+  "include": ["src/**/*", "test/**/*"]
 }
