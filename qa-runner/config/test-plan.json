@@ -588,14 +588,14 @@
       "tests": [
         {
           "id": "APPT-001",
-          "description": "List appointments returns 200",
+          "description": "List appointments (paginated) returns 200",
           "module": "appointments",
           "requires_env": [
             "AUTH_BEARER_TOKEN"
           ],
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/appointments",
+            "endpoint": "/api/appointments?paginated=true",
             "expect_statuses": [
               200
             ]
@@ -963,14 +963,15 @@
       "tests": [
         {
           "id": "TECH-001",
-          "description": "Authenticated GET /api/jobs filters fine when scoped to assigned tech (auth-only smoke)",
+          "description": "Jobs list scoped by technicianId returns 200 (env-gated)",
           "module": "technician",
           "requires_env": [
-            "AUTH_BEARER_TOKEN"
+            "AUTH_BEARER_TOKEN",
+            "TECHNICIAN_ID"
           ],
           "api_check": {
             "method": "GET",
-            "endpoint": "/api/jobs?assignedToMe=true",
+            "endpoint": "/api/jobs?technicianId={{TECHNICIAN_ID}}",
             "expect_statuses": [
               200
             ]
