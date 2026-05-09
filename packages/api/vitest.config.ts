@@ -18,7 +18,10 @@ export default defineConfig({
         lines: 50,
       },
     },
-    // Integration tests use a separate config
+    // Integration tests also run under this config (test/**/*.test.ts includes
+    // test/integration/**). Set hookTimeout high enough to survive a cold Docker
+    // image pull (~30-120 s for pgvector/pgvector:pg16 on a fresh CI runner).
     testTimeout: 30000,
+    hookTimeout: 120000,
   },
 });

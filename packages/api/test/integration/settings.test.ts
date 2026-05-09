@@ -16,6 +16,25 @@ describe('Postgres integration — settings', () => {
   beforeEach(async () => {
     // tenant_settings has UNIQUE(tenant_id), so each test needs its own tenant.
     tenant = await createTestTenant(pool);
+
+    // Each tenant can have at most one settings row (unique constraint).
+    // Create it once here; individual tests read or update it.
+    const now = new Date();
+    await settingsRepo.create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      businessName: 'Test Business',
+      businessPhone: '555-1234',
+      businessEmail: 'test@business.com',
+      timezone: 'America/Chicago',
+      estimatePrefix: 'EST',
+      invoicePrefix: 'INV',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      createdAt: now,
+      updatedAt: now,
+    });
   });
 
   afterAll(async () => {
@@ -24,23 +43,6 @@ describe('Postgres integration — settings', () => {
 
   describe('CRUD', () => {
     it('creates settings and retrieves via findByTenant', async () => {
-      const now = new Date();
-      const settings = await settingsRepo.create({
-        id: crypto.randomUUID(),
-        tenantId: tenant.tenantId,
-        businessName: 'Test Business',
-        businessPhone: '555-1234',
-        businessEmail: 'test@business.com',
-        timezone: 'America/Chicago',
-        estimatePrefix: 'EST',
-        invoicePrefix: 'INV',
-        nextEstimateNumber: 1,
-        nextInvoiceNumber: 1,
-        defaultPaymentTermDays: 30,
-        createdAt: now,
-        updatedAt: now,
-      });
-
       const found = await settingsRepo.findByTenant(tenant.tenantId);
       expect(found).not.toBeNull();
       expect(found!.businessName).toBe('Test Business');
@@ -48,21 +50,6 @@ describe('Postgres integration — settings', () => {
     });
 
     it('updates settings and reflects in findByTenant', async () => {
-      const now = new Date();
-      await settingsRepo.create({
-        id: crypto.randomUUID(),
-        tenantId: tenant.tenantId,
-        businessName: 'Original Name',
-        timezone: 'America/New_York',
-        estimatePrefix: 'EST',
-        invoicePrefix: 'INV',
-        nextEstimateNumber: 1,
-        nextInvoiceNumber: 1,
-        defaultPaymentTermDays: 30,
-        createdAt: now,
-        updatedAt: now,
-      });
-
       const updated = await settingsRepo.update(tenant.tenantId, {
         businessName: 'Updated Name',
         timezone: 'America/Los_Angeles',
@@ -80,21 +67,6 @@ describe('Postgres integration — settings', () => {
   describe('tenant isolation', () => {
     it('rejects cross-tenant access', async () => {
       const otherTenant = await createTestTenant(pool);
-      const now = new Date();
-      await settingsRepo.create({
-        id: crypto.randomUUID(),
-        tenantId: tenant.tenantId,
-        businessName: 'Secret Business',
-        timezone: 'America/Chicago',
-        estimatePrefix: 'EST',
-        invoicePrefix: 'INV',
-        nextEstimateNumber: 1,
-        nextInvoiceNumber: 1,
-        defaultPaymentTermDays: 30,
-        createdAt: now,
-        updatedAt: now,
-      });
-
       const found = await settingsRepo.findByTenant(otherTenant.tenantId);
       expect(found).toBeNull();
     });
