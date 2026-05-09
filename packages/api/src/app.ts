@@ -120,7 +120,7 @@ import { InMemoryEstimateTemplateRepository } from './templates/estimate-templat
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
-import { createTranscriptionProvider } from './voice/transcription-providers';
+import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
   InMemoryFeatureFlagStore,
@@ -760,7 +760,7 @@ export function createApp(): express.Express {
   const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
 
   // URL-based provider for the queue worker pipeline.
-  const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
+  const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
@@ -1566,9 +1566,17 @@ export function createApp(): express.Express {
                     });
                   }
                 },
-              },
+                `transcript:${event.voiceRecordingId}:v1`,
+              );
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.error('app: failed to enqueue transcript_ingestion', {
+                voiceRecordingId: event.voiceRecordingId,
+                error: err instanceof Error ? err.message : String(err),
+              });
             }
-          : {}),
+          },
+        },
       },
       getHealth: () => {
         const ttsEnabled =

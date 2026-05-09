@@ -113,6 +113,16 @@ export interface MediaStreamAdapterDeps {
   streamingProvider: StreamingTranscriptionProvider;
   ttsProvider?: TtsProvider;
   speechTurn: SpeechTurnHandler;
+  /**
+   * Called once after Deepgram opens — runs disclosure, caller-ID lookup,
+   * and FSM bootstrap (incoming_call → greeted_ok → caller_known/unknown).
+   * Returns side effects including the real greeting tts_play text.
+   * When omitted the adapter starts silently and waits for the first utterance.
+   */
+  initializeSession?: (opts: {
+    callSid: string;
+    tenantId: string;
+  }) => Promise<SideEffect[]>;
   /** Audio inactivity teardown (ms). Default 30 minutes. */
   audioIdleTimeoutMs?: number;
   /**
@@ -389,6 +399,29 @@ export class TwilioMediaStreamAdapter {
         callSid,
       });
       this.closeWs(1011, 'deepgram_open_failed');
+      return;
+    }
+
+    // Play greeting: run disclosure + caller-ID + FSM bootstrap, then
+    // synthesize and stream the greeting audio before listening for speech.
+    // Wrapped in withSessionLock so a final transcript that races the
+    // bootstrap (caller speaks before greeting completes) cannot dispatch
+    // FSM events on top of an in-flight `incoming_call` / `greeted_ok`.
+    if (this.deps.initializeSession) {
+      try {
+        const initEffects = await this.deps.store.withSessionLock(session.id, () =>
+          this.deps.initializeSession!({
+            callSid,
+            tenantId: session.tenantId,
+          }),
+        );
+        await this.emitSideEffects(initEffects);
+      } catch (err) {
+        logger.warn('mediastream: initializeSession failed — continuing without greeting', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid,
+        });
+      }
     }
   }
 
@@ -478,7 +511,7 @@ export class TwilioMediaStreamAdapter {
     for (const fx of sideEffects) {
       if (fx.type !== 'tts_play') continue;
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
-      if (!text || text === 'greeting' || text === 'intent_confirm') continue;
+      if (!text) continue;
       const turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
       try {

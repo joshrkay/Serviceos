@@ -2386,41 +2386,52 @@ export const MIGRATIONS = {
       WHERE stripe_connect_account_id IS NOT NULL;
   `,
 
-  '088_tenant_settings_voice_persona': `
-    -- B1 — Per-tenant voice persona.
-    -- voice_agent_name : the name the AI agent uses when greeting callers
-    --                    (e.g. "Alex"). NULL = default generic greeting.
-    -- voice_greeting   : fully-custom greeting text that replaces the
-    --                    default "Thank you for calling..." / "Hi, this is
-    --                    your assistant" openers. For telephony the
-    --                    recording-disclosure sentence is still appended
-    --                    after the custom greeting. NULL = use default.
-    -- Both columns are nullable so existing tenants keep current
-    -- behavior with no backfill required.
+  '088_fix_schema_constraints': `
+    -- Make voice_recordings.file_id nullable. The original schema assumed
+    -- recordings always come from an in-app file upload (voice notes), but
+    -- Twilio inbound-call recordings do not have a pre-created file row.
+    ALTER TABLE voice_recordings
+      ALTER COLUMN file_id DROP NOT NULL;
+
+    -- Relax the US-region check on tenant_settings. The constraint was added
+    -- aspirationally but no application path currently sets country/region, so
+    -- every tenant_settings INSERT was violating it. Allow region to be null
+    -- while still validating the format when a value IS provided.
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    ALTER TABLE tenant_settings
+      ADD CONSTRAINT tenant_settings_region_format_check
+        CHECK (region IS NULL OR btrim(region) ~ '^[A-Z]{2}$');
+  `,
+
+  '089_drop_vertical_packs_type_check': `
+    -- The vertical_packs.type column was originally CHECK (type IN ('hvac',
+    -- 'plumbing')) but the registry stores packId values ('hvac-v1',
+    -- 'plumbing-v1') in this column, so seedCanonicalVerticalPacks has been
+    -- silently failing in production (errors swallowed by .catch()). Drop the
+    -- stale check; UNIQUE on type still enforces one row per packId.
+    ALTER TABLE vertical_packs
+      DROP CONSTRAINT IF EXISTS vertical_packs_type_check;
+  `,
+
+  '090_tenant_settings_voice_persona': `
+    -- Per-tenant voice persona fields used by the voice-persona-resolver
+    -- to personalize AI greeting text on both the Twilio Gather and
+    -- Media Streams paths. Both columns are optional: when absent the
+    -- adapter falls back to the static businessName-based opener.
+    -- Length limits mirror the API contract (contracts.ts) so that internal
+    -- writes (scripts, migrations, direct SQL) are also bounded.
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS voice_agent_name TEXT,
       ADD COLUMN IF NOT EXISTS voice_greeting   TEXT;
-    -- Length guards mirror the Zod schema (80 / 500 chars).
-    -- DROP … IF EXISTS makes the ADD idempotent; Postgres does not
-    -- support ADD CONSTRAINT IF NOT EXISTS.
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_voice_agent_name_length,
-      DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length;
-    ALTER TABLE tenant_settings
       ADD CONSTRAINT tenant_settings_voice_agent_name_length
-        CHECK (char_length(voice_agent_name) <= 80),
-      ADD CONSTRAINT tenant_settings_voice_greeting_length
-        CHECK (char_length(voice_greeting) <= 500);
-  `,
-
-  '089_drop_us_region_check': `
-    -- The tenant_settings_us_region_check constraint (migration 070)
-    -- requires country='US' rows to have a 2-char region. The settings
-    -- create() path doesn't set country/region, so initial tenant setup
-    -- always violated it. Drop the constraint; region validation belongs
-    -- at the application layer (the Zod contract / UI form), not the DB.
+        CHECK (voice_agent_name IS NULL OR length(voice_agent_name) <= 80);
     ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_greeting_length,
+      ADD CONSTRAINT tenant_settings_voice_greeting_length
+        CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500);
   `,
 
   // B2 — Persistent outcome stamping. Mirrors voice_recordings.outcome
@@ -2454,10 +2465,17 @@ function makePoliciesIdempotent(sql: string): string {
 export function getMigrationSQL(): string {
   return Object.values(MIGRATIONS)
     .map((migration) =>
-      migration.replace(
-        /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)/g,
-        'DROP POLICY IF EXISTS $1 ON $2;\n    CREATE POLICY $1 ON $2'
-      )
+      migration
+        .replace(
+          /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)/g,
+          'DROP POLICY IF EXISTS $1 ON $2;\n    CREATE POLICY $1 ON $2'
+        )
+        // ADD CONSTRAINT has no IF NOT EXISTS in PostgreSQL; prepend a
+        // DROP CONSTRAINT IF EXISTS so re-runs on the same DB are safe.
+        .replace(
+          /(ALTER TABLE\s+\w+)\s*\n(\s+)(ADD CONSTRAINT\s+(\w+))/g,
+          '$1 DROP CONSTRAINT IF EXISTS $4;\n$1\n$2$3'
+        )
     )
     .join('\n');
 }

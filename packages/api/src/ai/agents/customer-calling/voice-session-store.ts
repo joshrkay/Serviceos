@@ -232,6 +232,20 @@ export class VoiceSessionStore {
   }
 
   /**
+   * Variant of findByCallSid that also returns sessions marked `ended`.
+   * Used by post-call hooks (recording webhook → outcome stamp, transcript
+   * ingestion) that legitimately need the FSM context AFTER the FSM has
+   * terminated. The session is still in the map until idle reaping; the
+   * `ended` flag only suppresses NEW dispatches, not lookup of historical
+   * state.
+   */
+  findByCallSidIncludingEnded(callSid: string): VoiceSession | undefined {
+    const id = this.callSidIndex.get(callSid);
+    if (!id) return undefined;
+    return this.sessions.get(id);
+  }
+
+  /**
    * Run `body` while holding the per-session lock. Serializes
    * concurrent webhook handlers (e.g., Twilio retries, parallel /input
    * requests) against the FSM dispatch + transcript mutations.

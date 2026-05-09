@@ -219,7 +219,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     try {
       const twiml = deps.mediaStreamsEnabled
-        ? await deps.adapter.handleInboundForStream({ callSid, tenantId })
+        ? await deps.adapter.handleInboundForStream({ callSid, from, tenantId })
         : await deps.adapter.handleInbound({ callSid, from, to, tenantId });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {

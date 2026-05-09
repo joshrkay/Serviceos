@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, closeSharedTestDb } from './shared';
 import { PgVerticalPackRegistry } from '../../src/shared/pg-vertical-pack-registry';
+import { seedCanonicalVerticalPacks } from '../../src/shared/canonical-vertical-packs';
 
 describe('Postgres integration — verticals', () => {
   let pool: Pool;
