@@ -197,6 +197,27 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('closes WS with 1008 when start frame has empty callSid (invalid_start_payload)', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-valid' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn: async () => [] },
+      ws,
+    );
+    adapter.start();
+
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-bad',
+      start: { callSid: '', accountSid: 'AC', streamSid: 'MZ-bad', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(ws.closed).toBe(true);
+    expect(ws.closeCode).toBe(1008);
+    expect(ws.closeReason).toBe('invalid_start_payload');
+  });
+
   it('closes WS when CallSid does not resolve to a session', async () => {
     const ws = new FakeWs();
     const { provider } = makeStreamingProvider();
@@ -353,5 +374,9 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
     const clearFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear');
     expect(clearFrames.length).toBeGreaterThanOrEqual(1);
+
+    // TTS never resolved, so no media frames should have been sent after barge-in.
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBe(0);
   });
 });
