@@ -7,24 +7,31 @@ tracks follow-ups surfaced during /review that were intentionally not fixed.
 
 ## Executor double-execution on multi-instance deploys ✅ CLOSED
 
-`packages/api/src/proposals/execution/executor.ts:17-72` checks
-`proposal.status === 'approved'` from the in-memory object returned by
-`findReadyForExecution`, runs the handler's side effects, THEN calls
-`updateStatus('executed')`. With more than one API instance running, two
-workers can both claim the same approved proposal via `findReadyForExecution`
-and run the handler twice (customer created twice, appointment booked twice,
-etc.).
+Surfaced during `/review` of PR #89 and originally deferred to keep that PR
+focused. The fix shipped in commit `22f84b4` ("Add stale executing proposal
+recovery with retry limits") and is safe for horizontal scale.
 
-This was surfaced during `/review` of PR #89 but explicitly deferred to keep
-the P0-gap PR focused. Not a problem today because ServiceOS runs a single
-Railway dyno, but any horizontal scale flips this on.
+**What's in place:**
 
-**Fix:** atomic claim via `UPDATE proposals SET status = 'executing' WHERE id
-= $1 AND status = 'approved' RETURNING *` before running the handler. If the
-update returns no row, another worker claimed it — skip. Add an `'executing'`
-ProposalStatus (or a dedicated `claimed_by` + `claimed_at` column pair) and
-thread it through the lifecycle.
+- `'executing'` lifecycle state with `claimed_by` / `claimed_at` /
+  `execution_retry_count` columns (`packages/api/src/proposals/proposal.ts`,
+  `packages/api/src/proposals/lifecycle.ts:11`).
+- Atomic claim:
+  `UPDATE proposals SET status = 'executing', claimed_by = $2, claimed_at = NOW() WHERE id = $1 AND status = 'approved' RETURNING *`
+  in `PgProposalRepository.claimForExecution`
+  (`packages/api/src/proposals/pg-proposal.ts:285-296`). Concurrent workers
+  see at most one `RETURNING` row; losers get `null` and skip.
+- Crash recovery via `PgProposalRepository.resetStaleExecuting`
+  (`packages/api/src/proposals/pg-proposal.ts:298-325`): proposals stuck in
+  `'executing'` past `staleMinutes` (default 10) are reset to `'approved'`
+  with `execution_retry_count + 1`, or moved to `'execution_failed'` once
+  retries reach `maxRetries` (default 3).
+- Worker wiring: `runExecutionSweep`
+  (`packages/api/src/workers/execution-worker.ts`) runs reset →
+  `findReadyForExecution` → atomic claim → `executor.execute`. Driven from
+  `packages/api/src/app.ts:1089-1101` on a 1s `setInterval`.
+- Executor accepts both `'approved'` and `'executing'` so the claimed
+  proposal flows through unchanged
+  (`packages/api/src/proposals/execution/executor.ts:70`).
 
-**Effort:** ~30 min CC + careful thinking about crash recovery (what if the
-handler crashes mid-execution — do we reset `executing` back to `approved` on
-a timeout?). Flag before scaling past one dyno.
+Safe to scale past one Railway dyno.
