@@ -453,7 +453,21 @@ export class InAppVoiceAdapter {
       session.machine.currentState === 'terminated';
     if (endedNow) {
       session.ended = true;
-      session.events.emit('voice-event', { type: 'ended', reason: typeof last?.payload?.reason === 'string' ? last.payload.reason : 'closed' });
+      // B2: extract the FSM-supplied end_session.payload.reason (e.g.
+      // 'abuse_detected:profanity') so deriveCallOutcome maps it to the
+      // correct CallOutcome — flattening to 'session_ended' here would
+      // lose abuse / system_failure signal.
+      const endFx = [...allSideEffects].reverse().find((e) => e.type === 'end_session');
+      const endReason =
+        endFx && typeof endFx.payload.reason === 'string'
+          ? endFx.payload.reason
+          : 'closed';
+      session.events.emit('voice-event', { type: 'ended', reason: endReason });
+      // Stamp voice_sessions.outcome here so a client that drops the
+      // connection after seeing `ended: true` (without calling DELETE)
+      // still produces a finalized row. _endSessionLocked's later call
+      // is short-circuited by the session.terminalOutcome guard.
+      this.finalizeTerminalOutcome(session, endReason);
       // Best-effort summary (P8-010 — skill is already in tree).
       void this.runSummary(session).catch(() => {
         /* never block the response on summary failures */

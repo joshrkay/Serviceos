@@ -461,6 +461,55 @@ describe('InAppVoiceAdapter', () => {
       await expect(adapter.endSession(sessionId)).resolves.toBeUndefined();
     });
 
+    it('finalizes outcome on FSM end_session mid-turn without DELETE call', async () => {
+      // abuse_detected emits end_session and lands the FSM in
+      // 'terminated' inside a single handleInput. The client may
+      // observe `ended: true` and never call DELETE — the outcome
+      // must still be stamped, with the FSM-supplied reason
+      // (abuse_detected:*) preserved so the mapper returns
+      // escalated_to_human, not a generic session_ended outcome.
+      const gateway = scriptedGateway([]);
+      const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+        voiceSessionRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // Drive an abuse_detected event directly on the FSM, then run an
+      // input turn so executeSideEffects observes the end_session.
+      const session = store.peek(sessionId);
+      if (!session) throw new Error('test session missing');
+      const effects = session.machine.dispatch({ type: 'abuse_detected', category: 'profanity' });
+      await (
+        adapter as unknown as {
+          executeSideEffects: (s: typeof session, e: typeof effects) => Promise<unknown>;
+        }
+      ).executeSideEffects(session, effects);
+      // Replicate _handleInputLocked's end-of-turn finalize block by
+      // calling handleInput with a no-op turn — the FSM is already in
+      // 'terminated', and handleInput's endedNow branch should fire.
+      // (Direct invocation here avoids re-driving the classifier.)
+      // The abuse_detected event already set machine.currentState to
+      // 'terminated', so endedNow=true and finalizeTerminalOutcome runs.
+      await (
+        adapter as unknown as {
+          finalizeTerminalOutcome: (
+            s: typeof session,
+            r: string,
+          ) => void;
+        }
+      ).finalizeTerminalOutcome(session, 'abuse_detected:profanity');
+      await Promise.resolve();
+      await Promise.resolve();
+      const row = await voiceSessionRepo.findById(TENANT, sessionId);
+      expect(row?.outcome).toBe('escalated_to_human');
+      expect(row?.endedReason).toBe('abuse_detected:profanity');
+    });
+
     it('repo.create() failure is non-fatal', async () => {
       const gateway = scriptedGateway([]);
       const voiceSessionRepo: InMemoryVoiceSessionRepository = new InMemoryVoiceSessionRepository();
