@@ -1,41 +1,29 @@
-import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool, PoolClient } from 'pg';
-import { getMigrationSQL } from '../../src/db/schema';
 
-let sharedContainer: StartedPostgreSqlContainer | null = null;
+// Container lifecycle (start, migrations, stop) is owned by vitest globalSetup
+// at test/integration/global-setup.ts. This module only wraps a process-wide
+// pg.Pool against TEST_DB_URL so per-file beforeAll/afterAll are near-instant.
 let sharedPool: Pool | null = null;
 
 export async function getSharedTestDb(): Promise<Pool> {
-  if (!sharedContainer || !sharedPool) {
-    // pgvector/pgvector:pg16 is the canonical Postgres 16 image with the
-    // `vector` extension preloaded — required by migration 062
-    // (knowledge_chunks). The plain `postgres:16-alpine` image lacks the
-    // extension and fails `CREATE EXTENSION vector` at schema apply time.
-    const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
-    sharedContainer = await new PostgreSqlContainer(image)
-      .withDatabase('serviceos_test')
-      .start();
-
-    sharedPool = new Pool({
-      connectionString: sharedContainer.getConnectionUri(),
-    });
-
-    await sharedPool.query('SET lock_timeout = \'5s\'');
-    await sharedPool.query('SET statement_timeout = \'25s\'');
-    await sharedPool.query(getMigrationSQL());
+  if (!sharedPool) {
+    const uri = process.env.TEST_DB_URL;
+    if (!uri) {
+      throw new Error(
+        'TEST_DB_URL not set — integration tests must run via `npm run test:integration` ' +
+          'so vitest globalSetup (test/integration/global-setup.ts) can start the testcontainer.',
+      );
+    }
+    sharedPool = new Pool({ connectionString: uri });
   }
   return sharedPool;
 }
 
 export async function closeSharedTestDb(): Promise<void> {
-  if (sharedPool) {
-    await sharedPool.end();
-    sharedPool = null;
-  }
-  if (sharedContainer) {
-    await sharedContainer.stop();
-    sharedContainer = null;
-  }
+  // No-op: container lifecycle is owned by vitest globalSetup. The pool
+  // stays open for the duration of `vitest run` and is reaped on process
+  // exit. We deliberately don't end the pool per-file because the next
+  // file's beforeAll would just rebuild it.
 }
 
 export interface TestTenant {
