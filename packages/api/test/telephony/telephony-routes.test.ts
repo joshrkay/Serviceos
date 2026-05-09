@@ -20,6 +20,7 @@ import {
 } from '../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 
 const AUTH_TOKEN = 'test-tw-token-xyz';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -201,7 +202,7 @@ describe('POST /api/telephony/gather', () => {
   });
 });
 
-// ─── P8-013 — POST /api/telephony/dial-result ────────────────────────────────────────────
+// ─── P8-013 — POST /api/telephony/dial-result ────────────────────────────────────────────────────────────────────────────────────────
 
 interface DialHarness {
   app: express.Application;
@@ -211,7 +212,8 @@ interface DialHarness {
   onCallRepo: InMemoryOnCallRepository;
   auditRepo: InMemoryAuditRepository;
   proposalRepo: InMemoryProposalRepository;
-  resolver: ReturnType<typeof vi.fn<[_t: string, userId: string], Promise<string | null>>>;
+  voiceSessionRepo: InMemoryVoiceSessionRepository;
+  resolver: ReturnType<typeof vi.fn>;
 }
 
 function makeRotation(entries: OnCallEntry[]): InMemoryOnCallRepository {
@@ -228,6 +230,7 @@ function buildDialHarness(opts: {
   const auditRepo = new InMemoryAuditRepository();
   const proposalRepo = new InMemoryProposalRepository();
   const callControl = new DefaultTwilioCallControl();
+  const voiceSessionRepo = new InMemoryVoiceSessionRepository();
   const resolver = vi.fn(async (_t: string, userId: string) => opts.phones[userId] ?? null);
 
   const adapter = new TwilioGatherAdapter({
@@ -240,6 +243,7 @@ function buildDialHarness(opts: {
     onCallRepo,
     auditRepo,
     proposalRepo,
+    voiceSessionRepo,
   });
 
   const app = express();
@@ -253,7 +257,7 @@ function buildDialHarness(opts: {
       businessName: 'Acme Plumbing',
     }),
   );
-  return { app, store, adapter, callControl, onCallRepo, auditRepo, proposalRepo, resolver };
+  return { app, store, adapter, callControl, onCallRepo, auditRepo, proposalRepo, voiceSessionRepo, resolver };
 }
 
 function signDialResult(
@@ -456,9 +460,83 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       true,
     );
   });
+
+  it('B2: dial completed → stamps voice_sessions.outcome=completed', async () => {
+    const { app, store, voiceSessionRepo } = buildDialHarness({
+      rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
+      phones: { u1: '+15125550101' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-stamp-ok' });
+    await voiceSessionRepo.create({
+      id: session.id,
+      tenantId: TENANT_ID,
+      channel: 'voice_inbound',
+      callSid: 'CA-stamp-ok',
+      state: session.machine.currentState,
+    });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-stamp-ok',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+
+    await signDialResult(app, session.id, {
+      CallSid: 'CA-stamp-ok',
+      DialCallStatus: 'completed',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const row = await voiceSessionRepo.findById(TENANT_ID, session.id);
+    expect(row?.outcome).toBe('completed');
+    expect(row?.endedReason).toBe('transferred');
+    expect(row?.endedAt).toBeInstanceOf(Date);
+  });
+
+  it('B2: rotation exhausted → stamps voice_sessions.outcome=callback_required', async () => {
+    const { app, store, voiceSessionRepo, callControl } = buildDialHarness({
+      rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
+      phones: { u1: '+15125550101' },
+    });
+    const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-stamp-cb' });
+    await voiceSessionRepo.create({
+      id: session.id,
+      tenantId: TENANT_ID,
+      channel: 'voice_inbound',
+      callSid: 'CA-stamp-cb',
+      state: session.machine.currentState,
+    });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-stamp-cb',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: TENANT_ID,
+    });
+    session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    callControl.setCursorAfter(session.id, 0);
+
+    const res = await signDialResult(app, session.id, {
+      CallSid: 'CA-stamp-cb',
+      DialCallStatus: 'no-answer',
+      From: '+15125550100',
+      To: '+15125550999',
+    });
+    expect(res.text).toMatch(/call you back/i);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const row = await voiceSessionRepo.findById(TENANT_ID, session.id);
+    expect(row?.outcome).toBe('callback_required');
+    expect(row?.endedReason).toBe('normal_close');
+    expect(row?.endedAt).toBeInstanceOf(Date);
+  });
 });
 
-// ─── P8-014: POST /api/telephony/recording wiring ────────────────────────────────────────────
+// ─── P8-014: POST /api/telephony/recording wiring ────────────────────────────────────────────────────────────────────────────────────────
 
 describe('POST /api/telephony/recording (P8-014 record_call)', () => {
   // recordInboundCall calls setTenantContext, which validates UUID format,
