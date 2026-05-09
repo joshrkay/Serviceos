@@ -34,6 +34,11 @@ describe('P0-006 — Secrets/config framework', () => {
       AI_PROVIDER_BASE_URL: 'https://ai.example.com',
       CORS_ORIGIN: 'https://app.example.com',
       LOG_LEVEL: 'debug',
+      // Opt features out so the feature-required gate doesn't fire;
+      // its own behavior is covered by the dedicated tests below.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
     });
     expect(config.NODE_ENV).toBe('staging');
     expect(config.PORT).toBe(8080);
@@ -123,6 +128,11 @@ describe('P0-006 — Secrets/config framework', () => {
         CLERK_WEBHOOK_SECRET: 'whsec_x',
         AI_PROVIDER_API_KEY: 'ak_x',
         CORS_ORIGIN: 'https://app.example.com',
+        // Opt features out so the feature-required gate doesn't fire.
+        // The feature-required gate has its own dedicated tests below.
+        TELEPHONY_ENABLED: 'false',
+        EMAIL_ENABLED: 'false',
+        STORAGE_ENABLED: 'false',
       })
     ).not.toThrow();
   });
@@ -138,6 +148,83 @@ describe('P0-006 — Secrets/config framework', () => {
         CORS_ORIGIN: 'https://app.example.com',
       })
     ).toThrow(/CLERK_PUBLISHABLE_KEY/);
+  });
+
+  describe('feature-required config gate (Sprint 1 / Story 1.5)', () => {
+    const baseProdEnv = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+    };
+
+    it('telephony — fails naming each missing TWILIO var when not opted out', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          EMAIL_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+        })
+      ).toThrow(/TWILIO_ACCOUNT_SID[\s\S]*TWILIO_AUTH_TOKEN[\s\S]*TWILIO_FROM_NUMBER[\s\S]*TWILIO_DEFAULT_TENANT_ID/);
+    });
+
+    it('telephony — passes when TELEPHONY_ENABLED=false even with no Twilio vars', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          EMAIL_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+        })
+      ).not.toThrow();
+    });
+
+    it('email — fails when SENDGRID_API_KEY missing and EMAIL_ENABLED not set to false', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          STORAGE_ENABLED: 'false',
+        })
+      ).toThrow(/SENDGRID_API_KEY/);
+    });
+
+    it('storage — fails when R2 vars missing and STORAGE_ENABLED not set to false', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TELEPHONY_ENABLED: 'false',
+          EMAIL_ENABLED: 'false',
+        })
+      ).toThrow(/R2_ACCOUNT_ID[\s\S]*R2_ACCESS_KEY_ID[\s\S]*R2_SECRET_ACCESS_KEY[\s\S]*R2_PUBLIC_URL/);
+    });
+
+    it('passes when all feature vars are set', () => {
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          TWILIO_ACCOUNT_SID: 'AC_x',
+          TWILIO_AUTH_TOKEN: 't_x',
+          TWILIO_FROM_NUMBER: '+15551234567',
+          TWILIO_DEFAULT_TENANT_ID: 'tenant-1',
+          SENDGRID_API_KEY: 'SG.x',
+          SENDGRID_FROM_EMAIL: 'noreply@example.com',
+          R2_ACCOUNT_ID: 'r2acct',
+          R2_ACCESS_KEY_ID: 'r2key',
+          R2_SECRET_ACCESS_KEY: 'r2secret',
+          R2_PUBLIC_URL: 'https://cdn.example.com',
+        })
+      ).not.toThrow();
+    });
+
+    it('dev environment skips the feature gate entirely', () => {
+      // Dev should never trip these — silent feature-off is the
+      // intended local behavior.
+      expect(() => loadConfig({ NODE_ENV: 'dev' })).not.toThrow();
+    });
   });
 });
 
