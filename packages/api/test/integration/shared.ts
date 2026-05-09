@@ -7,7 +7,7 @@ let sharedPool: Pool | null = null;
 
 export async function getSharedTestDb(): Promise<Pool> {
   if (!sharedContainer || !sharedPool) {
-    const image = process.env.POSTGRES_IMAGE || 'postgres:16-alpine';
+    const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
     sharedContainer = await new PostgreSqlContainer(image)
       .withDatabase('serviceos_test')
       .start();
