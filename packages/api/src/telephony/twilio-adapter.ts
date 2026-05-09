@@ -70,6 +70,7 @@ import { createLogger } from '../logging/logger';
 import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
+import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -185,6 +186,7 @@ export interface TwilioAdapterDeps {
    * at session end (by callSid). Without this, analytics remain blind.
    */
   voiceRepo?: VoiceRepository;
+  /**
    * B1 — Per-tenant voice persona. When present, consulted during
    * `handleInbound` to personalize the greeting. Failures fall back
    * to the static `businessName`-based opener — calls are never
