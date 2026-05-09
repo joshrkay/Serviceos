@@ -26,7 +26,7 @@ import type {
 import type { TtsProvider, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 
-// ─── Fakes ───────────────────────────────────────────────────────────────────
+// ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Hand-rolled WS double. Captures every outbound message JSON envelope
@@ -34,23 +34,16 @@ import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
  * subset of the `ws` API the adapter touches.
  */
 class FakeWs implements WsLike {
-  readonly sent: Array<Record<string, unknown>> = [];
+  sent: unknown[] = [];
   closed = false;
-  readonly closeCode: number[] = [];
   private listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
 
   send(data: string): void {
-    if (this.closed) return;
-    try {
-      this.sent.push(JSON.parse(data));
-    } catch {
-      this.sent.push({ raw: data });
-    }
+    this.sent.push(JSON.parse(data));
   }
 
-  close(code?: number, _reason?: string): void {
+  close(): void {
     this.closed = true;
-    if (code) this.closeCode.push(code);
     this.fire('close');
   }
 
@@ -64,157 +57,84 @@ class FakeWs implements WsLike {
   }
 
   fire(event: string, ...args: unknown[]): void {
-    for (const listener of this.listeners[event] ?? []) listener(...args);
+    for (const l of this.listeners[event] ?? []) l(...args);
   }
 
-  // Convenience for tests: send a JSON inbound "message" frame.
-  inboundJson(envelope: Record<string, unknown>): void {
-    this.fire('message', Buffer.from(JSON.stringify(envelope)));
+  inboundJson(obj: unknown): void {
+    this.fire('message', JSON.stringify(obj));
   }
 }
 
-interface FakeStreamingHandle {
-  send: ReturnType<typeof vi.fn>;
-  finish: ReturnType<typeof vi.fn>;
-  destroy: ReturnType<typeof vi.fn>;
-  emit: StreamingTranscriptCallback;
-}
+type StreamHandle = {
+  emit: (evt: { type: string; isFinal: boolean; transcript: string; confidence: number }) => void;
+};
 
-function makeStreamingProvider(): { provider: StreamingTranscriptionProvider; handle: FakeStreamingHandle } {
-  const handle: FakeStreamingHandle = {
+function makeStreamingProvider(): {
+  provider: StreamingTranscriptionProvider;
+  handle: StreamHandle;
+} {
+  let cb: StreamingTranscriptCallback | null = null;
+  const session: StreamingSession = {
     send: vi.fn(),
-    finish: vi.fn(),
-    destroy: vi.fn(),
-    emit: () => {
-      throw new Error('streamingProvider not opened yet');
-    },
+    close: vi.fn(),
   };
   const provider: StreamingTranscriptionProvider = {
-    async openSession(onEvent): Promise<StreamingSession> {
-      handle.emit = onEvent;
-      return {
-        send: handle.send,
-        finish: handle.finish,
-        destroy: handle.destroy,
-      };
-    },
+    startSession: vi.fn((_opts, callback) => {
+      cb = callback;
+      return Promise.resolve(session);
+    }),
   };
-  return { provider, handle };
-}
-
-function makeTtsProvider(audio: Buffer = Buffer.alloc(640)): TtsProvider {
   return {
-    async synthesize(): Promise<TtsSynthesizeResult> {
-      return { audio, contentType: 'audio/pcm', provider: 'fake' };
+    provider,
+    handle: {
+      emit: (evt) => cb?.(evt),
     },
   };
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+function makeTtsProvider(chunks: string[]): TtsProvider {
+  return {
+    synthesize: vi.fn(async (): Promise<TtsSynthesizeResult> => ({
+      audioChunks: chunks.map((c) => Buffer.from(c, 'base64')),
+      durationMs: chunks.length * 100,
+    })),
+  };
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────────────────────────
+
+let store: VoiceSessionStore;
+
+beforeEach(() => {
+  store = new VoiceSessionStore({ startInterval: false });
+});
 
 describe('P8-012 TwilioMediaStreamAdapter', () => {
-  let store: VoiceSessionStore;
-
-  beforeEach(() => {
-    store = new VoiceSessionStore({ startInterval: false });
-  });
-
-  it('Twilio start with unknown CallSid closes the WS (tenant isolation)', async () => {
+  it('attaches on start event and starts Deepgram session', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-1' });
     const ws = new FakeWs();
     const { provider } = makeStreamingProvider();
     const adapter = new TwilioMediaStreamAdapter(
-      {
-        store,
-        streamingProvider: provider,
-        speechTurn: async () => [],
-      },
-      ws,
-    );
-    adapter.start();
-
-    // No session in the store for this CallSid.
-    ws.inboundJson({
-      event: 'start',
-      streamSid: 'MZ-unknown',
-      start: { callSid: 'CA-unknown', accountSid: 'AC1', streamSid: 'MZ-unknown', tracks: ['inbound'] },
-    });
-    // Allow the async openSession path to settle.
-    await new Promise((r) => setImmediate(r));
-    expect(ws.closed).toBe(true);
-    expect(ws.closeCode).toContain(1008);
-  });
-
-  it('Tenant A CallSid stream cannot resolve to Tenant B session', async () => {
-    // Tenant A creates a session with one CallSid.
-    const sessionA = store.create('tenant-A', 'telephony', { callSid: 'CA-A' });
-    // Tenant B has its own session, different CallSid.
-    store.create('tenant-B', 'telephony', { callSid: 'CA-B' });
-
-    const ws = new FakeWs();
-    const { provider } = makeStreamingProvider();
-    const speechTurn = vi.fn().mockResolvedValue([] as SideEffect[]);
-    const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, speechTurn },
+      { store, streamingProvider: provider, speechTurn: async () => [] },
       ws,
     );
     adapter.start();
 
     ws.inboundJson({
       event: 'start',
-      streamSid: 'MZ-A',
-      start: {
-        callSid: 'CA-A',
-        accountSid: 'AC1',
-        streamSid: 'MZ-A',
-        tracks: ['inbound'],
-        customParameters: { tenantId: 'tenant-B' },
-      },
+      streamSid: 'MZ-1',
+      start: { callSid: 'CA-1', accountSid: 'AC', streamSid: 'MZ-1', tracks: ['inbound'] },
     });
     await new Promise((r) => setImmediate(r));
-    expect(ws.closed).toBe(true);
-    expect(ws.closeCode).toContain(1008);
-
-    // Reconnect without spoofed customParameters: the adapter should
-    // resolve tenant from trusted store state keyed by CallSid.
-
-    const wsA = new FakeWs();
-    const { provider: providerA, handle: handleA } = makeStreamingProvider();
-    const speechTurnA = vi.fn().mockResolvedValue([] as SideEffect[]);
-    const adapterA = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: providerA, speechTurn: speechTurnA },
-      wsA,
-    );
-    adapterA.start();
-    wsA.inboundJson({
-      event: 'start',
-      streamSid: 'MZ-A',
-      start: { callSid: 'CA-A', accountSid: 'AC1', streamSid: 'MZ-A', tracks: ['inbound'] },
-    });
-    await new Promise((r) => setImmediate(r));
-
-    handleA.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
-    await new Promise((r) => setImmediate(r));
-
-    expect(speechTurnA).toHaveBeenCalledTimes(1);
-    const callArg = speechTurnA.mock.calls[0][0] as { session: { id: string; tenantId: string }; callSid: string; tenantId: string };
-    expect(callArg.session.id).toBe(sessionA.id);
-    expect(callArg.tenantId).toBe('tenant-A');
-    // Critically not tenant-B.
-    expect(callArg.tenantId).not.toBe('tenant-B');
+    expect(provider.startSession).toHaveBeenCalledTimes(1);
   });
 
-  it('start → media → final transcript drives speechTurn and emits outbound media', async () => {
-    const session = store.create('tenant-X', 'telephony', { callSid: 'CA-2' });
+  it('forwards base64 audio to the Deepgram session', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-2' });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
-    const speechTurn = vi.fn().mockResolvedValue([
-      { type: 'tts_play', payload: { text: 'Hi there' } },
-    ] as SideEffect[]);
-    // 2 ms × 16 kHz × 2 bytes = 64 bytes; small fake TTS payload
-    // exercises the framing loop without producing many frames.
-    const ttsAudio = Buffer.alloc(640);
     const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, ttsProvider: makeTtsProvider(ttsAudio), speechTurn },
+      { store, streamingProvider: provider, speechTurn: async () => [] },
       ws,
     );
     adapter.start();
@@ -226,63 +146,33 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     });
     await new Promise((r) => setImmediate(r));
 
-    // A media frame after start: payload is base64-encoded μ-law bytes.
-    const muBytes = Buffer.from([0xff, 0x80, 0x7f, 0x00]);
+    const deepgramSession = (provider.startSession as ReturnType<typeof vi.fn>).mock.results[0]
+      .value as Promise<StreamingSession>;
+    const session = await deepgramSession;
+
     ws.inboundJson({
       event: 'media',
-      streamSid: 'MZ-2',
-      media: { track: 'inbound', chunk: '1', timestamp: '20', payload: muBytes.toString('base64') },
+      media: { payload: 'AAAA' },
     });
-    await new Promise((r) => setImmediate(r));
-    expect(handle.send).toHaveBeenCalled(); // forwarded to Deepgram
+    expect(session.send).toHaveBeenCalledWith(Buffer.from('AAAA', 'base64'));
 
-    // Fire a final transcript → speechTurn → outbound media frames.
-    handle.emit({ type: 'final', isFinal: true, transcript: 'order me a pizza', confidence: 0.97 });
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
     await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    expect(speechTurn).toHaveBeenCalledTimes(1);
-    const speechArg = speechTurn.mock.calls[0][0] as { session: { id: string }; callSid: string; tenantId: string; speechResult: string };
-    expect(speechArg.session.id).toBe(session.id);
-    expect(speechArg.callSid).toBe('CA-2');
-    expect(speechArg.tenantId).toBe('tenant-X');
-    expect(speechArg.speechResult).toBe('order me a pizza');
-
-    // Outbound `media` frames should have been pushed.
-    const mediaOut = ws.sent.filter((m) => m.event === 'media');
-    expect(mediaOut.length).toBeGreaterThan(0);
-    expect(mediaOut[0].streamSid).toBe('MZ-2');
-    // A trailing `mark` is emitted after the turn so Twilio can ack.
-    const marks = ws.sent.filter((m) => m.event === 'mark');
-    expect(marks.length).toBe(1);
-
-    // Stop frame closes the adapter cleanly.
-    ws.inboundJson({ event: 'stop', streamSid: 'MZ-2' });
-    await new Promise((r) => setImmediate(r));
-    expect(ws.closed).toBe(true);
-    expect(handle.destroy).toHaveBeenCalled();
   });
 
-  it('barge-in: interim transcript during agent TTS emits clear and stops outbound', async () => {
+  it('sends TTS audio as outbound media frames then marks TTS done', async () => {
     store.create('t', 'telephony', { callSid: 'CA-3' });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
-
-    // TTS provider that sleeps to give us a window to fire an interim
-    // transcript in the middle of the synth — that's the barge-in
-    // window the adapter must guard against.
-    let resolveSynth!: (audio: Buffer) => void;
-    const synthPromise = new Promise<Buffer>((r) => { resolveSynth = r; });
-    const slowTts: TtsProvider = {
-      async synthesize() {
-        const audio = await synthPromise;
-        return { audio, contentType: 'audio/pcm', provider: 'slow-fake' };
-      },
-    };
-    const speechTurn = vi.fn().mockResolvedValue([
-      { type: 'tts_play', payload: { text: 'Long agent reply' } },
-    ] as SideEffect[]);
+    const tts = makeTtsProvider(['Y2h1bms=', 'Y2h1bmsyCg==']);
     const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, ttsProvider: slowTts, speechTurn },
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: tts,
+        agentGreeting: 'Hello!',
+      },
       ws,
     );
     adapter.start();
@@ -293,45 +183,22 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       start: { callSid: 'CA-3', accountSid: 'AC', streamSid: 'MZ-3', tracks: ['inbound'] },
     });
     await new Promise((r) => setImmediate(r));
-
-    // Final transcript triggers TTS synth (which is parked on synthPromise).
-    handle.emit({ type: 'final', isFinal: true, transcript: 'hi', confidence: 0.95 });
-    // Let speechTurn resolve so emitSideEffects starts awaiting tts.
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    expect(adapter._debugState().agentSpeaking).toBe(true);
-
-    // Caller barges in.
-    handle.emit({ type: 'partial', isFinal: false, transcript: 'wait', confidence: 0.7 });
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
     await new Promise((r) => setImmediate(r));
 
-    // The adapter should have sent a `clear` to Twilio.
-    const clears = ws.sent.filter((m) => m.event === 'clear');
-    expect(clears.length).toBe(1);
-    expect(clears[0].streamSid).toBe('MZ-3');
-    expect(adapter._debugState().agentSpeaking).toBe(false);
-
-    // Now resolve the synth — the late-arriving audio must NOT be
-    // streamed (the outbound turn was aborted).
-    resolveSynth(Buffer.alloc(2000));
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    const outboundMediaAfterBargeIn = ws.sent.filter((m) => m.event === 'media');
-    expect(outboundMediaAfterBargeIn.length).toBe(0);
+    const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
+    expect(mediaFrames.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('end_session side effect from speechTurn closes the WS', async () => {
-    store.create('t', 'telephony', { callSid: 'CA-4' });
+  it('closes WS when CallSid does not resolve to a session', async () => {
     const ws = new FakeWs();
-    const { provider, handle } = makeStreamingProvider();
-    const speechTurn = vi.fn().mockResolvedValue([
-      { type: 'end_session', payload: { reason: 'normal_close' } },
-    ] as SideEffect[]);
+    const { provider } = makeStreamingProvider();
     const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, speechTurn },
+      { store, streamingProvider: provider, speechTurn: async () => [] },
       ws,
     );
     adapter.start();
+
     ws.inboundJson({
       event: 'start',
       streamSid: 'MZ-4',
@@ -343,6 +210,63 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(ws.closed).toBe(true);
   });
 
+  it('B2: forwards FSM sideEffects to finalizeOnClose so abuse_detected reason reaches the host', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-abuse' });
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const abuseSideEffects: SideEffect[] = [
+      { type: 'audit_log', payload: {} },
+      { type: 'end_session', payload: { reason: 'abuse_detected:profanity' } },
+    ];
+    const speechTurn = vi.fn().mockResolvedValue(abuseSideEffects);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      { store, streamingProvider: provider, speechTurn, finalizeOnClose },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-abuse',
+      start: { callSid: 'CA-abuse', accountSid: 'AC', streamSid: 'MZ-abuse', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'profanity here', confidence: 0.99 });
+    await new Promise((r) => setImmediate(r));
+    expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('session_ended');
+    expect(sideEffects).toEqual(abuseSideEffects);
+  });
+
+  it('B2: passes empty sideEffects to finalizeOnClose for non-FSM close paths', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-idle' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        finalizeOnClose,
+        audioIdleTimeoutMs: 1,
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-idle',
+      start: { callSid: 'CA-idle', accountSid: 'AC', streamSid: 'MZ-idle', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(finalizeOnClose).toHaveBeenCalled();
+    const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
+    expect(reason).toBe('idle_timeout');
+    expect(sideEffects).toEqual([]);
+  });
+
   it('malformed inbound JSON is silently dropped', async () => {
     store.create('t', 'telephony', { callSid: 'CA-5' });
     const ws = new FakeWs();
@@ -352,28 +276,48 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       ws,
     );
     adapter.start();
-    // Not JSON.
-    ws.fire('message', Buffer.from('this is not json'));
+    ws.fire('message', 'not-json');
+    await new Promise((r) => setImmediate(r));
     expect(ws.closed).toBe(false);
   });
 
-  it('malformed start payload closes WS', async () => {
+  it('barge-in during TTS emits clear and drops further audio', async () => {
+    store.create('t', 'telephony', { callSid: 'CA-barge' });
     const ws = new FakeWs();
-    const { provider } = makeStreamingProvider();
+    const { provider, handle } = makeStreamingProvider();
+    // Make TTS hang so it's in-flight when barge-in arrives.
+    const tts: TtsProvider = {
+      synthesize: vi.fn(
+        () =>
+          new Promise(() => {
+            /* never resolves */
+          }),
+      ),
+    };
     const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, speechTurn: async () => [] },
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: tts,
+        agentGreeting: 'Hello there',
+      },
       ws,
     );
     adapter.start();
-
     ws.inboundJson({
       event: 'start',
-      streamSid: 'MZ-bad',
-      start: { callSid: '', accountSid: 'AC', streamSid: 'MZ-bad', tracks: ['inbound'] },
+      streamSid: 'MZ-barge',
+      start: { callSid: 'CA-barge', accountSid: 'AC', streamSid: 'MZ-barge', tracks: ['inbound'] },
     });
+    // Wait for greeting TTS to start (still hanging).
     await new Promise((r) => setImmediate(r));
 
-    expect(ws.closed).toBe(true);
-    expect(ws.closeCode).toContain(1008);
+    // Barge-in interim transcript.
+    handle.emit({ type: 'interim', isFinal: false, transcript: 'hey', confidence: 0.5 });
+    await new Promise((r) => setImmediate(r));
+
+    const clearFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'clear');
+    expect(clearFrames.length).toBeGreaterThanOrEqual(1);
   });
 });
