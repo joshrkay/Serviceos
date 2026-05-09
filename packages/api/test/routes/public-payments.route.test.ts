@@ -104,8 +104,8 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
 
   it('forwards invoice amountDueCents to Stripe', async () => {
     const seenBodies: string[] = [];
-    const fetcher: StripeFetch = (async (_url: string | URL | Request, init: RequestInit) => {
-      seenBodies.push(init.body as string);
+    const fetcher: StripeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenBodies.push(init?.body?.toString() ?? '');
       return {
         ok: true,
         status: 200,
