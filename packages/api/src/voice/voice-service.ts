@@ -16,7 +16,9 @@ export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'fail
  *   - no_intent             — caller stayed on but classifier never crossed TAU_INT
  *   - failed                — system_failure event landed the FSM in escalating
  *
- * NULL until stamped (Phase 2 ships the column; FSM stamping lands in 4a).
+ * Stamped by both adapter finalize hooks (B2): voice_sessions.outcome
+ * always, voice_recordings.outcome when a recording exists. Derivation
+ * lives in `ai/agents/customer-calling/outcome-mapper.ts`.
  */
 export type CallOutcome =
   | 'completed'

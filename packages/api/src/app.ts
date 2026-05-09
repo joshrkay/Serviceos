@@ -168,6 +168,8 @@ import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
+import { InMemoryVoiceSessionRepository } from './voice/voice-session';
+import { PgVoiceSessionRepository } from './voice/pg-voice-session';
 import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
@@ -705,6 +707,7 @@ export function createApp(): express.Express {
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
+  const voiceSessionRepo   = pool ? new PgVoiceSessionRepository(pool)   : new InMemoryVoiceSessionRepository();
   const technicianLocationPingRepo = pool
     ? new PgTechnicianLocationPingRepository(pool)
     : new InMemoryTechnicianLocationPingRepository();
@@ -1416,6 +1419,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
   });
@@ -1521,51 +1525,52 @@ export function createApp(): express.Express {
         // first lands. Skipped on Twilio retries (`inserted=false`) so
         // we don't double-process the same call. Skipped silently when
         // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
-        options: {
-          onPersisted: async (event) => {
-            // Stamp call outcome now that the row exists. The earlier
-            // attempt from runSummary() typically no-ops because Twilio's
-            // recording webhook hasn't fired yet — this is the reliable
-            // stamp path. Runs regardless of insert vs replay (idempotent).
-            await twilioAdapter.stampCallOutcomeByCallSid({
-              tenantId: event.tenantId,
-              callSid: event.callSid,
-            });
-
-            if (!embeddingProvider) return;
-            if (!event.inserted) return;
-            const session = voiceSessionStore.findByCallSid(event.callSid);
-            if (!session) {
-              // Session was reaped (>30 min idle) before the
-              // recording webhook fired. Known data-loss edge
-              // case from the in-memory session store; not
-              // something Phase 4a-1 fixes. Phase 4 architecture
-              // doc covers persistent FSM state as a follow-up.
-              return;
-            }
-            try {
-              await queue.send(
-                'transcript_ingestion',
-                {
-                  tenantId: event.tenantId,
-                  voiceRecordingId: event.voiceRecordingId,
-                  transcript: [...session.transcript],
-                  ...(session.machine.currentContext.currentIntent
-                    ? { intent: session.machine.currentContext.currentIntent }
-                    : {}),
-                  durationMs: Date.now() - session.createdAt.getTime(),
+        ...(embeddingProvider
+          ? {
+              options: {
+                onPersisted: async (event) => {
+                  if (!event.inserted) return;
+                  const session = voiceSessionStore.findByCallSid(event.callSid);
+                  if (!session) {
+                    // Session was reaped (>30 min idle) before the
+                    // recording webhook fired. Known data-loss edge
+                    // case from the in-memory session store; not
+                    // something Phase 4a-1 fixes. Phase 4 architecture
+                    // doc covers persistent FSM state as a follow-up.
+                    return;
+                  }
+                  try {
+                    await queue.send(
+                      'transcript_ingestion',
+                      {
+                        tenantId: event.tenantId,
+                        voiceRecordingId: event.voiceRecordingId,
+                        transcript: [...session.transcript],
+                        ...(session.machine.currentContext.currentIntent
+                          ? { intent: session.machine.currentContext.currentIntent }
+                          : {}),
+                        // B2: thread the typed CallOutcome into the worker
+                        // payload so voice_recordings.outcome gets stamped
+                        // alongside voice_sessions.outcome. Optional —
+                        // the worker no-ops when undefined.
+                        ...(session.terminalOutcome
+                          ? { outcome: session.terminalOutcome }
+                          : {}),
+                        durationMs: Date.now() - session.createdAt.getTime(),
+                      },
+                      `transcript:${event.voiceRecordingId}:v1`,
+                    );
+                  } catch (err) {
+                    // eslint-disable-next-line no-console
+                    console.error('app: failed to enqueue transcript_ingestion', {
+                      voiceRecordingId: event.voiceRecordingId,
+                      error: err instanceof Error ? err.message : String(err),
+                    });
+                  }
                 },
-                `transcript:${event.voiceRecordingId}:v1`,
-              );
-            } catch (err) {
-              // eslint-disable-next-line no-console
-              console.error('app: failed to enqueue transcript_ingestion', {
-                voiceRecordingId: event.voiceRecordingId,
-                error: err instanceof Error ? err.message : String(err),
-              });
+              },
             }
-          },
-        },
+          : {}),
       },
       getHealth: () => {
         const ttsEnabled =
@@ -1658,8 +1663,15 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
-            initializeSession: async ({ callSid, tenantId }) =>
-              twilioAdapter.initializeStreamSession({ callSid, tenantId }),
+            // B2: delegate outcome stamping to the gather adapter so all
+            // close paths (caller hangup, idle timeout, end_session, WS
+            // teardown, slow-consumer disconnect) stamp the same typed
+            // CallOutcome onto voice_sessions. Forward the FSM
+            // sideEffects so the actual `end_session.payload.reason`
+            // (e.g. 'abuse_detected:profanity') reaches deriveCallOutcome
+            // for non-hangup terminations.
+            finalizeOnClose: (session, reason, sideEffects) =>
+              twilioAdapter.finalizeTerminatedSession(session, sideEffects, reason),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).
@@ -2129,6 +2141,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voiceSessionRepo,
     voicePersonaResolver,
   });
   app.use(

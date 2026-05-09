@@ -57,6 +57,8 @@ import {
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import { deriveCallOutcome } from '../ai/agents/customer-calling/outcome-mapper';
+import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
 import type { LeadRepository } from '../leads/lead';
@@ -181,6 +183,13 @@ export interface TwilioAdapterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /**
+   * B2 — persistent outcome stamping. When wired, the adapter inserts a
+   * voice_sessions row on session start and stamps the typed CallOutcome
+   * + ended_reason on session end (before store.delete()). Optional so
+   * existing test fixtures continue to work without DI'ing a stub.
+   */
+  voiceSessionRepo?: VoiceSessionRepository;
   /**
    * When wired, the call outcome is stamped on the voice_recordings row
    * at session end (by callSid). Without this, analytics remain blind.
@@ -486,9 +495,31 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
-    // Store caller-id so initializeStreamSession can pass it to identifyCaller.
+    // initializeStreamSession reads callerIdBySession to drive
+    // identifyCaller/lead creation; without this, every media-stream
+    // inbound silently falls through to unknown-caller behavior.
     this.callerIdBySession.set(session.id, opts.from ?? '');
+    this.persistVoiceSessionRow(session, opts.callSid);
     return this.buildStreamTwiML({ sessionId: session.id, callSid: opts.callSid });
+  }
+
+  /**
+   * B2 — fire-and-forget insert into voice_sessions. Best-effort: a repo
+   * error never blocks call setup.
+   */
+  private persistVoiceSessionRow(session: VoiceSession, callSid: string | undefined): void {
+    if (!this.deps.voiceSessionRepo) return;
+    void this.deps.voiceSessionRepo
+      .create({
+        id: session.id,
+        tenantId: session.tenantId,
+        channel: 'voice_inbound',
+        ...(callSid ? { callSid } : {}),
+        state: session.machine.currentState,
+      })
+      .catch(() => {
+        /* swallow — outcome stamping is best-effort */
+      });
   }
 
   /**
@@ -818,6 +849,7 @@ export class TwilioGatherAdapter {
     }
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      this.finalizeTerminatedSession(session, sideEffectsAll, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -856,6 +888,7 @@ export class TwilioGatherAdapter {
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
     });
+    this.persistVoiceSessionRow(session, opts.callSid);
 
     // P18-001: record the caller-id (or "" when blocked/withheld) so
     // the create_customer voice flow can use it as the new customer's
@@ -1005,6 +1038,7 @@ export class TwilioGatherAdapter {
     //    captures even calls that never reached intent_capture.
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      this.finalizeTerminatedSession(session, expanded, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -1266,11 +1300,11 @@ export class TwilioGatherAdapter {
    * the end-of-call summary in the background. Centralizes the
    * end-of-handler wrap-up shared by handleGather and handleInbound.
    */
-  private finalizeTwiml(
+  private async finalizeTwiml(
     session: VoiceSession,
     sideEffects: SideEffect[],
     sessionId: string,
-  ): string {
+  ): Promise<string> {
     // P8-013: when a notify_oncall side effect produced a <Dial>
     // transfer descriptor, we hand back that TwiML directly instead
     // of looping into another <Gather>. Twilio will POST the dial
@@ -1303,6 +1337,7 @@ export class TwilioGatherAdapter {
     }
     if (session.machine.currentState === 'terminated' && !session.ended) {
       session.ended = true;
+      this.finalizeTerminatedSession(session, sideEffects, 'caller_hangup');
       void this.runSummary(session).catch(() => {
         /* swallow — summary is best-effort */
       });
@@ -2042,6 +2077,70 @@ export class TwilioGatherAdapter {
    * Persist an end-of-call summary to call_summaries. Best-effort —
    * failures are logged but never bubble out (the call already ended).
    */
+  /**
+   * B2 — derive the typed CallOutcome from FSM state, stash it on the
+   * session, and kick off the persist to voice_sessions in the
+   * background. The synchronous part (derive + stash) MUST complete
+   * before `store.delete()` so the recording-webhook → onPersisted
+   * path can still read `session.terminalOutcome`. The async DB write
+   * is deliberately fire-and-forget so a slow Postgres can never delay
+   * a Twilio webhook response (which would trigger Twilio retries).
+   *
+   * Idempotent: `session.terminalOutcome` short-circuits duplicate
+   * derives, and `voiceSessionRepo.markEnded`'s upsert+`ended_at IS NULL`
+   * guard makes the DB write idempotent too.
+   *
+   * Public so the mediastream adapter can delegate finalize through
+   * the twilio adapter rather than DI'ing voiceSessionRepo separately.
+   */
+  finalizeTerminatedSession(
+    session: VoiceSession,
+    sideEffects: ReadonlyArray<SideEffect>,
+    fallbackReason: string,
+  ): void {
+    if (session.terminalOutcome) return;
+    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
+    const reason =
+      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
+        ? endSessionEffect.payload.reason
+        : undefined) ?? fallbackReason;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason: reason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = reason;
+    void this.persistSessionEnded(session, reason, outcome);
+  }
+
+  /**
+   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
+   * fire-and-forget; errors are swallowed (outcome stamping is
+   * best-effort, never breaks a call flow).
+   */
+  private async persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!this.deps.voiceSessionRepo) return;
+    try {
+      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
+    }
+  }
+
   private async runSummary(session: VoiceSession): Promise<void> {
     const durationMs = Date.now() - session.createdAt.getTime();
 

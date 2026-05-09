@@ -2433,6 +2433,25 @@ export const MIGRATIONS = {
       ADD CONSTRAINT tenant_settings_voice_greeting_length
         CHECK (voice_greeting IS NULL OR length(voice_greeting) <= 500);
   `,
+
+  // B2 — Persistent outcome stamping. Mirrors voice_recordings.outcome
+  // (migration 060) so in-app sessions, which never get a voice_recordings
+  // row, also have a typed terminal-state column. The free-text
+  // ended_reason column from migration 066 is preserved as a breadcrumb;
+  // outcome is the dashboard-grade enum derived by deriveCallOutcome at
+  // FSM hangup. call_sid is added so analytics can join voice_sessions
+  // ↔ voice_recordings on telephony calls.
+  '091_voice_session_outcome': `
+    ALTER TABLE voice_sessions
+      ADD COLUMN IF NOT EXISTS outcome TEXT
+        CHECK (outcome IN ('completed', 'escalated_to_human', 'callback_required', 'dropped', 'no_intent', 'failed'));
+    ALTER TABLE voice_sessions
+      ADD COLUMN IF NOT EXISTS call_sid TEXT;
+    CREATE INDEX IF NOT EXISTS idx_voice_sessions_tenant_outcome
+      ON voice_sessions (tenant_id, outcome) WHERE outcome IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_voice_sessions_call_sid
+      ON voice_sessions (call_sid) WHERE call_sid IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
