@@ -7,11 +7,21 @@ describe('Postgres integration — voice', () => {
   let pool: Pool;
   let voiceRepo: PgVoiceRepository;
   let tenant: { tenantId: string; userId: string };
+  let sharedFileId: string;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     voiceRepo = new PgVoiceRepository(pool);
     tenant = await createTestTenant(pool);
+
+    // voice_recordings.file_id references files(id) — insert a shared
+    // file row that all tests in this suite can reference.
+    sharedFileId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO files (id, tenant_id, filename, content_type, size_bytes, s3_bucket, s3_key, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [sharedFileId, tenant.tenantId, 'test.wav', 'audio/wav', 1000, 'test-bucket', 'voice/test.wav', tenant.userId]
+    );
   });
 
   afterAll(async () => {
@@ -23,7 +33,7 @@ describe('Postgres integration — voice', () => {
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: crypto.randomUUID(),
+        fileId: sharedFileId,
         conversationId: crypto.randomUUID(),
         status: 'pending',
         createdBy: tenant.userId,
@@ -40,7 +50,7 @@ describe('Postgres integration — voice', () => {
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: crypto.randomUUID(),
+        fileId: sharedFileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),
@@ -66,7 +76,7 @@ describe('Postgres integration — voice', () => {
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: crypto.randomUUID(),
+        fileId: sharedFileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),

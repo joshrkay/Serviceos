@@ -2412,6 +2412,16 @@ export const MIGRATIONS = {
       ADD CONSTRAINT tenant_settings_voice_greeting_length
         CHECK (char_length(voice_greeting) <= 500);
   `,
+
+  '089_drop_us_region_check': `
+    -- The tenant_settings_us_region_check constraint (migration 070)
+    -- requires country='US' rows to have a 2-char region. The settings
+    -- create() path doesn't set country/region, so initial tenant setup
+    -- always violated it. Drop the constraint; region validation belongs
+    -- at the application layer (the Zod contract / UI form), not the DB.
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
