@@ -71,6 +71,19 @@ npm run qa:report
 These are HARD STOP cases. If any returns 200 instead of 403/404, that's a
 critical security bug and the deploy must not ship.
 
+### 4a. (Optional) Unblock other gated cases
+
+Two more positive checks skip without their env var. Set them if you want
+full coverage on this run:
+
+- `TECHNICIAN_ID=<uuid>` — required by `TECH-001` to verify jobs list
+  honors `technicianId` filter. Find it under `/settings → Team` or in
+  `/api/users`.
+- `TENANT_A_ESTIMATE_PUBLIC_TOKEN=<token>` — required by `PORTAL-005` to
+  verify a real public estimate token loads. Send an estimate to a
+  customer first; the token is the path segment in the `/e/<token>`
+  approval link.
+
 ## 5. Triage failures into the runbook
 
 Open `docs/verification-runs/beta-verification-2026-05-09.md`.
