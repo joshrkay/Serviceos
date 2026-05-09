@@ -23,7 +23,12 @@ interface Probe {
 }
 
 const PROBES: Probe[] = [
-  { name: 'liveness', path: '/health', expectStatus: 200, expectBodyContains: '"status"' },
+  // /health always returns 200 with {"status":"ok"|"degraded"|"down"}.
+  // Require "status":"ok" so a DB-degraded deploy fails: the DB health
+  // check returns 'degraded' on connection failure (app.ts), and /ready
+  // only flips to 503 for 'down', so a substring match on "status"
+  // would silently green-light an outage.
+  { name: 'liveness', path: '/health', expectStatus: 200, expectBodyContains: '"status":"ok"' },
   // /ready returns 503 when a critical dependency is down — that is
   // exactly the signal a smoke check must fail on, not paper over.
   { name: 'readiness', path: '/ready', expectStatus: 200 },
