@@ -555,10 +555,19 @@ export class TwilioGatherAdapter {
     );
 
     // 4. Replace 'greeting' placeholder with real greeting + disclosure text.
-    const greetingText =
-      `Thank you for calling ${this.deps.businessName}. ` +
-      disclosure.disclosureText +
-      ' How can I help you today?';
+    let persona: VoicePersona | null | undefined;
+    if (this.deps.voicePersonaResolver) {
+      try {
+        persona = await this.deps.voicePersonaResolver(opts.tenantId);
+      } catch {
+        persona = undefined;
+      }
+    }
+    const greetingText = buildTelephonyGreeting(
+      this.deps.businessName,
+      disclosure.disclosureText,
+      persona,
+    );
     for (const fx of sideEffects) {
       if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
         fx.payload.text = greetingText;
