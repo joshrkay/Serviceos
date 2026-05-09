@@ -33,7 +33,6 @@ describe('Postgres integration — voice', () => {
       const recording = await voiceRepo.create({
         id: crypto.randomUUID(),
         tenantId: tenant.tenantId,
-        fileId: sharedFileId,
         status: 'pending',
         createdBy: tenant.userId,
         createdAt: new Date(),

@@ -120,7 +120,7 @@ import { InMemoryEstimateTemplateRepository } from './templates/estimate-templat
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
-import { createTranscriptionProvider } from './voice/transcription-providers';
+import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
   InMemoryFeatureFlagStore,
@@ -757,7 +757,7 @@ export function createApp(): express.Express {
   const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
 
   // URL-based provider for the queue worker pipeline.
-  const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
+  const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
@@ -1416,6 +1416,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    voiceRepo,
     voicePersonaResolver,
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
@@ -1520,45 +1521,51 @@ export function createApp(): express.Express {
         // first lands. Skipped on Twilio retries (`inserted=false`) so
         // we don't double-process the same call. Skipped silently when
         // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
-        ...(embeddingProvider
-          ? {
-              options: {
-                onPersisted: async (event) => {
-                  if (!event.inserted) return;
-                  const session = voiceSessionStore.findByCallSid(event.callSid);
-                  if (!session) {
-                    // Session was reaped (>30 min idle) before the
-                    // recording webhook fired. Known data-loss edge
-                    // case from the in-memory session store; not
-                    // something Phase 4a-1 fixes. Phase 4 architecture
-                    // doc covers persistent FSM state as a follow-up.
-                    return;
-                  }
-                  try {
-                    await queue.send(
-                      'transcript_ingestion',
-                      {
-                        tenantId: event.tenantId,
-                        voiceRecordingId: event.voiceRecordingId,
-                        transcript: [...session.transcript],
-                        ...(session.machine.currentContext.currentIntent
-                          ? { intent: session.machine.currentContext.currentIntent }
-                          : {}),
-                        durationMs: Date.now() - session.createdAt.getTime(),
-                      },
-                      `transcript:${event.voiceRecordingId}:v1`,
-                    );
-                  } catch (err) {
-                    // eslint-disable-next-line no-console
-                    console.error('app: failed to enqueue transcript_ingestion', {
-                      voiceRecordingId: event.voiceRecordingId,
-                      error: err instanceof Error ? err.message : String(err),
-                    });
-                  }
-                },
-              },
+        options: {
+          onPersisted: async (event) => {
+            // Stamp call outcome now that the row exists. The earlier
+            // attempt from runSummary() typically no-ops because Twilio's
+            // recording webhook hasn't fired yet — this is the reliable
+            // stamp path. Runs regardless of insert vs replay (idempotent).
+            await twilioAdapter.stampCallOutcomeByCallSid({
+              tenantId: event.tenantId,
+              callSid: event.callSid,
+            });
+
+            if (!embeddingProvider) return;
+            if (!event.inserted) return;
+            const session = voiceSessionStore.findByCallSid(event.callSid);
+            if (!session) {
+              // Session was reaped (>30 min idle) before the
+              // recording webhook fired. Known data-loss edge
+              // case from the in-memory session store; not
+              // something Phase 4a-1 fixes. Phase 4 architecture
+              // doc covers persistent FSM state as a follow-up.
+              return;
             }
-          : {}),
+            try {
+              await queue.send(
+                'transcript_ingestion',
+                {
+                  tenantId: event.tenantId,
+                  voiceRecordingId: event.voiceRecordingId,
+                  transcript: [...session.transcript],
+                  ...(session.machine.currentContext.currentIntent
+                    ? { intent: session.machine.currentContext.currentIntent }
+                    : {}),
+                  durationMs: Date.now() - session.createdAt.getTime(),
+                },
+                `transcript:${event.voiceRecordingId}:v1`,
+              );
+            } catch (err) {
+              // eslint-disable-next-line no-console
+              console.error('app: failed to enqueue transcript_ingestion', {
+                voiceRecordingId: event.voiceRecordingId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          },
+        },
       },
       getHealth: () => {
         const ttsEnabled =
@@ -1651,6 +1658,8 @@ export function createApp(): express.Express {
                 speechResult,
                 tenantId,
               }),
+            initializeSession: async ({ callSid, tenantId }) =>
+              twilioAdapter.initializeStreamSession({ callSid, tenantId }),
             // WS upgrades don't carry AccountSid; fall back to the master
             // token. Per-tenant subaccount auth for media streams is a
             // future-phase change (auth at first `start` message).

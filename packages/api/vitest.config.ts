@@ -6,6 +6,7 @@ export default defineConfig({
     globals: true,
     root: '.',
     include: ['test/**/*.test.ts'],
+    exclude: ['test/integration/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

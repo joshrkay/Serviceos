@@ -282,7 +282,7 @@ describe('P0-027 createWhisperTranscriptionProvider factory', () => {
     const provider = createWhisperTranscriptionProvider({}, { logger: { warn } });
     expect(provider).toBeInstanceOf(DevNoopTranscriptionProvider);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/OPENAI_API_KEY missing/);
+    expect(warn.mock.calls[0][0]).toMatch(/AI_PROVIDER_API_KEY/);
   });
 
   it('returns WhisperTranscriptionProvider when OPENAI_API_KEY is set', () => {

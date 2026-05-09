@@ -39,16 +39,13 @@ function adaptToCanonical(packId: string, rich: ReturnType<typeof createHvacPack
   };
 }
 
-export function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): void {
-  registry
-    .register(adaptToCanonical('hvac-v1', createHvacPack()))
-    .catch((err) => {
+export async function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): Promise<void> {
+  await Promise.all([
+    registry.register(adaptToCanonical('hvac-v1', createHvacPack())).catch((err) => {
       process.stderr.write(`[seed] Failed to register hvac-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
-    });
-
-  registry
-    .register(adaptToCanonical('plumbing-v1', createPlumbingPack()))
-    .catch((err) => {
+    }),
+    registry.register(adaptToCanonical('plumbing-v1', createPlumbingPack())).catch((err) => {
       process.stderr.write(`[seed] Failed to register plumbing-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
-    });
+    }),
+  ]);
 }

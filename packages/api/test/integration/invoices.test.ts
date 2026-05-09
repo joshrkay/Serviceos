@@ -76,7 +76,7 @@ describe('Postgres integration — invoices', () => {
   describe('CRUD', () => {
     it('creates invoice and retrieves via findById', async () => {
       const lineItems = [
-        buildLineItem(crypto.randomUUID(), 'Labor', 2, 7500, 1, true, 'labor'),
+        buildLineItem(crypto.randomUUID(),'Labor', 2, 7500, 1, true, 'labor'),
       ];
       const totals = calculateDocumentTotals(lineItems, 0, 825);
 
@@ -104,7 +104,7 @@ describe('Postgres integration — invoices', () => {
 
     it('updates invoice and reflects in findById', async () => {
       const lineItems = [
-        buildLineItem(crypto.randomUUID(), 'Labor', 1, 5000, 1, true, 'labor'),
+        buildLineItem(crypto.randomUUID(),'Labor', 1, 5000, 1, true, 'labor'),
       ];
       const totals = calculateDocumentTotals(lineItems, 0, 825);
 
@@ -136,7 +136,7 @@ describe('Postgres integration — invoices', () => {
 
     it('finds invoices by tenant', async () => {
       const lineItems = [
-        buildLineItem(crypto.randomUUID(), 'Labor', 1, 3000, 1, true, 'labor'),
+        buildLineItem(crypto.randomUUID(),'Labor', 1, 3000, 1, true, 'labor'),
       ];
       const totals = calculateDocumentTotals(lineItems, 0, 825);
 
@@ -164,7 +164,7 @@ describe('Postgres integration — invoices', () => {
     it('rejects cross-tenant access', async () => {
       const otherTenant = await createTestTenant(pool);
       const lineItems = [
-        buildLineItem(crypto.randomUUID(), 'Secret Labor', 1, 10000, 1, true, 'labor'),
+        buildLineItem(crypto.randomUUID(),'Secret Labor', 1, 10000, 1, true, 'labor'),
       ];
       const totals = calculateDocumentTotals(lineItems, 0, 825);
 

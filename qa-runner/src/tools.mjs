@@ -13,9 +13,12 @@ export function ts() {
 function templateString(value) {
   const timestamp = Date.now();
   const rand4 = Math.floor(1000 + Math.random() * 9000);
+  const today = new Date().toISOString().slice(0, 10);
   return String(value)
     .replaceAll('{{timestamp}}', String(timestamp))
-    .replaceAll('{{rand4}}', String(rand4));
+    .replaceAll('{{rand4}}', String(rand4))
+    .replaceAll('{{today}}', today)
+    .replace(/\{\{([A-Z0-9_]+)\}\}/g, (_, name) => process.env[name] ?? `{{${name}}}`);
 }
 
 function templateObject(value) {
@@ -38,10 +41,13 @@ export async function writeJson(filePath, data) {
 }
 
 export async function runApiCheck({ apiUrl, testId, check, artifactDir }) {
-  const url = `${apiUrl}${check.endpoint}`;
+  const url = templateString(`${apiUrl}${check.endpoint}`);
   const method = check.method || 'GET';
-  const headers = { ...(check.headers || {}) };
-  if (process.env.AUTH_BEARER_TOKEN) headers.Authorization = `Bearer ${process.env.AUTH_BEARER_TOKEN}`;
+  const headers = { ...templateObject(check.headers || {}) };
+  // Inject global auth unless the check opts out (no_auth: true) or supplies its own Authorization.
+  if (!check.no_auth && !headers.Authorization && process.env.AUTH_BEARER_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.AUTH_BEARER_TOKEN}`;
+  }
 
   const requestBody = check.body ? templateObject(check.body) : undefined;
 
@@ -166,10 +172,27 @@ export async function runDbCheck({ testId, check, artifactDir }) {
     const artifactPath = path.join(artifactDir, `${testId}-${ts()}.txt`);
     await fs.mkdir(path.dirname(artifactPath), { recursive: true });
     await fs.writeFile(artifactPath, `CMD: ${finalCmd}\n\nSTDOUT:\n${stdout}\n\nSTDERR:\n${stderr}\n`);
+
+    // When expect_count is set, extract the last integer from stdout
+    // (psql format: header / dashes / value / row count) and compare.
+    let countStatus = 'pass';
+    let countNotes = '';
+    if (check.expect_count !== undefined) {
+      const match = stdout.match(/^\s*(\d+)\s*$/m);
+      const actual = match ? parseInt(match[1], 10) : null;
+      if (actual === null) {
+        countStatus = 'blocked';
+        countNotes = `Could not parse count from output: ${stdout.trim().slice(0, 200)}`;
+      } else if (actual !== check.expect_count) {
+        countStatus = 'fail';
+        countNotes = `Expected count ${check.expect_count}, got ${actual}`;
+      }
+    }
+
     return {
-      status: 'pass',
+      status: countStatus,
       evidence_path: artifactPath,
-      notes: '',
+      notes: countNotes,
     };
   } catch (error) {
     const artifactPath = path.join(artifactDir, `${testId}-${ts()}-error.txt`);

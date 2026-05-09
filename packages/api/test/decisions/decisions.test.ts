@@ -203,7 +203,7 @@ describe('D2 — Voice debrief primary capture', () => {
     expect(providersTs).toMatch(/api\.openai\.com\/v1\/audio\/transcriptions/);
     // And the factory must still be invoked from app.ts.
     const appTs = await fs.readFile(path.resolve(API_SRC, 'app.ts'), 'utf8');
-    expect(appTs).toMatch(/createTranscriptionProvider/);
+    expect(appTs).toMatch(/createWhisperTranscriptionProvider/);
   });
 
   it('dev fallback is clearly marked and not used when AI_PROVIDER_API_KEY is set', async () => {

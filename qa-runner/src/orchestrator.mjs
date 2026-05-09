@@ -34,7 +34,12 @@ function stagePassed(rows, stageName) {
 }
 
 function assemble({ stage, test, api, ui, db, skippedReason = null }) {
-  const statuses = [api.status, ui.status, db.status];
+  // An optional db check that is blocked (e.g. DB_CHECK_COMMAND unset) should
+  // not prevent the test from passing — treat it as neutral.
+  const dbEffective = (db.status === 'blocked' && test.db_check?.required === false)
+    ? 'pass'
+    : db.status;
+  const statuses = [api.status, ui.status, dbEffective];
   let final = 'blocked';
   if (statuses.every((s) => s === 'pass')) final = 'pass';
   else if (statuses.includes('fail')) final = 'fail';
