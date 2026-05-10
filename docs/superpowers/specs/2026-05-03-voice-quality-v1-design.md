@@ -207,6 +207,8 @@ When a call fails, the report shows: bucket → script id → failed criteria �
 
 ## 6. Layer 2 design — caller-experience suite (sketch; full design in separate plan)
 
+> See: [`docs/superpowers/runbooks/voice-quality-layer2.md`](../runbooks/voice-quality-layer2.md) for the operational runbook.
+
 **Out of scope for the Layer 1 plan.** Captured here so the Layer 1 architecture doesn't paint Layer 2 into a corner.
 
 **Core characteristics (to be detailed in a separate spec):**
