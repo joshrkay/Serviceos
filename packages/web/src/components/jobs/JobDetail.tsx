@@ -1159,6 +1159,28 @@ export function JobDetailView({ id }: { id: string }) {
             <div className="flex items-center gap-2 shrink-0">
               {job.priority === 'Urgent' && <StatusBadge status="Urgent" />}
               <StatusBadge status={job.status} />
+              {/* Status transition control */}
+              {job.status !== 'Completed' && job.status !== 'Canceled' && (
+                <select
+                  className="text-xs rounded-lg border border-slate-200 px-2 py-1 text-slate-600 bg-white cursor-pointer hover:border-slate-300"
+                  value={apiJob?.status ?? ''}
+                  onChange={async (e) => {
+                    const newStatus = e.target.value;
+                    if (!newStatus) return;
+                    try {
+                      await transitionJob({ status: newStatus });
+                    } catch {
+                      // non-fatal: reload will reflect actual state
+                    }
+                  }}
+                  title="Change job status"
+                >
+                  <option value="" disabled>Change status</option>
+                  {apiJob?.status !== 'scheduled' && <option value="scheduled">Scheduled</option>}
+                  {apiJob?.status !== 'in_progress' && <option value="in_progress">In Progress</option>}
+                  {apiJob?.status !== 'completed' && <option value="completed">Completed</option>}
+                </select>
+              )}
             </div>
           </div>
 

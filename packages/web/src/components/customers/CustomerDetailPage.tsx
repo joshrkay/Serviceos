@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, Mail, MessageSquare, Plus, MapPin,
@@ -12,12 +12,36 @@ import {
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiContract {
   id: string;
   title: string;
   cadence?: string;
   status?: string;
+}
+
+interface ApiCustomerDetail {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  communicationNotes?: string;
+  isArchived?: boolean;
+  createdAt?: string;
+}
+
+interface ApiLocation {
+  id: string;
+  street1?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  isPrimary?: boolean;
+  label?: string;
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -348,7 +372,56 @@ export function CustomerDetailPage() {
   const { id }   = useParams<{ id: string }>();
   const navigate = useNavigate();
 
-  const found = customers.find(c => c.id === id);
+  // Fetch customer from API — the mock data only has seed entries
+  const { data: apiCustomer, isLoading: custLoading } = useDetailQuery<ApiCustomerDetail>(
+    '/api/customers',
+    id ?? ''
+  );
+  const [apiLocations, setApiLocations] = useState<ApiLocation[]>([]);
+
+  useEffect(() => {
+    if (!id) return;
+    apiFetch(`/api/locations?customerId=${id}`)
+      .then(r => r.ok ? r.json() as Promise<ApiLocation[]> : [])
+      .then(locs => setApiLocations(locs))
+      .catch(() => []);
+  }, [id]);
+
+  // Build a compatible Customer object from API data, falling back to mock data
+  const mockFound = customers.find(c => c.id === id);
+  const found = apiCustomer
+    ? {
+        ...( mockFound ?? {
+          id: apiCustomer.id,
+          name: apiCustomer.displayName ?? [apiCustomer.firstName, apiCustomer.lastName].filter(Boolean).join(' ') ?? 'Customer',
+          phone: apiCustomer.primaryPhone ?? '',
+          email: apiCustomer.email ?? '',
+          address: '',
+          serviceType: 'HVAC' as ServiceType,
+          jobCount: 0,
+          openJobs: 0,
+        }),
+        id: apiCustomer.id,
+        name: apiCustomer.displayName ?? [apiCustomer.firstName, apiCustomer.lastName].filter(Boolean).join(' ') ?? 'Customer',
+        phone: apiCustomer.primaryPhone ?? mockFound?.phone ?? '',
+        email: apiCustomer.email ?? mockFound?.email ?? '',
+        notes: apiCustomer.communicationNotes ?? mockFound?.notes,
+        locations: apiLocations.length > 0
+          ? apiLocations.map(loc => ({
+              id: loc.id,
+              nickname: loc.label ?? (loc.isPrimary ? 'Primary' : 'Location'),
+              address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+              serviceTypes: ['HVAC' as ServiceType],
+              isPrimary: !!loc.isPrimary,
+              jobCount: 0,
+            }))
+          : mockFound?.locations ?? [],
+        memberSince: apiCustomer.createdAt
+          ? new Date(apiCustomer.createdAt).toLocaleDateString([], { month: 'short', year: 'numeric' })
+          : mockFound?.memberSince,
+      }
+    : mockFound;
+
   const customerId = id ?? '';
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
     customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
@@ -363,6 +436,17 @@ export function CustomerDetailPage() {
   const [plusMenuOpen,     setPlusMenuOpen]  = useState(false);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
+  // Update locations state when API data loads
+  useEffect(() => {
+    if (found?.locations) setLocations(found.locations);
+  }, [found?.locations?.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (custLoading && !mockFound) return (
+    <div className="h-full flex items-center justify-center">
+      <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+    </div>
+  );
+
   if (!found) return (
     <div className="h-full flex flex-col items-center justify-center gap-4">
       <p className="text-slate-400 text-sm">Customer not found</p>
@@ -376,6 +460,12 @@ export function CustomerDetailPage() {
   const initials        = found.name.split(' ').map(n => n[0]).join('');
   const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
   const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
+
+  // Real jobs from API for this customer (overrides mock data for the history count)
+  const { data: apiRealJobs } = useListQuery<{ id: string; jobNumber: string; summary: string; status: string; createdAt?: string }>(
+    `/api/jobs?customerId=${id}`,
+    { enabled: Boolean(id) }
+  );
 
   const custJobs      = jobs.filter(j => j.customerId === id);
   const custEstimates = estimates.filter(e => e.customerId === id);
@@ -396,7 +486,13 @@ export function CustomerDetailPage() {
   }
 
   // counts for filter pills
-  const counts = { all: custJobs.length + custEstimates.length + custInvoices.length, invoices: custInvoices.length, jobs: custJobs.length, estimates: custEstimates.length };
+  const effectiveJobCount = Math.max(custJobs.length, apiRealJobs.length);
+  const counts = {
+    all: effectiveJobCount + custEstimates.length + custInvoices.length,
+    invoices: custInvoices.length,
+    jobs: effectiveJobCount,
+    estimates: custEstimates.length,
+  };
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -713,12 +809,31 @@ export function CustomerDetailPage() {
               )}
 
               {/* ── Jobs section ── */}
-              {(histFilter === 'all' || histFilter === 'jobs') && custJobs.length > 0 && (
+              {(histFilter === 'all' || histFilter === 'jobs') && (custJobs.length > 0 || apiRealJobs.length > 0) && (
                 <div className="flex flex-col gap-2">
                   {histFilter === 'all' && (
                     <p className="text-xs text-slate-400 uppercase tracking-wide px-1 mt-1">Jobs</p>
                   )}
-                  {custJobs.map(j => (
+                  {/* Real API jobs (takes priority over mock data) */}
+                  {apiRealJobs.map(j => (
+                    <Link key={j.id} to={`/jobs/${j.id}`}
+                      className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-3.5 hover:border-slate-300 transition-colors cursor-pointer active:bg-slate-50">
+                      <span className="flex size-8 items-center justify-center rounded-xl bg-blue-50 shrink-0">
+                        <Briefcase size={13} className="text-blue-500" />
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs text-slate-400">Job #{j.jobNumber}</p>
+                          <span className={`text-xs rounded-full px-2 py-0.5 ${JOB_STATUS_STYLE[j.status] ?? 'bg-slate-100 text-slate-500'}`}>
+                            {j.status}
+                          </span>
+                        </div>
+                        <p className="text-sm text-slate-800 mt-0.5 leading-snug">{j.summary}</p>
+                      </div>
+                    </Link>
+                  ))}
+                  {/* Mock jobs (only when no real API jobs) */}
+                  {apiRealJobs.length === 0 && custJobs.map(j => (
                     <div key={j.id}
                       className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-3.5 hover:border-slate-300 transition-colors cursor-pointer active:bg-slate-50">
                       <span className="flex size-8 items-center justify-center rounded-xl bg-blue-50 shrink-0">
