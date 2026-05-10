@@ -1,15 +1,39 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Sparkles } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   LineItemEditor,
   LineItemDraft,
   emptyDraft,
   toLineItemPayload,
+  totalCents,
 } from '../forms/LineItemEditor';
+import { useListQuery } from '../../hooks/useListQuery';
 
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
   onCancel?: () => void;
+}
+
+interface ApiJob {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  customerId?: string;
+  customer?: {
+    id: string;
+    displayName?: string;
+    firstName?: string;
+    lastName?: string;
+  };
+  location?: {
+    street1?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    label?: string;
+    isPrimary?: boolean;
+  };
 }
 
 interface State {
@@ -24,6 +48,22 @@ interface State {
 
 const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
+const AI_SUGGESTIONS: Record<string, { description: string; qty: string; price: string }[]> = {
+  HVAC: [
+    { description: 'Labor – 2 hrs at $95/hr', qty: '2', price: '95.00' },
+    { description: 'Service call fee', qty: '1', price: '85.00' },
+    { description: 'R-410A refrigerant (1 lb)', qty: '1', price: '85.00' },
+  ],
+  default: [
+    { description: 'Labor – 2 hrs', qty: '2', price: '95.00' },
+    { description: 'Service call fee', qty: '1', price: '85.00' },
+  ],
+};
+
+function makeId() {
+  return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+}
+
 export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [form, setForm] = useState<State>(() => ({
     jobId: '',
@@ -36,6 +76,52 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   }));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [selectedJob, setSelectedJob] = useState<ApiJob | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiUsed, setAiUsed] = useState(false);
+
+  const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
+
+  useEffect(() => {
+    if (!form.jobId) { setSelectedJob(null); return; }
+    // Always fetch the enriched job detail (includes customer + location)
+    apiFetch(`/api/jobs/${form.jobId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then((j: ApiJob | null) => j ? setSelectedJob(j) : null)
+      .catch(() => null);
+  }, [form.jobId]);
+
+  const serviceAddress = selectedJob?.location
+    ? [selectedJob.location.street1, selectedJob.location.city, selectedJob.location.state, selectedJob.location.postalCode]
+        .filter(Boolean).join(', ')
+    : '';
+
+  const customerName = selectedJob?.customer
+    ? (selectedJob.customer.displayName || [selectedJob.customer.firstName, selectedJob.customer.lastName].filter(Boolean).join(' '))
+    : '';
+
+  function handleJobChange(jobId: string) {
+    setForm(p => ({ ...p, jobId }));
+    setAiUsed(false);
+  }
+
+  function handleAiSuggest() {
+    setAiLoading(true);
+    setTimeout(() => {
+      const suggestions = AI_SUGGESTIONS.HVAC;
+      const newItems = suggestions.map(s => ({
+        id: makeId(),
+        description: s.description,
+        quantity: s.qty,
+        unitPriceDollars: s.price,
+        taxable: false,
+        category: 'labor' as const,
+      }));
+      setForm(p => ({ ...p, items: [...p.items, ...newItems] }));
+      setAiLoading(false);
+      setAiUsed(true);
+    }, 1200);
+  }
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -43,7 +129,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       setError(null);
 
       if (!form.jobId.trim()) {
-        setError('Job ID is required.');
+        setError('Job is required.');
         return;
       }
       if (form.items.length === 0) {
@@ -105,9 +191,9 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
         });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
-          throw new Error(json?.message ?? `HTTP ${res.status}`);
+          throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
         }
-        const created = await res.json();
+        const created = await res.json() as { id: string };
         onCreated?.(created.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to create estimate');
@@ -117,6 +203,9 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     },
     [form, onCreated]
   );
+
+  const total = totalCents(form.items);
+  const totalDisplay = `$${(total / 100).toFixed(2)}`;
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
@@ -131,23 +220,45 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Job ID *
-          <input
+        {/* Job picker */}
+        <div className="md:col-span-2">
+          <label className="text-xs text-slate-500">Job *</label>
+          <select
             value={form.jobId}
-            onChange={(e) => setForm((p) => ({ ...p, jobId: e.target.value }))}
+            onChange={(e) => handleJobChange(e.target.value)}
             className={inputCls}
-            placeholder="job-id-uuid"
-          />
-        </label>
+            required
+          >
+            <option value="">— select a job —</option>
+            {jobs.map(j => (
+              <option key={j.id} value={j.id}>
+                {j.jobNumber} — {j.summary}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Customer & service location (auto-populated) */}
+        {selectedJob && (
+          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 text-sm text-slate-700 space-y-0.5">
+            {customerName && (
+              <p><span className="text-xs text-slate-500">Customer:</span> {customerName}</p>
+            )}
+            {serviceAddress && (
+              <p><span className="text-xs text-slate-500">Service address:</span> {serviceAddress}</p>
+            )}
+            {!serviceAddress && (
+              <p className="text-xs text-amber-600">⚠ No service location linked to this job</p>
+            )}
+          </div>
+        )}
+
         <label className="text-xs text-slate-500">
           Valid until
           <input
             type="date"
             value={form.validUntil}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, validUntil: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, validUntil: e.target.value }))}
             className={inputCls}
           />
         </label>
@@ -155,9 +266,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Tax rate (%)
           <input
             value={form.taxRatePercent}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, taxRatePercent: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
             placeholder="0"
             className={inputCls}
@@ -167,9 +276,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Discount ($)
           <input
             value={form.discountDollars}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, discountDollars: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, discountDollars: e.target.value }))}
             inputMode="decimal"
             placeholder="0.00"
             className={inputCls}
@@ -178,10 +285,29 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       </div>
 
       <div className="mt-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-slate-500 font-medium">Line items</span>
+          <button
+            type="button"
+            onClick={handleAiSuggest}
+            disabled={aiLoading || aiUsed}
+            className="flex items-center gap-1.5 text-xs bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg px-3 py-1.5 transition-colors"
+          >
+            <Sparkles size={12} />
+            {aiLoading ? 'Generating...' : aiUsed ? 'Suggestions added' : 'AI Suggestions'}
+          </button>
+        </div>
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
         />
+        {total > 0 && (
+          <div className="mt-3 flex justify-end">
+            <p className="text-sm font-medium text-slate-900">
+              Total: <span className="text-lg">{totalDisplay}</span>
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-3 mt-4">
@@ -189,9 +315,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Customer message
           <textarea
             value={form.customerMessage}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, customerMessage: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, customerMessage: e.target.value }))}
             rows={3}
             className={inputCls}
           />
@@ -200,9 +324,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Internal notes
           <textarea
             value={form.internalNotes}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, internalNotes: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, internalNotes: e.target.value }))}
             rows={3}
             className={inputCls}
           />

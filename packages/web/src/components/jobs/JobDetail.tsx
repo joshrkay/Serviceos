@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, MessageSquare, Navigation,
@@ -13,6 +13,7 @@ import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../..
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
+import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiJobDetail {
   id: string;
@@ -969,6 +970,30 @@ export function JobDetailView({ id }: { id: string }) {
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
 
+  // Load persisted notes from API on mount / job change
+  const loadNotes = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await apiFetch(`/api/notes?entityType=job&entityId=${id}`);
+      if (!res.ok) return;
+      const notes: Array<{ id: string; content: string; authorRole: string; createdAt: string }> = await res.json();
+      const mapped: JobActivity[] = notes.map(n => ({
+        id: n.id,
+        type: 'note' as const,
+        content: n.content,
+        time: new Date(n.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+        author: n.authorRole,
+        authorInitials: n.authorRole[0]?.toUpperCase() ?? 'U',
+        authorColor: '#475569',
+      }));
+      setActivities(mapped);
+    } catch {
+      // non-fatal
+    }
+  }, [id]);
+
+  useEffect(() => { loadNotes(); }, [loadNotes]);
+
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -992,10 +1017,30 @@ export function JobDetailView({ id }: { id: string }) {
   const mapsUrl       = `https://maps.google.com/?q=${encodeURIComponent(job.address)}`;
   const hints         = getAIHints(job, materials, customer);
 
-  function addActivity(entry: Partial<JobActivity>) {
-    setActivities(prev => [...prev, {
+  async function addActivity(entry: Partial<JobActivity>) {
+    // Optimistically add to local state
+    const localActivity: JobActivity = {
       id: `new-${Date.now()}`, type: 'note', content: '', time: 'Just now', ...entry,
-    }]);
+    };
+    setActivities(prev => [...prev, localActivity]);
+
+    // Persist note entries to the API
+    if (entry.type === 'note' && entry.content && id) {
+      try {
+        await apiFetch('/api/notes', {
+          method: 'POST',
+          body: JSON.stringify({
+            entityType: 'job',
+            entityId: id,
+            content: entry.content,
+          }),
+        });
+        // Reload from API to get the server-assigned ID and timestamp
+        await loadNotes();
+      } catch {
+        // non-fatal: note remains in local state even if persist fails
+      }
+    }
   }
 
   const secondaryActions = [
@@ -1245,7 +1290,7 @@ export function JobDetailView({ id }: { id: string }) {
           authorInitials={tech?.initials ?? 'MO'}
           authorColor={tech?.color ?? '#475569'}
           onClose={() => setModal(null)}
-          onSubmit={entry => { addActivity(entry); setModal(null); }}
+          onSubmit={entry => { void addActivity(entry); setModal(null); }}
         />
       )}
       {modal === 'materials' && (

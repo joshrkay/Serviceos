@@ -54,6 +54,9 @@ export function createEstimateRouter(
         );
         res.status(201).json(result);
       } catch (err) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.error('[estimate-create] error:', err instanceof Error ? err.stack ?? err.message : String(err));
+        }
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }

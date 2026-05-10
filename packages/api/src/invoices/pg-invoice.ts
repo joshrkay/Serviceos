@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { v4 as uuidv4 } from 'uuid';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   Invoice,
@@ -328,13 +329,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     lineItems: LineItem[],
   ): Promise<void> {
     for (const item of lineItems) {
+      // Use a proper UUID for the DB row — client-provided IDs are ephemeral
+      // form-field tracking keys and may not be valid UUIDs.
+      const rowId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.id)
+        ? item.id
+        : uuidv4();
       await client.query(
         `INSERT INTO invoice_line_items (
           id, tenant_id, invoice_id, description, category,
           quantity, unit_price_cents, total_cents, sort_order, taxable
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
-          item.id,
+          rowId,
           tenantId,
           invoiceId,
           item.description,
