@@ -295,12 +295,10 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
 
   async findByViewToken(token: string): Promise<Invoice | null> {
     const headerRow = await this.withClient(async (client) => {
+      // Use a SECURITY DEFINER function to bypass RLS for the initial token
+      // lookup — the token itself is the authentication mechanism.
       const { rows } = await client.query(
-        `SELECT * FROM invoices
-         WHERE view_token = $1
-           AND (view_token_expires_at IS NULL OR view_token_expires_at > NOW())
-         ORDER BY created_at DESC
-         LIMIT 1`,
+        `SELECT id, tenant_id FROM find_invoice_by_view_token($1)`,
         [token],
       );
       return rows[0] ?? null;

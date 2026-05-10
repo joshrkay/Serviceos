@@ -181,8 +181,12 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
    */
   async findByViewToken(token: string): Promise<Estimate | null> {
     const headerRow = await this.withClient(async (client) => {
+      // Use a SECURITY DEFINER function to bypass RLS for the initial token
+      // lookup — the token itself is the authentication mechanism, and we have
+      // no tenant_id yet to set in the GUC. The function was created as the
+      // superuser (see migration) so it runs without RLS filtering.
       const { rows } = await client.query(
-        `SELECT * FROM estimates WHERE view_token = $1 LIMIT 1`,
+        `SELECT id, tenant_id FROM find_estimate_by_view_token($1)`,
         [token],
       );
       return rows[0] ?? null;
