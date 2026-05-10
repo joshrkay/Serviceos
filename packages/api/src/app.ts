@@ -1842,7 +1842,7 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     })
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
+  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
 
