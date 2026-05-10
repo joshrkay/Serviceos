@@ -87,3 +87,31 @@ export function sessionTerminatedEvent(
 ): Extract<VoiceSessionEvent, { type: 'session_terminated' }> {
   return { type: 'session_terminated', cause, ts };
 }
+
+/**
+ * VQ2-004: TTFA-start marker. Emitted by the media-stream adapter the
+ * moment the STT provider returns a final transcript for the caller's
+ * turn (Whisper-final / Deepgram-final). Pairs with the next
+ * `audio_frame_emitted` event to compute time-to-first-audio.
+ */
+export const transcriptReceivedEvent = (
+  opts: { ts?: number } = {},
+): Extract<VoiceSessionEvent, { type: 'transcript_received' }> => ({
+  type: 'transcript_received',
+  ts: opts.ts ?? Date.now(),
+});
+
+/**
+ * VQ2-004: TTFA-stop marker. Emitted by the media-stream adapter on
+ * the FIRST outbound audio chunk of a turn (subsequent chunks in the
+ * same turn are suppressed). `byteCount` is the chunk size for sanity
+ * — a non-zero count means the WS actually carried audio, not just a
+ * mark/heartbeat frame.
+ */
+export const audioFrameEmittedEvent = (
+  opts: { byteCount: number; ts?: number },
+): Extract<VoiceSessionEvent, { type: 'audio_frame_emitted' }> => ({
+  type: 'audio_frame_emitted',
+  byteCount: opts.byteCount,
+  ts: opts.ts ?? Date.now(),
+});
