@@ -33,6 +33,8 @@ interface ApiJobDetail {
     lastName?: string;
     primaryPhone?: string;
     email?: string;
+    communicationNotes?: string;
+    notes?: string;
     locations?: Array<{ street1?: string; city?: string; state?: string; postalCode?: string }>;
   };
   technician?: {
@@ -83,6 +85,7 @@ function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefine
     email: api.email ?? '',
     address: api.locations?.[0]?.street1 ?? '',
     serviceType: 'HVAC',
+    notes: api.communicationNotes ?? api.notes,
     locations: [],
     jobCount: 0,
     openJobs: 0,
