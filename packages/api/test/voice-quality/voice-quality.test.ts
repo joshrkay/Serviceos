@@ -50,9 +50,13 @@ import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 // `loadCorpus()` is robust to a missing root — returns []. So this is
 // safe to call at module scope even before Phase 2 authors any
 // scripts.
+//
+// VQ2-014 — exclude `layer2Only` scripts. Those are audio-only edge
+// cases (mumbled speech, mid-sentence pause) that the Layer 1
+// text-mode runner cannot fairly grade; they belong to Layer 2 only.
 const scripts = (() => {
   try {
-    return loadCorpus();
+    return loadCorpus().filter((s) => !s.layer2Only);
   } catch {
     // A genuine corpus *parse* failure should still be loud — but for
     // the entry-point sanity case (root absent / empty) we already
