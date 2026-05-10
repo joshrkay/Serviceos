@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, Mail, MessageSquare, Plus, MapPin,
@@ -7,17 +7,65 @@ import {
   AlertTriangle, Home, CheckCircle2, AlertCircle, ChevronRight,
 } from 'lucide-react';
 import {
-  customers, jobs, estimates, invoices,
+  jobs, estimates, invoices,
   ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 interface ApiContract {
   id: string;
   title: string;
   cadence?: string;
   status?: string;
+}
+
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  communicationNotes?: string;
+  tags?: string[];
+}
+
+interface ApiLocation {
+  id: string;
+  customerId: string;
+  label?: string;
+  street1: string;
+  street2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  isPrimary: boolean;
+}
+
+function customerName(c: ApiCustomer): string {
+  return (
+    c.displayName?.trim() ||
+    [c.firstName, c.lastName].filter(Boolean).join(' ').trim() ||
+    'Customer'
+  );
+}
+
+function formatAddress(loc: ApiLocation): string {
+  const stateZip = [loc.state, loc.postalCode].filter(Boolean).join(' ');
+  return [loc.street1, loc.city, stateZip].filter(Boolean).join(', ');
+}
+
+function adaptLocation(loc: ApiLocation): ServiceLocation {
+  return {
+    id: loc.id,
+    nickname: loc.label?.trim() || (loc.isPrimary ? 'Home' : 'Service location'),
+    address: formatAddress(loc),
+    serviceTypes: [],
+    isPrimary: loc.isPrimary,
+    jobCount: 0,
+  };
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -347,15 +395,26 @@ type HistoryFilter = 'all' | 'invoices' | 'jobs' | 'estimates';
 export function CustomerDetailPage() {
   const { id }   = useParams<{ id: string }>();
   const navigate = useNavigate();
-
-  const found = customers.find(c => c.id === id);
   const customerId = id ?? '';
+
+  const { data: customer, isLoading: customerLoading, error: customerError } =
+    useDetailQuery<ApiCustomer>('/api/customers', customerId || null);
+
+  const { data: apiLocations } = useListQuery<ApiLocation>('/api/locations', {
+    filters: customerId ? { customerId } : {},
+    enabled: Boolean(customerId),
+  });
+
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
     customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
-    { enabled: Boolean(customerId) && Boolean(found) },
+    { enabled: Boolean(customerId) && Boolean(customer) },
   );
   const [tab,              setTab]           = useState<Tab>('history');
-  const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
+  // The AddLocationSheet is currently in-memory only — it doesn't POST to
+  // /api/locations — so we hold the added entries separately and merge them
+  // with what the API returns instead of seeding shared state via an effect
+  // (which would loop on every new array reference from useListQuery).
+  const [localLocations,   setLocalLocations] = useState<ServiceLocation[]>([]);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
   const [showAddLoc,       setShowAddLoc]    = useState(false);
   const [newLocIds,        setNewLocIds]     = useState<Set<string>>(new Set());
@@ -363,19 +422,48 @@ export function CustomerDetailPage() {
   const [plusMenuOpen,     setPlusMenuOpen]  = useState(false);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
-  if (!found) return (
+  const locations = useMemo(() => {
+    const apiAdapted = (apiLocations ?? []).map(adaptLocation);
+    const apiIds = new Set(apiAdapted.map((l) => l.id));
+    return [...apiAdapted, ...localLocations.filter((l) => !apiIds.has(l.id))];
+  }, [apiLocations, localLocations]);
+
+  if (customerLoading && !customer) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (!customer) return (
     <div className="h-full flex flex-col items-center justify-center gap-4">
-      <p className="text-slate-400 text-sm">Customer not found</p>
+      <p className="text-slate-400 text-sm">
+        {customerError ? 'Failed to load customer' : 'Customer not found'}
+      </p>
       <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
         ← Back to customers
       </button>
     </div>
   );
 
-  const multiLocation   = locations.length > 1;
-  const initials        = found.name.split(' ').map(n => n[0]).join('');
-  const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
   const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
+  const found = {
+    name: customerName(customer),
+    phone: customer.primaryPhone ?? '',
+    email: customer.email ?? '',
+    address: primaryLoc?.address ?? '',
+    notes: customer.communicationNotes,
+    tags: customer.tags,
+    jobCount: 0,
+    memberSince: undefined as string | undefined,
+    totalRevenue: undefined as number | undefined,
+    lastService: undefined as string | undefined,
+  };
+
+  const multiLocation   = locations.length > 1;
+  const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
+  const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
 
   const custJobs      = jobs.filter(j => j.customerId === id);
   const custEstimates = estimates.filter(e => e.customerId === id);
@@ -389,7 +477,7 @@ export function CustomerDetailPage() {
     setExpanded(s => { const n = new Set(s); n.has(locId) ? n.delete(locId) : n.add(locId); return n; });
   }
   function handleAddLocation(loc: ServiceLocation) {
-    setLocations(p => [...p, loc]);
+    setLocalLocations(p => [...p, loc]);
     setNewLocIds(s => new Set([...s, loc.id]));
     setExpanded(s => new Set([...s, loc.id]));
     setTab('locations');
