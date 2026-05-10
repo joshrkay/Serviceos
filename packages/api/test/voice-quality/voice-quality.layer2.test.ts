@@ -45,23 +45,17 @@
  *      mid-suite cost-cap or runtime error halted execution — partial
  *      data is more useful than no data for the launch gate.
  *
- * # Production agent path stub
+ * # Production agent path
  *
  * The production media-streams `speechTurn` handler delegates to
- * `TwilioGatherAdapter#processCallerUtterance`, which depends on the
- * full Express app + every agent dep (FSM, classifier, repos, audit,
- * proposals…). Wiring that up in the test would balloon to many
- * hundreds of lines and re-implement most of `app.ts`. For this
- * follow-up we ship a no-op `speechTurn` (returns []) so the
- * mediastream-server upgrade + audio-frame plumbing is real, but the
- * agent never speaks back. That means agent-audio is empty for now,
- * Whisper transcripts are empty strings, and graders produce
- * fail-everything verdicts. The test runs end-to-end — it just doesn't
- * yet exercise the production agent.
- *
- * The full agent wiring is tracked as a follow-up; the value here is
- * "every other piece of Layer 2 wiring is exercised when keys are
- * present" so the next follow-up can focus on the agent harness alone.
+ * `TwilioGatherAdapter#processCallerUtterance`. That body (plus its
+ * helpers — cost tracking, audit + proposal side effects, FSM dispatch,
+ * end-of-call summary) has been extracted into a reusable
+ * `createVoiceTurnProcessor` factory at
+ * `packages/api/src/ai/voice-turn/`. This suite wires the factory with
+ * in-memory repos + a real Layer-2 LLM gateway so the mediastream
+ * server now exercises the real agent loop end-to-end. Whisper
+ * transcripts and the graders therefore see actual agent replies.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -100,6 +94,15 @@ import type { StreamingTranscriptionProvider } from '../../src/voice/transcripti
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
+import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 
 const REPORT_PATH = path.resolve(
   __dirname,
@@ -197,12 +200,44 @@ describe('Voice Quality Layer 2 — corpus', () => {
       },
     };
 
+    // Build a Layer-2 LLM gateway for the agent loop. The same factory the
+    // graders use for judge calls, but with no event bus / no shared cost
+    // tracker — agent calls don't need to count toward suite cost in this
+    // wiring (Layer 2 cost accounting tracks Whisper + TTS + judge LLM).
+    const agentGateway = createRealLayerTwoGateway({
+      apiKey: process.env.ANTHROPIC_API_KEY!,
+      bus: new AgentEventBus(),
+      costTracker: suiteState.suiteCostTracker,
+    });
+
+    // Real agent processor — replaces the no-op stub. Wires the in-memory
+    // repos the corpus exercises (audit + proposal + the read-only
+    // lookup family). Optional deps (pool, callControl, voicePersonaResolver,
+    // etc.) are left undefined; the processor's helpers degrade
+    // gracefully ("not wired" log + skip).
+    const processor = createVoiceTurnProcessor({
+      store: suiteState.voiceSessionStore,
+      gateway: agentGateway,
+      auditRepo: new InMemoryAuditRepository(),
+      proposalRepo: new InMemoryProposalRepository(),
+      customerRepo: new InMemoryCustomerRepository(),
+      appointmentRepo: new InMemoryAppointmentRepository(),
+      jobRepo: new InMemoryJobRepository(),
+      invoiceRepo: new InMemoryInvoiceRepository(),
+      estimateRepo: new InMemoryEstimateRepository(),
+      leadRepo: new InMemoryLeadRepository(),
+      businessName: 'Test Tenant',
+      systemActorId: 'voice-quality-layer2',
+    });
+
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,
       streamingProvider,
-      // No-op speechTurn for now — see file header "Production agent
-      // path stub" for why and what's tracked as follow-up.
-      speechTurn: async () => [],
+      // VQ2-FOLLOWUP — replaces the no-op stub with the real agent loop
+      // extracted from TwilioGatherAdapter#processCallerUtterance. The
+      // factory closure-captures all helpers (cost, audit, proposal,
+      // FSM dispatch) so the harness exercises the production code path.
+      speechTurn: processor.speechTurn,
       authTokenGetter: () => 'test-token-unused',
       authTestMode: true,
     });
