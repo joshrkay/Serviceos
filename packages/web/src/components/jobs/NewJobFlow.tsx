@@ -1336,7 +1336,11 @@ export function NewJobFlow({
           <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
             <button
               onClick={createJob}
-              disabled={!parsed.customerId || !parsed.serviceType || creating}
+              // BUG-3 — disabled predicate must mirror the validation
+              // in `createJob()` (draft.*), otherwise the button can
+              // light up while createJob silently early-returns or, in
+              // the inverse case, stay disabled with no explanation.
+              disabled={!draft.customerId || !draft.locationId || !draft.description.trim() || creating}
               className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors"
             >
               {creating
@@ -1344,8 +1348,14 @@ export function NewJobFlow({
                 : <><Check size={14} /> Create job {parsed.scheduledDate ? `· ${parsed.scheduledDate}` : ''}</>
               }
             </button>
-            {!parsed.customerId && (
-              <p className="text-xs text-amber-600 text-center mt-2">Couldn't detect customer — use "Fill it in" for manual entry</p>
+            {(!draft.customerId || !draft.locationId || !draft.description.trim()) && (
+              <p className="text-xs text-amber-600 text-center mt-2">
+                {!draft.customerId
+                  ? 'Couldn’t detect customer — use "Fill it in" for manual entry'
+                  : !draft.locationId
+                  ? 'Pick a service location to continue'
+                  : 'Add a short description to continue'}
+              </p>
             )}
             {createError && (
               <p className="text-xs text-red-500 text-center mt-2">{createError}</p>
