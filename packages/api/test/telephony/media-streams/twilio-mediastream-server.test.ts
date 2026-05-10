@@ -220,4 +220,68 @@ describe('P8-012 attachMediaStreamServer', () => {
     const res = await sendUpgrade(port, MEDIA_STREAM_PATH, 'any-sig', `127.0.0.1:${port}`);
     expect(res.statusCode === 500 || res.closed).toBe(true);
   });
+
+  // VQ2-007 — auth-test-mode flag for Layer 2 voice-quality tests.
+  describe('VQ2-007 authTestMode bypass', () => {
+    it('VQ2-007 — authTestMode: false (default) → unsigned upgrade is rejected', async () => {
+      const result = attachMediaStreamServer(server, {
+        store: new VoiceSessionStore({ startInterval: false }),
+        streamingProvider: makeStreamingProvider(),
+        speechTurn: async () => [],
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: `http://127.0.0.1:${port}`,
+        // authTestMode intentionally omitted — should default to false.
+      });
+      dispose = result.dispose;
+
+      const res = await sendUpgrade(port, MEDIA_STREAM_PATH, undefined, `127.0.0.1:${port}`);
+      // With auth on and no signature, signature validation rejects the upgrade.
+      expect(res.statusCode === 403 || res.closed).toBe(true);
+      expect(res.statusCode).not.toBe(101);
+    });
+
+    it('VQ2-007 — authTestMode: true → unsigned upgrade is accepted (101 Switching Protocols)', async () => {
+      const result = attachMediaStreamServer(server, {
+        store: new VoiceSessionStore({ startInterval: false }),
+        streamingProvider: makeStreamingProvider(),
+        speechTurn: async () => [],
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: `http://127.0.0.1:${port}`,
+        authTestMode: true,
+      });
+      dispose = result.dispose;
+
+      const res = await sendUpgrade(port, MEDIA_STREAM_PATH, undefined, `127.0.0.1:${port}`);
+      expect(res.statusCode).toBe(101);
+    });
+
+    it('VQ2-007 — authTestMode: true → properly-signed upgrade still works (permissive override)', async () => {
+      const result = attachMediaStreamServer(server, {
+        store: new VoiceSessionStore({ startInterval: false }),
+        streamingProvider: makeStreamingProvider(),
+        speechTurn: async () => [],
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: `http://127.0.0.1:${port}`,
+        authTestMode: true,
+      });
+      dispose = result.dispose;
+
+      const url = `http://127.0.0.1:${port}${MEDIA_STREAM_PATH}`;
+      const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, {});
+      const res = await sendUpgrade(port, MEDIA_STREAM_PATH, sig, `127.0.0.1:${port}`);
+      expect(res.statusCode).toBe(101);
+    });
+
+    it('VQ2-007 — production wiring in app.ts must NOT set authTestMode: true', async () => {
+      // Lint-via-test: the production server construction in app.ts must
+      // never opt into authTestMode. This test fails the suite if a
+      // future commit accidentally introduces the literal pattern.
+      const fs = await import('fs');
+      const path = await import('path');
+      const appPath = path.resolve(__dirname, '../../../src/app.ts');
+      const src = fs.readFileSync(appPath, 'utf8');
+      // Match `authTestMode: true` with optional whitespace, in any quote/comma context.
+      expect(/authTestMode\s*:\s*true/.test(src)).toBe(false);
+    });
+  });
 });
