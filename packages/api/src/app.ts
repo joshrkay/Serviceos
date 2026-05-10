@@ -437,9 +437,11 @@ export function createApp(): express.Express {
   }));
 
   // Rate limiting — applied before auth to protect all routes
+  // In dev mode, use a much higher limit to allow QA testing
+  const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,                  // per IP
+    max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
   }));
@@ -1804,7 +1806,7 @@ export function createApp(): express.Express {
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
   app.use(
     '/api/jobs',
     createJobFilesRouter({

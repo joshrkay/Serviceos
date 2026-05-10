@@ -22,6 +22,7 @@ interface ApiJobDetail {
   status: string;
   priority?: string;
   customerId?: string;
+  locationId?: string;
   assignedTechnicianId?: string;
   scheduledStart?: string;
   createdAt?: string;
@@ -33,7 +34,17 @@ interface ApiJobDetail {
     lastName?: string;
     primaryPhone?: string;
     email?: string;
-    locations?: Array<{ street1?: string; city?: string; state?: string; postalCode?: string }>;
+    communicationNotes?: string;
+    locations?: Array<{ id?: string; street1?: string; street2?: string; city?: string; state?: string; postalCode?: string; isPrimary?: boolean; label?: string }>;
+  };
+  location?: {
+    id?: string;
+    street1?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    isPrimary?: boolean;
+    label?: string;
   };
   technician?: {
     id: string;
@@ -51,9 +62,11 @@ function buildJobCompat(api: ApiJobDetail): Job {
   const customerName = api.customer
     ? (api.customer.displayName || [api.customer.firstName, api.customer.lastName].filter(Boolean).join(' ') || 'Customer')
     : 'Customer';
-  const primaryLocation = api.customer?.locations?.[0];
-  const address = primaryLocation
-    ? [primaryLocation.street1, primaryLocation.city, primaryLocation.state, primaryLocation.postalCode].filter(Boolean).join(', ')
+
+  // Use the job's specific location (most accurate), falling back to customer's primary location
+  const jobLocation = api.location ?? api.customer?.locations?.find(l => l.isPrimary) ?? api.customer?.locations?.[0];
+  const address = jobLocation
+    ? [jobLocation.street1, jobLocation.city, jobLocation.state, jobLocation.postalCode].filter(Boolean).join(', ')
     : '';
 
   return {
@@ -76,12 +89,16 @@ function buildJobCompat(api: ApiJobDetail): Job {
 function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefined {
   if (!api) return undefined;
   const name = api.displayName || [api.firstName, api.lastName].filter(Boolean).join(' ') || 'Customer';
+  const primaryLocation = api.locations?.find(l => l.isPrimary) ?? api.locations?.[0];
   return {
     id: api.id,
     name,
     phone: api.primaryPhone ?? '',
     email: api.email ?? '',
-    address: api.locations?.[0]?.street1 ?? '',
+    address: primaryLocation
+      ? [primaryLocation.street1, primaryLocation.city, primaryLocation.state, primaryLocation.postalCode].filter(Boolean).join(', ')
+      : (api.locations?.[0]?.street1 ?? ''),
+    notes: api.communicationNotes,
     serviceType: 'HVAC',
     locations: [],
     jobCount: 0,

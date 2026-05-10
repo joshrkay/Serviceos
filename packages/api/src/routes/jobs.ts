@@ -4,7 +4,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { createJobSchema } from '../shared/contracts';
 import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
-import { Customer } from '../customers/customer';
+import { Customer, CustomerRepository } from '../customers/customer';
 import {
   createJob,
   getJob,
@@ -22,6 +22,7 @@ import {
 import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
+import { LocationRepository } from '../locations/location';
 
 export function createJobRouter(
   jobRepo: JobRepository,
@@ -30,6 +31,8 @@ export function createJobRouter(
   ownership: TenantOwnership,
   queue: Queue,
   feedbackDispatcher: FeedbackDispatcher,
+  customerRepo?: CustomerRepository,
+  locationRepo?: LocationRepository,
 ): Router {
   const router = Router();
   // Dispatcher is intentionally passed through router wiring so this API
@@ -155,7 +158,44 @@ export function createJobRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
           return;
         }
-        res.json(result);
+
+        // Enrich with customer and location data when repos are available
+        let customer: Customer | null = null;
+        if (customerRepo && result.customerId) {
+          customer = await customerRepo.findById(req.auth!.tenantId, result.customerId);
+        }
+
+        let locations: Array<Record<string, unknown>> = [];
+        if (locationRepo && result.customerId) {
+          const locs = await locationRepo.findByCustomer(req.auth!.tenantId, result.customerId);
+          locations = locs.map(loc => ({
+            id: loc.id,
+            street1: loc.street1,
+            street2: loc.street2,
+            city: loc.city,
+            state: loc.state,
+            postalCode: loc.postalCode,
+            isPrimary: loc.isPrimary,
+            label: loc.label,
+          }));
+        }
+
+        const response = {
+          ...result,
+          customer: customer ? {
+            id: customer.id,
+            displayName: customer.displayName,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            primaryPhone: customer.primaryPhone,
+            email: customer.email,
+            communicationNotes: customer.communicationNotes,
+            locations,
+          } : undefined,
+          location: locations.find(l => l.id === result.locationId),
+        };
+
+        res.json(response);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

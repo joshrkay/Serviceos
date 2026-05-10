@@ -459,13 +459,43 @@ export function NewJobFlow({
         c.address.toLowerCase().includes(search.toLowerCase()))
     : customerOptions;
 
-  function selectCustomer(id: string, source: Customer[] = customerOptions) {
+  async function selectCustomer(id: string, source: Customer[] = customerOptions) {
     const c = source.find(c => c.id === id);
+
+    // If the customer has no locations loaded yet (API list doesn't embed them),
+    // fetch them on-demand so the location picker can appear.
+    let resolvedCustomer = c;
+    if (c && c.locations.length === 0) {
+      try {
+        const res = await apiFetch(`/api/locations?customerId=${id}`);
+        if (res.ok) {
+          const locs: ApiLocation[] = await res.json();
+          const mappedLocs = locs.map((loc) => ({
+            id: loc.id,
+            nickname: loc.label || (loc.isPrimary ? 'Primary' : 'Location'),
+            address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+            serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : ['HVAC' as ServiceType],
+            isPrimary: !!loc.isPrimary,
+            jobCount: 0,
+          }));
+          resolvedCustomer = { ...c, locations: mappedLocs };
+          // Update customerOptions so the picker renders with fresh locations
+          setCustomerOptions(prev =>
+            prev.map(opt => (opt.id === id ? resolvedCustomer! : opt))
+          );
+        }
+      } catch {
+        // Non-fatal: fall through with empty locations
+      }
+    }
+
+    const locs = resolvedCustomer?.locations ?? [];
+    const primaryLoc = locs.find(l => l.isPrimary) ?? locs[0];
     setDraft(d => ({
       ...d,
       customerId:  id,
-      locationId:  (c?.locations.length ?? 0) <= 1 ? (c?.locations[0]?.id ?? null) : null,
-      serviceType: d.serviceType ?? c?.serviceType ?? null,
+      locationId:  locs.length <= 1 ? (locs[0]?.id ?? null) : (primaryLoc?.id ?? null),
+      serviceType: d.serviceType ?? resolvedCustomer?.serviceType ?? null,
     }));
   }
 
