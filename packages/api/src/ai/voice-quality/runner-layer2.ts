@@ -197,6 +197,14 @@ function resolveGateway(ctx: RunScriptLayer2Context, scriptId: string): LLMGatew
 
 /**
  * Apply all graders to one run's observation and pack into PerRunResult.
+ *
+ * `perceivedCompletionCache` is shared across the 3 voting runs of the
+ * same script so identical transcripts (e.g., when the LLM is run at
+ * temp=0 with prompt caching, or replayed via the Layer 2 audio fixture
+ * cache) reuse a single judge call instead of triple-invoking. The
+ * grader's cache key includes the observation events hash, so genuinely
+ * different runs still each pay for a judge call.
+ *
  * Throws if any grader throws — the caller wraps this in try/catch and
  * substitutes a fail-everything run so the script can continue.
  */
@@ -204,13 +212,19 @@ async function gradeOneRun(
   observation: import('./observation').Observation,
   script: VoiceQualityScript,
   gateway: LLMGateway,
+  perceivedCompletionCache: Map<string, import('./graders/perceived-completion').PerceivedCompletionVerdict>,
 ): Promise<PerRunResult> {
   const floor = gradeFloor(observation, script);
   const dispStruct = gradeDispositionStructured(observation, script);
   const dispLlm = await gradeDispositionLlm({ observation, script, gateway });
   const callerExp = gradeCallerExperience(observation, script);
   const reprompt = await gradeRepromptAndRecovery({ observation, script, gateway });
-  const perceived = await gradePerceivedCompletion({ observation, script, gateway });
+  const perceived = await gradePerceivedCompletion({
+    observation,
+    script,
+    gateway,
+    cache: perceivedCompletionCache,
+  });
 
   return {
     floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
@@ -250,6 +264,15 @@ export async function runScriptLayer2(
   let scriptCostCents = 0;
   let costCapped = false;
 
+  // Shared perceived-completion cache across the 3 voting runs of this
+  // script. The grader caches by (scriptId + observation events hash),
+  // so when 2 of 3 runs produce identical event sequences (Layer 2 with
+  // temp=0 + prompt caching frequently does), we pay for 1 judge call
+  // instead of 3. The cache key in perceived-completion.ts must not
+  // include wall-clock fields (e.g., `ts`) for this to be effective —
+  // see the grader's cache-key implementation.
+  const perceivedCompletionCache = new Map<string, import('./graders/perceived-completion').PerceivedCompletionVerdict>();
+
   for (let runIdx = 0; runIdx < 3; runIdx++) {
     // Fresh per-run cost tracker so each run's cost is countable in
     // isolation; we accumulate into `scriptCostCents` after the run.
@@ -276,7 +299,7 @@ export async function runScriptLayer2(
     try {
       const { observation } = await runScript(script, ctxForRun);
       const gateway = resolveGateway(ctx, script.id);
-      runResult = await gradeOneRun(observation, script, gateway);
+      runResult = await gradeOneRun(observation, script, gateway, perceivedCompletionCache);
     } catch (err) {
       // Cost-cap errors propagate (suite-cap may bubble through here in
       // edge cases); everything else degrades to a fail-everything run

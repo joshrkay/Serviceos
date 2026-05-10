@@ -85,6 +85,75 @@ export interface SynthesizeOptions {
 /** Lock backoff schedule (ms). Total max wait ≈ 350ms before giving up. */
 const LOCK_RETRY_BACKOFFS_MS: readonly number[] = [50, 100, 200];
 
+/**
+ * Lock files older than this are considered stale (the holder presumably
+ * crashed) and unlinked. 5 minutes is comfortably longer than the worst
+ * legitimate TTS round-trip we've observed (~10s), and short enough that
+ * a real CI crash doesn't strand a script for hours.
+ */
+const STALE_LOCK_AGE_MS = 5 * 60 * 1000;
+
+interface LockFileMeta {
+  pid: number;
+  ts: number;
+}
+
+/**
+ * Decide whether an existing lock file is stale and safe to unlink.
+ * A lock is stale if either:
+ *   - the recorded PID is no longer running (`process.kill(pid, 0)` ESRCH), OR
+ *   - the file's mtime is older than {@link STALE_LOCK_AGE_MS}.
+ * Unreadable / malformed lock files are also treated as stale — better
+ * to drop a confusing artifact than block synthesis indefinitely.
+ *
+ * Exported via the module boundary purely for unit testing the staleness
+ * predicate; production callers go through `synthesizeUnderLock`.
+ */
+function isLockStale(lockPath: string): boolean {
+  let meta: LockFileMeta | null = null;
+  try {
+    const raw = fs.readFileSync(lockPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.pid === 'number' &&
+      typeof parsed.ts === 'number'
+    ) {
+      meta = parsed as LockFileMeta;
+    }
+  } catch {
+    // Unreadable / not-yet-written / corrupt — fall through to mtime check.
+  }
+
+  // If we got a PID, see whether it's still alive. `kill(pid, 0)` throws
+  // ESRCH when no such process exists, EPERM when it exists but we can't
+  // signal it. PID 0 is never a real process — treat it as not running.
+  if (meta && meta.pid !== 0) {
+    try {
+      process.kill(meta.pid, 0);
+      // Process is alive — only stale if the lock has aged out.
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ESRCH') return true;
+      // EPERM means the process exists; fall through to mtime.
+    }
+  } else if (meta && meta.pid === 0) {
+    return true;
+  }
+
+  // mtime fallback for old-format lock files (pre-stale-detection) or
+  // when the PID exists but the holder is wedged.
+  try {
+    const stat = fs.statSync(lockPath);
+    return Date.now() - stat.mtimeMs > STALE_LOCK_AGE_MS;
+  } catch {
+    // Lock vanished between checks — treat as not-stale; the caller's
+    // next openSync('wx') will succeed or report a fresh EEXIST.
+    return false;
+  }
+}
+
 export class TtsFixtureCache {
   constructor(private readonly deps: TtsFixtureCacheDeps) {}
 
@@ -151,9 +220,46 @@ export class TtsFixtureCache {
       }
       try {
         lockFd = fs.openSync(lockPath, 'wx');
+        // Stamp the lock with our PID + creation time so a future
+        // process can detect a stale lock left behind by a crash
+        // (Gemini #5 on PR #334). Best-effort — we still hold the fd
+        // either way, so a write failure here doesn't block us.
+        try {
+          const meta: LockFileMeta = { pid: process.pid, ts: Date.now() };
+          fs.writeSync(lockFd, JSON.stringify(meta));
+        } catch {
+          /* lock identity is opportunistic; loss-tolerant */
+        }
         break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        // Lock already exists. If the holder appears to have died
+        // (PID gone) or the lock is older than STALE_LOCK_AGE_MS, drop
+        // it and retry immediately — otherwise loop with backoff.
+        if (isLockStale(lockPath)) {
+          try {
+            fs.unlinkSync(lockPath);
+          } catch {
+            /* peer cleared it for us — fine */
+          }
+          // Retry immediately, without consuming a backoff slot.
+          try {
+            lockFd = fs.openSync(lockPath, 'wx');
+            try {
+              const meta: LockFileMeta = { pid: process.pid, ts: Date.now() };
+              fs.writeSync(lockFd, JSON.stringify(meta));
+            } catch {
+              /* see above */
+            }
+            break;
+          } catch (retryErr) {
+            if ((retryErr as NodeJS.ErrnoException).code !== 'EEXIST') {
+              throw retryErr;
+            }
+            // Another process re-acquired between our unlink and create —
+            // fall through to the normal retry/backoff loop.
+          }
+        }
         // Otherwise loop and retry (subject to backoff exhaustion).
       }
     }

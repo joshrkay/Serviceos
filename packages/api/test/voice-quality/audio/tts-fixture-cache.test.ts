@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {
@@ -179,6 +179,91 @@ describe('VQ2-002 — TtsFixtureCache', () => {
     expect(ttsProvider.synthesize).toHaveBeenCalledTimes(1);
     expect(maxInFlight).toBeLessThanOrEqual(1);
     expect(a.equals(b)).toBe(true);
+  });
+
+  /**
+   * Mirrors `TtsFixtureCache#hashKey` so tests can pre-seed lock files
+   * at the exact path the cache will look for them. Kept in sync with
+   * `JSON.stringify({ text, voice, model })` order.
+   */
+  function lockPathFor(opts: { text: string; voice: SupportedVoice; model?: string }): string {
+    const canonical = JSON.stringify({
+      text: opts.text,
+      voice: opts.voice,
+      model: opts.model ?? 'tts-1',
+    });
+    const hash = createHash('sha256').update(canonical).digest('hex');
+    return path.join(cacheDir, `${hash}.wav.lock`);
+  }
+
+  it('VQ2-fix — stale lock with PID 0 is cleared and write succeeds', async () => {
+    // Regression for PR #334 review (Gemini #5): a crashed prior process
+    // could leave a `.lock` file behind that blocked synthesis indefinitely
+    // (3 retries with backoff, then a hard throw). With stale-lock
+    // detection, a lock whose PID is 0 (sentinel: never a real process)
+    // must be unlinked and the cache must complete the synthesis.
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const stalePath = lockPathFor({ text: 'unblock me', voice: 'alloy' });
+    fs.writeFileSync(stalePath, JSON.stringify({ pid: 0, ts: Date.now() }));
+    expect(fs.existsSync(stalePath)).toBe(true);
+
+    const ttsProvider = makeFakeTtsProvider();
+    const cache = new TtsFixtureCache({ ttsProvider, cacheDir });
+
+    const result = await cache.getOrSynthesize({
+      text: 'unblock me',
+      voice: 'alloy',
+    });
+
+    expect(Buffer.isBuffer(result)).toBe(true);
+    expect(ttsProvider.synthesize).toHaveBeenCalledTimes(1);
+    // Lock is released after success.
+    expect(fs.existsSync(stalePath)).toBe(false);
+  });
+
+  it('VQ2-fix — fresh lock held by current PID still blocks (no false-positive stale eviction)', async () => {
+    // Counterpart to the PID-0 test: a lock stamped with the current
+    // process's PID and a recent timestamp must be respected. Otherwise
+    // stale-detection would defeat the lock entirely. We emulate "another
+    // worker holds the lock" by pre-creating the lock file ourselves and
+    // racing a synth attempt against unlinking it after a short delay.
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const freshPath = lockPathFor({ text: 'fresh holder', voice: 'alloy' });
+    fs.writeFileSync(
+      freshPath,
+      JSON.stringify({ pid: process.pid, ts: Date.now() })
+    );
+
+    let synthesizeStartedAt = 0;
+    const ttsProvider = makeFakeTtsProvider(async (input) => {
+      synthesizeStartedAt = Date.now();
+      return {
+        audio: Buffer.from(`audio:${input.voice}:${input.text}`, 'utf-8'),
+        contentType: 'audio/mpeg',
+        provider: 'fake-tts',
+      };
+    });
+    const cache = new TtsFixtureCache({ ttsProvider, cacheDir });
+
+    const startedAt = Date.now();
+    // Release the simulated holder lock partway through the retry window.
+    setTimeout(() => {
+      try {
+        fs.unlinkSync(freshPath);
+      } catch {
+        /* already gone */
+      }
+    }, 75);
+
+    const result = await cache.getOrSynthesize({
+      text: 'fresh holder',
+      voice: 'alloy',
+    });
+
+    expect(Buffer.isBuffer(result)).toBe(true);
+    // The cache must have waited for at least one backoff slot before
+    // synthesizing — proving it did not falsely evict the fresh lock.
+    expect(synthesizeStartedAt - startedAt).toBeGreaterThanOrEqual(40);
   });
 
   it('VQ2-002 — pickVoiceForScript rotates through alloy/nova/onyx deterministically', () => {

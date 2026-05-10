@@ -188,6 +188,44 @@ describe('VQ2-003 — pcm-codec', () => {
       }
     );
 
+    (haveFfmpeg ? it : it.skip)(
+      'VQ2-fix — survives >64 KB stdin without truncation (backpressure)',
+      async () => {
+        // Regression for PR #334 review (Gemini #1): writing >pipe-capacity
+        // (~64 KB on Linux) to ffmpeg's stdin and immediately calling
+        // `end` could race the buffered write and truncate the input.
+        // Generate a long-enough MP3 to exceed pipe capacity, then assert
+        // the decoded PCM length matches the expected duration. If the
+        // race regresses, ffmpeg sees a truncated MP3 and the decoded
+        // PCM is short or the call rejects with an "Invalid data" error.
+        const result = spawnSync(
+          'ffmpeg',
+          [
+            '-f', 'lavfi',
+            '-i', 'sine=frequency=1000:duration=8:sample_rate=22050',
+            '-f', 'mp3',
+            '-acodec', 'libmp3lame',
+            '-b:a', '128k', // higher bitrate ensures > 64 KB output
+            'pipe:1',
+          ],
+          { encoding: 'buffer', maxBuffer: 10_000_000 }
+        );
+        expect(result.status).toBe(0);
+        const mp3 = result.stdout;
+        // Assert the input actually exceeds pipe capacity; otherwise the
+        // test isn't exercising the backpressure path.
+        expect(mp3.length).toBeGreaterThan(64 * 1024);
+
+        const pcm = await mp3ToPcm16Mono8k(mp3);
+        // 8s @ 8 kHz = 64 000 samples = 128 000 bytes. Allow ±10% for
+        // codec preroll/padding; truncation would land an order of
+        // magnitude below this.
+        expect(pcm.length).toBeGreaterThan(110_000);
+        expect(pcm.length % 2).toBe(0);
+      },
+      30_000, // ffmpeg pipeline + 8s render can be slow on shared CI runners
+    );
+
     it('VQ2-003 — re-exports production μ-law helpers', () => {
       // Quick smoke test that the re-exports are wired through correctly:
       // pcm16ToMulaw and mulawToPcm16 should round-trip.

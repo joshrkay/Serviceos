@@ -172,11 +172,20 @@ export class WhisperRealProvider {
  *
  * Reference rates:
  *   - WAV mono 8 kHz μ-law: 8000 bytes/second
- *   - 16-bit PCM mono 8 kHz: 16 000 bytes/second
- *   - 16-bit PCM mono 16 kHz: 32 000 bytes/second   ← default heuristic
+ *   - 16-bit PCM mono 8 kHz: 16 000 bytes/second   ← default heuristic
+ *   - 16-bit PCM mono 16 kHz: 32 000 bytes/second
+ *
+ * Layer 2's pipeline (VQ2-003 codec helpers) standardizes on telephony
+ * 8 kHz 16-bit PCM mono after μ-law decode, so 16 000 bytes/sec is the
+ * realistic byte rate for buffers that reach this estimator. The earlier
+ * 32 000 default assumed 16 kHz and undercharged the cost tracker by 2x,
+ * which could let a long suite silently exceed the suite cost cap
+ * (Gemini #2 on PR #334).
  */
 function estimateAudioSeconds(audio: Buffer): number {
-  const BYTES_PER_SECOND_DEFAULT = 32_000;
+  // 16-bit PCM mono 8 kHz (telephony standard); WhisperBufferTranscriber
+  // consumers upstream of this wrapper convert from μ-law if needed.
+  const BYTES_PER_SECOND_DEFAULT = 16_000;
   return audio.length / BYTES_PER_SECOND_DEFAULT;
 }
 

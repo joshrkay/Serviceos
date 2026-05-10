@@ -165,6 +165,35 @@ describe('VQ2-010 — gradePerceivedCompletion', () => {
     expect(cache.size).toBe(2);
   });
 
+  it('VQ2-fix — same events with different `ts` values → identical cache key (only one judge call)', async () => {
+    // Regression for PR #334 review (Codex P2 / Gemini #4): without the cache
+    // key omitting `ts` from event JSON, two voting runs that produce
+    // structurally identical events with per-millisecond clock skew would
+    // each pay for a separate judge call, defeating the runner-layer2
+    // perceived-completion cache.
+    const { gateway, provider } = createMockLLMGateway(verdict('good', 0));
+    const cache = new Map<string, PerceivedCompletionVerdict>();
+    const script = makeScript();
+
+    const baseEvent = {
+      type: 'intent_classified' as const,
+      callId: 'c1',
+      intent: 'lookup_appointments',
+      confidence: 0.95,
+    };
+    const eventAtT1: VoiceSessionEvent = { ...baseEvent, ts: 1000 } as VoiceSessionEvent;
+    const eventAtT2: VoiceSessionEvent = { ...baseEvent, ts: 1234 } as VoiceSessionEvent;
+
+    const obsRun1 = makeObservation({ events: [eventAtT1] });
+    const obsRun2 = makeObservation({ events: [eventAtT2] });
+
+    await gradePerceivedCompletion({ observation: obsRun1, script, gateway, cache });
+    await gradePerceivedCompletion({ observation: obsRun2, script, gateway, cache });
+
+    expect(provider.getCalls()).toHaveLength(1);
+    expect(cache.size).toBe(1);
+  });
+
   it('VQ2-010 — invalid JSON from gateway throws clear error', async () => {
     const { gateway } = createMockLLMGateway('not json {{{');
     await expect(

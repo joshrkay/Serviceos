@@ -146,7 +146,13 @@ function verdictPasses(v: PerceivedCompletionVerdict): boolean {
 }
 
 function makeCacheKey(scriptId: string, observation: Observation): string {
-  const eventsJson = JSON.stringify(observation.events);
+  // Stable across runs that produce identical events with differing timestamps.
+  // Replacer drops `ts` fields (and any future wall-clock fields) so two voting
+  // runs whose only difference is per-event millisecond timestamps share a key.
+  // Line endings normalized for cross-OS hash stability.
+  const eventsJson = JSON
+    .stringify(observation.events, (k, v) => (k === 'ts' ? undefined : v))
+    .replace(/\r\n/g, '\n');
   const hash = createHash('sha256');
   hash.update(scriptId);
   hash.update(' ');

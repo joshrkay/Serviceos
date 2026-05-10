@@ -202,7 +202,14 @@ async function spawnFfmpegConvert(
         ));
       }
     });
-    proc.stdin.write(input);
-    proc.stdin.end();
+    // Honour stdin backpressure (Gemini #1 on PR #334). Inputs larger than
+    // the OS pipe capacity (~64 KB on Linux) cause `write` to return false
+    // and buffer the remainder in Node; calling `end` immediately can race
+    // the buffered write and truncate. Defer `end` until the buffer drains.
+    if (!proc.stdin.write(input)) {
+      proc.stdin.once('drain', () => proc.stdin.end());
+    } else {
+      proc.stdin.end();
+    }
   });
 }

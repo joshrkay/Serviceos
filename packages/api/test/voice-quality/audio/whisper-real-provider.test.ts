@@ -25,14 +25,18 @@ class MockCostTracker implements WhisperCostTracker {
   }
 }
 
-/** 1 second of "audio" at the conservative 32000 bytes/sec heuristic. */
+/**
+ * 1 second of "audio" at the 16-bit PCM mono 8 kHz heuristic
+ * (telephony-standard, post-VQ2-003). The estimator divides
+ * `audio.length` by 16 000 to derive seconds.
+ */
 function oneSecondAudio(): Buffer {
-  return Buffer.alloc(32_000, 0);
+  return Buffer.alloc(16_000, 0);
 }
 
 /** 60 seconds of "audio" → exactly 0.6 cents per the constant. */
 function oneMinuteAudio(): Buffer {
-  return Buffer.alloc(32_000 * 60, 0);
+  return Buffer.alloc(16_000 * 60, 0);
 }
 
 /** Build a 429-shaped error consumers (e.g. the OpenAI SDK) typically throw. */
@@ -101,6 +105,28 @@ describe('VQ2-001 — WhisperRealProvider', () => {
       Math.ceil(WHISPER_CENTS_PER_MINUTE),
     );
     expect(costTracker.totalCents()).toBe(1);
+  });
+
+  it('VQ2-fix — pins bytes-per-sec heuristic at 16 kBps (telephony 8 kHz 16-bit PCM)', async () => {
+    // Regression for PR #334 review (Gemini #2): the estimator must divide
+    // by 16 000, not 32 000. A 16 000-byte buffer represents 1 second of
+    // 8 kHz 16-bit PCM mono audio, so cost = ceil(1/60 * 0.6) = 1 cent.
+    // If the estimator divides by 32 000, the same buffer bills 0 cents
+    // (or 1 only because of ceil), and longer suites silently undercount.
+    const inner: WhisperBufferTranscriber = {
+      transcribeBuffer: vi
+        .fn()
+        .mockResolvedValue({ transcript: 't', metadata: {} }),
+    };
+    const provider = new WhisperRealProvider({ inner, bus, costTracker });
+
+    // 16 000 bytes → 1 second @ 16 kBps. ceil(1/60 * 0.6) = 1 cent.
+    await provider.transcribeBuffer(Buffer.alloc(16_000, 0), 'script-1');
+    expect(costTracker.totalCents()).toBe(1);
+
+    // 16 000 * 60 bytes → 60 seconds → 0.6 cents → ceil = 1 → cumulative 2.
+    await provider.transcribeBuffer(Buffer.alloc(16_000 * 60, 0), 'script-1');
+    expect(costTracker.totalCents()).toBe(2);
   });
 
   it('VQ2-001 — retries once on 429, then succeeds', async () => {
