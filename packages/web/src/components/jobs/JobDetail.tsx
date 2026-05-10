@@ -970,6 +970,52 @@ export function JobDetailView({ id }: { id: string }) {
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
 
+  // Time entries state
+  const [timeEntries, setTimeEntries] = useState<Array<{
+    id: string; entryType: string; clockedInAt: string;
+    clockedOutAt?: string; durationMinutes?: number; notes?: string;
+  }>>([]);
+  const [showTimeForm, setShowTimeForm] = useState(false);
+  const [timeFormStart, setTimeFormStart] = useState('09:00');
+  const [timeFormEnd, setTimeFormEnd] = useState('11:30');
+  const [timeFormType, setTimeFormType] = useState<'job' | 'drive'>('job');
+  const [timeFormSaving, setTimeFormSaving] = useState(false);
+
+  const loadTimeEntries = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await apiFetch(`/api/time-entries?jobId=${id}`);
+      if (!res.ok) return;
+      const entries = await res.json();
+      setTimeEntries(Array.isArray(entries) ? entries : []);
+    } catch { /* non-fatal */ }
+  }, [id]);
+
+  useEffect(() => { loadTimeEntries(); }, [loadTimeEntries]);
+
+  async function saveTimeEntry() {
+    if (!timeFormStart || !timeFormEnd) return;
+    const today = new Date().toISOString().split('T')[0];
+    const startISO = `${today}T${timeFormStart}:00Z`;
+    const endISO   = `${today}T${timeFormEnd}:00Z`;
+    setTimeFormSaving(true);
+    try {
+      const clockInRes = await apiFetch('/api/time-entries/clock-in', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: id, entryType: timeFormType, clockedInAt: startISO }),
+      });
+      if (!clockInRes.ok) return;
+      await apiFetch('/api/time-entries/clock-out', {
+        method: 'POST',
+        body: JSON.stringify({ clockedOutAt: endISO }),
+      });
+      setShowTimeForm(false);
+      await loadTimeEntries();
+    } catch { /* non-fatal */ } finally {
+      setTimeFormSaving(false);
+    }
+  }
+
   // Load persisted notes from API on mount / job change
   const loadNotes = useCallback(async () => {
     if (!id) return;
@@ -1082,6 +1128,87 @@ export function JobDetailView({ id }: { id: string }) {
         />
       )}
       <MaterialsTable materials={materials} onEdit={() => setModal('materials')} onSuppliers={() => setModal('suppliers')} />
+
+      {/* ── Time Entries ── */}
+      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <Clock size={14} className="text-slate-500" />
+            <h4 className="text-slate-700">Time Tracking</h4>
+          </div>
+          <div className="flex items-center gap-2">
+            {timeEntries.length > 0 && (
+              <span className="text-xs text-slate-400">
+                Total: {Math.floor(timeEntries.reduce((s, e) => s + (e.durationMinutes ?? 0), 0) / 60)}h{' '}
+                {timeEntries.reduce((s, e) => s + (e.durationMinutes ?? 0), 0) % 60}m
+              </span>
+            )}
+            <button
+              onClick={() => setShowTimeForm(p => !p)}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
+            >
+              <Plus size={12} /> Add entry
+            </button>
+          </div>
+        </div>
+        {showTimeForm && (
+          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              Start time
+              <input type="time" value={timeFormStart} onChange={e => setTimeFormStart(e.target.value)}
+                className="rounded border border-slate-200 px-2 py-1 text-sm" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              End time
+              <input type="time" value={timeFormEnd} onChange={e => setTimeFormEnd(e.target.value)}
+                className="rounded border border-slate-200 px-2 py-1 text-sm" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              Type
+              <select value={timeFormType} onChange={e => setTimeFormType(e.target.value as 'job' | 'drive')}
+                className="rounded border border-slate-200 px-2 py-1 text-sm">
+                <option value="job">Job work</option>
+                <option value="drive">Travel / Drive</option>
+              </select>
+            </label>
+            <button onClick={saveTimeEntry} disabled={timeFormSaving}
+              className="rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 disabled:opacity-50">
+              {timeFormSaving ? 'Saving...' : 'Save'}
+            </button>
+            <button onClick={() => setShowTimeForm(false)} className="text-xs text-slate-400 hover:text-slate-600">
+              Cancel
+            </button>
+          </div>
+        )}
+        <div className="divide-y divide-slate-100">
+          {timeEntries.length === 0 && !showTimeForm && (
+            <p className="px-4 py-3 text-xs text-slate-400 italic">No time entries yet</p>
+          )}
+          {timeEntries.map(entry => {
+            const start = new Date(entry.clockedInAt);
+            const end = entry.clockedOutAt ? new Date(entry.clockedOutAt) : null;
+            const mins = entry.durationMinutes ?? 0;
+            const label = entry.entryType === 'drive' ? 'Travel' : 'Job work';
+            return (
+              <div key={entry.id} className="flex items-center justify-between px-4 py-2.5">
+                <div>
+                  <p className="text-sm text-slate-700">{label}</p>
+                  <p className="text-xs text-slate-400">
+                    {start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                    {end ? ` – ${end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ' (in progress)'}
+                  </p>
+                </div>
+                {mins > 0 && (
+                  <span className="text-sm text-slate-600 font-medium">
+                    {Math.floor(mins / 60)}h {mins % 60}m
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <SiteMedia
         media={jobMedia}
         onAdd={() => setCameraOpen(true)}
