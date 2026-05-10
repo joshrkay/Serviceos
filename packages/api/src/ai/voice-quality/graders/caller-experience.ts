@@ -30,6 +30,7 @@ import {
 } from '../audio/audio-timings';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
+import type { LLMGateway } from '../../gateway/gateway';
 
 export interface CallerExperienceThresholds {
   /** P95 cap on per-turn TTFA. Default 800ms (spec §6.2). */
@@ -125,4 +126,160 @@ function percentile(samples: ReadonlyArray<number>, p: number): number {
   const sorted = [...samples].sort((a, b) => a - b);
   const idx = Math.floor((p / 100) * (sorted.length - 1));
   return sorted[idx];
+}
+
+/* -------------------------------------------------------------------------- *
+ * VQ2-011 — Reprompt + recovery grader
+ * -------------------------------------------------------------------------- *
+ *
+ * Lives alongside `gradeCallerExperience` (VQ2-009) because reprompts are
+ * the same family of caller-facing UX metric — but unlike the mechanical
+ * latency grader, this one needs an LLM judge to classify each agent turn
+ * as a reprompt or as advancing the call.
+ *
+ * Strategy: one judge call per turn, bounded to PARALLELISM=5 in flight,
+ * so a 20-turn script makes 20 judge calls but never more than 5 at a
+ * time. The judge prompt is a fixed prefix (cache-friendly) plus the
+ * single agent utterance per call.
+ *
+ * Reprompt ratio: count(reprompts) / total turns. Threshold ≤ 0.10.
+ * Recovery turns: counted from the FIRST reprompt to the FIRST
+ * subsequent non-reprompt that advances the call. If the call never
+ * recovers (every subsequent turn is also a reprompt), recovery equals
+ * the number of turns from first-reprompt+1 to end-of-call. Threshold ≤ 2.
+ *
+ * v1 limitation (mirrors VQ-022/disposition-llm.ts and VQ2-010): the
+ * voice agent does not yet emit a `speech_outbound` event, so we cannot
+ * read the agent's actual utterance off the bus. We use the script's
+ * `expected.spokenAnswerMatches` as a v1 stand-in. VQ2-021 will swap in
+ * the real Whisper-recovered transcript with no API change.
+ *
+ * Conservative fallback: if the judge returns malformed JSON we treat
+ * the turn as NOT a reprompt. Reasoning: a noisy classifier producing
+ * spurious failures is worse than missing one reprompt.
+ */
+
+export const REPROMPT_RATIO_MAX = 0.1;
+export const RECOVERY_MAX_TURNS = 2;
+
+const REPROMPT_JUDGE_PARALLELISM = 5;
+
+export interface RepromptDetectionInput {
+  observation: Observation;
+  script: VoiceQualityScript;
+  gateway: LLMGateway;
+}
+
+export interface RepromptResult {
+  totalTurns: number;
+  repromptCount: number;
+  repromptRatio: number;
+  recoveryTurns: number;
+  perTurnReprompts: boolean[];
+  passes: {
+    repromptRatio: boolean;
+    recovery: boolean;
+  };
+}
+
+const REPROMPT_JUDGE_SYSTEM_PROMPT = `Given an agent's spoken response in a voice call, classify it as a reprompt or not.
+
+A reprompt is when the agent asks the caller to repeat or clarify something. Examples:
+- "Could you say that again?"
+- "I didn't catch that. Could you repeat?"
+- "Sorry, what did you mean by..."
+- A generic clarification like "could you tell me more about" or "what would you like to do"
+- Re-asking the same intent slot the prior agent turn already asked for
+
+A NON-reprompt advances the call: it states an answer, gives information,
+confirms a slot the caller has just provided, or asks for a NEW slot.
+
+Respond ONLY with valid JSON: { "isReprompt": boolean, "reason": "<= 80 chars" }`;
+
+export async function gradeRepromptAndRecovery(
+  input: RepromptDetectionInput,
+): Promise<RepromptResult> {
+  const turns = input.script.turns;
+  if (turns.length === 0) {
+    return {
+      totalTurns: 0,
+      repromptCount: 0,
+      repromptRatio: 0,
+      recoveryTurns: 0,
+      perTurnReprompts: [],
+      passes: { repromptRatio: true, recovery: true },
+    };
+  }
+
+  const perTurnReprompts: boolean[] = [];
+  for (let batchStart = 0; batchStart < turns.length; batchStart += REPROMPT_JUDGE_PARALLELISM) {
+    const batchSize = Math.min(REPROMPT_JUDGE_PARALLELISM, turns.length - batchStart);
+    const batchVerdicts = await Promise.all(
+      Array.from({ length: batchSize }, (_, offset) =>
+        judgeOneTurn(input, batchStart + offset),
+      ),
+    );
+    perTurnReprompts.push(...batchVerdicts);
+  }
+
+  const repromptCount = perTurnReprompts.filter(Boolean).length;
+  const repromptRatio = repromptCount / turns.length;
+  const recoveryTurns = countRecoveryTurns(perTurnReprompts);
+
+  return {
+    totalTurns: turns.length,
+    repromptCount,
+    repromptRatio,
+    recoveryTurns,
+    perTurnReprompts,
+    passes: {
+      repromptRatio: repromptRatio <= REPROMPT_RATIO_MAX,
+      recovery: recoveryTurns <= RECOVERY_MAX_TURNS,
+    },
+  };
+}
+
+async function judgeOneTurn(input: RepromptDetectionInput, turnIdx: number): Promise<boolean> {
+  // v1 stand-in: VQ2-021 will swap this for the Whisper-recovered transcript.
+  const turn = input.script.turns[turnIdx];
+  const agentText =
+    turn.expected.spokenAnswerMatches ?? `<turn ${turnIdx + 1} response>`;
+  const userPrompt = `Agent's spoken response: "${agentText}"`;
+
+  const response = await input.gateway.complete({
+    taskType: 'voice_quality_reprompt_judge',
+    messages: [
+      { role: 'system', content: REPROMPT_JUDGE_SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt },
+    ],
+    responseFormat: 'json',
+    temperature: 0,
+    metadata: { skill: 'voice_quality_reprompt_judge', turnIdx },
+  });
+
+  try {
+    const parsed = JSON.parse(response.content);
+    return parsed.isReprompt === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Count recovery turns: from the first reprompt, count successive turns
+ * (inclusive of the next turn) until the first non-reprompt is observed.
+ * If no reprompts → 0. If the first reprompt is the very last turn → 0
+ * (no remaining turns to recover into). If reprompts run to end-of-call
+ * without recovering → the count of remaining turns after the first
+ * reprompt (open-ended; bounded by the script length).
+ */
+function countRecoveryTurns(perTurnReprompts: ReadonlyArray<boolean>): number {
+  const firstRepromptIdx = perTurnReprompts.indexOf(true);
+  if (firstRepromptIdx === -1) return 0;
+  let recovery = 0;
+  for (let i = firstRepromptIdx + 1; i < perTurnReprompts.length; i++) {
+    recovery += 1;
+    if (!perTurnReprompts[i]) return recovery;
+  }
+  return recovery; // never recovered
 }
