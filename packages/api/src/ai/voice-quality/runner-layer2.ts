@@ -231,23 +231,34 @@ async function gradeOneRun(
   script: VoiceQualityScript,
   baseGateway: LLMGateway,
   perceivedCompletionCache: Map<string, import('./graders/perceived-completion').PerceivedCompletionVerdict>,
-  runCostTracker: CostTracker,
   bus: AgentEventBus,
-): Promise<PerRunResult> {
-  // Codex P1 fix — propagate the per-run cost tracker through the
-  // grader gateway calls. The graders (`gradeDispositionLlm`,
-  // `gradeRepromptAndRecovery`, `gradePerceivedCompletion`) call
-  // `gateway.complete()`. The base gateway already carries the
-  // suite-level cost tracker (set at construction time by
-  // `createRealLayerTwoGateway`), but the runner's per-run `runCents`
-  // would stay near zero even when judges burn money. Layering a per-
-  // run cost-tracking wrapper here makes `runCents` (and thus the
-  // per-script cap) actually reflect grader spend in production. For
-  // mock gateways with no `tokenUsage` on responses, the wrapper is a
-  // no-op — which is the correct behavior in tests.
+): Promise<{ result: PerRunResult; graderCents: number }> {
+  // Codex P1 round 2 — keep grader cost in its own tracker so the
+  // caller can decide independently how much of it to forward to the
+  // suite tracker. The previous shape mingled grader cents with the
+  // per-run cost tracker (`runCostTracker`), and the suite-tracker
+  // forward gate then had to choose between dropping ALL non-gateway
+  // run costs (when `gatewayReportsToSuiteTracker: true`) or double-
+  // counting grader cents. Splitting graders out lets the runner
+  // forward only non-gateway run costs unconditionally and then add
+  // graderCents only when the gateway is NOT pre-wired to the suite
+  // tracker.
+  //
+  // For mock gateways with no `tokenUsage` on responses, the wrapper
+  // is a no-op (graderCents stays 0) — which is the correct behavior
+  // in tests.
+  let graderCents = 0;
+  const graderTracker: CostTracker = {
+    addCents(n: number) {
+      graderCents += n;
+    },
+    totalCents() {
+      return graderCents;
+    },
+  };
   const gateway = wrapWithCostTracking(baseGateway, {
     bus,
-    costTracker: runCostTracker,
+    costTracker: graderTracker,
   });
   const floor = gradeFloor(observation, script);
   const dispStruct = gradeDispositionStructured(observation, script);
@@ -262,26 +273,29 @@ async function gradeOneRun(
   });
 
   return {
-    floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
-    disposition: {
-      // Hard-disposition pass requires BOTH the structured grader's
-      // verdict AND the LLM grader's verdict (criterion 12 + soft slot
-      // 10). Either failure flips this run to disposition-fail.
-      passed: dispStruct.passed && dispLlm.failedCriteria.length === 0,
-      failedCriteria: [...dispStruct.failedCriteria, ...dispLlm.failedCriteria],
-      slotValues: mergeSlotValues(dispStruct.perTurnDetail),
+    result: {
+      floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
+      disposition: {
+        // Hard-disposition pass requires BOTH the structured grader's
+        // verdict AND the LLM grader's verdict (criterion 12 + soft slot
+        // 10). Either failure flips this run to disposition-fail.
+        passed: dispStruct.passed && dispLlm.failedCriteria.length === 0,
+        failedCriteria: [...dispStruct.failedCriteria, ...dispLlm.failedCriteria],
+        slotValues: mergeSlotValues(dispStruct.perTurnDetail),
+      },
+      callerExperience: {
+        ttfaMs: callerExp.ttfaP95Ms,
+        lookupMs: callerExp.lookupP95Ms,
+        durationMs: callerExp.totalDurationMs,
+        repromptRatio: reprompt.repromptRatio,
+        recoveryTurns: reprompt.recoveryTurns,
+      },
+      perceivedCompletion: {
+        satisfaction: perceived.verdict.perceivedSatisfaction,
+        abandonmentRisk: perceived.verdict.abandonmentRisk,
+      },
     },
-    callerExperience: {
-      ttfaMs: callerExp.ttfaP95Ms,
-      lookupMs: callerExp.lookupP95Ms,
-      durationMs: callerExp.totalDurationMs,
-      repromptRatio: reprompt.repromptRatio,
-      recoveryTurns: reprompt.recoveryTurns,
-    },
-    perceivedCompletion: {
-      satisfaction: perceived.verdict.perceivedSatisfaction,
-      abandonmentRisk: perceived.verdict.abandonmentRisk,
-    },
+    graderCents,
   };
 }
 
@@ -331,6 +345,7 @@ export async function runScriptLayer2(
     };
 
     let runResult: PerRunResult;
+    let graderCents = 0;
     try {
       const { observation } = await runScript(script, ctxForRun);
       const gateway = resolveGateway(ctx, script.id);
@@ -340,14 +355,15 @@ export async function runScriptLayer2(
       // tests with mock gateways) — the wrapper still needs a bus
       // reference but no consumer is listening.
       const runBus = ctx.bus ?? new AgentEventBus();
-      runResult = await gradeOneRun(
+      const graded = await gradeOneRun(
         observation,
         script,
         gateway,
         perceivedCompletionCache,
-        runCostTracker,
         runBus,
       );
+      runResult = graded.result;
+      graderCents = graded.graderCents;
     } catch (err) {
       // Cost-cap errors propagate (suite-cap may bubble through here in
       // edge cases); everything else degrades to a fail-everything run
@@ -357,19 +373,37 @@ export async function runScriptLayer2(
     }
 
     perRunResults.push(runResult);
-    scriptCostCents += runCents;
-    // Codex P1 fix — avoid double-counting grader cost in the suite
-    // tracker. When the gateway is built by `createRealLayerTwoGateway`
-    // (or otherwise pre-wrapped with the suite cost tracker), each
-    // grader `gateway.complete()` already increments
-    // `suiteCostTracker`; adding `runCents` here again would count
-    // grader spend twice. Callers set `gatewayReportsToSuiteTracker`
-    // when they pre-wire that wrap (see the Layer 2 entry test). For
-    // mock-gateway suites where the gateway does NOT touch the suite
-    // tracker, we still need this `addCents` to populate the suite
-    // total — those keep the flag false/undefined.
-    if (ctx.suiteCostTracker && !ctx.gatewayReportsToSuiteTracker) {
+    // Per-script cost cap covers BOTH non-gateway run cost (driver/
+    // STT/TTS/orchestration captured by `runCostTracker` inside
+    // `runScript`) AND grader gateway cost (captured by the local
+    // graderTracker inside `gradeOneRun`). The cap is meant to model
+    // total per-script spend, not just one half.
+    scriptCostCents += runCents + graderCents;
+
+    // Codex P1 round 2 fix — forward to the suite tracker without
+    // dropping non-gateway costs. Two distinct paths feed suite-level
+    // accounting:
+    //
+    //   (1) Non-gateway run costs (driver/STT/TTS/orchestration that
+    //       `runScript` writes into `runCostTracker`). These NEVER pass
+    //       through the gateway wrap, so the runner is the only path
+    //       that can forward them to the suite tracker. ALWAYS forward.
+    //
+    //   (2) Grader gateway costs. When the caller built the gateway via
+    //       `createRealLayerTwoGateway` (or otherwise pre-wrapped it
+    //       with the suite cost tracker), each `gateway.complete()`
+    //       already increments the suite tracker once — so adding
+    //       `graderCents` here would double-count. The
+    //       `gatewayReportsToSuiteTracker` flag tells the runner to
+    //       skip the explicit add in that wiring. For mock-gateway
+    //       suites where the gateway does NOT touch the suite tracker,
+    //       the runner is the only suite-side accounting path for
+    //       grader spend, so we DO add `graderCents`.
+    if (ctx.suiteCostTracker) {
       ctx.suiteCostTracker.addCents(runCents);
+      if (!ctx.gatewayReportsToSuiteTracker) {
+        ctx.suiteCostTracker.addCents(graderCents);
+      }
     }
 
     // Per-script cap.

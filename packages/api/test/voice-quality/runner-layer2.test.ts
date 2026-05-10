@@ -291,29 +291,29 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     expect(harness.runScriptCalls).toBe(2);
   });
 
-  it('VQ2-fix — when gatewayReportsToSuiteTracker=true, runner does NOT double-add runCents to suite tracker', async () => {
-    // Codex P1 regression — the production wiring builds the gateway
-    // via `createRealLayerTwoGateway`, which wraps the gateway to
+  it('VQ2-fix — when gatewayReportsToSuiteTracker=true, runner does NOT double-add grader cents to suite tracker (but DOES forward non-gateway run costs)', async () => {
+    // Codex P1 round 2 — the production wiring builds the gateway via
+    // `createRealLayerTwoGateway`, which wraps the gateway to
     // accumulate per-call cost into the suite tracker. Inside
     // `gradeOneRun`, the runner layers another `wrapWithCostTracking`
-    // for the per-run tracker. Every `gateway.complete()` call thus
-    // hits suite tracker once already. If the runner ALSO calls
-    // `suiteCostTracker.addCents(runCents)`, grader spend is counted
-    // twice and the suite cap trips at half the real spend.
+    // for a dedicated grader tracker. Every `gateway.complete()` call
+    // thus hits the suite tracker once already (from wrap-1). If the
+    // runner ALSO forwarded `graderCents` to the suite tracker, grader
+    // spend would be counted twice and the suite cap would trip at
+    // half the real spend.
     //
-    // Simulate that wrap-1 behavior by having the grader mocks bump
-    // a "gateway-attributed" suite total themselves. The grader mocks
-    // also bump `runCents` via `gateway.complete()` indirectly — but
-    // since the graders are fully mocked in this test we just stub
-    // the runner's per-run tracker injection through `runScript`'s
-    // cost path.
+    // BUT — non-gateway costs (driver/STT/TTS/orchestration recorded
+    // through `ctxForRun.costTracker` by `runScript`) NEVER pass
+    // through wrap-1, so the runner is the ONLY path that can forward
+    // them to the suite tracker. The flag must NOT suppress those.
     //
     // What this test pins:
-    //   - With `gatewayReportsToSuiteTracker: true`, only the
-    //     simulated wrap-1 increments hit the suite tracker (the
-    //     runner skips its own `addCents`).
-    //   - The suite tracker total equals the per-call wrap-1 total
-    //     (NOT 2× that).
+    //   - Simulated wrap-1 grader cents land in the suite tracker once
+    //     (via the gateway wrap).
+    //   - Non-gateway run cents (recorded into `ctxForRun.costTracker`
+    //     by the mocked `runScript`) ALSO land in the suite tracker
+    //     once — the runner forwards them unconditionally.
+    //   - No 2× double-count anywhere.
     harness.runScriptCostsCents = [50, 50, 50];
 
     // Suite tracker that callers (production: `createRealLayerTwoGateway`)
@@ -352,18 +352,23 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
       }),
     );
 
-    // 3 runs × 10¢/run from simulated wrap-1 = 30¢. If the runner
-    // were still calling `addCents(runCents)`, we'd see an additional
-    // 3 × 50 = 150¢, for a total of 180¢. The flag must suppress that.
-    expect(suiteTracker.totalCents()).toBe(30);
+    // 3 runs × (50¢ non-gateway runCents + 10¢ wrap-1 grader cents) = 180¢.
+    // If the runner double-counted graderCents (the bug from round 1's
+    // over-correction would have been 30¢ only — dropping all run
+    // cents), or pre-fix counted them via runCents (would be 30 wrap-1
+    // + 150 runCents-with-graders = 180, but graderCents inside runCents
+    // would also re-enter via wrap-1 = 210¢), we'd see a different
+    // total. 180¢ pins the new shape:
+    //   - graderCents flow through wrap-1 once, never via runner add.
+    //   - runCents flow through runner add once, never via wrap-1.
+    expect(suiteTracker.totalCents()).toBe(180);
   });
 
-  it('VQ2-fix — when gatewayReportsToSuiteTracker is false/undefined, runner still adds runCents to suite tracker (legacy mock-gateway path)', async () => {
+  it('VQ2-fix — when gatewayReportsToSuiteTracker is false/undefined, runner adds BOTH runCents and graderCents to suite tracker (legacy mock-gateway path)', async () => {
     // Inverse of the above: a mock-only suite where the gateway does
     // NOT touch the suite tracker. The runner's explicit
-    // `addCents(runCents)` is the ONLY source of suite-tracker
-    // increments, so it must keep firing. Pins the legacy behavior
-    // existing tests rely on.
+    // `addCents` is the ONLY source of suite-tracker increments for
+    // BOTH runCents AND graderCents, so it must keep firing for both.
     harness.runScriptCostsCents = [50, 50, 50];
 
     let suiteTotal = 0;
@@ -387,7 +392,8 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
       }),
     );
 
-    // 3 × 50¢ from the runner's per-run cost = 150¢.
+    // graderCents = 0 (default fake gateway has no tokenUsage), so the
+    // suite tracker gets only runCents: 3 × 50¢ = 150¢.
     expect(suiteTracker.totalCents()).toBe(150);
   });
 
@@ -548,5 +554,126 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     // check happens AFTER the run completes (post per-script accumulator
     // update), so run 1 will have finished before the throw.
     expect(harness.runScriptCalls).toBe(1);
+  });
+
+  // ─── Codex P1 round 2 — non-gateway cost forwarding ───────────────────────
+  //
+  // Round 1 introduced `gatewayReportsToSuiteTracker` to suppress double-
+  // counting of grader cents in real-mode (where wrap-1 of
+  // `createRealLayerTwoGateway` already accumulates them). But the round
+  // 1 implementation skipped the entire `addCents(runCents)` call, which
+  // dropped non-gateway costs (driver/STT/TTS recorded into
+  // `ctxForRun.costTracker` by `runScript`) from suite accounting.
+  //
+  // Round 2 splits grader cents into a dedicated graderTracker inside
+  // `gradeOneRun` and returns them alongside the PerRunResult. The runner
+  // ALWAYS forwards `runCents` (the only suite-side path for non-gateway
+  // costs); it forwards `graderCents` only when the gateway does NOT
+  // already report to the suite tracker. These tests pin both sides.
+
+  it('VQ2-fix-2a — when gatewayReportsToSuiteTracker=true, non-gateway run costs land in suite tracker exactly once', async () => {
+    // Real-mode shape: simulate wrap-1 (`createRealLayerTwoGateway`) by
+    // having the dispLlm grader mock write to the suite tracker directly
+    // — that's what the suite-cost-tracker-wrapped gateway would do per
+    // `gateway.complete()` call. Pin that:
+    //   - graderCents flow into suite via wrap-1 once (3 × 10¢ = 30¢)
+    //   - runCents flow into suite via the runner's forward once
+    //     (3 × 50¢ = 150¢ from `runScript`'s addCents)
+    //   - runner does NOT additionally add graderCents (would double-count)
+    //   - Total = 180¢
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      // Simulated wrap-1 effect: each gateway.complete() bumps suite tracker.
+      suiteTracker.addCents(10);
+      return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+    });
+
+    const script = eligibleScript();
+    await runScriptLayer2(
+      script,
+      makeCtx({
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        gatewayReportsToSuiteTracker: true,
+      }),
+    );
+
+    // 150¢ runCents (forwarded by runner) + 30¢ wrap-1 grader cents = 180¢.
+    expect(suiteTracker.totalCents()).toBe(180);
+  });
+
+  it('VQ2-fix-2b — when gatewayReportsToSuiteTracker is false, BOTH non-gateway runCents and grader gateway cents land in suite tracker via runner', async () => {
+    // Mock-mode shape: the gateway is NOT wrapped with the suite tracker,
+    // so the runner is the only suite-side path for both runCents AND
+    // graderCents. graderCents come from the wrap-2 (graderTracker)
+    // applied inside `gradeOneRun` when the dispLlm mock calls
+    // gateway.complete() with a tokenUsage shape.
+    //
+    // Setup:
+    //   - runScript adds 50¢/run of non-gateway cost (3 × 50 = 150¢)
+    //   - gateway.complete() → 45¢/call via wrap-2 (input=100k → 30¢,
+    //     output=10k → 15¢). dispLlm calls it once per run = 3 × 45 = 135¢.
+    //   - Total = 285¢
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    const fakeGateway = {
+      complete: vi.fn(async () => ({
+        content: 'noop',
+        model: 'haiku',
+        provider: 'fake',
+        latencyMs: 1,
+        tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+      })),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+
+    const script = eligibleScript();
+    await runScriptLayer2(
+      script,
+      makeCtx({
+        gateway: fakeGateway,
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        // gatewayReportsToSuiteTracker omitted (defaults to false)
+      }),
+    );
+
+    // 150¢ runCents + 135¢ graderCents = 285¢. Runner forwards both.
+    expect(suiteTracker.totalCents()).toBe(285);
   });
 });
