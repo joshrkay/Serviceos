@@ -17,21 +17,12 @@ interface JobInfo {
   id: string;
   jobNumber: string;
   summary: string;
-  customer?: {
-    id: string;
-    displayName?: string;
-    firstName?: string;
-    lastName?: string;
-  };
-  location?: {
-    id: string;
-    label?: string;
-    street1?: string;
-    city?: string;
-    state?: string;
-    postalCode?: string;
-    isPrimary?: boolean;
-  };
+  customerId?: string;
+  locationId?: string;
+  // Enriched after secondary API calls:
+  customerName?: string;
+  locationLine?: string;
+  isPrimaryLocation?: boolean;
 }
 
 interface State {
@@ -77,9 +68,33 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           if (!cancelled) { setJobInfo(null); setJobLookupError('Job not found'); }
           return;
         }
-        const data = await res.json();
+        const job = await res.json();
+        if (cancelled) return;
+
+        // Enrich with customer and location details
+        let customerName: string | undefined;
+        let locationLine: string | undefined;
+        let isPrimaryLocation: boolean | undefined;
+
+        if (job.customerId) {
+          const custRes = await apiFetch(`/api/customers/${job.customerId}`).catch(() => null);
+          if (custRes?.ok && !cancelled) {
+            const cust = await custRes.json();
+            customerName = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || undefined;
+          }
+        }
+
+        if (job.locationId) {
+          const locRes = await apiFetch(`/api/locations/${job.locationId}`).catch(() => null);
+          if (locRes?.ok && !cancelled) {
+            const loc = await locRes.json();
+            locationLine = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
+            isPrimaryLocation = loc.isPrimary;
+          }
+        }
+
         if (!cancelled) {
-          setJobInfo(data);
+          setJobInfo({ ...job, customerName, locationLine, isPrimaryLocation });
           setJobLookupError(null);
         }
       } catch {
@@ -170,12 +185,8 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     [form, onCreated]
   );
 
-  const customerName = jobInfo?.customer
-    ? (jobInfo.customer.displayName || [jobInfo.customer.firstName, jobInfo.customer.lastName].filter(Boolean).join(' ') || null)
-    : null;
-  const locationLine = jobInfo?.location
-    ? [jobInfo.location.street1, jobInfo.location.city, jobInfo.location.state].filter(Boolean).join(', ')
-    : null;
+  const customerName = jobInfo?.customerName ?? null;
+  const locationLine = jobInfo?.locationLine ?? null;
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
@@ -215,7 +226,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
               <p className="text-xs text-slate-500 flex items-center gap-1.5">
                 <MapPin size={11} className="text-slate-400" />
                 {locationLine}
-                {jobInfo.location?.isPrimary && (
+                {jobInfo.isPrimaryLocation && (
                   <span className="text-xs text-green-600 ml-1">(primary)</span>
                 )}
               </p>
