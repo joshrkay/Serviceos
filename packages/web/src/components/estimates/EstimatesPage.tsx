@@ -3,7 +3,7 @@ import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
-  Briefcase,
+  Briefcase, MapPin,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -731,6 +731,37 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
 
+  // Enriched customer/location from the linked job
+  const [enrichedCustomer, setEnrichedCustomer] = useState<{ name: string; id: string; phone?: string; email?: string } | null>(null);
+  const [enrichedLocation, setEnrichedLocation] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!est?.jobId) return;
+    let cancelled = false;
+    apiFetch(`/api/jobs/${est.jobId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(async (job) => {
+        if (!job || cancelled) return;
+        if (job.customerId) {
+          const custRes = await apiFetch(`/api/customers/${job.customerId}`).catch(() => null);
+          if (custRes?.ok && !cancelled) {
+            const cust = await custRes.json();
+            const name = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || 'Customer';
+            setEnrichedCustomer({ name, id: job.customerId, phone: cust.primaryPhone, email: cust.email });
+          }
+        }
+        if (job.locationId) {
+          const locRes = await apiFetch(`/api/locations/${job.locationId}`).catch(() => null);
+          if (locRes?.ok && !cancelled) {
+            const loc = await locRes.json();
+            setEnrichedLocation([loc.street1, loc.city, loc.state].filter(Boolean).join(', '));
+          }
+        }
+      })
+      .catch(() => null);
+    return () => { cancelled = true; };
+  }, [est?.jobId]);
+
   // Notes
   const [notes, setNotes]       = useState<Array<{ id: string; content: string; createdAt: string }>>([]);
   const [notesLoaded, setNotesLoaded] = useState(false);
@@ -793,11 +824,14 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   }
 
   // Build a mock Estimate-like object for the sub-components that still need it
+  const effectiveCustomerName = enrichedCustomer?.name
+    ?? (customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer');
+  const effectiveCustomerId = enrichedCustomer?.id ?? est.customerId ?? customer?.id ?? '';
   const estCompat = {
     id: est.id,
     estimateNumber: est.estimateNumber,
-    customer: customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer',
-    customerId: est.customerId ?? customer?.id ?? '',
+    customer: effectiveCustomerName,
+    customerId: effectiveCustomerId,
     description: est.customerMessage ?? '',
     status,
     lineItems: uiLineItems,
@@ -909,7 +943,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
               )}
 
               {/* Customer card */}
-              {customer && (
+              {(customer || enrichedCustomer) && (
                 <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
                   <p className="text-xs text-slate-400 mb-2">Customer</p>
                   <button
@@ -918,15 +952,20 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   >
                     {estCompat.customer}
                   </button>
+                  {enrichedLocation && (
+                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                      <MapPin size={10} /> {enrichedLocation}
+                    </p>
+                  )}
                   <div className="flex flex-col gap-1.5 mt-2">
-                    {customer.primaryPhone && (
-                      <a href={`tel:${customer.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
-                        <Phone size={11} /> {customer.primaryPhone}
+                    {(enrichedCustomer?.phone ?? customer?.primaryPhone) && (
+                      <a href={`tel:${enrichedCustomer?.phone ?? customer?.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
+                        <Phone size={11} /> {enrichedCustomer?.phone ?? customer?.primaryPhone}
                       </a>
                     )}
-                    {customer.email && (
-                      <a href={`mailto:${customer.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
-                        <Mail size={11} /> {customer.email}
+                    {(enrichedCustomer?.email ?? customer?.email) && (
+                      <a href={`mailto:${enrichedCustomer?.email ?? customer?.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
+                        <Mail size={11} /> {enrichedCustomer?.email ?? customer?.email}
                       </a>
                     )}
                   </div>

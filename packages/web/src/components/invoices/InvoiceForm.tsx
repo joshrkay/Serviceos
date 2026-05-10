@@ -86,7 +86,10 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
           jobId: prev.jobId || data.jobId || '',
           items: items.length > 0 ? items : prev.items,
         }));
-        setEstimateInfo({ estimateNumber: data.estimateNumber, totalCents: data.totalCents });
+        setEstimateInfo({
+          estimateNumber: data.estimateNumber,
+          totalCents: data.totals?.totalCents ?? data.totalCents ?? 0,
+        });
         setEstimateLookupStatus('loaded');
       } catch {
         if (!cancelled) setEstimateLookupStatus('error');
