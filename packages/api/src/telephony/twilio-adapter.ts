@@ -428,7 +428,6 @@ export class TwilioGatherAdapter {
     this.processor = createVoiceTurnProcessor({
       ...this.deps,
       pendingTransferTwiml: this.pendingTransferTwiml,
-      callerIdBySession: this.callerIdBySession,
       // Wire the existing fire-and-forget summary path. Preserves the
       // legacy behavior where a terminated turn kicks off the
       // end-of-call summary in the background.

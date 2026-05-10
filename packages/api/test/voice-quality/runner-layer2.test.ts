@@ -291,6 +291,106 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     expect(harness.runScriptCalls).toBe(2);
   });
 
+  it('VQ2-fix — when gatewayReportsToSuiteTracker=true, runner does NOT double-add runCents to suite tracker', async () => {
+    // Codex P1 regression — the production wiring builds the gateway
+    // via `createRealLayerTwoGateway`, which wraps the gateway to
+    // accumulate per-call cost into the suite tracker. Inside
+    // `gradeOneRun`, the runner layers another `wrapWithCostTracking`
+    // for the per-run tracker. Every `gateway.complete()` call thus
+    // hits suite tracker once already. If the runner ALSO calls
+    // `suiteCostTracker.addCents(runCents)`, grader spend is counted
+    // twice and the suite cap trips at half the real spend.
+    //
+    // Simulate that wrap-1 behavior by having the grader mocks bump
+    // a "gateway-attributed" suite total themselves. The grader mocks
+    // also bump `runCents` via `gateway.complete()` indirectly — but
+    // since the graders are fully mocked in this test we just stub
+    // the runner's per-run tracker injection through `runScript`'s
+    // cost path.
+    //
+    // What this test pins:
+    //   - With `gatewayReportsToSuiteTracker: true`, only the
+    //     simulated wrap-1 increments hit the suite tracker (the
+    //     runner skips its own `addCents`).
+    //   - The suite tracker total equals the per-call wrap-1 total
+    //     (NOT 2× that).
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    // Suite tracker that callers (production: `createRealLayerTwoGateway`)
+    // share with the gateway wrapper.
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    // Simulate wrap-1 of `createRealLayerTwoGateway`: each grader-
+    // attributed call writes to the suite tracker. We trigger the
+    // simulated wrap-1 from inside one of the grader mocks (the
+    // graders are what call `gateway.complete()` in production). Use
+    // `gradeDispositionLlm` once per run = 3 suite-tracker writes of
+    // 10¢ each = 30¢ from "wrap-1".
+    const { gradeDispositionLlm } = await import('../../src/ai/voice-quality/graders/disposition-llm');
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      // Wrap-1 effect: suite tracker bumps each "gateway.complete()" call.
+      suiteTracker.addCents(10);
+      return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+    });
+
+    const script = eligibleScript();
+    await runScriptLayer2(
+      script,
+      makeCtx({
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        gatewayReportsToSuiteTracker: true,
+      }),
+    );
+
+    // 3 runs × 10¢/run from simulated wrap-1 = 30¢. If the runner
+    // were still calling `addCents(runCents)`, we'd see an additional
+    // 3 × 50 = 150¢, for a total of 180¢. The flag must suppress that.
+    expect(suiteTracker.totalCents()).toBe(30);
+  });
+
+  it('VQ2-fix — when gatewayReportsToSuiteTracker is false/undefined, runner still adds runCents to suite tracker (legacy mock-gateway path)', async () => {
+    // Inverse of the above: a mock-only suite where the gateway does
+    // NOT touch the suite tracker. The runner's explicit
+    // `addCents(runCents)` is the ONLY source of suite-tracker
+    // increments, so it must keep firing. Pins the legacy behavior
+    // existing tests rely on.
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    const script = eligibleScript();
+    await runScriptLayer2(
+      script,
+      makeCtx({
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        // gatewayReportsToSuiteTracker omitted (defaults to false)
+      }),
+    );
+
+    // 3 × 50¢ from the runner's per-run cost = 150¢.
+    expect(suiteTracker.totalCents()).toBe(150);
+  });
+
   it('VQ2-013 — failed run (runScript throws) is recorded as fail-everything PerRunResult; aggregation continues', async () => {
     harness.runScriptShouldThrowOnRun = 2;
     const script = eligibleScript();

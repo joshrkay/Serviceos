@@ -36,10 +36,9 @@
  *                                  finalizeTwiml) can call them directly
  *                                  instead of duplicating logic.
  *
- * The two ephemeral session maps (`pendingTransferTwiml`,
- * `callerIdBySession`) are accepted as deps so the adapter and processor
- * share the same Map instances. When the adapter omits them, fresh empty
- * Maps are created — useful for tests.
+ * The ephemeral `pendingTransferTwiml` session map is accepted as a dep
+ * so the adapter and processor share the same Map instance. When the
+ * adapter omits it, a fresh empty Map is created — useful for tests.
  *
  * Production behavior is preserved verbatim: same audit emissions, same
  * proposal payload shape, same FSM dispatch order, same cost tracking,
@@ -191,14 +190,13 @@ export interface VoiceTurnProcessorDeps {
   voiceRepo?: VoiceRepository;
   voicePersonaResolver?: VoicePersonaResolver;
   /**
-   * Optional shared maps. When the host (TwilioGatherAdapter) provides
-   * its own Map instances, the processor reads/writes the same instance
+   * Optional shared map. When the host (TwilioGatherAdapter) provides
+   * its own Map instance, the processor reads/writes the same instance
    * so the host's other entry points (handleInbound, handleNotifyOncall,
-   * etc.) see the same state. When omitted, fresh empty Maps are
+   * etc.) see the same state. When omitted, a fresh empty Map is
    * created — appropriate for tests and standalone harness use.
    */
   pendingTransferTwiml?: Map<string, string>;
-  callerIdBySession?: Map<string, string>;
   /**
    * Optional callback fired when a session terminates so the host can
    * trigger any post-terminate work. The adapter wires this so its
@@ -261,8 +259,6 @@ export function createVoiceTurnProcessor(
 ): VoiceTurnProcessor {
   const pendingTransferTwiml =
     deps.pendingTransferTwiml ?? new Map<string, string>();
-  const callerIdBySession =
-    deps.callerIdBySession ?? new Map<string, string>();
 
   // ─── Helpers (formerly private methods on TwilioGatherAdapter) ──────
 
@@ -946,9 +942,6 @@ export function createVoiceTurnProcessor(
 
     return sideEffectsAll;
   };
-
-  // Touch the maps so unused-locals lint passes when the host wires its own.
-  void callerIdBySession;
 
   return {
     speechTurn,

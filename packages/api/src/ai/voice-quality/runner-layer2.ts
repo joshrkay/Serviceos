@@ -120,6 +120,22 @@ export interface RunScriptLayer2Context extends Omit<RunScriptContext, 'costTrac
   /** Cap on cumulative suite cost. Only consulted with `suiteCostTracker`. */
   suiteCostCapCents?: number;
   /**
+   * When true, the LLM gateway supplied to the runner (via `gateway` or
+   * `gatewayFactory`) is already wired to accumulate per-call cost into
+   * `suiteCostTracker` — for example, anything built via
+   * `createRealLayerTwoGateway`, which wraps the gateway with the
+   * suite-level cost tracker at construction time. In that wiring the
+   * grader gateway call increments the suite tracker once already, so
+   * the runner's own `suiteCostTracker.addCents(runCents)` would
+   * double-count grader spend (and trip the suite cost cap at half the
+   * real spend).
+   *
+   * Default `false` for mock-gateway suites whose gateways do NOT
+   * report to the suite tracker — those still need the runner to
+   * forward `runCents` so the suite tracker reflects per-script spend.
+   */
+  gatewayReportsToSuiteTracker?: boolean;
+  /**
    * LLM gateway shared across the three runs. Used by the LLM-judge
    * graders. If absent and `gatewayFactory` is set, one is synthesized
    * per run via the factory.
@@ -342,7 +358,19 @@ export async function runScriptLayer2(
 
     perRunResults.push(runResult);
     scriptCostCents += runCents;
-    if (ctx.suiteCostTracker) ctx.suiteCostTracker.addCents(runCents);
+    // Codex P1 fix — avoid double-counting grader cost in the suite
+    // tracker. When the gateway is built by `createRealLayerTwoGateway`
+    // (or otherwise pre-wrapped with the suite cost tracker), each
+    // grader `gateway.complete()` already increments
+    // `suiteCostTracker`; adding `runCents` here again would count
+    // grader spend twice. Callers set `gatewayReportsToSuiteTracker`
+    // when they pre-wire that wrap (see the Layer 2 entry test). For
+    // mock-gateway suites where the gateway does NOT touch the suite
+    // tracker, we still need this `addCents` to populate the suite
+    // total — those keep the flag false/undefined.
+    if (ctx.suiteCostTracker && !ctx.gatewayReportsToSuiteTracker) {
+      ctx.suiteCostTracker.addCents(runCents);
+    }
 
     // Per-script cap.
     if (scriptCostCents > perRunCostCap) {

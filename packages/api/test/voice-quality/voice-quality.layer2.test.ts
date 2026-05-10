@@ -310,6 +310,13 @@ describe('Voice Quality Layer 2 — corpus', () => {
             process.env.VOICE_QUALITY_COST_CAP_CENTS ?? '1000',
             10,
           ),
+          // `driverDeps.gateway` is built via `createRealLayerTwoGateway`,
+          // which already wraps the gateway to add per-call cost into
+          // `suiteState.suiteCostTracker`. Tell the runner so it skips
+          // its own redundant `suiteCostTracker.addCents(runCents)` —
+          // otherwise grader spend would be counted twice and the
+          // suite cap would trip at half the real spend (Codex P1).
+          gatewayReportsToSuiteTracker: true,
         });
       } catch (err) {
         if (err instanceof CostCapExceededError) {
