@@ -96,6 +96,7 @@ import {
   InMemoryRevenueBySourceRepository,
 } from './reports/revenue-by-source';
 import { createFeedbackResponsesRouter } from './routes/feedback';
+import { createInteractionsRouter } from './routes/interactions';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -1984,6 +1985,13 @@ export function createApp(): express.Express {
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
+
+  // 15.8/15.9 — Call log. Requires Postgres; falls back to 503 when pool
+  // is unavailable (dev without DATABASE_URL). Pool-guard matches pattern
+  // used by other pool-dependent routes above.
+  if (pool) {
+    app.use('/api/interactions', createInteractionsRouter({ pool }));
+  }
   app.use(
     '/api/settings',
     createSettingsRouter(settingsRepo, {
