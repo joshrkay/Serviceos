@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { useClerk } from '@clerk/clerk-react';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
@@ -25,6 +26,7 @@ import {
 
 export function SettingsPage() {
   const navigate = useNavigate();
+  const { signOut } = useClerk();
   const { me } = useMe();
   // Tier 4 — Quick toggles: load from backend on mount, persist on
   // toggle. aiAuto + reminders live on /api/settings (migration 075).
@@ -379,7 +381,12 @@ export function SettingsPage() {
             <p className="text-xs text-slate-400 mt-0.5">HVAC · Plumbing · Painting · Austin, TX</p>
             <p className="text-xs text-slate-400 mt-0.5">Owner</p>
           </div>
-          <button className="text-xs text-slate-400 hover:text-white transition-colors shrink-0">Edit</button>
+          <button
+            onClick={() => setBusinessProfileOpen(true)}
+            className="text-xs text-slate-400 hover:text-white transition-colors shrink-0"
+          >
+            Edit
+          </button>
         </div>
 
         {/* Customer Intake Form — featured card */}
@@ -588,7 +595,7 @@ export function SettingsPage() {
         {/* Sign out */}
         <div className="mt-4 flex flex-col gap-2">
           <button
-            onClick={() => navigate('/login')}
+            onClick={() => signOut({ redirectUrl: '/login' })}
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 hover:bg-slate-50 transition-colors text-left"
           >
             Sign out
