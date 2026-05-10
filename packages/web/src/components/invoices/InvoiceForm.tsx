@@ -1,4 +1,5 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { FileText, Loader } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   LineItemEditor,
@@ -10,6 +11,16 @@ import {
 export interface InvoiceFormProps {
   onCreated?: (invoiceId: string) => void;
   onCancel?: () => void;
+}
+
+interface ApiEstimateLineItem {
+  id?: string;
+  description: string;
+  quantity: number;
+  unitPriceCents: number;
+  totalCents: number;
+  taxable?: boolean;
+  sortOrder?: number;
 }
 
 interface State {
@@ -41,6 +52,48 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   }));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [estimateLookupStatus, setEstimateLookupStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const [estimateInfo, setEstimateInfo] = useState<{ estimateNumber: string; totalCents: number } | null>(null);
+
+  // Auto-populate line items when a valid estimate ID is entered
+  useEffect(() => {
+    const id = form.estimateId.trim();
+    if (!id || id.length < 10) {
+      setEstimateLookupStatus('idle');
+      setEstimateInfo(null);
+      return;
+    }
+    let cancelled = false;
+    setEstimateLookupStatus('loading');
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiFetch(`/api/estimates/${id}`);
+        if (!res.ok) {
+          if (!cancelled) setEstimateLookupStatus('error');
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        const items: LineItemDraft[] = (data.lineItems ?? []).map((li: ApiEstimateLineItem) => ({
+          id: li.id,
+          description: li.description,
+          quantity: String(li.quantity),
+          unitPriceDollars: (li.unitPriceCents / 100).toFixed(2),
+          taxable: li.taxable ?? false,
+        }));
+        setForm((prev) => ({
+          ...prev,
+          jobId: prev.jobId || data.jobId || '',
+          items: items.length > 0 ? items : prev.items,
+        }));
+        setEstimateInfo({ estimateNumber: data.estimateNumber, totalCents: data.totalCents });
+        setEstimateLookupStatus('loaded');
+      } catch {
+        if (!cancelled) setEstimateLookupStatus('error');
+      }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [form.estimateId]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -137,13 +190,28 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
         </label>
         <label className="text-xs text-slate-500">
           Estimate ID
-          <input
-            value={form.estimateId}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, estimateId: e.target.value }))
-            }
-            className={inputCls}
-          />
+          <div className="relative">
+            <input
+              value={form.estimateId}
+              onChange={(e) =>
+                setForm((p) => ({ ...p, estimateId: e.target.value }))
+              }
+              className={inputCls}
+              placeholder="estimate-uuid (auto-fills line items)"
+            />
+            {estimateLookupStatus === 'loading' && (
+              <Loader size={13} className="absolute right-2.5 top-2.5 animate-spin text-slate-400" />
+            )}
+          </div>
+          {estimateLookupStatus === 'loaded' && estimateInfo && (
+            <div className="mt-1 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-md px-2 py-1">
+              <FileText size={11} />
+              {estimateInfo.estimateNumber} — ${(estimateInfo.totalCents / 100).toFixed(2)} loaded
+            </div>
+          )}
+          {estimateLookupStatus === 'error' && (
+            <span className="text-xs text-red-500 mt-0.5 block">Estimate not found</span>
+          )}
         </label>
         <label className="text-xs text-slate-500">
           Due date

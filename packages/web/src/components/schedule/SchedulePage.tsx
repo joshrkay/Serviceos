@@ -1,9 +1,9 @@
-import { useState, useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle } from 'lucide-react';
-import { technicians, jobs as mockJobs } from '../../data/mock-data';
-import { useListQuery } from '../../hooks/useListQuery';
-import { normalizeJobStatus } from '../../utils/statusNormalize';
-import { StatusBadge } from '../shared/StatusBadge';
+import { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
+  Bell, CheckCircle, X, MapPin, Briefcase,
+} from 'lucide-react';
+import { technicians } from '../../data/mock-data';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -15,256 +15,352 @@ const TECH_COLORS: Record<string, string> = {
   'Sarah Lin':    'bg-violet-100 text-violet-700 border-violet-200',
 };
 
-interface ApiJob {
+interface ApiAppointment {
   id: string;
-  jobNumber: string;
-  summary: string;
+  jobId: string;
+  scheduledStart: string;
+  scheduledEnd: string;
   status: string;
-  priority?: string;
-  serviceType?: string;
-  scheduledStart?: string;
-  assignedTechnicianId?: string;
-  customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
-  technician?: { id: string; firstName?: string; lastName?: string; color?: string };
+  notes?: string;
+  timezone: string;
 }
 
-type ScheduleViewMode = 'personal' | 'team';
-
-function readRuntimePermissions(): Set<string> {
-  if (typeof window === 'undefined') return new Set();
-  const raw = window.localStorage.getItem('serviceos.permissions');
-  if (!raw) return new Set();
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return new Set(parsed.filter((p): p is string => typeof p === 'string'));
-  } catch {
-    return new Set(raw.split(',').map((x) => x.trim()).filter(Boolean));
-  }
-  return new Set();
+interface EnrichedAppointment extends ApiAppointment {
+  customerName: string;
+  jobSummary: string;
+  serviceAddress: string;
+  technicianId: string;
+  technicianName: string;
+  serviceType: string;
+  hasConflict: boolean;
 }
 
-function toLocalDatetimeInputValue(isoDateTime?: string): string {
-  if (!isoDateTime) return '';
-  const d = new Date(isoDateTime);
-  if (Number.isNaN(d.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** Build a 7-day window starting from today */
+/** Build a 7-day window starting from yesterday */
 function buildWeekDays(today: Date) {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
-    d.setDate(today.getDate() + i - 1); // start 1 day before today
+    d.setDate(today.getDate() + i - 1);
     const label = d.toLocaleDateString('en-US', { weekday: 'short' });
-    const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const date  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     const isoDate = d.toISOString().split('T')[0];
-    const isToday = i === 1;
-    return { label, date, isoDate, isToday };
+    return { label, date, isoDate, isToday: i === 1 };
   });
+}
+
+function toTimeLabel(iso: string) {
+  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
+  const aStart = new Date(a.scheduledStart).getTime();
+  const aEnd   = new Date(a.scheduledEnd).getTime();
+  const bStart = new Date(b.scheduledStart).getTime();
+  const bEnd   = new Date(b.scheduledEnd).getTime();
+  return aStart < bEnd && bStart < aEnd;
+}
+
+/** Delay notification form */
+function DelaySheet({ appointmentId, onClose }: { appointmentId: string; onClose: () => void }) {
+  const [minutes, setMinutes] = useState<10 | 15 | 20 | 60>(20);
+  const [sending, setSending] = useState(false);
+  const [sent,    setSent]    = useState(false);
+  const [error,   setError]   = useState<string | null>(null);
+
+  async function send() {
+    setSending(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/appointments/${appointmentId}/delay-ack`, {
+        method: 'POST',
+        body: JSON.stringify({ appointmentId, isRunningBehind: true, delayMinutes: minutes }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j?.message ?? `HTTP ${res.status}`);
+      }
+      setSent(true);
+      setTimeout(onClose, 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send delay notice');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-end md:items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-sm text-slate-800">Notify next customer of delay</p>
+          <button onClick={onClose}><X size={15} className="text-slate-400" /></button>
+        </div>
+        {sent ? (
+          <div className="flex flex-col items-center gap-2 py-4">
+            <CheckCircle size={32} className="text-green-500" />
+            <p className="text-sm text-slate-700">Delay notice sent</p>
+          </div>
+        ) : (
+          <>
+            <p className="text-xs text-slate-500 mb-3">Select delay duration:</p>
+            <div className="flex gap-2 mb-4">
+              {([10, 15, 20, 60] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => setMinutes(m)}
+                  className={`flex-1 rounded-lg border py-2 text-sm transition-colors ${
+                    minutes === m ? 'bg-slate-900 text-white border-slate-900' : 'border-slate-200 text-slate-600'
+                  }`}
+                >
+                  {m} min
+                </button>
+              ))}
+            </div>
+            {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
+            <button
+              onClick={send}
+              disabled={sending}
+              className="w-full rounded-xl bg-amber-500 text-white py-3 text-sm hover:bg-amber-600 disabled:opacity-50 transition-colors"
+            >
+              {sending ? 'Sending…' : `Send ${minutes}-min delay notice`}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** New appointment form panel */
+function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
+  selectedDate: string;
+  onCreated: () => void;
+  onClose: () => void;
+}) {
+  const [jobId,    setJobId]    = useState('');
+  const [techId,   setTechId]   = useState(technicians[0]?.id ?? '');
+  const [startTime, setStartTime] = useState('10:00');
+  const [endTime,   setEndTime]   = useState('12:00');
+  const [saving, setSaving]     = useState(false);
+  const [error,  setError]      = useState<string | null>(null);
+  const [jobInfo, setJobInfo]   = useState<{ jobNumber: string; summary: string; customer?: { displayName?: string } } | null>(null);
+
+  useEffect(() => {
+    if (!jobId || jobId.length < 10) { setJobInfo(null); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const res = await apiFetch(`/api/jobs/${jobId}`).catch(() => null);
+      if (res?.ok && !cancelled) setJobInfo(await res.json());
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [jobId]);
+
+  async function save() {
+    if (!jobId.trim()) { setError('Job ID is required'); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      const start = new Date(`${selectedDate}T${startTime}:00`);
+      const end   = new Date(`${selectedDate}T${endTime}:00`);
+      if (end <= start) { setError('End time must be after start time'); setSaving(false); return; }
+
+      // Create the appointment
+      const apptRes = await apiFetch('/api/appointments', {
+        method: 'POST',
+        body: JSON.stringify({
+          jobId: jobId.trim(),
+          scheduledStart: start.toISOString(),
+          scheduledEnd: end.toISOString(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago',
+        }),
+      });
+      if (!apptRes.ok) {
+        const j = await apptRes.json().catch(() => ({}));
+        throw new Error(j?.message ?? `HTTP ${apptRes.status}`);
+      }
+
+      // Also update the job's assigned technician and scheduled start
+      if (techId) {
+        await apiFetch(`/api/jobs/${jobId.trim()}`, {
+          method: 'PUT',
+          body: JSON.stringify({ assignedTechnicianId: techId, scheduledStart: start.toISOString(), status: 'scheduled' }),
+        }).catch(() => null);
+      }
+
+      onCreated();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create appointment');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-sm text-slate-800">New appointment</p>
+        <button onClick={onClose}><X size={14} className="text-slate-400" /></button>
+      </div>
+      {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
+      <div className="grid md:grid-cols-2 gap-3">
+        <label className="text-xs text-slate-500 md:col-span-2">
+          Job ID *
+          <input value={jobId} onChange={e => setJobId(e.target.value)} placeholder="paste job UUID"
+            className="w-full mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+          {jobInfo && (
+            <p className="text-xs text-slate-500 mt-0.5">{jobInfo.jobNumber} — {jobInfo.summary}</p>
+          )}
+        </label>
+        <label className="text-xs text-slate-500">
+          Start time
+          <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+            className="w-full mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+        </label>
+        <label className="text-xs text-slate-500">
+          End time
+          <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+            className="w-full mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+        </label>
+        <label className="text-xs text-slate-500 md:col-span-2">
+          Assign technician
+          <select value={techId} onChange={e => setTechId(e.target.value)}
+            className="w-full mt-0.5 rounded-lg border border-slate-200 px-3 py-2 text-sm">
+            <option value="">Unassigned</option>
+            {technicians.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </label>
+      </div>
+      <button
+        onClick={save}
+        disabled={saving || !jobId.trim()}
+        className="mt-3 w-full rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 disabled:opacity-50 transition-colors"
+      >
+        {saving ? 'Saving…' : 'Create appointment'}
+      </button>
+    </div>
+  );
 }
 
 export function SchedulePage() {
   const navigate = useNavigate();
   const today = useMemo(() => new Date(), []);
   const weekDays = useMemo(() => buildWeekDays(today), [today]);
-  const todayIso = useMemo(() => today.toISOString().split('T')[0], [today]);
-  const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate); // today
-  const [techFilter, setTechFilter] = useState<string>('All');
-  const [viewMode, setViewMode] = useState<ScheduleViewMode>('team');
-  const [isSaving, setIsSaving] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
-  const [showNewEvent, setShowNewEvent] = useState(false);
-  const [newEventJobId, setNewEventJobId] = useState('');
-  const [newEventTechnicianId, setNewEventTechnicianId] = useState(technicians[0]?.id ?? '');
-  const [newEventStart, setNewEventStart] = useState('');
+  const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate);
+  const [showNew,     setShowNew]     = useState(false);
+  const [techFilter,  setTechFilter]  = useState('All');
+  const [appointments, setAppointments] = useState<ApiAppointment[]>([]);
+  const [enriched,    setEnriched]    = useState<EnrichedAppointment[]>([]);
+  const [loading,     setLoading]     = useState(false);
+  const [delayApptId, setDelayApptId] = useState<string | null>(null);
+  const [detailAppt,  setDetailAppt]  = useState<EnrichedAppointment | null>(null);
 
-  const { data, isLoading, error, refetch, setFilters } = useListQuery<ApiJob>('/api/jobs', {
-    filters: { scheduledDate: selectedIso },
-  });
-
-  const runtimePermissions = useMemo(() => readRuntimePermissions(), []);
-  const canManageSchedule = runtimePermissions.size === 0 || runtimePermissions.has('jobs:update');
-  const canViewTeamSchedule = runtimePermissions.size === 0
-    || runtimePermissions.has('schedule:view:team')
-    || runtimePermissions.has('jobs:view');
-  const myTechnicianId = useMemo(() => {
-    if (typeof window !== 'undefined') {
-      const fromStorage = window.localStorage.getItem('serviceos.technicianId');
-      if (fromStorage) return fromStorage;
-    }
-    return technicians[0]?.id ?? '';
-  }, []);
-
-  async function updateSchedule(
-    jobId: string,
-    payload: { assignedTechnicianId?: string; scheduledStart?: string | null; status?: string },
-    successMessage: string
-  ) {
-    setIsSaving(true);
-    setActionError(null);
-    setActionSuccess(null);
+  const loadAppointments = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await apiFetch(`/api/jobs/${jobId}`, {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setActionSuccess(successMessage);
-      await refetch();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to save schedule');
+      const from = `${selectedIso}T00:00:00.000Z`;
+      const to   = `${selectedIso}T23:59:59.999Z`;
+      const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
+      if (!res.ok) { setLoading(false); return; }
+      const body = await res.json();
+      const list: ApiAppointment[] = body.data ?? body ?? [];
+      setAppointments(list);
+
+      // Enrich each appointment with job/customer data
+      const enrichedList = await Promise.all(list.map(async appt => {
+        try {
+          const jobRes = await apiFetch(`/api/jobs/${appt.jobId}`);
+          if (!jobRes.ok) return buildFallback(appt);
+          const job = await jobRes.json();
+          const tech = technicians.find(t => t.id === job.assignedTechnicianId);
+          const customerName = job.customer
+            ? (job.customer.displayName || [job.customer.firstName, job.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+            : job.customerName || 'Customer';
+          const loc = job.location;
+          const addr = loc
+            ? [loc.street1, loc.city, loc.state].filter(Boolean).join(', ')
+            : job.address || '';
+          return {
+            ...appt,
+            customerName,
+            jobSummary: job.summary || job.description || '',
+            serviceAddress: addr,
+            technicianId: tech?.id ?? job.assignedTechnicianId ?? '',
+            technicianName: tech?.name ?? job.technicianName ?? 'Unassigned',
+            serviceType: job.serviceType ?? '',
+            hasConflict: false,
+          };
+        } catch {
+          return buildFallback(appt);
+        }
+      }));
+
+      // Detect conflicts: same technician, overlapping time
+      const withConflicts: EnrichedAppointment[] = enrichedList.map((a, i) => ({
+        ...a,
+        hasConflict: enrichedList.some((b, j) =>
+          j !== i &&
+          a.technicianId &&
+          a.technicianId === b.technicianId &&
+          overlap(a, b)
+        ),
+      }));
+
+      setEnriched(withConflicts);
     } finally {
-      setIsSaving(false);
+      setLoading(false);
     }
+  }, [selectedIso]);
+
+  useEffect(() => { loadAppointments(); }, [loadAppointments]);
+
+  function buildFallback(appt: ApiAppointment): EnrichedAppointment {
+    return { ...appt, customerName: 'Customer', jobSummary: appt.jobId, serviceAddress: '', technicianId: '', technicianName: 'Unassigned', serviceType: '', hasConflict: false };
   }
 
-  function selectDay(isoDate: string) {
-    setSelectedIso(isoDate);
-    setFilters({ scheduledDate: isoDate });
-  }
+  const displayed = techFilter === 'All'
+    ? enriched
+    : enriched.filter(a => a.technicianName === techFilter);
 
-  const fallbackJobs: ApiJob[] = useMemo(() => {
-    if (selectedIso !== todayIso) return [];
-    return mockJobs.map((job, idx) => {
-      const assignedTech = technicians.find((t) => t.name === job.assignedTech);
-      const hourToken = (job.scheduledTime ?? '').match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
-      const hour = hourToken ? Number(hourToken[1]) % 12 + (hourToken[3].toUpperCase() === 'PM' ? 12 : 0) : 9 + idx;
-      const minute = hourToken?.[2] ? Number(hourToken[2]) : 0;
-      const start = new Date(`${selectedIso}T00:00:00`);
-      start.setHours(hour, minute, 0, 0);
-      return {
-        id: `fallback-${job.id}`,
-        jobNumber: job.jobNumber,
-        summary: job.description,
-        status: job.status.toLowerCase().replace(/\s+/g, '_'),
-        serviceType: job.serviceType,
-        scheduledStart: start.toISOString(),
-        customer: { id: job.customerId, displayName: job.customer },
-        technician: assignedTech
-          ? { id: assignedTech.id, firstName: assignedTech.name.split(' ')[0], lastName: assignedTech.name.split(' ').slice(1).join(' '), color: assignedTech.color }
-          : undefined,
-      };
-    });
-  }, [selectedIso, todayIso]);
-
-  const activeData = error ? fallbackJobs : data;
-  const isFallbackMode = Boolean(error);
-
-  // Apply personal-view scope, then client-side tech filter
-  const scopedData = viewMode === 'personal'
-    ? activeData.filter(j => j.technician?.id === myTechnicianId || j.assignedTechnicianId === myTechnicianId)
-    : activeData;
-
-  const dayJobs = techFilter === 'All'
-    ? scopedData
-    : scopedData.filter(j => {
-        const techName = j.technician
-          ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
-          : null;
-        return techName === techFilter;
-      });
+  const conflictCount = enriched.filter(a => a.hasConflict).length;
 
   return (
     <div className="h-full overflow-y-auto pb-20 md:pb-0">
     <div className="p-4 md:p-6 max-w-4xl mx-auto">
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
-        <h1 className="text-slate-900">Schedule</h1>
+        <div>
+          <h1 className="text-slate-900">Schedule</h1>
+          {conflictCount > 0 && (
+            <p className="text-xs text-amber-600 flex items-center gap-1 mt-0.5">
+              <AlertTriangle size={11} /> {conflictCount} scheduling conflict{conflictCount !== 1 ? 's' : ''} today
+            </p>
+          )}
+        </div>
         <button
-          onClick={() => setShowNewEvent((v) => !v)}
+          onClick={() => setShowNew(v => !v)}
           className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
         >
-          <Plus size={14} /> New event
+          <Plus size={14} /> New appointment
         </button>
       </div>
-
-      <div className="mb-4 flex items-center gap-2">
-        <button
-          onClick={() => setViewMode('personal')}
-          className={`rounded-full px-3 py-1.5 text-xs border ${viewMode === 'personal' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200'}`}
-        >
-          My schedule
-        </button>
-        <button
-          onClick={() => canViewTeamSchedule && setViewMode('team')}
-          disabled={!canViewTeamSchedule}
-          className={`rounded-full px-3 py-1.5 text-xs border ${viewMode === 'team' ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200'} disabled:opacity-50`}
-        >
-          Team schedule
-        </button>
-      </div>
-
-      {showNewEvent && canManageSchedule && (
-        <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
-          <h4 className="text-sm text-slate-800 mb-3">Schedule event</h4>
-          <div className="grid md:grid-cols-3 gap-2">
-            <input
-              value={newEventJobId}
-              onChange={(e) => setNewEventJobId(e.target.value)}
-              placeholder="Job ID"
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-            />
-            <select
-              value={newEventTechnicianId}
-              onChange={(e) => setNewEventTechnicianId(e.target.value)}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-            >
-              <option value="">Unassigned</option>
-              {technicians.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-            <input
-              type="datetime-local"
-              value={newEventStart}
-              onChange={(e) => setNewEventStart(e.target.value)}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
-            />
-          </div>
-          <div className="mt-3">
-            <button
-              disabled={!newEventJobId || !newEventStart || isSaving}
-              onClick={() => updateSchedule(
-                newEventJobId,
-                { status: 'scheduled', assignedTechnicianId: newEventTechnicianId || undefined, scheduledStart: new Date(newEventStart).toISOString() },
-                'Scheduled event updated'
-              )}
-              className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white disabled:opacity-50"
-            >
-              Save event
-            </button>
-          </div>
-        </div>
-      )}
-
-      {actionError && <p className="text-xs text-red-600 mb-2">{actionError}</p>}
-      {actionSuccess && <p className="text-xs text-green-600 mb-2">{actionSuccess}</p>}
 
       {/* Week nav */}
       <div className="flex items-center gap-2 mb-4">
         <button
-          onClick={() => {
-            const prev = new Date(selectedIso);
-            prev.setDate(prev.getDate() - 1);
-            selectDay(prev.toISOString().split('T')[0]);
-          }}
+          onClick={() => { const d = new Date(selectedIso); d.setDate(d.getDate() - 1); setSelectedIso(d.toISOString().split('T')[0]); }}
           className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronLeft size={15} />
         </button>
-        <div className="flex-1 flex gap-1 overflow-x-auto scrollbar-none">
+        <div className="flex-1 flex gap-1 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
           {weekDays.map(day => {
             const isSelected = day.isoDate === selectedIso;
             return (
-              <button
-                key={day.isoDate}
-                onClick={() => selectDay(day.isoDate)}
+              <button key={day.isoDate} onClick={() => setSelectedIso(day.isoDate)}
                 className={`flex-1 min-w-[64px] flex flex-col items-center rounded-xl py-2.5 transition-all border ${
-                  isSelected
-                    ? 'bg-slate-900 border-slate-900 text-white'
-                    : day.isToday
-                    ? 'bg-blue-50 border-blue-100 text-blue-700'
-                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                  isSelected ? 'bg-slate-900 border-slate-900 text-white' :
+                  day.isToday ? 'bg-blue-50 border-blue-100 text-blue-700' :
+                  'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
                 }`}
               >
                 <span className="text-xs">{day.label}</span>
@@ -274,11 +370,7 @@ export function SchedulePage() {
           })}
         </div>
         <button
-          onClick={() => {
-            const next = new Date(selectedIso);
-            next.setDate(next.getDate() + 1);
-            selectDay(next.toISOString().split('T')[0]);
-          }}
+          onClick={() => { const d = new Date(selectedIso); d.setDate(d.getDate() + 1); setSelectedIso(d.toISOString().split('T')[0]); }}
           className="flex size-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50"
         >
           <ChevronRight size={15} />
@@ -286,225 +378,190 @@ export function SchedulePage() {
       </div>
 
       {/* Tech filter */}
-      <div className="flex gap-2 mb-5 overflow-x-auto scrollbar-none">
+      <div className="flex gap-2 mb-5 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
         {['All', ...technicians.map(t => t.name)].map(name => {
           const t = technicians.find(x => x.name === name);
-          const isSelected = techFilter === name;
           return (
-            <button
-              key={name}
-              onClick={() => setTechFilter(name)}
+            <button key={name} onClick={() => setTechFilter(name)}
               className={`shrink-0 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs border transition-colors ${
-                isSelected
-                  ? 'bg-slate-900 text-white border-slate-900'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                techFilter === name ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
               }`}
             >
-              {t && (
-                <span
-                  className="flex size-4 items-center justify-center rounded-full text-white shrink-0"
-                  style={{ fontSize: 8, backgroundColor: t.color }}
-                >
-                  {t.initials}
-                </span>
-              )}
+              {t && <span className="flex size-4 items-center justify-center rounded-full text-white shrink-0" style={{ fontSize: 8, backgroundColor: t.color }}>{t.initials}</span>}
               {name === 'All' ? 'All techs' : name.split(' ')[0]}
             </button>
           );
         })}
       </div>
 
-      {/* Day label */}
+      {/* New appointment form */}
+      {showNew && (
+        <NewAppointmentForm
+          selectedDate={selectedIso}
+          onCreated={loadAppointments}
+          onClose={() => setShowNew(false)}
+        />
+      )}
+
+      {/* Appointments list */}
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-slate-700">
-          {weekDays.find(d => d.isoDate === selectedIso)?.isToday
-            ? "Today's schedule"
-            : `${weekDays.find(d => d.isoDate === selectedIso)?.label ?? ''}'s schedule`}
+          {weekDays.find(d => d.isoDate === selectedIso)?.isToday ? "Today's appointments" :
+           `${weekDays.find(d => d.isoDate === selectedIso)?.label ?? ''}'s appointments`}
         </h3>
-        <span className="text-xs text-slate-400">{dayJobs.length} job{dayJobs.length !== 1 ? 's' : ''}</span>
+        <span className="text-xs text-slate-400">{displayed.length} appointment{displayed.length !== 1 ? 's' : ''}</span>
       </div>
 
-      {/* Loading / Error */}
-      {isLoading && (
+      {loading && (
         <div className="flex items-center justify-center py-16">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
         </div>
       )}
-      {error && (
-        <div className="flex flex-col items-center py-4 gap-2 text-center mb-2 rounded-xl border border-amber-200 bg-amber-50 px-4">
-          <p className="text-sm text-red-500">Failed to load live schedule</p>
-          <p className="text-xs text-amber-700 flex items-center gap-1.5">
-            <AlertTriangle size={12} /> Showing fallback schedule view while we reconnect.
-          </p>
-          <button onClick={refetch} className="text-xs text-blue-500 hover:underline">Retry live data</button>
+
+      {!loading && displayed.length === 0 && (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <span className="text-4xl mb-3">📅</span>
+          <p className="text-sm text-slate-500 mb-1">No appointments</p>
+          <p className="text-xs text-slate-400">Tap "New appointment" to schedule one</p>
         </div>
       )}
 
-      {/* Jobs */}
-      {!isLoading && (dayJobs.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <span className="text-4xl mb-3">📅</span>
-          <p className="text-sm text-slate-500 mb-1">
-            {isFallbackMode ? 'No fallback schedule for this day' : 'Nothing scheduled'}
-          </p>
-          <p className="text-xs text-slate-400">Tap "New job" to schedule something</p>
-        </div>
-      ) : (
+      {!loading && (
         <div className="flex flex-col gap-3">
-          {dayJobs
-            .sort((a, b) => {
-              const t = (s?: string) => s ? new Date(s).getTime() : Infinity;
-              return t(a.scheduledStart) - t(b.scheduledStart);
-            })
-            .map(job => {
-              const techName = job.technician
-                ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
+          {displayed
+            .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())
+            .map(appt => {
+              const tech = technicians.find(t => t.name === appt.technicianName);
+              const techColor = tech?.color ?? '#94a3b8';
+              const techStyle = appt.technicianName ? (TECH_COLORS[appt.technicianName] ?? '') : '';
+              const techInitials = appt.technicianName !== 'Unassigned'
+                ? appt.technicianName.split(' ').map(n => n[0]).join('')
                 : null;
-              const techColor = job.technician?.color ?? '#94a3b8';
-              const techInitials = techName ? techName.split(' ').map(n => n[0]).join('') : null;
-              const techStyle = techName ? (TECH_COLORS[techName] ?? '') : '';
-              const customerName = job.customer
-                ? (job.customer.displayName || [job.customer.firstName, job.customer.lastName].filter(Boolean).join(' ') || 'Customer')
-                : 'Customer';
-              const uiStatus = normalizeJobStatus(job.status);
-              const scheduledTime = job.scheduledStart
-                ? new Date(job.scheduledStart).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-                : null;
-
               return (
-                <button
-                  key={job.id}
-                  onClick={() => navigate(`/jobs/${job.id}`)}
-                  className="flex gap-4 rounded-xl bg-white border border-slate-200 px-4 py-4 text-left hover:border-slate-300 hover:shadow-sm transition-all"
+                <div
+                  key={appt.id}
+                  className={`rounded-xl bg-white border px-4 py-4 transition-all ${
+                    appt.hasConflict ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200'
+                  }`}
                 >
-                  {/* Time column */}
-                  <div className="shrink-0 w-16 text-right">
-                    {scheduledTime ? (
-                      <>
-                        <p className="text-sm text-slate-800">{scheduledTime}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">~2 hrs</p>
-                      </>
-                    ) : (
-                      <p className="text-xs text-slate-400">TBD</p>
-                    )}
-                  </div>
-
-                  {/* Divider */}
-                  <div className="flex flex-col items-center gap-1">
-                    <span className="size-2.5 rounded-full border-2 border-blue-500 bg-white mt-0.5 shrink-0" />
-                    <span className="w-px flex-1 bg-slate-100" />
-                  </div>
-
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="text-sm text-slate-900">{customerName}</p>
-                        <p className="text-xs text-slate-500 mt-0.5">{job.summary}</p>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-base">{SERVICE_ICON[job.serviceType ?? ''] ?? '🔧'}</span>
-                        <StatusBadge status={uiStatus} size="sm" />
-                      </div>
+                  {/* Conflict badge */}
+                  {appt.hasConflict && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
+                      <AlertTriangle size={11} /> Scheduling conflict
                     </div>
-                    <div className="flex items-center gap-3 mt-2">
-                      <span className="flex items-center gap-1 text-xs text-slate-400">
-                        <Clock size={11} /> {scheduledTime ?? 'Unscheduled'}
-                      </span>
-                      {techName && techInitials && (
-                        <span className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs ${techStyle}`}>
-                          <span
-                            className="flex size-4 items-center justify-center rounded-full text-white"
-                            style={{ fontSize: 8, backgroundColor: techColor }}
-                          >
-                            {techInitials}
+                  )}
+
+                  <div className="flex gap-4">
+                    {/* Time column */}
+                    <div className="shrink-0 w-16 text-right">
+                      <p className="text-sm text-slate-800">{toTimeLabel(appt.scheduledStart)}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{toTimeLabel(appt.scheduledEnd)}</p>
+                    </div>
+
+                    {/* Divider */}
+                    <div className="flex flex-col items-center gap-1">
+                      <span className={`size-2.5 rounded-full border-2 mt-0.5 shrink-0 ${appt.hasConflict ? 'border-amber-500 bg-white' : 'border-blue-500 bg-white'}`} />
+                      <span className="w-px flex-1 bg-slate-100" />
+                    </div>
+
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm text-slate-900">{appt.customerName}</p>
+                          <p className="text-xs text-slate-500 mt-0.5">{appt.jobSummary}</p>
+                          {appt.serviceAddress && (
+                            <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1">
+                              <MapPin size={9} /> {appt.serviceAddress}
+                            </p>
+                          )}
+                        </div>
+                        <span className="text-base shrink-0">{SERVICE_ICON[appt.serviceType ?? ''] ?? '🔧'}</span>
+                      </div>
+
+                      <div className="flex items-center gap-3 mt-2">
+                        {techInitials ? (
+                          <span className={`flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs ${techStyle}`}>
+                            <span className="flex size-4 items-center justify-center rounded-full text-white" style={{ fontSize: 8, backgroundColor: techColor }}>
+                              {techInitials}
+                            </span>
+                            {appt.technicianName.split(' ')[0]}
                           </span>
-                          {techName.split(' ')[0]}
-                        </span>
-                      )}
-                      {!techName && (
-                        <span className="flex items-center gap-1 text-xs text-amber-600">
-                          <User size={11} /> Unassigned
-                        </span>
-                      )}
-                    </div>
-                    {canManageSchedule && (
-                      <div className="mt-3 grid md:grid-cols-[1fr_1fr_auto_auto] gap-2 items-center">
-                        <select
-                          defaultValue={job.technician?.id ?? job.assignedTechnicianId ?? ''}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            const nextTechId = e.target.value || undefined;
-                            updateSchedule(job.id, { assignedTechnicianId: nextTechId }, 'Technician assignment updated');
-                          }}
-                          className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs"
-                        >
-                          <option value="">Unassigned</option>
-                          {technicians.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                        </select>
-                        <input
-                          type="datetime-local"
-                          defaultValue={toLocalDatetimeInputValue(job.scheduledStart)}
-                          onClick={(e) => e.stopPropagation()}
-                          onBlur={(e) => {
-                            const iso = e.target.value ? new Date(e.target.value).toISOString() : null;
-                            updateSchedule(job.id, { scheduledStart: iso, status: iso ? 'scheduled' : 'new' }, iso ? 'Event rescheduled' : 'Event unscheduled');
-                          }}
-                          className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs"
-                        />
+                        ) : (
+                          <span className="flex items-center gap-1 text-xs text-amber-600">
+                            <User size={11} /> Unassigned
+                          </span>
+                        )}
+                        <span className="text-xs text-slate-400">{appt.status}</span>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex gap-2 mt-3">
                         <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            updateSchedule(job.id, { scheduledStart: null, status: 'new' }, 'Event removed from calendar');
-                          }}
-                          className="rounded-lg border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+                          onClick={() => navigate(`/appointments/${appt.id}/edit`)}
+                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-1"
                         >
-                          Remove
+                          <Briefcase size={11} /> Edit
+                        </button>
+                        <button
+                          onClick={() => setDelayApptId(appt.id)}
+                          className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-100 transition-colors flex items-center gap-1"
+                        >
+                          <Bell size={11} /> Notify delay
+                        </button>
+                        <button
+                          onClick={() => setDetailAppt(appt)}
+                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
+                        >
+                          Details
                         </button>
                       </div>
-                    )}
+                    </div>
                   </div>
-                </button>
+                </div>
               );
-            })}
+            })
+          }
         </div>
-      ))}
+      )}
+    </div>
 
-      {/* Technician availability summary (uses mock data until /api/technicians is available) */}
-      <div className="mt-6 rounded-xl bg-white border border-slate-200 px-4 py-4">
-        <h4 className="text-slate-700 mb-3">Team today</h4>
-        <div className="flex flex-col gap-3">
-          {technicians.map(tech => {
-              const techJobs = activeData.filter(j => {
-              const name = j.technician
-                ? [j.technician.firstName, j.technician.lastName].filter(Boolean).join(' ')
-                : null;
-              return name === tech.name;
-            });
-            return (
-              <div key={tech.id} className="flex items-center gap-3">
-                <span
-                  className="flex size-7 items-center justify-center rounded-full text-white text-xs shrink-0"
-                  style={{ backgroundColor: tech.color }}
-                >
-                  {tech.initials}
-                </span>
-                <div className="flex-1">
-                  <p className="text-sm text-slate-800">{tech.name}</p>
-                  <p className="text-xs text-slate-400">{techJobs.length} job{techJobs.length !== 1 ? 's' : ''} scheduled</p>
-                </div>
-                <div className="flex gap-1">
-                  {techJobs.map(j => (
-                    <span key={j.id} className="text-base">{SERVICE_ICON[j.serviceType ?? ''] ?? '🔧'}</span>
-                  ))}
-                  {techJobs.length === 0 && <span className="text-xs text-slate-400">Available</span>}
-                </div>
-              </div>
-            );
-          })}
+    {/* Delay notification modal */}
+    {delayApptId && (
+      <DelaySheet appointmentId={delayApptId} onClose={() => setDelayApptId(null)} />
+    )}
+
+    {/* Detail modal */}
+    {detailAppt && (
+      <div className="fixed inset-0 z-50 bg-black/50 flex items-end md:items-center justify-center p-4" onClick={() => setDetailAppt(null)}>
+        <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl p-5" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm text-slate-800">Appointment details</p>
+            <button onClick={() => setDetailAppt(null)}><X size={15} className="text-slate-400" /></button>
+          </div>
+          <div className="space-y-2">
+            <p className="text-sm text-slate-900 font-medium">{detailAppt.customerName}</p>
+            <p className="text-xs text-slate-500">{detailAppt.jobSummary}</p>
+            {detailAppt.serviceAddress && (
+              <p className="text-xs text-slate-500 flex items-center gap-1.5">
+                <MapPin size={11} className="text-slate-400" /> {detailAppt.serviceAddress}
+              </p>
+            )}
+            <p className="text-xs text-slate-500 flex items-center gap-1.5">
+              <Clock size={11} className="text-slate-400" />
+              {toTimeLabel(detailAppt.scheduledStart)} – {toTimeLabel(detailAppt.scheduledEnd)}
+            </p>
+            <p className="text-xs text-slate-500">Technician: {detailAppt.technicianName}</p>
+          </div>
+          <button
+            onClick={() => navigate(`/appointments/${detailAppt.id}/edit`)}
+            className="mt-4 w-full rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 transition-colors"
+          >
+            Edit appointment
+          </button>
         </div>
       </div>
-    </div>
+    )}
     </div>
   );
 }
