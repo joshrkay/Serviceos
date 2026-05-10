@@ -1290,7 +1290,7 @@ export function JobDetailView({ id }: { id: string }) {
               {job.status !== 'Completed' && job.status !== 'Canceled' && (
                 <select
                   className="text-xs rounded-lg border border-slate-200 px-2 py-1 text-slate-600 bg-white cursor-pointer hover:border-slate-300"
-                  value={apiJob?.status ?? ''}
+                  value=""
                   onChange={async (e) => {
                     const newStatus = e.target.value;
                     if (!newStatus) return;
@@ -1304,10 +1304,16 @@ export function JobDetailView({ id }: { id: string }) {
                   }}
                   title="Change job status"
                 >
-                  <option value="" disabled>Change status</option>
-                  {apiJob?.status !== 'scheduled' && <option value="scheduled">Scheduled</option>}
-                  {apiJob?.status !== 'in_progress' && <option value="in_progress">In Progress</option>}
-                  {apiJob?.status !== 'completed' && <option value="completed">Completed</option>}
+                  <option value="" disabled>Change status…</option>
+                  {/* Only show valid transitions from the current API status */}
+                  {apiJob?.status === 'new' && <option value="scheduled">→ Scheduled</option>}
+                  {apiJob?.status === 'scheduled' && <option value="in_progress">→ In Progress</option>}
+                  {apiJob?.status === 'in_progress' && (
+                    <>
+                      <option value="completed">→ Completed</option>
+                      <option value="scheduled">← Scheduled (reschedule)</option>
+                    </>
+                  )}
                 </select>
               )}
             </div>
