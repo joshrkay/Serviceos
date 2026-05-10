@@ -348,4 +348,105 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     const result = await runScriptLayer2(eligibleScript(), makeCtx());
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
   });
+
+  // ─── Codex P1 fix — grader cost tracker propagation ───────────────────────
+  //
+  // Before the fix, `runScriptLayer2` created a per-run `runCostTracker`,
+  // passed it to `runScript`'s context, but did not propagate it through
+  // to the LLM-judge graders. Graders used `ctx.gateway` directly, whose
+  // own cost tracker was set at construction time (suite-level), so the
+  // runner's `runCents` stayed near zero even when graders burned money.
+  //
+  // The fix wraps the base gateway with `wrapWithCostTracking({
+  //   bus: runBus, costTracker: runCostTracker })` inside `gradeOneRun`.
+  // The decorator reads `tokenUsage` off the response and accumulates
+  // cents into the per-run tracker. These tests verify (a) cents emitted
+  // by grader gateway calls land in the per-run tracker, and (b) those
+  // cents contribute to the per-script cost cap.
+
+  it('VQ2-fix — gradeOneRun gateway calls increment the per-run cost tracker', async () => {
+    // Wire a fake "real" gateway whose `complete()` returns a token-usage
+    // shape that the wrapper translates to a positive cents delta. The
+    // wrapper computes:
+    //   inputCents  = ceil(input  /1M * 300)
+    //   outputCents = ceil(output /1M * 1500)
+    // For input=100_000 + output=10_000 → 30 + 15 = 45 cents per call.
+    //
+    // The wrapper executes for every gateway.complete() call from the
+    // mocked graders. We force just gradeDispositionLlm to call
+    // gateway.complete() so we can assert a deterministic cents delta.
+    const fakeGateway = {
+      complete: vi.fn(async () => ({
+        content: 'noop',
+        model: 'haiku',
+        provider: 'fake',
+        latencyMs: 1,
+        tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+      })),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    const llmMock = gradeDispositionLlm as ReturnType<typeof vi.fn>;
+    // Mock impl receives the per-run-wrapped gateway and calls
+    // .complete() on it. The wrapper accumulates 45¢ per call into the
+    // per-run cost tracker.
+    llmMock.mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+
+    const script = eligibleScript();
+    const result = await runScriptLayer2(
+      script,
+      makeCtx({ gateway: fakeGateway, perRunCostCapCents: 10_000 }),
+    );
+
+    // 3 runs × 1 call/run × 45¢ = 135¢. The cost tracker spend is
+    // attributed to the runs' totals via the propagation fix.
+    expect(result.totalCostCents).toBe(135);
+    expect(result.costCapped).toBe(false);
+  });
+
+  it('VQ2-fix — accumulated grader cost contributes to per-script cost cap', async () => {
+    // Spend 200¢ per gateway.complete() call: input=400_000 (120¢) +
+    // output=53_334 (≈80¢, rounded up by ceil) = 200¢ delta. With a
+    // per-script cap of 100¢, the cap should fire after run 1.
+    const fakeGateway = {
+      complete: vi.fn(async () => ({
+        content: 'noop',
+        model: 'haiku',
+        provider: 'fake',
+        latencyMs: 1,
+        tokenUsage: { input: 400_000, output: 53_334, total: 453_334 },
+      })),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    const llmMock = gradeDispositionLlm as ReturnType<typeof vi.fn>;
+    llmMock.mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+
+    const script = eligibleScript();
+    await expect(
+      runScriptLayer2(
+        script,
+        makeCtx({ gateway: fakeGateway, perRunCostCapCents: 100 }),
+      ),
+    ).rejects.toBeInstanceOf(CostCapExceededError);
+
+    // After run 1, runCents = 200, which exceeds the 100¢ cap. The cap
+    // check happens AFTER the run completes (post per-script accumulator
+    // update), so run 1 will have finished before the throw.
+    expect(harness.runScriptCalls).toBe(1);
+  });
 });

@@ -342,6 +342,39 @@ describe('Voice Quality Layer 2 — corpus', () => {
       ).toBe(true);
     },
   );
+
+  // Codex P1 fix — launchGate.pass enforcement.
+  //
+  // The pre-deploy CI workflow gates release on the exit status of
+  // `npm run voice-quality:layer2`. Before this assertion existed,
+  // the suite could exit 0 even when `buildLayer2Report(...).launchGate.pass`
+  // was false: regressions in TTFA P95, perceived-completion rate,
+  // overall pass rate, or cost-capped scripts all slipped through
+  // because the per-script `it.each` block only checked the floor.
+  //
+  // This final `it` runs after the `it.each` block (vitest preserves
+  // source-order test enqueue), rebuilds the launch-gate verdict from
+  // the same `suiteState.perScriptResults` the `afterAll` will write
+  // to disk, and asserts `pass === true`. When false, the assertion
+  // message names every blocker so the CI consumer can act without
+  // opening the report file.
+  it('VQ2-LAYER2 — launch gate verdict', () => {
+    // Empty-corpus / no-keys skip paths are handled by the early
+    // returns above (the surrounding `describe` returns before
+    // reaching this block). If we somehow arrive here with no
+    // recorded results, treat that as "no data" and skip rather than
+    // fail — the launch gate consumer interprets an empty report the
+    // same way.
+    if (suiteState.perScriptResults.length === 0) return;
+
+    const report = buildLayer2Report(suiteState.perScriptResults);
+    expect(
+      report.launchGate.pass,
+      `Layer 2 launch gate failed:\n${report.launchGate.blockers.join(
+        '\n',
+      )}\nMeasured: ${JSON.stringify(report.launchGate.measured, null, 2)}`,
+    ).toBe(true);
+  });
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

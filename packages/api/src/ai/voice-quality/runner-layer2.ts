@@ -58,6 +58,8 @@ import { gradePerceivedCompletion } from './graders/perceived-completion';
 import { aggregate } from './voting/majority-vote';
 import type { AggregatedResult, PerRunResult } from './voting/majority-vote';
 import type { LLMGateway } from '../gateway/gateway';
+import { wrapWithCostTracking } from './audio/real-llm-gateway-factory';
+import { AgentEventBus } from './event-bus';
 
 /**
  * ~$3.50 per script across 3 runs (i.e. the script's worst-case ceiling).
@@ -211,9 +213,26 @@ function resolveGateway(ctx: RunScriptLayer2Context, scriptId: string): LLMGatew
 async function gradeOneRun(
   observation: import('./observation').Observation,
   script: VoiceQualityScript,
-  gateway: LLMGateway,
+  baseGateway: LLMGateway,
   perceivedCompletionCache: Map<string, import('./graders/perceived-completion').PerceivedCompletionVerdict>,
+  runCostTracker: CostTracker,
+  bus: AgentEventBus,
 ): Promise<PerRunResult> {
+  // Codex P1 fix — propagate the per-run cost tracker through the
+  // grader gateway calls. The graders (`gradeDispositionLlm`,
+  // `gradeRepromptAndRecovery`, `gradePerceivedCompletion`) call
+  // `gateway.complete()`. The base gateway already carries the
+  // suite-level cost tracker (set at construction time by
+  // `createRealLayerTwoGateway`), but the runner's per-run `runCents`
+  // would stay near zero even when judges burn money. Layering a per-
+  // run cost-tracking wrapper here makes `runCents` (and thus the
+  // per-script cap) actually reflect grader spend in production. For
+  // mock gateways with no `tokenUsage` on responses, the wrapper is a
+  // no-op — which is the correct behavior in tests.
+  const gateway = wrapWithCostTracking(baseGateway, {
+    bus,
+    costTracker: runCostTracker,
+  });
   const floor = gradeFloor(observation, script);
   const dispStruct = gradeDispositionStructured(observation, script);
   const dispLlm = await gradeDispositionLlm({ observation, script, gateway });
@@ -299,7 +318,20 @@ export async function runScriptLayer2(
     try {
       const { observation } = await runScript(script, ctxForRun);
       const gateway = resolveGateway(ctx, script.id);
-      runResult = await gradeOneRun(observation, script, gateway, perceivedCompletionCache);
+      // Reuse the ctx bus when present so cost_incurred events emitted
+      // by the wrapper land on the same bus the run is observing.
+      // Fall back to a throwaway bus when no bus is wired in (unit
+      // tests with mock gateways) — the wrapper still needs a bus
+      // reference but no consumer is listening.
+      const runBus = ctx.bus ?? new AgentEventBus();
+      runResult = await gradeOneRun(
+        observation,
+        script,
+        gateway,
+        perceivedCompletionCache,
+        runCostTracker,
+        runBus,
+      );
     } catch (err) {
       // Cost-cap errors propagate (suite-cap may bubble through here in
       // edge cases); everything else degrades to a fail-everything run
