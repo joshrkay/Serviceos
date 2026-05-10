@@ -90,7 +90,6 @@ export const router = createBrowserRouter([
       { path: 'customers/:id',  Component: CustomerDetailPage },
       { path: 'customers/:id/edit', Component: CustomerEditRoute },
       { path: 'appointments/:id/edit', Component: AppointmentEditRoute },
-      { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'leads',          Component: LeadsPage       },
       { path: 'estimates',      Component: EstimatesPage   },
       { path: 'estimates/new',  Component: EstimateCreate  },
