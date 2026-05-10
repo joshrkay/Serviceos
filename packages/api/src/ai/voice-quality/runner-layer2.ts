@@ -232,30 +232,29 @@ async function gradeOneRun(
   baseGateway: LLMGateway,
   perceivedCompletionCache: Map<string, import('./graders/perceived-completion').PerceivedCompletionVerdict>,
   bus: AgentEventBus,
-): Promise<{ result: PerRunResult; graderCents: number }> {
-  // Codex P1 round 2 — keep grader cost in its own tracker so the
-  // caller can decide independently how much of it to forward to the
-  // suite tracker. The previous shape mingled grader cents with the
-  // per-run cost tracker (`runCostTracker`), and the suite-tracker
-  // forward gate then had to choose between dropping ALL non-gateway
-  // run costs (when `gatewayReportsToSuiteTracker: true`) or double-
-  // counting grader cents. Splitting graders out lets the runner
-  // forward only non-gateway run costs unconditionally and then add
-  // graderCents only when the gateway is NOT pre-wired to the suite
-  // tracker.
+  graderTracker: CostTracker,
+): Promise<PerRunResult> {
+  // Codex P1 round 3 — `graderTracker` is now OWNED by the caller
+  // (`runScriptLayer2`) and passed in. Previously it was allocated
+  // inside this function and the accumulated cents returned alongside
+  // the result on the success path. If a grader threw mid-run (e.g.,
+  // malformed LLM output from a real gateway), the destructuring in
+  // the caller never ran and the catch handler reset `graderCents` to
+  // 0, silently dropping any cents that had already been burned (and
+  // already reported via wrap-1 to the suite tracker in real-mode).
+  // That let per-script and suite caps fail to trip even after real
+  // spend exceeded them.
+  //
+  // Lifting tracker ownership to the loop means the cents accumulated
+  // before the throw survive the catch — the loop reads
+  // `graderTracker.totalCents()` after the try/catch regardless of
+  // outcome. Wrap-#1/wrap-#2/gatewayReportsToSuiteTracker semantics
+  // are preserved because the inner wrap below still feeds the same
+  // tracker; the only change is who allocates it.
   //
   // For mock gateways with no `tokenUsage` on responses, the wrapper
-  // is a no-op (graderCents stays 0) — which is the correct behavior
+  // is a no-op (graderTracker stays 0) — which is the correct behavior
   // in tests.
-  let graderCents = 0;
-  const graderTracker: CostTracker = {
-    addCents(n: number) {
-      graderCents += n;
-    },
-    totalCents() {
-      return graderCents;
-    },
-  };
   const gateway = wrapWithCostTracking(baseGateway, {
     bus,
     costTracker: graderTracker,
@@ -273,29 +272,26 @@ async function gradeOneRun(
   });
 
   return {
-    result: {
-      floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
-      disposition: {
-        // Hard-disposition pass requires BOTH the structured grader's
-        // verdict AND the LLM grader's verdict (criterion 12 + soft slot
-        // 10). Either failure flips this run to disposition-fail.
-        passed: dispStruct.passed && dispLlm.failedCriteria.length === 0,
-        failedCriteria: [...dispStruct.failedCriteria, ...dispLlm.failedCriteria],
-        slotValues: mergeSlotValues(dispStruct.perTurnDetail),
-      },
-      callerExperience: {
-        ttfaMs: callerExp.ttfaP95Ms,
-        lookupMs: callerExp.lookupP95Ms,
-        durationMs: callerExp.totalDurationMs,
-        repromptRatio: reprompt.repromptRatio,
-        recoveryTurns: reprompt.recoveryTurns,
-      },
-      perceivedCompletion: {
-        satisfaction: perceived.verdict.perceivedSatisfaction,
-        abandonmentRisk: perceived.verdict.abandonmentRisk,
-      },
+    floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
+    disposition: {
+      // Hard-disposition pass requires BOTH the structured grader's
+      // verdict AND the LLM grader's verdict (criterion 12 + soft slot
+      // 10). Either failure flips this run to disposition-fail.
+      passed: dispStruct.passed && dispLlm.failedCriteria.length === 0,
+      failedCriteria: [...dispStruct.failedCriteria, ...dispLlm.failedCriteria],
+      slotValues: mergeSlotValues(dispStruct.perTurnDetail),
     },
-    graderCents,
+    callerExperience: {
+      ttfaMs: callerExp.ttfaP95Ms,
+      lookupMs: callerExp.lookupP95Ms,
+      durationMs: callerExp.totalDurationMs,
+      repromptRatio: reprompt.repromptRatio,
+      recoveryTurns: reprompt.recoveryTurns,
+    },
+    perceivedCompletion: {
+      satisfaction: perceived.verdict.perceivedSatisfaction,
+      abandonmentRisk: perceived.verdict.abandonmentRisk,
+    },
   };
 }
 
@@ -344,8 +340,23 @@ export async function runScriptLayer2(
       costTracker: runCostTracker,
     };
 
-    let runResult: PerRunResult;
+    // Codex P1 round 3 — hoist graderTracker ownership to the loop so
+    // the cents accumulated by grader gateway calls survive a mid-run
+    // throw. Before, gradeOneRun allocated this tracker internally and
+    // returned its total via the success path; a throw mid-grader-chain
+    // meant the cents were silently dropped, defeating per-script and
+    // suite-cap accounting in error-heavy real-gateway runs.
     let graderCents = 0;
+    const graderTracker: CostTracker = {
+      addCents(n: number) {
+        graderCents += n;
+      },
+      totalCents() {
+        return graderCents;
+      },
+    };
+
+    let runResult: PerRunResult;
     try {
       const { observation } = await runScript(script, ctxForRun);
       const gateway = resolveGateway(ctx, script.id);
@@ -355,19 +366,20 @@ export async function runScriptLayer2(
       // tests with mock gateways) — the wrapper still needs a bus
       // reference but no consumer is listening.
       const runBus = ctx.bus ?? new AgentEventBus();
-      const graded = await gradeOneRun(
+      runResult = await gradeOneRun(
         observation,
         script,
         gateway,
         perceivedCompletionCache,
         runBus,
+        graderTracker,
       );
-      runResult = graded.result;
-      graderCents = graded.graderCents;
     } catch (err) {
       // Cost-cap errors propagate (suite-cap may bubble through here in
       // edge cases); everything else degrades to a fail-everything run
-      // so 2/3 voting can still produce signal.
+      // so 2/3 voting can still produce signal. graderCents already
+      // reflects any partial spend the failed run incurred before the
+      // throw — the caller-owned tracker survives the catch.
       if (err instanceof CostCapExceededError) throw err;
       runResult = failEverythingRun();
     }

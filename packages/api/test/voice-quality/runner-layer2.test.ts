@@ -676,4 +676,306 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     // 150¢ runCents + 135¢ graderCents = 285¢. Runner forwards both.
     expect(suiteTracker.totalCents()).toBe(285);
   });
+
+  // ─── Codex P1 round 3 — partial-spend capture on failed runs ──────────────
+  //
+  // Round 2 split grader cents into a dedicated `graderTracker` allocated
+  // inside `gradeOneRun`. The tracker's accumulated total was returned to
+  // the caller via the success-path destructuring: `{ result, graderCents }`.
+  // When a grader threw mid-chain (e.g., the LLM judge produced malformed
+  // JSON on the 2nd grader after the 1st had already burned tokens), the
+  // destructuring never executed and the catch handler left the loop's
+  // `graderCents` local at its initial `0`, silently dropping the partial
+  // spend. In real-gateway runs this caused both the per-script cap and
+  // suite cap to fail to trip after real money had been burned.
+  //
+  // Round 3 lifts the tracker to the loop and passes it INTO gradeOneRun
+  // as a parameter. The tracker accumulates cents in-place via the
+  // gateway wrapper's `addCents` calls, so the loop reads the partial
+  // total after the try/catch regardless of run outcome.
+
+  it('VQ2-fix-3a — partial grader cents survive a mid-run throw and land in suite tracker (mock-mode)', async () => {
+    // Mock-mode (`gatewayReportsToSuiteTracker: false/undefined`): the
+    // gateway is NOT pre-wrapped with the suite tracker, so the runner's
+    // explicit forward is the ONLY suite-side path for grader cents. If
+    // the catch dropped graderCents, the suite tracker would be missing
+    // partial spend from the failed run.
+    //
+    // Setup:
+    //   - runScript adds 50¢/run of non-gateway cost (3 × 50 = 150¢)
+    //   - dispLlm calls gateway.complete() once with tokenUsage that
+    //     resolves to 45¢ via wrap-2 (input=100k → 30¢, output=10k → 15¢)
+    //   - On run #2, after the dispLlm call lands its 45¢ in graderTracker,
+    //     the SECOND `gateway.complete()` (issued by the reprompt grader)
+    //     throws. gradeOneRun bubbles the throw; the loop catch converts
+    //     the run to fail-everything but the 45¢ already in graderTracker
+    //     must survive.
+    //   - Expected total in suite tracker = 150¢ runCents + 3 × 45¢
+    //     graderCents (run 1 success, run 2 partial-then-fail, run 3
+    //     success) = 285¢.
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    // Per-call counter shared across runs. Run 2 = calls 3,4 (1-indexed):
+    // 1 (run1.dispLlm), 2 (run1.reprompt-or-perceived), 3 (run2.dispLlm),
+    // 4 (run2.reprompt → throw). We trigger the throw on the 4th call so
+    // run 2's first grader call has already accumulated 45¢ into the
+    // grader tracker before the failure.
+    let completeCallCount = 0;
+    const fakeGateway = {
+      complete: vi.fn(async () => {
+        completeCallCount++;
+        if (completeCallCount === 4) {
+          throw new Error('stubbed malformed-LLM-output mid-run failure');
+        }
+        return {
+          content: 'noop',
+          model: 'haiku',
+          provider: 'fake',
+          latencyMs: 1,
+          tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+        };
+      }),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    const { gradeRepromptAndRecovery } = await import(
+      '../../src/ai/voice-quality/graders/caller-experience'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+    (gradeRepromptAndRecovery as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        // Will throw on the 4th overall complete() call (run 2's reprompt grader).
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return {
+          totalTurns: 1,
+          repromptCount: 0,
+          repromptRatio: 0,
+          recoveryTurns: 0,
+          perTurnReprompts: [false],
+          passes: { repromptRatio: true, recovery: true },
+        };
+      },
+    );
+
+    const script = eligibleScript();
+    const result = await runScriptLayer2(
+      script,
+      makeCtx({
+        gateway: fakeGateway,
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        // gatewayReportsToSuiteTracker omitted → mock-mode
+      }),
+    );
+
+    // Call ledger (dispLlm + reprompt issue one complete() each per run):
+    //   Run 1: call 1 (dispLlm, ok) + call 2 (reprompt, ok)         = 2 × 45¢
+    //   Run 2: call 3 (dispLlm, ok) + call 4 (reprompt, THROWS)     = 1 × 45¢
+    //          → run is fail-everything but the 45¢ already in graderTracker
+    //            survives (round 3 fix: caller owns the tracker)
+    //   Run 3: call 5 (dispLlm, ok) + call 6 (reprompt, ok)         = 2 × 45¢
+    //   Total successful calls = 5 × 45¢ = 225¢ graderCents
+    //
+    // Suite total = 150¢ runCents (3 × 50) + 225¢ graderCents = 375¢.
+    // Pre-fix, run 2's 45¢ would have been dropped (caller's local
+    // `graderCents = 0` after catch), giving 150 + 180 = 330¢.
+    expect(suiteTracker.totalCents()).toBe(375);
+    expect(result.totalCostCents).toBe(375);
+    // Run 2 should be encoded as fail-everything.
+    expect(result.perRunResults[1].floor.passed).toBe(false);
+    // Runs 1 and 3 passed.
+    expect(result.perRunResults[0].floor.passed).toBe(true);
+    expect(result.perRunResults[2].floor.passed).toBe(true);
+  });
+
+  it('VQ2-fix-3b — partial grader cents survive a mid-run throw without double-counting in suite tracker (real-mode)', async () => {
+    // Real-mode (`gatewayReportsToSuiteTracker: true`): wrap-1 of
+    // `createRealLayerTwoGateway` already increments the suite tracker
+    // per `gateway.complete()` call, so the runner does NOT add
+    // graderCents to suite. Partial-spend on the failed run must still
+    // be reflected in:
+    //   (a) the suite tracker via wrap-1 (the gateway writes once per call)
+    //   (b) the runner's per-script `scriptCostCents` (via graderTracker
+    //       survival across the catch) so the per-script cap can still
+    //       trip on partial spend.
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    // Simulated wrap-1 effect: every successful gateway.complete() bumps
+    // the suite tracker. The 4th call throws BEFORE any wrap-1 write, so
+    // wrap-1 records 3 successful calls.
+    let completeCallCount = 0;
+    const fakeGateway = {
+      complete: vi.fn(async () => {
+        completeCallCount++;
+        if (completeCallCount === 4) {
+          throw new Error('stubbed malformed-LLM-output mid-run failure');
+        }
+        // Wrap-1 simulation: real-mode pre-wrapping would credit the suite
+        // tracker for this call's cost (45¢ at our token shape).
+        suiteTracker.addCents(45);
+        return {
+          content: 'noop',
+          model: 'haiku',
+          provider: 'fake',
+          latencyMs: 1,
+          tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+        };
+      }),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    const { gradeRepromptAndRecovery } = await import(
+      '../../src/ai/voice-quality/graders/caller-experience'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+    (gradeRepromptAndRecovery as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return {
+          totalTurns: 1,
+          repromptCount: 0,
+          repromptRatio: 0,
+          recoveryTurns: 0,
+          perTurnReprompts: [false],
+          passes: { repromptRatio: true, recovery: true },
+        };
+      },
+    );
+
+    const script = eligibleScript();
+    const result = await runScriptLayer2(
+      script,
+      makeCtx({
+        gateway: fakeGateway,
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        gatewayReportsToSuiteTracker: true,
+      }),
+    );
+
+    // Call ledger:
+    //   Run 1: dispLlm (call 1, ok) + reprompt (call 2, ok)
+    //   Run 2: dispLlm (call 3, ok) + reprompt (call 4, THROWS)
+    //   Run 3: dispLlm (call 5, ok) + reprompt (call 6, ok)
+    // The fake throws BEFORE `suiteTracker.addCents(45)` runs on call 4,
+    // so wrap-1 credits 5 successful calls × 45¢ = 225¢ to the suite
+    // tracker. The runner also forwards runCents (3 × 50 = 150¢). The
+    // runner does NOT add graderCents (gatewayReportsToSuiteTracker=true).
+    //   suite = 225 (wrap-1) + 150 (runner runCents forward) = 375¢
+    expect(suiteTracker.totalCents()).toBe(375);
+
+    // Per-script (`scriptCostCents`) accumulates BOTH runCents AND the
+    // runner's caller-owned graderTracker. graderTracker receives 5
+    // successful complete() calls × 45¢ = 225¢ via wrap-2. Critically,
+    // run 2's first call (45¢) survived the catch — without round 3,
+    // the destructuring drop would have reset run 2's graderCents to 0
+    // and totalCostCents would have been 150 + (45+0+90) = 285¢.
+    //   per-script = 150¢ runCents + 225¢ graderCents = 375¢
+    expect(result.totalCostCents).toBe(375);
+    // Run 2 still encoded as fail-everything despite the partial spend.
+    expect(result.perRunResults[1].floor.passed).toBe(false);
+  });
+
+  it('VQ2-fix-3 — partial grader spend on a failed run still trips the per-script cap', async () => {
+    // Edge case: if the partial spend on a failed run pushes scriptCostCents
+    // past the per-script cap, the cap should still throw after the catch.
+    // Before round 3, the dropped graderCents would have let the cap NOT
+    // trip even when real spend exceeded it.
+    harness.runScriptCostsCents = [0]; // tiny non-gateway cost; we want graderCents to dominate.
+
+    let completeCallCount = 0;
+    const fakeGateway = {
+      complete: vi.fn(async () => {
+        completeCallCount++;
+        if (completeCallCount === 2) {
+          throw new Error('stubbed mid-run grader failure');
+        }
+        return {
+          content: 'noop',
+          model: 'haiku',
+          provider: 'fake',
+          latencyMs: 1,
+          // 200¢ per call: input=400k → 120¢, output=53_334 → 80¢ (ceil)
+          tokenUsage: { input: 400_000, output: 53_334, total: 453_334 },
+        };
+      }),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    const { gradeRepromptAndRecovery } = await import(
+      '../../src/ai/voice-quality/graders/caller-experience'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+    (gradeRepromptAndRecovery as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        // Throws via the gateway's 2nd-call rejection.
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return {
+          totalTurns: 1,
+          repromptCount: 0,
+          repromptRatio: 0,
+          recoveryTurns: 0,
+          perTurnReprompts: [false],
+          passes: { repromptRatio: true, recovery: true },
+        };
+      },
+    );
+
+    const script = eligibleScript();
+    await expect(
+      runScriptLayer2(
+        script,
+        makeCtx({ gateway: fakeGateway, perRunCostCapCents: 100 }),
+      ),
+    ).rejects.toBeInstanceOf(CostCapExceededError);
+
+    // Run 1: dispLlm succeeds → +200¢ in graderTracker. reprompt throws on
+    // 2nd complete(). graderCents survives the catch = 200¢. scriptCostCents
+    // = 0 + 200 = 200¢ > 100¢ cap → throws. Pre-fix this would have been
+    // scriptCostCents = 0 + 0 = 0 (cap miss).
+    expect(harness.runScriptCalls).toBe(1);
+  });
 });
