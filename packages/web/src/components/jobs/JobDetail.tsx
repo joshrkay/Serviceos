@@ -948,7 +948,7 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
 export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
 
-  const { data: apiJob, isLoading, error } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
+  const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
   const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
 
   const job      = apiJob ? buildJobCompat(apiJob) : null;
@@ -1169,6 +1169,8 @@ export function JobDetailView({ id }: { id: string }) {
                     if (!newStatus) return;
                     try {
                       await transitionJob({ status: newStatus });
+                      // Reload job data to reflect new status in UI
+                      await refetchJob();
                     } catch {
                       // non-fatal: reload will reflect actual state
                     }

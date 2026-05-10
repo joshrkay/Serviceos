@@ -427,6 +427,11 @@ export function CustomerDetailPage() {
     customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
     { enabled: Boolean(customerId) && Boolean(found) },
   );
+  // Real jobs from API for this customer (must be called before early returns)
+  const { data: apiRealJobs } = useListQuery<{ id: string; jobNumber: string; summary: string; status: string; createdAt?: string }>(
+    `/api/jobs?customerId=${id ?? ''}`,
+    { enabled: Boolean(id) }
+  );
   const [tab,              setTab]           = useState<Tab>('history');
   const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
@@ -460,12 +465,6 @@ export function CustomerDetailPage() {
   const initials        = found.name.split(' ').map(n => n[0]).join('');
   const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
   const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
-
-  // Real jobs from API for this customer (overrides mock data for the history count)
-  const { data: apiRealJobs } = useListQuery<{ id: string; jobNumber: string; summary: string; status: string; createdAt?: string }>(
-    `/api/jobs?customerId=${id}`,
-    { enabled: Boolean(id) }
-  );
 
   const custJobs      = jobs.filter(j => j.customerId === id);
   const custEstimates = estimates.filter(e => e.customerId === id);

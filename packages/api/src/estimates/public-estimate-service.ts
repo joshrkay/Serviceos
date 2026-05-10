@@ -1,6 +1,7 @@
 import { Estimate, EstimateRepository } from './estimate';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
+import { LocationRepository } from '../locations/location';
 import { SettingsRepository } from '../settings/settings';
 import { evaluateDepositRule, deriveDepositStatus } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
@@ -116,6 +117,7 @@ export interface PublicEstimateServiceDeps {
   estimateRepo: EstimateRepository;
   jobRepo: JobRepository;
   customerRepo: CustomerRepository;
+  locationRepo?: LocationRepository;
   settingsRepo: SettingsRepository;
   stripeConfig?: DepositStripeConfig | null;
   stripeFetch?: DepositStripeFetch;
@@ -292,6 +294,17 @@ export class PublicEstimateService {
       ? await this.deps.customerRepo.findById(estimate.tenantId, job.customerId)
       : null;
     const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
+
+    // Fetch the job's service location for the approval page (QA 5.14)
+    let serviceAddress: string | undefined;
+    if (job?.locationId && this.deps.locationRepo) {
+      const locs = await this.deps.locationRepo.findByCustomer(estimate.tenantId, job.customerId);
+      const loc = locs.find(l => l.id === job.locationId);
+      if (loc) {
+        serviceAddress = [loc.street1, loc.city, loc.state, loc.postalCode]
+          .filter(Boolean).join(', ');
+      }
+    }
     const isExpired = this.isExpired(estimate);
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
 
@@ -336,6 +349,7 @@ export class PublicEstimateService {
       estimateNumber: estimate.estimateNumber,
       status: estimate.status,
       customerName: customer?.displayName ?? 'Customer',
+      customerAddress: serviceAddress,
       businessName: settings?.businessName ?? 'Service team',
       // Settings types now allow null on optional string columns
       // (Codex P2 PR #316). mapRow normalizes NULL→undefined for Pg

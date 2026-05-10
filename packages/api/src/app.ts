@@ -1235,6 +1235,7 @@ export function createApp(): express.Express {
     estimateRepo,
     jobRepo,
     customerRepo,
+    locationRepo,
     settingsRepo,
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
