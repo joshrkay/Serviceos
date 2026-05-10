@@ -288,6 +288,9 @@ import {
   NextCustomerSelector,
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
+import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
+import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { createInteractionsRouter } from './routes/interactions';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -970,6 +973,16 @@ export function createApp(): express.Express {
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
+  const schedulingConfirmationNotifier = messageDelivery
+    ? new AppointmentConfirmationNotifier({
+        delivery: messageDelivery,
+        appointmentRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dispatchRepo,
+      })
+    : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
@@ -980,6 +993,7 @@ export function createApp(): express.Express {
     paymentRepo,
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
+    schedulingNotifier: schedulingConfirmationNotifier,
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
@@ -1073,8 +1087,11 @@ export function createApp(): express.Express {
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
   );
+  const delayNotificationService = messageDelivery
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    : new NoopDelayNotificationService();
   const delayNotificationWorker = createDelayNotificationWorker({
-    service: new NoopDelayNotificationService(),
+    service: delayNotificationService,
     stateRepo: delayNoticeStateRepo,
     analyticsRepo: dispatchAnalyticsRepo,
   });
@@ -1830,7 +1847,7 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     })
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
+  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
 
@@ -2018,6 +2035,12 @@ export function createApp(): express.Express {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+  app.use('/api/interactions', createInteractionsRouter({
+    dispatchRepo,
+    jobRepo,
+    estimateRepo,
+    invoiceRepo,
+  }));
 
   // ── Service agreements (P9-003) ─────────────────────────────────────────
   // Recurring service contracts auto-generate a job + draft invoice on

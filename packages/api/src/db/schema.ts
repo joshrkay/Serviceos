@@ -2452,6 +2452,22 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_voice_sessions_call_sid
       ON voice_sessions (call_sid) WHERE call_sid IS NOT NULL;
   `,
+
+  // 092 — extend message_dispatches entity_type to support appointment
+  // confirmation notices and delay notices. The original CHECK limited
+  // the column to ('estimate','invoice'); new dispatch types require
+  // the constraint to be widened. We drop the old constraint by name
+  // and add the replacement in a single migration so it's idempotent
+  // across environments that may already be on the new definition.
+  '092_extend_dispatch_entity_types': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'delay_notice'));
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_sent_at
+      ON message_dispatches (tenant_id, sent_at DESC);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
