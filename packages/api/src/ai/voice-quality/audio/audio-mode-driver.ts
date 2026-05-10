@@ -60,6 +60,7 @@ import type {
 } from '../text-mode-driver';
 import type { AgentEventBus } from '../event-bus';
 import type { VoiceSessionStore } from '../../agents/customer-calling/voice-session-store';
+import { speechOutboundEvent } from '../events';
 import type { TwilioStreamEmulator } from './twilio-stream-emulator';
 import type { WhisperRealProvider } from './whisper-real-provider';
 import type { TtsFixtureCache, SupportedVoice } from './tts-fixture-cache';
@@ -173,6 +174,19 @@ export class AudioModeDriver implements AgentDriver {
         agentTranscript = '';
       }
     }
+
+    // VQ2-followup: stamp the recovered agent transcript on the bus so
+    // perceived-completion + reprompt graders can read the actual
+    // caller-perceived utterance per turn (instead of leaning on the
+    // script's `expected.spokenAnswerMatches` placeholder). `turnIdx`
+    // is the just-completed turn's zero-indexed position — captured
+    // before `this.turnIndex` was incremented above.
+    this.deps.bus.record(
+      speechOutboundEvent({
+        transcript: agentTranscript,
+        turnIndex: turnIdx,
+      }),
+    );
 
     return {
       agentResponse: agentTranscript,

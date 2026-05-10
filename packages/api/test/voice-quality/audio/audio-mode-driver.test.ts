@@ -332,4 +332,82 @@ describe('VQ2-008 — AudioModeDriver', () => {
 
     expect(emulator.sendCallerUtterance.mock.calls.map((c) => c[1])).toEqual([0, 1, 2]);
   });
+
+  it('VQ2-followup — speak() emits speech_outbound on the bus with the Whisper transcript and monotonic turnIndex', async () => {
+    const { deps, voiceSessionStore, bus } = makeDeps();
+    cleanups.push(() => voiceSessionStore.dispose());
+    // Pin distinct Whisper outputs per call so we can assert each turn
+    // carries the right transcript.
+    const whisperOutputs = ['hello caller', 'second reply', 'third reply'];
+    const whisper: MockWhisper = {
+      transcribeBuffer: vi
+        .fn()
+        .mockResolvedValueOnce(whisperOutputs[0])
+        .mockResolvedValueOnce(whisperOutputs[1])
+        .mockResolvedValueOnce(whisperOutputs[2]),
+    };
+    const driver = new AudioModeDriver({
+      ...deps,
+      whisper: whisper as unknown as WhisperRealProvider,
+    });
+    const { sessionId } = await driver.startSession(START_OPTS);
+
+    await driver.speak(sessionId, 'turn 0');
+    await driver.speak(sessionId, 'turn 1');
+    await driver.speak(sessionId, 'turn 2');
+
+    const captured = bus.filterByType('speech_outbound');
+    expect(captured).toHaveLength(3);
+    expect(captured.map((e) => e.turnIndex)).toEqual([0, 1, 2]);
+    expect(captured.map((e) => e.transcript)).toEqual(whisperOutputs);
+    // ts is stamped by the constructor — must be a number, not undefined.
+    for (const e of captured) {
+      expect(typeof e.ts).toBe('number');
+    }
+  });
+
+  it('VQ2-followup — speak() emits speech_outbound with empty transcript when Whisper transcription fails', async () => {
+    const { deps, voiceSessionStore, bus } = makeDeps();
+    cleanups.push(() => voiceSessionStore.dispose());
+    const whisper: MockWhisper = {
+      transcribeBuffer: vi.fn().mockRejectedValue(new Error('whisper exploded')),
+    };
+    const driver = new AudioModeDriver({
+      ...deps,
+      whisper: whisper as unknown as WhisperRealProvider,
+    });
+    const { sessionId } = await driver.startSession(START_OPTS);
+
+    await driver.speak(sessionId, 'will fail to whisper');
+
+    const captured = bus.filterByType('speech_outbound');
+    expect(captured).toHaveLength(1);
+    expect(captured[0].turnIndex).toBe(0);
+    // Whisper threw → driver swallowed the error → empty transcript still
+    // emitted so graders see the gap.
+    expect(captured[0].transcript).toBe('');
+  });
+
+  it('VQ2-followup — speak() emits speech_outbound with empty transcript when emulator returns zero-length agent audio', async () => {
+    const { deps, voiceSessionStore, bus } = makeDeps();
+    cleanups.push(() => voiceSessionStore.dispose());
+    const emulator = makeMockEmulator({
+      agentAudio: Buffer.alloc(0),
+      ttfaMs: 0,
+      numFrames: 0,
+      totalBytesIn: 0,
+    });
+    const driver = new AudioModeDriver({
+      ...deps,
+      emulator: emulator as unknown as TwilioStreamEmulator,
+    });
+    const { sessionId } = await driver.startSession(START_OPTS);
+
+    await driver.speak(sessionId, 'silent agent');
+
+    const captured = bus.filterByType('speech_outbound');
+    expect(captured).toHaveLength(1);
+    expect(captured[0].turnIndex).toBe(0);
+    expect(captured[0].transcript).toBe('');
+  });
 });

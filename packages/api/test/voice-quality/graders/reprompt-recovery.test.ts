@@ -19,6 +19,7 @@ import type { VoiceQualityScript } from '../../../src/ai/voice-quality/schema';
 import type { Proposal } from '../../../src/proposals/proposal';
 import type { LLMGateway, LLMRequest, LLMResponse, LLMProvider } from '../../../src/ai/gateway/gateway';
 import { LLMGateway as LLMGatewayClass } from '../../../src/ai/gateway/gateway';
+import type { VoiceSessionEvent } from '../../../src/ai/agents/customer-calling/voice-session-store';
 
 function makeScript(turnCount: number): VoiceQualityScript {
   return {
@@ -253,6 +254,135 @@ describe('VQ2-011 — gradeRepromptAndRecovery', () => {
     });
     expect(result.repromptCount).toBe(0);
     expect(result.perTurnReprompts).toEqual([false, false]);
+  });
+
+  it('VQ2-followup — judgeOneTurn uses speech_outbound transcript over expected.spokenAnswerMatches when both present', async () => {
+    // Capture the user prompt the gateway sees so we can confirm which
+    // transcript source the grader picked.
+    const observedPrompts: string[] = [];
+    const provider: LLMProvider = {
+      name: 'mock',
+      async complete(req: LLMRequest): Promise<LLMResponse> {
+        const userMsg = req.messages.find((m) => m.role === 'user');
+        observedPrompts.push(userMsg?.content ?? '');
+        return {
+          content: repromptVerdict(false),
+          model: 'mock-model',
+          provider: 'mock',
+          latencyMs: 1,
+          tokenUsage: { input: 10, output: 10, total: 20 },
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>([['mock', provider]]);
+    const gateway = new LLMGatewayClass({ defaultProvider: 'mock' }, providers);
+
+    const script = makeScript(2);
+    const observation = makeObservation({
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: 'recovered transcript turn 0',
+          turnIndex: 0,
+          ts: 1000,
+        } as VoiceSessionEvent,
+        {
+          type: 'speech_outbound',
+          transcript: 'recovered transcript turn 1',
+          turnIndex: 1,
+          ts: 2000,
+        } as VoiceSessionEvent,
+      ],
+    });
+
+    await gradeRepromptAndRecovery({ observation, script, gateway });
+
+    expect(observedPrompts).toHaveLength(2);
+    // The grader must prefer the recovered transcript over the script's
+    // spokenAnswerMatches ("agent reply 1" / "agent reply 2").
+    expect(observedPrompts[0]).toContain('recovered transcript turn 0');
+    expect(observedPrompts[1]).toContain('recovered transcript turn 1');
+    expect(observedPrompts[0]).not.toContain('agent reply 1');
+    expect(observedPrompts[1]).not.toContain('agent reply 2');
+  });
+
+  it('VQ2-followup — judgeOneTurn falls back to expected.spokenAnswerMatches when no speech_outbound event present', async () => {
+    const observedPrompts: string[] = [];
+    const provider: LLMProvider = {
+      name: 'mock',
+      async complete(req: LLMRequest): Promise<LLMResponse> {
+        const userMsg = req.messages.find((m) => m.role === 'user');
+        observedPrompts.push(userMsg?.content ?? '');
+        return {
+          content: repromptVerdict(false),
+          model: 'mock-model',
+          provider: 'mock',
+          latencyMs: 1,
+          tokenUsage: { input: 10, output: 10, total: 20 },
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>([['mock', provider]]);
+    const gateway = new LLMGatewayClass({ defaultProvider: 'mock' }, providers);
+
+    // Observation has no speech_outbound events at all → grader falls
+    // back to the script's spokenAnswerMatches strings.
+    const script = makeScript(2);
+    const observation = makeObservation({ events: [] });
+
+    await gradeRepromptAndRecovery({ observation, script, gateway });
+
+    expect(observedPrompts).toHaveLength(2);
+    expect(observedPrompts[0]).toContain('agent reply 1');
+    expect(observedPrompts[1]).toContain('agent reply 2');
+  });
+
+  it('VQ2-followup — judgeOneTurn uses speech_outbound only for matching turnIndex (gap turn falls back to expected)', async () => {
+    const observedPrompts: string[] = [];
+    const provider: LLMProvider = {
+      name: 'mock',
+      async complete(req: LLMRequest): Promise<LLMResponse> {
+        const userMsg = req.messages.find((m) => m.role === 'user');
+        observedPrompts.push(userMsg?.content ?? '');
+        return {
+          content: repromptVerdict(false),
+          model: 'mock-model',
+          provider: 'mock',
+          latencyMs: 1,
+          tokenUsage: { input: 10, output: 10, total: 20 },
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>([['mock', provider]]);
+    const gateway = new LLMGatewayClass({ defaultProvider: 'mock' }, providers);
+
+    const script = makeScript(2);
+    // Only turn 0 has a recovered transcript; turn 1 must fall back.
+    const observation = makeObservation({
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: 'recovered turn 0 only',
+          turnIndex: 0,
+          ts: 1000,
+        } as VoiceSessionEvent,
+      ],
+    });
+
+    await gradeRepromptAndRecovery({ observation, script, gateway });
+
+    expect(observedPrompts).toHaveLength(2);
+    expect(observedPrompts[0]).toContain('recovered turn 0 only');
+    expect(observedPrompts[1]).toContain('agent reply 2');
   });
 
   /**

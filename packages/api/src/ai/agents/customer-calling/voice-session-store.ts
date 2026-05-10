@@ -84,7 +84,25 @@ export type VoiceSessionEvent =
    * `transcript_received`. `byteCount` is the chunk size of the first
    * frame for a sanity check (non-zero ⇒ real audio, not a heartbeat).
    */
-  | { type: 'audio_frame_emitted'; ts: number; byteCount: number };
+  | { type: 'audio_frame_emitted'; ts: number; byteCount: number }
+  /**
+   * VQ2-followup: per-turn agent transcript recovered after the agent
+   * finished speaking. In Layer 2 (`AudioModeDriver`) this is the
+   * Whisper-recovered transcription of the actual TTS audio the caller
+   * heard; in Layer 1 (`TextModeDriver`) it is the synthesized
+   * confirmation/lookup string the driver was about to "speak". Graders
+   * (perceived-completion, reprompt) consume this so they can judge the
+   * caller-perceived turn directly instead of relying on the script's
+   * `expected.spokenAnswerMatches` placeholder.
+   */
+  | {
+      type: 'speech_outbound';
+      /** Transcript of what the agent said this turn. */
+      transcript: string;
+      /** Zero-indexed turn within the session. */
+      turnIndex: number;
+      ts: number;
+    };
 
 export interface TranscriptEntry {
   speaker: 'caller' | 'agent';

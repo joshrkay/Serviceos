@@ -21,6 +21,7 @@ import {
   escalationTriggeredEvent,
   costIncurredEvent,
   sessionTerminatedEvent,
+  speechOutboundEvent,
 } from '../../src/ai/voice-quality/events';
 import { escalateToHuman } from '../../src/ai/skills/escalate-to-human';
 import { SessionCostTracker } from '../../src/ai/skills/session-cost-tracker';
@@ -214,6 +215,51 @@ describe('VQ-003 — AgentEventBus', () => {
     // Bus stays subscribed after clear — new emits still land.
     session.events.emit('voice-event', costIncurredEvent(4, 7));
     expect(bus.events()).toHaveLength(1);
+
+    store.dispose();
+  });
+
+  it('VQ2-followup — bus captures speech_outbound events emitted on the session', () => {
+    const session = store.create('t-1', 'telephony', { callSid: 'CA-spk-1' });
+    const bus = new AgentEventBus();
+    bus.subscribe(session);
+
+    session.events.emit(
+      'voice-event',
+      speechOutboundEvent({ transcript: 'first reply', turnIndex: 0 }),
+    );
+    session.events.emit(
+      'voice-event',
+      speechOutboundEvent({ transcript: 'second reply', turnIndex: 1 }),
+    );
+
+    const captured = bus.filterByType('speech_outbound');
+    expect(captured).toHaveLength(2);
+    expect(captured[0].transcript).toBe('first reply');
+    expect(captured[0].turnIndex).toBe(0);
+    expect(captured[1].transcript).toBe('second reply');
+    expect(captured[1].turnIndex).toBe(1);
+    for (const e of captured) {
+      expect(typeof e.ts).toBe('number');
+    }
+
+    store.dispose();
+  });
+
+  it('VQ2-followup — bus.record() appends a synthesized speech_outbound (matches AudioModeDriver emit path)', () => {
+    const session = store.create('t-1', 'telephony', { callSid: 'CA-spk-2' });
+    const bus = new AgentEventBus();
+    bus.subscribe(session);
+
+    // AudioModeDriver uses bus.record() (direct append) rather than
+    // emitting through session.events. Confirm the bus surfaces those
+    // events in the unified observation log just like subscribed emits.
+    bus.record(speechOutboundEvent({ transcript: 'recorded directly', turnIndex: 0 }));
+
+    const captured = bus.filterByType('speech_outbound');
+    expect(captured).toHaveLength(1);
+    expect(captured[0].transcript).toBe('recorded directly');
+    expect(captured[0].turnIndex).toBe(0);
 
     store.dispose();
   });

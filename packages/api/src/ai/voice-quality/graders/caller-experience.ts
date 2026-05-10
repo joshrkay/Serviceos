@@ -148,11 +148,11 @@ function percentile(samples: ReadonlyArray<number>, p: number): number {
  * recovers (every subsequent turn is also a reprompt), recovery equals
  * the number of turns from first-reprompt+1 to end-of-call. Threshold ≤ 2.
  *
- * v1 limitation (mirrors VQ-022/disposition-llm.ts and VQ2-010): the
- * voice agent does not yet emit a `speech_outbound` event, so we cannot
- * read the agent's actual utterance off the bus. We use the script's
- * `expected.spokenAnswerMatches` as a v1 stand-in. VQ2-021 will swap in
- * the real Whisper-recovered transcript with no API change.
+ * Transcript source (VQ2-followup): we prefer the `speech_outbound`
+ * event for the turn (Layer 2 = Whisper-recovered, Layer 1 =
+ * synthesized confirmation/lookup string). When the bus has no
+ * outbound for the turn we fall back to the script's
+ * `expected.spokenAnswerMatches`, then to a generic placeholder.
  *
  * Conservative fallback: if the judge returns malformed JSON we treat
  * the turn as NOT a reprompt. Reasoning: a noisy classifier producing
@@ -240,10 +240,23 @@ export async function gradeRepromptAndRecovery(
 }
 
 async function judgeOneTurn(input: RepromptDetectionInput, turnIdx: number): Promise<boolean> {
-  // v1 stand-in: VQ2-021 will swap this for the Whisper-recovered transcript.
+  // VQ2-followup: prefer the recovered agent transcript stamped on the
+  // bus (Layer 2 = Whisper, Layer 1 = synthesized confirmation), fall
+  // back to the script's `expected.spokenAnswerMatches` so existing
+  // fixture-driven tests + Layer-1 callers without an emit site keep
+  // working, then a generic placeholder as a last resort.
   const turn = input.script.turns[turnIdx];
+  const speechEvent = input.observation.events.find(
+    (e) => e.type === 'speech_outbound' && e.turnIndex === turnIdx,
+  );
+  const recoveredTranscript =
+    speechEvent && speechEvent.type === 'speech_outbound' ? speechEvent.transcript : null;
   const agentText =
-    turn.expected.spokenAnswerMatches ?? `<turn ${turnIdx + 1} response>`;
+    (recoveredTranscript !== null && recoveredTranscript.length > 0
+      ? recoveredTranscript
+      : null) ??
+    turn.expected.spokenAnswerMatches ??
+    `<turn ${turnIdx + 1} response>`;
   const userPrompt = `Agent's spoken response: "${agentText}"`;
 
   const response = await input.gateway.complete({

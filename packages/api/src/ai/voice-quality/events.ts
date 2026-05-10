@@ -115,3 +115,24 @@ export const audioFrameEmittedEvent = (
   byteCount: opts.byteCount,
   ts: opts.ts ?? Date.now(),
 });
+
+/** Convenience alias for the new variant constructor below. */
+export type SpeechOutboundEvent = Extract<VoiceSessionEvent, { type: 'speech_outbound' }>;
+
+/**
+ * VQ2-followup: emitted by the agent driver after each turn's outbound
+ * speech has been finalized. Layer 2 emits the Whisper-recovered
+ * transcription of the TTS audio the caller would have heard; Layer 1
+ * emits the synthesized confirmation/lookup string the driver was about
+ * to "speak". Both consumers (perceived-completion / reprompt graders)
+ * read by `turnIndex`, which is the zero-indexed turn position within
+ * the script.
+ */
+export const speechOutboundEvent = (
+  opts: { transcript: string; turnIndex: number; ts?: number },
+): SpeechOutboundEvent => ({
+  type: 'speech_outbound',
+  transcript: opts.transcript,
+  turnIndex: opts.turnIndex,
+  ts: opts.ts ?? Date.now(),
+});

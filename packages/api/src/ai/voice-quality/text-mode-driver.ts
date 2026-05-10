@@ -64,6 +64,7 @@ import {
   intentClassifiedEvent,
   lookupExecutedEvent,
   sessionTerminatedEvent,
+  speechOutboundEvent,
 } from './events';
 import {
   VoiceSessionStore,
@@ -197,6 +198,14 @@ export class TextModeDriver implements AgentDriver {
    * the handler map.
    */
   private readonly voiceActionRouter: ReturnType<typeof createVoiceActionRouterWorker>;
+  /**
+   * VQ2-followup: per-session zero-indexed turn counter. The driver
+   * does not constrain itself to a single session at a time (the
+   * harness creates one driver and runs many scripts through it), so
+   * we key on `sessionId` rather than carrying a single integer like
+   * `AudioModeDriver`. Cleared in `endSession`.
+   */
+  private readonly turnIndexBySession = new Map<string, number>();
 
   constructor(deps: TextModeDriverDeps) {
     this.deps = deps;
@@ -333,6 +342,21 @@ export class TextModeDriver implements AgentDriver {
       ts: Date.now(),
     });
 
+    // VQ2-followup: emit a speech_outbound event so graders that
+    // consume per-turn agent transcripts (perceived-completion,
+    // reprompt) work in Layer 1 too. The turn index is the
+    // zero-indexed position of this `speak()` call within the
+    // session.
+    const turnIndex = this.turnIndexBySession.get(sessionId) ?? 0;
+    this.turnIndexBySession.set(sessionId, turnIndex + 1);
+    session.events.emit(
+      'voice-event',
+      speechOutboundEvent({
+        transcript: agentResponse,
+        turnIndex,
+      }),
+    );
+
     return { agentResponse, latencyMs };
   }
 
@@ -345,6 +369,7 @@ export class TextModeDriver implements AgentDriver {
 
   async endSession(sessionId: string): Promise<void> {
     const session = this.deps.voiceSessionStore.peek(sessionId);
+    this.turnIndexBySession.delete(sessionId);
     if (!session) return;
     if (this.deps.bus) {
       this.deps.bus.unsubscribe(session);

@@ -15,6 +15,8 @@ import type { Observation } from '../../../src/ai/voice-quality/observation';
 import type { VoiceQualityScript } from '../../../src/ai/voice-quality/schema';
 import type { Proposal } from '../../../src/proposals/proposal';
 import type { VoiceSessionEvent } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import type { LLMRequest, LLMResponse, LLMProvider } from '../../../src/ai/gateway/gateway';
+import { LLMGateway as LLMGatewayClass } from '../../../src/ai/gateway/gateway';
 
 function makeScript(overrides: Partial<VoiceQualityScript> = {}): VoiceQualityScript {
   return {
@@ -203,6 +205,129 @@ describe('VQ2-010 — gradePerceivedCompletion', () => {
         gateway,
       }),
     ).rejects.toThrow(/perceived-completion|judge.*JSON|invalid.*JSON/i);
+  });
+
+  it('VQ2-followup — buildTranscriptSummary uses speech_outbound transcripts when available', async () => {
+    // Capture the user prompt the gateway sees so we can assert what
+    // transcript the judge was actually given.
+    let observedUserPrompt = '';
+    const verdictBody = verdict('good', 0);
+    const provider: LLMProvider = {
+      name: 'mock',
+      async complete(req: LLMRequest): Promise<LLMResponse> {
+        const userMsg = req.messages.find((m) => m.role === 'user');
+        observedUserPrompt = userMsg?.content ?? '';
+        return {
+          content: verdictBody,
+          model: 'mock-model',
+          provider: 'mock',
+          latencyMs: 1,
+          tokenUsage: { input: 10, output: 10, total: 20 },
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>([['mock', provider]]);
+    const gateway = new LLMGatewayClass({ defaultProvider: 'mock' }, providers);
+
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'first caller line',
+          expected: { intent: 'lookup_appointments', spokenAnswerMatches: 'expected answer 1' },
+          hangupAfter: false,
+        },
+        {
+          caller: 'second caller line',
+          expected: { intent: 'lookup_appointments', spokenAnswerMatches: 'expected answer 2' },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const observation = makeObservation({
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: 'agent recovered turn 0',
+          turnIndex: 0,
+          ts: 1000,
+        } as VoiceSessionEvent,
+        {
+          type: 'speech_outbound',
+          transcript: 'agent recovered turn 1',
+          turnIndex: 1,
+          ts: 2000,
+        } as VoiceSessionEvent,
+      ],
+    });
+
+    await gradePerceivedCompletion({ observation, script, gateway });
+
+    // The judge should see the recovered transcripts on the Agent: lines,
+    // not the placeholder.
+    expect(observedUserPrompt).toContain('Caller: first caller line');
+    expect(observedUserPrompt).toContain('Agent: agent recovered turn 0');
+    expect(observedUserPrompt).toContain('Caller: second caller line');
+    expect(observedUserPrompt).toContain('Agent: agent recovered turn 1');
+    expect(observedUserPrompt).not.toContain('<response captured in events>');
+    expect(observedUserPrompt).not.toContain('<response not captured>');
+  });
+
+  it('VQ2-followup — buildTranscriptSummary falls back to "<response not captured>" when no speech_outbound for a turn', async () => {
+    let observedUserPrompt = '';
+    const verdictBody = verdict('good', 0);
+    const provider: LLMProvider = {
+      name: 'mock',
+      async complete(req: LLMRequest): Promise<LLMResponse> {
+        const userMsg = req.messages.find((m) => m.role === 'user');
+        observedUserPrompt = userMsg?.content ?? '';
+        return {
+          content: verdictBody,
+          model: 'mock-model',
+          provider: 'mock',
+          latencyMs: 1,
+          tokenUsage: { input: 10, output: 10, total: 20 },
+        };
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const providers = new Map<string, LLMProvider>([['mock', provider]]);
+    const gateway = new LLMGatewayClass({ defaultProvider: 'mock' }, providers);
+
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'turn 0 caller',
+          expected: { intent: 'lookup_appointments', spokenAnswerMatches: 'turn 0 expected' },
+          hangupAfter: false,
+        },
+        {
+          caller: 'turn 1 caller',
+          expected: { intent: 'lookup_appointments', spokenAnswerMatches: 'turn 1 expected' },
+          hangupAfter: false,
+        },
+      ],
+    });
+    // Only turn 0 has a speech_outbound event; turn 1 falls back.
+    const observation = makeObservation({
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: 'turn 0 actual',
+          turnIndex: 0,
+          ts: 1000,
+        } as VoiceSessionEvent,
+      ],
+    });
+
+    await gradePerceivedCompletion({ observation, script, gateway });
+
+    expect(observedUserPrompt).toContain('Agent: turn 0 actual');
+    expect(observedUserPrompt).toContain('Agent: <response not captured>');
   });
 
   it('VQ2-010 — verdict shape validated by Zod (rejects malformed responses)', async () => {

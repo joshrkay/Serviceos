@@ -24,13 +24,14 @@
  * cache (which would leak across test runs and across graders). The
  * cache is keyed by sha256 of `(scriptId, observation.events JSON)`.
  *
- * v1 transcript synthesis: the voice agent does not yet emit a
- * `speech_outbound` event (VQ-024 / VQ2-021 will wire that). Until then
- * we render each turn as `Caller: <utterance>\nAgent: <response captured
- * in events>`, and append a one-line summary of the captured event types
- * so the judge can see hangups, lookups and proposals it would not
- * otherwise have. The same key path swaps to real TTS once the upstream
- * task lands.
+ * Transcript synthesis (VQ2-followup): each turn is rendered as
+ * `Caller: <utterance>\nAgent: <transcript>` where the agent line is
+ * read from `speech_outbound` events on the bus (Layer 2 supplies the
+ * Whisper-recovered transcript; Layer 1 supplies the synthesized
+ * confirmation/lookup string). A turn without a captured outbound
+ * speech event renders as `<response not captured>` so the judge sees
+ * the failure rather than the line being elided. A one-line event-type
+ * summary is appended so the judge can see hangups, lookups, proposals.
  */
 import { createHash } from 'crypto';
 import { z } from 'zod';
@@ -161,18 +162,41 @@ function makeCacheKey(scriptId: string, observation: Observation): string {
 }
 
 /**
- * v1 transcript synthesis. Renders each scripted caller utterance and a
- * placeholder for the agent's spoken reply, then appends a one-line
- * summary of the captured event types (hangups, lookups, proposals)
- * so the judge has at least a structural read on what happened. VQ-024
- * will swap the placeholder for the actual TTS string with no API change.
+ * Transcript synthesis. Renders each scripted caller utterance plus
+ * the agent's recovered reply (read off `speech_outbound` events on
+ * the bus — Layer 2 supplies Whisper-recovered transcripts, Layer 1
+ * supplies the synthesized confirmation/lookup string), then appends
+ * a one-line summary of the captured event types so the judge has a
+ * structural read on what happened.
+ *
+ * If a turn has no `speech_outbound` event we substitute a "<response
+ * not captured>" placeholder; this is a meaningful signal to the
+ * judge (the agent failed to speak that turn) rather than silently
+ * eliding it.
  */
 function buildTranscriptSummary(observation: Observation, script: VoiceQualityScript): string {
+  // Index speech_outbound events by turnIndex for O(1) lookup. The
+  // driver emits one per turn, but we tolerate duplicates by keeping
+  // the most recent (later-emitted overrides earlier).
+  const agentByTurn = new Map<number, string>();
+  for (const e of observation.events) {
+    if (e.type === 'speech_outbound') {
+      agentByTurn.set(e.turnIndex, e.transcript);
+    }
+  }
   const lines: string[] = [];
   for (let i = 0; i < script.turns.length; i++) {
     const turn = script.turns[i];
     lines.push(`Caller: ${turn.caller}`);
-    lines.push(`Agent: <response captured in events>`);
+    const agent = agentByTurn.get(i);
+    if (agent !== undefined && agent.length > 0) {
+      lines.push(`Agent: ${agent}`);
+    } else {
+      // Layer 1 text-mode pre-emit fallback OR a Layer 2 turn whose
+      // Whisper recovery returned empty. Surface this to the judge
+      // so a silent / un-transcribable turn shows up as a signal.
+      lines.push(`Agent: <response not captured>`);
+    }
   }
   if (observation.events.length > 0) {
     const eventTypes = observation.events.map((e) => e.type).join(', ');
