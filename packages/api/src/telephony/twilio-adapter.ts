@@ -53,6 +53,12 @@ import {
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+// Aliased to avoid name collision with the private `deriveCallOutcome` method
+// on this class — see line 1828. The imported function takes the typed
+// options object (DeriveOutcomeInput); the instance method takes a
+// VoiceSession. They are NOT interchangeable. Pre-existing fix from cf76752
+// that got reverted in a subsequent merge to main.
+import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
@@ -1678,7 +1684,7 @@ export class TwilioGatherAdapter {
       (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
         ? endSessionEffect.payload.reason
         : undefined) ?? fallbackReason;
-    const outcome = deriveCallOutcome({
+    const outcome = deriveCallOutcomeFromState({
       finalState: session.machine.currentState,
       endedReason: reason,
       context: session.machine.currentContext,
