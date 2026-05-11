@@ -22,10 +22,13 @@ const VIEW_TOKEN = 'b'.repeat(32);
 
 function makeInvoice(overrides: Partial<Invoice> = {}): Invoice {
   const lineItems = [{
+    id: crypto.randomUUID(),
     description: 'Service call',
     quantity: 1,
     unitPriceCents: 12500,
     totalCents: 12500,
+    sortOrder: 0,
+    taxable: false,
   }];
   const totals = calculateDocumentTotals(lineItems, 0, 0);
   return {

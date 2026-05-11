@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { MapPin, User } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   LineItemEditor,
@@ -10,6 +11,18 @@ import {
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
   onCancel?: () => void;
+}
+
+interface JobInfo {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  customerId?: string;
+  locationId?: string;
+  // Enriched after secondary API calls:
+  customerName?: string;
+  locationLine?: string;
+  isPrimaryLocation?: boolean;
 }
 
 interface State {
@@ -36,24 +49,32 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   }));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [jobInfo, setJobInfo] = useState<JobInfo | null>(null);
+  const [jobLookupError, setJobLookupError] = useState<string | null>(null);
+  // Active maintenance contract banner — surfaced when the entered job's
+  // customer has an active agreement so the estimator can adjust pricing
+  // (carried in from main during the b3f91c9 merge).
   const [activeContract, setActiveContract] = useState<{ id: string; name: string; recurrenceRule?: string } | null>(null);
-  const jobIdLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contractLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // When job ID is entered, look up active agreements for the associated customer.
   // `cancelled` guards against state updates after unmount or a newer jobId.
   useEffect(() => {
-    if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current);
+    if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
     const jobId = form.jobId.trim();
     if (!jobId) { setActiveContract(null); return; }
     let cancelled = false;
-    jobIdLookupTimer.current = setTimeout(async () => {
+    contractLookupTimer.current = setTimeout(async () => {
       try {
         const jobRes = await apiFetch(`/api/jobs/${jobId}`);
-        if (cancelled || !jobRes.ok) return;
+        if (cancelled) return;
+        if (!jobRes.ok) { setActiveContract(null); return; }
         const job = await jobRes.json() as { customerId?: string };
-        if (cancelled || !job.customerId) return;
+        if (cancelled) return;
+        if (!job.customerId) { setActiveContract(null); return; }
         const agRes = await apiFetch(`/api/agreements?customerId=${job.customerId}&status=active`);
-        if (cancelled || !agRes.ok) return;
+        if (cancelled) return;
+        if (!agRes.ok) { setActiveContract(null); return; }
         const data = await agRes.json() as { data?: Array<{ id: string; name: string; recurrenceRule?: string }> };
         const contracts = data.data ?? [];
         if (!cancelled) setActiveContract(contracts.length > 0 ? contracts[0] : null);
@@ -148,6 +169,9 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     [form, onCreated]
   );
 
+  const customerName = jobInfo?.customerName ?? null;
+  const locationLine = jobInfo?.locationLine ?? null;
+
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
       <h1 className="text-lg text-slate-900 mb-4">New Estimate</h1>
@@ -186,7 +210,31 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
             className={inputCls}
             placeholder="job-id-uuid"
           />
+          {jobLookupError && (
+            <span className="text-xs text-red-500 mt-0.5 block">{jobLookupError}</span>
+          )}
         </label>
+
+        {jobInfo && (
+          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 flex flex-col gap-1">
+            {customerName && (
+              <p className="text-xs text-slate-700 flex items-center gap-1.5">
+                <User size={11} className="text-slate-400" />
+                <span className="font-medium">{customerName}</span>
+              </p>
+            )}
+            {locationLine && (
+              <p className="text-xs text-slate-500 flex items-center gap-1.5">
+                <MapPin size={11} className="text-slate-400" />
+                {locationLine}
+                {jobInfo.isPrimaryLocation && (
+                  <span className="text-xs text-green-600 ml-1">(primary)</span>
+                )}
+              </p>
+            )}
+            <p className="text-xs text-slate-400">{jobInfo.jobNumber} — {jobInfo.summary}</p>
+          </div>
+        )}
         <label className="text-xs text-slate-500">
           Valid until
           <input

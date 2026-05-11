@@ -5,7 +5,7 @@ import {
   Plus, Send, ArrowLeft, DollarSign, CheckCircle, CheckCircle2,
   Clock, AlertCircle, FileText, CreditCard, ChevronRight, X,
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
-  ExternalLink, Lock, Building2, Smartphone,
+  ExternalLink, Lock, Building2, Smartphone, Briefcase,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -13,6 +13,7 @@ import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { customers } from '../../data/mock-data';
+import { apiFetch } from '../../utils/api-fetch';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
 
@@ -51,6 +52,7 @@ interface ApiInvoice {
   invoiceNumber: string;
   status: string;
   jobId?: string;
+  estimateId?: string;
   totalCents: number;
   subtotalCents: number;
   amountDueCents?: number;
@@ -602,6 +604,7 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 
 // ─── Invoice Detail ───────────────────────────────────────────────────────
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
+  const navigate = useNavigate();
   const { data: inv, isLoading, error } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
   const { mutate: transitionInvoice } = useMutation<{ status: string }, ApiInvoice>('POST', `/api/invoices/${invoiceId}/transition`);
 
@@ -609,6 +612,40 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const [sendOpen,  setSendOpen]  = useState(false);
   const [markOpen,  setMarkOpen]  = useState(false);
   const [paid,      setPaid]      = useState(false);
+
+  // Notes
+  const [notes, setNotes]       = useState<Array<{ id: string; content: string; createdAt: string }>>([]);
+  const [notesLoaded, setNotesLoaded] = useState(false);
+  const [noteText,    setNoteText]    = useState('');
+  const [savingNote,  setSavingNote]  = useState(false);
+
+  useEffect(() => {
+    apiFetch(`/api/notes?entityType=invoice&entityId=${invoiceId}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((data: Array<{ id: string; content: string; createdAt: string }>) => {
+        setNotes(data);
+        setNotesLoaded(true);
+      })
+      .catch(() => setNotesLoaded(true));
+  }, [invoiceId]);
+
+  async function saveNote() {
+    if (!noteText.trim()) return;
+    setSavingNote(true);
+    try {
+      const res = await apiFetch('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ entityType: 'invoice', entityId: invoiceId, content: noteText.trim() }),
+      });
+      if (res.ok) {
+        const saved = await res.json();
+        setNotes(prev => [...prev, saved]);
+        setNoteText('');
+      }
+    } finally {
+      setSavingNote(false);
+    }
+  }
 
   if (isLoading) {
     return (
@@ -714,17 +751,81 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
               {status !== 'Paid' && (
                 <PaymentMethodsCard paymentLink={paymentLink} />
               )}
+
+              {/* Notes section */}
+              <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
+                  <MessageSquare size={13} className="text-slate-400" />
+                  <p className="text-sm text-slate-700">Notes</p>
+                  <span className="ml-auto text-xs text-slate-400">{notes.length}</span>
+                </div>
+                {notesLoaded && notes.length > 0 && (
+                  <div className="divide-y divide-slate-50">
+                    {notes.map(n => (
+                      <div key={n.id} className="px-4 py-3">
+                        <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
+                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="px-4 py-3 border-t border-slate-50 flex flex-col gap-2">
+                  <textarea
+                    value={noteText}
+                    onChange={e => setNoteText(e.target.value)}
+                    rows={2}
+                    placeholder="Add a note…"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm resize-none focus:outline-none focus:border-blue-400 transition-colors"
+                  />
+                  <button
+                    onClick={saveNote}
+                    disabled={savingNote || !noteText.trim()}
+                    className="self-end rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+                  >
+                    {savingNote ? 'Saving…' : 'Save note'}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Right rail */}
             <div className="flex flex-col gap-4">
               <PaymentTimeline inv={invCompat} />
 
+              {/* Originating estimate link */}
+              {inv.estimateId && (
+                <button
+                  onClick={() => navigate(`/estimates/${inv.estimateId}`)}
+                  className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-4 py-3 hover:border-slate-300 hover:bg-slate-50 transition-colors text-left"
+                >
+                  <FileText size={13} className="text-slate-400 shrink-0" />
+                  <p className="text-sm text-slate-700 flex-1">View originating estimate</p>
+                  <ChevronRight size={13} className="text-slate-300" />
+                </button>
+              )}
+
+              {/* Job link */}
+              {inv.jobId && (
+                <button
+                  onClick={() => navigate(`/jobs/${inv.jobId}`)}
+                  className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-4 py-3 hover:border-slate-300 hover:bg-slate-50 transition-colors text-left"
+                >
+                  <Briefcase size={13} className="text-slate-400 shrink-0" />
+                  <p className="text-sm text-slate-700 flex-1">View linked job</p>
+                  <ChevronRight size={13} className="text-slate-300" />
+                </button>
+              )}
+
               {/* Customer card */}
               {customer && (
                 <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
                   <p className="text-xs text-slate-400 mb-2">Billed to</p>
-                  <p className="text-sm text-slate-900">{invCompat.customer}</p>
+                  <button
+                    onClick={() => invCompat.customerId && navigate(`/customers/${invCompat.customerId}`)}
+                    className="text-sm text-slate-900 hover:text-blue-600 transition-colors text-left"
+                  >
+                    {invCompat.customer}
+                  </button>
                   <div className="flex flex-col gap-1.5 mt-2">
                     {customer.primaryPhone && (
                       <a href={`tel:${customer.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
@@ -837,10 +938,17 @@ const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
  */
 const INVOICE_LIST_REFRESH_MS = 30_000;
 
-export function InvoicesPage() {
+export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
   const navigate = useNavigate();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
+
+  // Keep `selected` in sync with the route param so deep-links and in-place
+  // route changes (/invoices/:id → /invoices/:other) reopen the right
+  // detail view instead of holding onto the previous selection.
+  useEffect(() => {
+    setSelected(defaultSelectedId ?? null);
+  }, [defaultSelectedId]);
 
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
 
@@ -873,7 +981,10 @@ export function InvoicesPage() {
   }, [data]);
 
   if (selected) {
-    return <InvoiceDetail invoiceId={selected} onBack={() => setSelected(null)} />;
+    return <InvoiceDetail invoiceId={selected} onBack={() => {
+      setSelected(null);
+      if (defaultSelectedId) navigate('/invoices');
+    }} />;
   }
 
   const normalizedData = data.map(i => ({
