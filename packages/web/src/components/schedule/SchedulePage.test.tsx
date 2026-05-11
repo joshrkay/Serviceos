@@ -1,10 +1,8 @@
-import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
 
-vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 vi.mock('../../data/mock-data', () => ({
   technicians: [
@@ -12,70 +10,77 @@ vi.mock('../../data/mock-data', () => ({
     { id: 't2', name: 'Marcus Webb',  initials: 'MW', color: '#22C55E' },
     { id: 't3', name: 'Sarah Lin',    initials: 'SL', color: '#8B5CF6' },
   ],
-  jobs: [
-    {
-      id: 'seed-1',
-      jobNumber: '1042',
-      customer: 'Alice Smith',
-      customerId: 'c1',
-      description: 'Fix AC unit not cooling',
-      status: 'Scheduled',
-      serviceType: 'HVAC',
-      assignedTech: 'Carlos Reyes',
-      scheduledDate: 'Today',
-      scheduledTime: '9:00 AM',
-    },
-  ],
 }));
 
-import { useListQuery } from '../../hooks/useListQuery';
 import { apiFetch } from '../../utils/api-fetch';
 
 const today = new Date().toISOString().split('T')[0];
 
-const mockJobs = [
-  {
-    id: 'j1',
-    jobNumber: 'JOB-001',
-    summary: 'Fix AC unit not cooling',
-    status: 'scheduled',
-    serviceType: 'HVAC',
-    scheduledStart: `${today}T09:00:00Z`,
-    customer: { id: 'c1', displayName: 'Alice Smith' },
-    technician: { id: 't1', firstName: 'Carlos', lastName: 'Reyes', color: '#3B82F6' },
-  },
-  {
-    id: 'j2',
-    jobNumber: 'JOB-002',
-    summary: 'Drain cleaning',
-    status: 'in_progress',
-    serviceType: 'Plumbing',
-    scheduledStart: `${today}T11:00:00Z`,
-    customer: { id: 'c2', displayName: 'Bob Jones' },
-    technician: { id: 't2', firstName: 'Marcus', lastName: 'Webb', color: '#22C55E' },
-  },
-];
-
-const defaultListResult = {
-  data: mockJobs,
-  total: 2,
-  page: 1,
-  pageSize: 25,
-  isLoading: false,
-  error: null,
-  refetch: vi.fn(),
-  setPage: vi.fn(),
-  setSearch: vi.fn(),
-  setFilters: vi.fn(),
+const appt1 = {
+  id: 'appt-1',
+  jobId: 'j1',
+  scheduledStart: `${today}T09:00:00.000Z`,
+  scheduledEnd: `${today}T10:00:00.000Z`,
+  status: 'scheduled',
+  timezone: 'America/Chicago',
 };
 
+const appt2 = {
+  id: 'appt-2',
+  jobId: 'j2',
+  scheduledStart: `${today}T11:00:00.000Z`,
+  scheduledEnd: `${today}T12:00:00.000Z`,
+  status: 'scheduled',
+  timezone: 'America/Chicago',
+};
+
+const job1 = {
+  id: 'j1',
+  jobNumber: 'JOB-001',
+  summary: 'Fix AC unit not cooling',
+  serviceType: 'HVAC',
+  assignedTechnicianId: 't1',
+  customer: { displayName: 'Alice Smith' },
+  location: { street1: '123 Main', city: 'Austin', state: 'TX' },
+};
+
+const job2 = {
+  id: 'j2',
+  jobNumber: 'JOB-002',
+  summary: 'Drain cleaning',
+  serviceType: 'Plumbing',
+  assignedTechnicianId: 't2',
+  customer: { displayName: 'Bob Jones' },
+  location: { street1: '456 Oak', city: 'Austin', state: 'TX' },
+};
+
+function mockResponse(body: unknown, ok = true, status = 200): Response {
+  return {
+    ok,
+    status,
+    json: async () => body,
+  } as Response;
+}
+
+/** Route apiFetch calls to the right mock body. */
+function setupApi(appointments: unknown[] = [appt1, appt2], jobs: Record<string, unknown> = { j1: job1, j2: job2 }) {
+  vi.mocked(apiFetch).mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.startsWith('/api/appointments?')) {
+      return mockResponse({ data: appointments });
+    }
+    const jobMatch = url.match(/^\/api\/jobs\/([^/?]+)/);
+    if (jobMatch) {
+      const job = jobs[jobMatch[1]];
+      return job ? mockResponse(job) : mockResponse({}, false, 404);
+    }
+    return mockResponse({});
+  });
+}
+
 beforeEach(() => {
-  vi.mocked(useListQuery).mockReturnValue(defaultListResult);
-  vi.mocked(apiFetch).mockResolvedValue({
-    ok: true,
-    status: 200,
-    json: async () => ({}),
-  } as Response);
+  vi.clearAllMocks();
+  setupApi();
 });
 
 function renderPage() {
@@ -87,142 +92,152 @@ function renderPage() {
 }
 
 describe('SchedulePage', () => {
-  it('renders jobs for selected date', () => {
+  it('renders appointments after fetching + enriching', async () => {
     renderPage();
-    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
+    expect(await screen.findByText('Bob Jones')).toBeInTheDocument();
+  });
+
+  it('renders enriched job summaries', async () => {
+    renderPage();
+    expect(await screen.findByText('Fix AC unit not cooling')).toBeInTheDocument();
+    expect(await screen.findByText('Drain cleaning')).toBeInTheDocument();
+  });
+
+  it('shows appointment count after load', async () => {
+    renderPage();
+    expect(await screen.findByText('2 appointments')).toBeInTheDocument();
+  });
+
+  it('renders service address from job location', async () => {
+    renderPage();
+    expect(await screen.findByText('123 Main, Austin, TX')).toBeInTheDocument();
+    expect(await screen.findByText('456 Oak, Austin, TX')).toBeInTheDocument();
+  });
+
+  it('shows empty state when no appointments', async () => {
+    setupApi([]);
+    renderPage();
+    expect(await screen.findByText('No appointments')).toBeInTheDocument();
+  });
+
+  it('falls back gracefully when /api/appointments returns non-ok', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(mockResponse({}, false, 500));
+    renderPage();
+    expect(await screen.findByText('No appointments')).toBeInTheDocument();
+  });
+
+  it('uses fallback customer label when /api/jobs/:id fails', async () => {
+    setupApi([appt1], {}); // no job data → /api/jobs/j1 returns 404
+    renderPage();
+    expect(await screen.findByText('Customer')).toBeInTheDocument();
+  });
+
+  it('calls /api/appointments with the selected day window', async () => {
+    renderPage();
+    await waitFor(() => {
+      const apptCall = vi.mocked(apiFetch).mock.calls.find(([u]) =>
+        String(u).startsWith('/api/appointments?'),
+      );
+      expect(apptCall).toBeDefined();
+      const url = String(apptCall![0]);
+      expect(url).toContain('fromDate=');
+      expect(url).toContain('toDate=');
+      expect(url).toContain('sort=asc');
+    });
+  });
+
+  it('enriches each appointment via /api/jobs/:id', async () => {
+    renderPage();
+    await waitFor(() => {
+      const calls = vi.mocked(apiFetch).mock.calls.map(([u]) => String(u));
+      expect(calls).toContain('/api/jobs/j1');
+      expect(calls).toContain('/api/jobs/j2');
+    });
+  });
+
+  it('prev button reloads with an earlier date window', async () => {
+    renderPage();
+    await screen.findByText('Alice Smith');
+    vi.mocked(apiFetch).mockClear();
+    setupApi();
+
+    const navButtons = screen.getAllByRole('button').filter(b =>
+      b.className.includes('size-8'),
+    );
+    fireEvent.click(navButtons[0]); // ChevronLeft
+
+    await waitFor(() => {
+      const apptCall = vi.mocked(apiFetch).mock.calls.find(([u]) =>
+        String(u).startsWith('/api/appointments?'),
+      );
+      expect(apptCall).toBeDefined();
+    });
+  });
+
+  it('next button reloads with a later date window', async () => {
+    renderPage();
+    await screen.findByText('Alice Smith');
+    vi.mocked(apiFetch).mockClear();
+    setupApi();
+
+    const navButtons = screen.getAllByRole('button').filter(b =>
+      b.className.includes('size-8'),
+    );
+    fireEvent.click(navButtons[1]); // ChevronRight
+
+    await waitFor(() => {
+      const apptCall = vi.mocked(apiFetch).mock.calls.find(([u]) =>
+        String(u).startsWith('/api/appointments?'),
+      );
+      expect(apptCall).toBeDefined();
+    });
+  });
+
+  it('tech filter hides appointments for other technicians', async () => {
+    renderPage();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
     expect(screen.getByText('Bob Jones')).toBeInTheDocument();
-  });
 
-  it('renders job summaries', () => {
-    renderPage();
-    expect(screen.getByText('Fix AC unit not cooling')).toBeInTheDocument();
-    expect(screen.getByText('Drain cleaning')).toBeInTheDocument();
-  });
+    // The tech filter chip is a `rounded-full` pill containing the
+    // tech's initials and first name (e.g. "CRCarlos" in textContent).
+    const carlosFilter = screen
+      .getAllByRole('button')
+      .find(b => b.className.includes('rounded-full') && b.textContent?.endsWith('Carlos'));
+    expect(carlosFilter).toBeDefined();
+    fireEvent.click(carlosFilter!);
 
-  it('shows job count', () => {
-    renderPage();
-    expect(screen.getByText('2 jobs')).toBeInTheDocument();
-  });
-
-  it('renders technician names in jobs', () => {
-    renderPage();
-    // Tech names appear in the job cards (first name only)
-    expect(screen.getAllByText('Carlos').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Marcus').length).toBeGreaterThan(0);
-  });
-
-  it('renders team today section', () => {
-    renderPage();
-    expect(screen.getByText('Team today')).toBeInTheDocument();
-    expect(screen.getAllByText('Carlos Reyes').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Marcus Webb').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Sarah Lin').length).toBeGreaterThan(0);
-  });
-
-  it('shows available for tech with no jobs', () => {
-    renderPage();
-    expect(screen.getByText('Available')).toBeInTheDocument();
-  });
-
-  it('shows loading spinner', () => {
-    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, isLoading: true, data: [] });
-    const { container } = renderPage();
-    expect(container.querySelector('.animate-spin')).toBeInTheDocument();
-    expect(screen.queryByText('Alice Smith')).not.toBeInTheDocument();
-  });
-
-  it('shows error state with retry', () => {
-    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, error: 'HTTP 500', data: [] });
-    renderPage();
-    expect(screen.getByText('Failed to load live schedule')).toBeInTheDocument();
-    expect(screen.getByText('Showing fallback schedule view while we reconnect.')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Retry live data'));
-    expect(defaultListResult.refetch).toHaveBeenCalled();
-  });
-
-  it('shows empty state when no jobs', () => {
-    vi.mocked(useListQuery).mockReturnValue({ ...defaultListResult, data: [] });
-    renderPage();
-    expect(screen.getByText('Nothing scheduled')).toBeInTheDocument();
-  });
-
-  it('calls setFilters with scheduledDate on initial render', () => {
-    renderPage();
-    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
-      '/api/jobs',
-      expect.objectContaining({ filters: expect.objectContaining({ scheduledDate: expect.any(String) }) })
-    );
-  });
-
-  it('date navigation prev button calls setFilters with new date', () => {
-    renderPage();
-    const prevButton = screen.getAllByRole('button').find(b => b.querySelector('svg'));
-    // Click the chevron-left button (first nav button)
-    const navButtons = screen.getAllByRole('button').filter(b =>
-      b.className.includes('size-8')
-    );
-    fireEvent.click(navButtons[0]);
-    expect(defaultListResult.setFilters).toHaveBeenCalledWith(
-      expect.objectContaining({ scheduledDate: expect.any(String) })
-    );
-  });
-
-  it('date navigation next button calls setFilters with new date', () => {
-    renderPage();
-    const navButtons = screen.getAllByRole('button').filter(b =>
-      b.className.includes('size-8')
-    );
-    fireEvent.click(navButtons[1]);
-    expect(defaultListResult.setFilters).toHaveBeenCalledWith(
-      expect.objectContaining({ scheduledDate: expect.any(String) })
-    );
-  });
-
-  it('tech filter button filters jobs by technician', () => {
-    renderPage();
-    // Click on Carlos filter button (first in tech filter bar — it's the first pill with 'Carlos')
-    const carlosButtons = screen.getAllByRole('button', { name: /Carlos/i });
-    fireEvent.click(carlosButtons[0]);
-    // After filtering, only Carlos's job should show (Bob Jones hidden)
     expect(screen.queryByText('Bob Jones')).not.toBeInTheDocument();
-    expect(screen.getAllByText('Alice Smith').length).toBeGreaterThan(0);
-  });
-
-  it('uses /api/jobs endpoint', () => {
-    renderPage();
-    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs', expect.any(Object));
-  });
-
-  it('supports personal schedule view toggle', () => {
-    renderPage();
-    fireEvent.click(screen.getByRole('button', { name: 'My schedule' }));
     expect(screen.getByText('Alice Smith')).toBeInTheDocument();
-    expect(screen.queryByText('Bob Jones')).not.toBeInTheDocument();
   });
 
-  it('can remove an event from the calendar', () => {
+  it('flags overlapping appointments on the same technician as conflicts', async () => {
+    // Two appointments on the same tech with overlapping times.
+    const overlapAppt = {
+      ...appt2,
+      jobId: 'j1', // also Carlos (t1)
+      scheduledStart: `${today}T09:30:00.000Z`,
+      scheduledEnd: `${today}T10:30:00.000Z`,
+    };
+    setupApi([appt1, overlapAppt], { j1: job1 });
     renderPage();
-    const removeButtons = screen.getAllByRole('button', { name: 'Remove' });
-    fireEvent.click(removeButtons[0]);
-    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
-      '/api/jobs/j1',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ scheduledStart: null, status: 'new' }),
-      })
-    );
+    expect(await screen.findAllByText('Scheduling conflict')).toHaveLength(2);
+    expect(screen.getByText(/2 scheduling conflicts today/)).toBeInTheDocument();
   });
 
-  it('can switch assigned team member', () => {
+  it('Notify delay button opens the delay sheet', async () => {
     renderPage();
-    const assignmentSelects = screen.getAllByRole('combobox');
-    fireEvent.change(assignmentSelects[0], { target: { value: 't2' } });
-    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith(
-      '/api/jobs/j1',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ assignedTechnicianId: 't2' }),
-      })
-    );
+    await screen.findByText('Alice Smith');
+    const delayButtons = screen.getAllByRole('button', { name: /Notify delay/i });
+    fireEvent.click(delayButtons[0]);
+    expect(screen.getByText('Notify next customer of delay')).toBeInTheDocument();
+  });
+
+  it('Details button opens the detail modal', async () => {
+    renderPage();
+    await screen.findByText('Alice Smith');
+    const detailsButtons = screen.getAllByRole('button', { name: 'Details' });
+    fireEvent.click(detailsButtons[0]);
+    expect(screen.getByText('Appointment details')).toBeInTheDocument();
   });
 });
