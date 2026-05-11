@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { MapPin, User } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
@@ -51,6 +51,37 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [jobInfo, setJobInfo] = useState<JobInfo | null>(null);
   const [jobLookupError, setJobLookupError] = useState<string | null>(null);
+  // Active maintenance contract banner — surfaced when the entered job's
+  // customer has an active agreement so the estimator can adjust pricing
+  // (carried in from main during the b3f91c9 merge).
+  const [activeContract, setActiveContract] = useState<{ id: string; name: string; recurrenceRule?: string } | null>(null);
+  const contractLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
+    const jobId = form.jobId.trim();
+    if (!jobId) { setActiveContract(null); return; }
+    let cancelled = false;
+    contractLookupTimer.current = setTimeout(async () => {
+      try {
+        const jobRes = await apiFetch(`/api/jobs/${jobId}`);
+        if (cancelled || !jobRes.ok) return;
+        const job = await jobRes.json() as { customerId?: string };
+        if (cancelled || !job.customerId) return;
+        const agRes = await apiFetch(`/api/agreements?customerId=${job.customerId}&status=active`);
+        if (cancelled || !agRes.ok) return;
+        const data = await agRes.json() as { data?: Array<{ id: string; name: string; recurrenceRule?: string }> };
+        const contracts = data.data ?? [];
+        if (!cancelled) setActiveContract(contracts.length > 0 ? contracts[0] : null);
+      } catch {
+        if (!cancelled) setActiveContract(null);
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
+    };
+  }, [form.jobId]);
 
   // Auto-populate customer name and service location when a valid job ID is entered
   useEffect(() => {

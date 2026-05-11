@@ -6,7 +6,6 @@ import {
 import { technicians } from '../../data/mock-data';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
-import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -49,26 +48,6 @@ function buildWeekDays(today: Date) {
 }
 
 const TIME_FORMATTER = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
-export function SchedulePage() {
-  const navigate = useNavigate();
-  const workerTerm = useWorkerTerm();
-  const today = useMemo(() => new Date(), []);
-  const weekDays = useMemo(() => buildWeekDays(today), [today]);
-  const todayIso = useMemo(() => today.toISOString().split('T')[0], [today]);
-  const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate); // today
-  const [techFilter, setTechFilter] = useState<string>('All');
-  const [viewMode, setViewMode] = useState<ScheduleViewMode>('team');
-  const [isSaving, setIsSaving] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
-  const [showNewEvent, setShowNewEvent] = useState(false);
-  const [newEventJobId, setNewEventJobId] = useState('');
-  const [newEventTechnicianId, setNewEventTechnicianId] = useState(technicians[0]?.id ?? '');
-  const [newEventStart, setNewEventStart] = useState('');
-
-  const { data, isLoading, error, refetch, setFilters } = useListQuery<ApiJob>('/api/jobs', {
-    filters: { scheduledDate: selectedIso },
-  });
 
 function toTimeLabel(iso: string) {
   return TIME_FORMATTER.format(new Date(iso));
