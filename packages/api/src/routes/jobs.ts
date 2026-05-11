@@ -168,13 +168,13 @@ export function createJobRouter(
 
         // Enrich with customer and location data when repos are available
         let customer: Customer | null = null;
-        if (customerRepo && result.customerId) {
-          customer = await customerRepo.findById(req.auth!.tenantId, result.customerId);
-        }
-
         let locations: Array<Record<string, unknown>> = [];
-        if (locationRepo && result.customerId) {
-          const locs = await locationRepo.findByCustomer(req.auth!.tenantId, result.customerId);
+        if (result.customerId) {
+          const [cust, locs] = await Promise.all([
+            customerRepo ? customerRepo.findById(req.auth!.tenantId, result.customerId) : Promise.resolve(null),
+            locationRepo ? locationRepo.findByCustomer(req.auth!.tenantId, result.customerId) : Promise.resolve([]),
+          ]);
+          customer = cust;
           locations = locs.map(loc => ({
             id: loc.id,
             street1: loc.street1,
