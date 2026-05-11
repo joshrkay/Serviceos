@@ -1,13 +1,23 @@
 import { Router, Request, Response } from 'express';
 import { getDispatchBoardData, BoardQueryDependencies } from './board-query';
-import { AppointmentRepository, Appointment } from '../appointments/appointment';
+import { AppointmentRepository, listAppointmentsWithMeta } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
+import { JobRepository } from '../jobs/job';
+import { CustomerRepository } from '../customers/customer';
+import { LocationRepository } from '../locations/location';
+import {
+  requireAuth,
+  requireTenant,
+  requirePermission,
+} from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
 
 export function createDispatchRoutes(deps: {
   appointmentRepo: AppointmentRepository;
   assignmentRepo: AssignmentRepository;
+  jobRepo?: JobRepository;
+  customerRepo?: CustomerRepository;
+  locationRepo?: LocationRepository;
 }): Router {
   const router = Router();
 
@@ -38,69 +48,88 @@ export function createDispatchRoutes(deps: {
     }
   });
 
-  // BUG-5 — TechnicianDayView (web) calls this URL on mount; without
-  // a handler the page surfaces "Failed to load appointments" on every
-  // load. Returns the shape the page expects:
-  //   { appointments: TechnicianAppointment[] }
-  // Joined customer/location names are left as empty strings here —
-  // the in-memory dev/test boot doesn't carry that context, and the
-  // page renders correctly with the fallback strings ("Customer",
-  // "No location"). Production wiring through customer/location
-  // joins is tracked separately.
+  /**
+   * GET /api/dispatch/technician/:technicianId/appointments?date=YYYY-MM-DD
+   * Returns the day's appointments for a given technician, enriched with
+   * customer name, service address, and job summary for the mobile day view.
+   */
   router.get(
-    '/technician/:id/appointments',
+    '/technician/:technicianId/appointments',
     requireAuth,
     requireTenant,
+    requirePermission('appointments:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
-        const technicianId = req.params.id;
-        const date = (req.query.date as string | undefined) ?? '';
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-          res.status(400).json({
-            error: 'BAD_REQUEST',
-            message: 'date query parameter is required (YYYY-MM-DD)',
-          });
+        const { technicianId } = req.params;
+        const dateStr = req.query.date as string | undefined;
+
+        if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'date query parameter is required (YYYY-MM-DD)' });
           return;
         }
 
-        const [year, month, day] = date.split('-').map(Number);
-        const start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
-        const end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+        const fromDate = new Date(`${dateStr}T00:00:00.000Z`);
+        const toDate   = new Date(`${dateStr}T23:59:59.999Z`);
 
-        const dayAppointments = await deps.appointmentRepo.findByDateRange(
+        const { data: appointments } = await listAppointmentsWithMeta(
           tenantId,
-          start,
-          end,
-        );
-        const assignments = await deps.assignmentRepo.findByTechnician(
-          tenantId,
-          technicianId,
-        );
-        const assignedAppointmentIds = new Set(
-          assignments.map((a) => a.appointmentId),
+          deps.appointmentRepo,
+          { technicianId, fromDate, toDate, sort: 'asc', limit: 50 },
         );
 
-        const filtered: Appointment[] = dayAppointments.filter((appt) =>
-          assignedAppointmentIds.has(appt.id),
-        );
+        // Enrich each appointment with job/customer/location data when
+        // repos are available (in-memory and Pg modes both work).
+        const enriched = await Promise.all(appointments.map(async (appt) => {
+          let customerName = 'Customer';
+          let locationAddress = '';
+          let locationLatitude: number | undefined;
+          let locationLongitude: number | undefined;
+          let jobSummary: string | undefined;
 
-        const appointments = filtered.map((appt) => ({
-          id: appt.id,
-          jobId: appt.jobId,
-          customerName: '',
-          locationAddress: '',
-          scheduledStart: appt.scheduledStart.toISOString(),
-          scheduledEnd: appt.scheduledEnd.toISOString(),
-          status: appt.status,
+          if (deps.jobRepo) {
+            const job = await deps.jobRepo.findById(tenantId, appt.jobId);
+            if (job) {
+              jobSummary = job.summary;
+              if (deps.customerRepo) {
+                const customer = await deps.customerRepo.findById(tenantId, job.customerId);
+                if (customer) {
+                  customerName = customer.displayName ||
+                    [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
+                    'Customer';
+                }
+              }
+              if (deps.locationRepo && job.locationId) {
+                const loc = await deps.locationRepo.findById(tenantId, job.locationId);
+                if (loc) {
+                  locationAddress = [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', ');
+                  locationLatitude  = loc.latitude;
+                  locationLongitude = loc.longitude;
+                }
+              }
+            }
+          }
+
+          return {
+            id: appt.id,
+            jobId: appt.jobId,
+            customerName,
+            locationAddress,
+            locationLatitude,
+            locationLongitude,
+            scheduledStart: appt.scheduledStart.toISOString(),
+            scheduledEnd:   appt.scheduledEnd.toISOString(),
+            status: appt.status,
+            jobSummary,
+          };
         }));
 
-        res.json({ appointments });
+        res.json({ appointments: enriched });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Internal server error';
         res.status(500).json({ error: message });
       }
-    },
+    }
   );
 
   return router;
