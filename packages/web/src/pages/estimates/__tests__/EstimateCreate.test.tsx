@@ -14,33 +14,19 @@ vi.mock('../../../hooks/useListQuery', () => ({
 
 import { apiFetch } from '../../../utils/api-fetch';
 import { useListQuery } from '../../../hooks/useListQuery';
+import { listQueryResult } from '../../../test-utils/list-query-result';
 
 const mockJobs = [
   { id: 'job-42', jobNumber: 'JOB-0042', summary: 'AC tune-up' },
   { id: 'job-7', jobNumber: 'JOB-0007', summary: 'Boiler service' },
 ];
 
-function listResult<T>(data: T[]) {
-  return {
-    data,
-    total: data.length,
-    page: 1,
-    pageSize: 25,
-    isLoading: false,
-    error: null,
-    refetch: vi.fn(),
-    setPage: vi.fn(),
-    setSearch: vi.fn(),
-    setFilters: vi.fn(),
-  };
-}
-
 describe('EstimateCreate (P11-006)', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(useListQuery).mockImplementation(((endpoint: string) => {
-      if (endpoint === '/api/jobs') return listResult(mockJobs);
-      return listResult([]);
+      if (endpoint === '/api/jobs') return listQueryResult(mockJobs);
+      return listQueryResult([]);
     }) as never);
   });
 
@@ -95,8 +81,8 @@ describe('EstimateCreate (P11-006)', () => {
       </MemoryRouter>
     );
 
-    // EstimateForm has exactly one <select> — the job picker.
-    const jobSelect = container.querySelector('select') as HTMLSelectElement;
+    // Job picker is the only required <select> on the form.
+    const jobSelect = container.querySelector('select[required]') as HTMLSelectElement;
     fireEvent.change(jobSelect, { target: { value: 'job-42' } });
 
     fireEvent.change(screen.getByLabelText('description-0'), {

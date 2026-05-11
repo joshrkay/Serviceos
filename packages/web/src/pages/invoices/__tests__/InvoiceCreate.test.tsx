@@ -14,34 +14,20 @@ vi.mock('../../../hooks/useListQuery', () => ({
 
 import { apiFetch } from '../../../utils/api-fetch';
 import { useListQuery } from '../../../hooks/useListQuery';
+import { listQueryResult } from '../../../test-utils/list-query-result';
 
 const mockJobs = [
   { id: 'job-7', jobNumber: 'JOB-0007', summary: 'Boiler service' },
   { id: 'job-42', jobNumber: 'JOB-0042', summary: 'AC tune-up' },
 ];
 
-function listResult<T>(data: T[]) {
-  return {
-    data,
-    total: data.length,
-    page: 1,
-    pageSize: 25,
-    isLoading: false,
-    error: null,
-    refetch: vi.fn(),
-    setPage: vi.fn(),
-    setSearch: vi.fn(),
-    setFilters: vi.fn(),
-  };
-}
-
 describe('InvoiceCreate (P11-006)', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset();
     vi.mocked(useListQuery).mockImplementation(((endpoint: string) => {
-      if (endpoint === '/api/jobs') return listResult(mockJobs);
-      if (endpoint === '/api/estimates') return listResult([]);
-      return listResult([]);
+      if (endpoint === '/api/jobs') return listQueryResult(mockJobs);
+      if (endpoint === '/api/estimates') return listQueryResult([]);
+      return listQueryResult([]);
     }) as never);
   });
 
@@ -95,9 +81,8 @@ describe('InvoiceCreate (P11-006)', () => {
       </MemoryRouter>
     );
 
-    // InvoiceForm renders two <select>s: [0] estimate picker, [1] job picker.
-    const selects = container.querySelectorAll('select');
-    const jobSelect = selects[1] as HTMLSelectElement;
+    // Job picker is the only required <select> on the form (estimate picker is optional).
+    const jobSelect = container.querySelector('select[required]') as HTMLSelectElement;
     fireEvent.change(jobSelect, { target: { value: 'job-7' } });
 
     fireEvent.change(screen.getByLabelText('description-0'), {
