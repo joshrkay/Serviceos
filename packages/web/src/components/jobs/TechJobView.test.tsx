@@ -1,31 +1,46 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 
-// TechJobView fetches the job via useApiClient on mount and renders a
-// loading state until that resolves; stub the client to return a minimal
-// job synchronously so the delay UI is in the DOM by the time we assert.
-// useApiClient must return a stable function reference across renders;
-// the real hook does this via useCallback, and TechJobView's loadJob /
-// loadNotes useCallbacks list apiFetch in deps. A fresh arrow per call
-// would invalidate the effect every render and never settle isLoading.
-const apiFetchStub = async (url: string) => {
-  const body = url.startsWith('/api/jobs/')
-    ? { id: 'j1', status: 'in_progress', serviceType: 'HVAC' }
-    : { data: [] };
-  return {
-    ok: true,
-    status: 200,
-    json: async () => body,
-  } as unknown as Response;
-};
+const mockFetcher = vi.fn();
+
 vi.mock('../../lib/apiClient', () => ({
-  useApiClient: () => apiFetchStub,
+  useApiClient: () => mockFetcher,
 }));
+
+vi.mock('@clerk/clerk-react', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@clerk/clerk-react')>();
+  return {
+    ...actual,
+    useAuth: () => ({
+      isLoaded: true,
+      isSignedIn: true,
+      getToken: async () => 'tok',
+    }),
+  };
+});
 
 import { TechJobView } from './TechJobView';
 
+const mockJob = {
+  id: 'j1',
+  jobNumber: '1001',
+  summary: 'Fix HVAC',
+  status: 'scheduled',
+};
+
 describe('TechJobView delay acknowledgement prompt', () => {
+  beforeEach(() => {
+    mockFetcher.mockReset();
+    // /api/jobs/j1 → job detail; /api/notes → empty list
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(new Response(JSON.stringify(mockJob), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+  });
+
   it('renders fixed delay options and toggles with Yes/No', async () => {
     render(
       <MemoryRouter>
@@ -33,7 +48,8 @@ describe('TechJobView delay acknowledgement prompt', () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText('Running behind?')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Running behind?')).toBeInTheDocument());
+
     const yesButton = screen.getByRole('button', { name: 'Yes' });
     const noButton = screen.getByRole('button', { name: 'No' });
 

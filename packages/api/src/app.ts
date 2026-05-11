@@ -446,6 +446,7 @@ export function createApp(): express.Express {
     max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
+    skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
   }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute

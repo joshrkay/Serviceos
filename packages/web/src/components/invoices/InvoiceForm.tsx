@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { FileText, Loader } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   LineItemEditor,

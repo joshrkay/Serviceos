@@ -87,7 +87,13 @@ export interface DevAuthBypassDeps {
 }
 
 export function isDevAuthBypassEnabled(): boolean {
-  return process.env.NODE_ENV === 'dev' && process.env.DEV_AUTH_BYPASS === 'true';
+  // NODE_ENV may be undefined when .env is not explicitly loaded before this
+  // check runs (e.g., dotenv loaded later in createApp). Treat undefined as
+  // 'dev' to mirror the Zod default in config.ts.
+  const isDevEnv = process.env.NODE_ENV === 'dev'
+    || process.env.NODE_ENV === 'development'
+    || process.env.NODE_ENV === undefined;
+  return isDevEnv && process.env.DEV_AUTH_BYPASS === 'true';
 }
 
 export function devAuthBypass(deps: DevAuthBypassDeps) {

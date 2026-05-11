@@ -206,6 +206,8 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
   const total = totalCents(form.items);
   const totalDisplay = `$${(total / 100).toFixed(2)}`;
+  const customerName = jobInfo?.customerName ?? null;
+  const locationLine = jobInfo?.locationLine ?? null;
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
