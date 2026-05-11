@@ -45,6 +45,8 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import { confirmIntent } from '../ai/skills/confirm-intent';
+import { summarizeSession } from '../ai/skills/summarize-session';
+import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import {
   intentClassifiedEvent,
   lookupExecutedEvent,
@@ -1663,7 +1665,7 @@ export class TwilioGatherAdapter {
       (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
         ? endSessionEffect.payload.reason
         : undefined) ?? fallbackReason;
-    const outcome = deriveCallOutcome({
+    const outcome = deriveCallOutcomeFromState({
       finalState: session.machine.currentState,
       endedReason: reason,
       context: session.machine.currentContext,
