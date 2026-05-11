@@ -6,7 +6,7 @@ export function EstimateCreate() {
   const navigate = useNavigate();
   return (
     <EstimateForm
-      onCreated={(id) => navigate(`/estimates/${id}`)}
+      onCreated={(_id) => navigate('/estimates')}
       onCancel={() => navigate('/estimates')}
     />
   );

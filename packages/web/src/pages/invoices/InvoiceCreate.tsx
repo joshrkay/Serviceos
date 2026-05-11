@@ -6,7 +6,7 @@ export function InvoiceCreate() {
   const navigate = useNavigate();
   return (
     <InvoiceForm
-      onCreated={(id) => navigate(`/invoices/${id}`)}
+      onCreated={(_id) => navigate('/invoices')}
       onCancel={() => navigate('/invoices')}
     />
   );
