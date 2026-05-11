@@ -119,6 +119,81 @@ describe('VQ2-followup — Layer 2 entry-test wiring', () => {
     ).toBe(true);
   });
 
+  // ─── Codex P1 fix — launchGate.pass enforcement regression test ───────────
+  //
+  // The Layer 2 entry test (voice-quality.layer2.test.ts) now ends with a
+  // final `it('VQ2-LAYER2 — launch gate verdict')` that rebuilds the
+  // launch-gate verdict from `suiteState.perScriptResults` and asserts
+  // `report.launchGate.pass === true`. The regression we're guarding
+  // against: previously the suite could exit 0 even when launchGate.pass
+  // was false because the per-script `it.each` block only checked the
+  // floor — regressions in TTFA P95, perceived-completion, overall pass
+  // rate, or cost-capped count all slipped through.
+  //
+  // We don't re-execute the entry test from here (it requires API keys),
+  // but we DO verify the underlying assertion logic: given a "degraded"
+  // result set (passing floor but failing perceived completion), the
+  // report's launchGate.pass is false AND the blockers array names the
+  // failure — which is exactly what the entry test now reads.
+  it('VQ2-fix — degraded report produces launchGate.pass=false and a non-empty blockers list', () => {
+    // Construct a result that passes floor on EVERY script but fails
+    // perceived completion on every script. Old behavior: it.each
+    // assertions all pass (floor.passed=true) and the suite exits 0
+    // even though the launch gate considers perceived-completion failure
+    // a hard blocker. New behavior: the final `it` rebuilds the report
+    // and asserts launchGate.pass — surfacing the regression.
+    const degraded = Array.from({ length: 5 }, (_, i) => ({
+      scriptId: `regression-${i}`,
+      aggregated: {
+        floor: { passed: true, runResults: [] as Array<{ passed: boolean; failedCriteria: number[] }> },
+        disposition: {
+          passed: true,
+          slotsAgree: true,
+          distinctSlotValueCounts: {} as Record<string, number>,
+        },
+        callerExperience: {
+          ttfaMedianMs: 200,
+          lookupMedianMs: 400,
+          durationMedianMs: 30_000,
+          repromptRatioMedian: 0,
+          recoveryTurnsMedian: 0,
+        },
+        // Hard regression: perceived completion fails. Old harness
+        // missed this because the entry test only asserted floor.
+        perceivedCompletion: {
+          passed: false,
+          satisfactions: [] as ReadonlyArray<'good' | 'acceptable' | 'poor'>,
+        },
+        flakeIndicator: false,
+      },
+      perRunResults: [],
+      totalCostCents: 0,
+      costCapped: false,
+      durationMs: 100,
+    }));
+
+    const report = buildLayer2Report(degraded);
+
+    // This is exactly what the new `VQ2-LAYER2 — launch gate verdict` it
+    // asserts. If `launchGate.pass` ever silently flipped to true on a
+    // perceived-completion failure, this test would catch the regression
+    // here in the unit suite (which always runs, no keys required).
+    expect(report.launchGate.pass).toBe(false);
+    expect(report.launchGate.blockers.length).toBeGreaterThan(0);
+    // The blocker message names the failure mode the entry test now
+    // surfaces in its assertion message.
+    expect(
+      report.launchGate.blockers.some((b) =>
+        b.includes('perceived completion'),
+      ),
+    ).toBe(true);
+    // Crucially, floor passes — the OLD entry-test it.each assertion
+    // would have considered every script a PASS. The new
+    // launchGate.pass assertion still flags it red.
+    expect(report.launchGate.measured.floorAllPass).toBe(true);
+    expect(report.launchGate.measured.perceivedCompletionPassRate).toBe(0);
+  });
+
   it('VQ2-followup — when keys are absent the entry test must still leave a report on disk', async () => {
     // We don't re-run the entry test here (it lives under a different
     // vitest config). But we DO assert that the file the entry test

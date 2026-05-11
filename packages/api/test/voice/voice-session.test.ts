@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
+// NOTE: findByTenant tests are in this file (appended below).
 
 const TENANT = 'tenant-1';
 
@@ -115,5 +116,84 @@ describe('InMemoryVoiceSessionRepository', () => {
   it('findById returns null for unknown id', async () => {
     const repo = new InMemoryVoiceSessionRepository();
     expect(await repo.findById(TENANT, 'nope')).toBeNull();
+  });
+
+  it('markEnded persists transcript and customerId (migration 092 fields)', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    await repo.create({ id: 's-trans-1', tenantId: TENANT, channel: 'voice_inbound', state: 'idle' });
+    const updated = await repo.markEnded(TENANT, 's-trans-1', {
+      endedAt: new Date(),
+      endedReason: 'caller_hangup',
+      outcome: 'completed',
+      state: 'terminated',
+      channel: 'voice_inbound',
+      transcript: ['caller: I need AC repair', 'agent: I can help with that'],
+      customerId: 'cust-uuid-1',
+    });
+    expect(updated?.transcript).toEqual(['caller: I need AC repair', 'agent: I can help with that']);
+    expect(updated?.customerId).toBe('cust-uuid-1');
+  });
+});
+
+describe('InMemoryVoiceSessionRepository.findByTenant', () => {
+  const T1 = 'tenant-findbyten-1';
+  const T2 = 'tenant-findbyten-2';
+
+  it('returns empty array when no sessions exist for the tenant', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    expect(await repo.findByTenant(T1)).toEqual([]);
+  });
+
+  it('only returns sessions belonging to the requested tenant', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    await repo.create({ id: 'a', tenantId: T1, channel: 'voice_inbound', state: 'idle' });
+    await repo.create({ id: 'b', tenantId: T2, channel: 'voice_inbound', state: 'idle' });
+
+    const results = await repo.findByTenant(T1);
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe('a');
+  });
+
+  it('endedOnly=true filters to sessions with endedAt stamped', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    await repo.create({ id: 'open', tenantId: T1, channel: 'voice_inbound', state: 'idle' });
+    await repo.create({ id: 'ended', tenantId: T1, channel: 'voice_inbound', state: 'idle' });
+    await repo.markEnded(T1, 'ended', {
+      endedAt: new Date(),
+      endedReason: 'caller_hangup',
+      outcome: 'completed',
+      state: 'terminated',
+      channel: 'voice_inbound',
+    });
+
+    const results = await repo.findByTenant(T1, { endedOnly: true });
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe('ended');
+  });
+
+  it('customerId filter narrows results', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    await repo.create({ id: 'x', tenantId: T1, channel: 'voice_inbound', state: 'idle', customerId: 'cust-A' });
+    await repo.create({ id: 'y', tenantId: T1, channel: 'voice_inbound', state: 'idle', customerId: 'cust-B' });
+
+    const results = await repo.findByTenant(T1, { customerId: 'cust-A' });
+    expect(results).toHaveLength(1);
+    expect(results[0].customerId).toBe('cust-A');
+  });
+
+  it('respects limit and offset for pagination', async () => {
+    const repo = new InMemoryVoiceSessionRepository();
+    for (let i = 0; i < 5; i++) {
+      await repo.create({ id: `p-${i}`, tenantId: T1, channel: 'voice_inbound', state: 'idle' });
+    }
+
+    const page1 = await repo.findByTenant(T1, { limit: 2, offset: 0 });
+    const page2 = await repo.findByTenant(T1, { limit: 2, offset: 2 });
+    expect(page1).toHaveLength(2);
+    expect(page2).toHaveLength(2);
+    // No overlap between pages.
+    const ids1 = new Set(page1.map((r) => r.id));
+    const ids2 = new Set(page2.map((r) => r.id));
+    for (const id of ids2) expect(ids1.has(id)).toBe(false);
   });
 });
