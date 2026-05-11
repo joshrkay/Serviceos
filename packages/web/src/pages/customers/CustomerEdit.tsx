@@ -17,6 +17,7 @@ interface FormState {
   secondaryPhone: string;
   email: string;
   preferredChannel: typeof CHANNELS[number];
+  communicationNotes: string;
 }
 
 const empty: FormState = {
@@ -27,6 +28,7 @@ const empty: FormState = {
   secondaryPhone: '',
   email: '',
   preferredChannel: 'email',
+  communicationNotes: '',
 };
 
 /**
@@ -69,6 +71,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
           preferredChannel: (CHANNELS.includes(data.preferredChannel)
             ? data.preferredChannel
             : 'email') as FormState['preferredChannel'],
+          communicationNotes: data.communicationNotes ?? '',
         });
       } catch (err) {
         if (!cancelled) {
@@ -101,6 +104,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
         secondaryPhone: form.secondaryPhone.trim() || undefined,
         email: form.email.trim() || undefined,
         preferredChannel: form.preferredChannel,
+        communicationNotes: form.communicationNotes.trim() || '',
       };
 
       setSubmitting(true);
@@ -211,6 +215,16 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
+        </label>
+        <label className="text-xs text-slate-500 md:col-span-2">
+          Customer notes
+          <textarea
+            aria-label="communicationNotes"
+            value={form.communicationNotes}
+            onChange={(e) => setField('communicationNotes', e.target.value)}
+            rows={4}
+            className={inputCls}
+          />
         </label>
       </div>
 

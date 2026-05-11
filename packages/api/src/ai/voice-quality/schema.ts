@@ -55,6 +55,15 @@ export const VoiceQualityScriptSchema = z.object({
     appliesDisposition: z.array(z.number().int().min(9).max(12)),
   }),
   layer2Eligible: z.boolean().default(false),
+  /**
+   * VQ2-014 — when `true`, the script is excluded from Layer 1 (cassettes
+   * cannot fairly grade audio-only edge cases like mumbled speech or
+   * mid-sentence pauses) and included in Layer 2 only. A script with
+   * `layer2Only: true` MUST also have `layer2Eligible: true`. The Layer 1
+   * runner filters these out; the Layer 2 corpus loader includes them
+   * via `loadLayer2Corpus()`.
+   */
+  layer2Only: z.boolean().default(false),
   expectedCallerMetrics: z
     .object({
       ttfaMaxMs: z.number().optional(),

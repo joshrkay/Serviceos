@@ -31,3 +31,7 @@ serviceos_training/.pytest_cache/
 
 # Voice Quality v1 corpus runner — generated JSON report (VQ-009)
 packages/api/voice-quality-report.json
+# Voice Quality v1 Layer 2 corpus runner — generated reports (VQ2-016)
+packages/api/voice-quality-layer2-report.json
+packages/api/voice-quality-layer2-vitest-report.json
+packages/api/voice-quality-layer2-failures/

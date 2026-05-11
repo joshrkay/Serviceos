@@ -30,7 +30,7 @@ import {
   makeRepoBundle,
   type DriverFactoryContext,
 } from '../../src/ai/voice-quality/runner';
-import { loadCorpus, loadScript } from '../../src/ai/voice-quality/corpus/loader';
+import { loadCorpus, loadScript, loadLayer2Corpus } from '../../src/ai/voice-quality/corpus/loader';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { Customer } from '../../src/customers/customer';
@@ -334,5 +334,57 @@ describe('VQ-008 — corpus loader', () => {
     const loaded = loadScript(file);
     expect(loaded.id).toBe(script.id);
     expect(loaded.bucket).toBe(script.bucket);
+  });
+});
+
+describe('VQ2-014 — loadLayer2Corpus', () => {
+  it('VQ2-014 — loadLayer2Corpus returns only layer2Eligible scripts', () => {
+    const root = mkdtempSync(join(tmpdir(), 'vq2-014-layer2-'));
+
+    // Eligible script.
+    const bucketA = join(root, '01-happy-lookups');
+    mkdirSync(bucketA, { recursive: true });
+    const eligible = { ...syntheticLookupScript(), id: 'eligible-script', layer2Eligible: true };
+    writeFileSync(join(bucketA, `${eligible.id}.json`), JSON.stringify(eligible));
+
+    // Ineligible script (default false).
+    const bucketB = join(root, '06-hangup-edges');
+    mkdirSync(bucketB, { recursive: true });
+    const ineligible = { ...syntheticHangupScript(), id: 'ineligible-script', layer2Eligible: false };
+    writeFileSync(join(bucketB, `${ineligible.id}.json`), JSON.stringify(ineligible));
+
+    const layer2 = loadLayer2Corpus(root);
+    expect(layer2.map((s) => s.id)).toEqual(['eligible-script']);
+  });
+
+  it('VQ2-014 — loadLayer2Corpus excludes layer2Only=false scripts that are not layer2Eligible', () => {
+    const root = mkdtempSync(join(tmpdir(), 'vq2-014-layer2-only-'));
+
+    // Layer-2-only script (eligible AND layer2Only) should be included.
+    const bucketA = join(root, '08-ambiguity');
+    mkdirSync(bucketA, { recursive: true });
+    const layer2Only = {
+      ...syntheticLookupScript(),
+      id: 'layer2-only-script',
+      bucket: '08-ambiguity' as const,
+      layer2Eligible: true,
+      layer2Only: true,
+    };
+    writeFileSync(join(bucketA, `${layer2Only.id}.json`), JSON.stringify(layer2Only));
+
+    // Default-flagged script (layer2Only false, layer2Eligible false) should be excluded.
+    const bucketB = join(root, '04-identity-edges');
+    mkdirSync(bucketB, { recursive: true });
+    const defaultFlags = {
+      ...syntheticLookupScript(),
+      id: 'default-flags-script',
+      bucket: '04-identity-edges' as const,
+      layer2Eligible: false,
+      layer2Only: false,
+    };
+    writeFileSync(join(bucketB, `${defaultFlags.id}.json`), JSON.stringify(defaultFlags));
+
+    const layer2 = loadLayer2Corpus(root);
+    expect(layer2.map((s) => s.id)).toEqual(['layer2-only-script']);
   });
 });

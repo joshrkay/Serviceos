@@ -60,6 +60,20 @@ export interface MediaStreamServerDeps extends MediaStreamAdapterDeps {
    * scheme inferred from x-forwarded-proto (or http).
    */
   publicBaseUrl?: string;
+  /**
+   * @internal Test-only escape hatch (VQ2-007). When `true`, the server
+   * accepts unsigned WebSocket upgrade requests — Twilio signature header
+   * validation is skipped entirely. Must NEVER be set in production code
+   * paths; it is read by Layer 2 voice-quality tests
+   * (`voice-quality.layer2.test.ts`) only. Defaults to `false`.
+   *
+   * The flag is deliberately NOT pulled from any env var: callers must opt
+   * in explicitly via this deps object so a misconfigured environment
+   * (a stray `AUTH_TEST_MODE=true`) cannot accidentally disable auth in
+   * production. Production wiring in `app.ts` does not pass this field; a
+   * unit test (VQ2-007) lints the source to enforce that.
+   */
+  authTestMode?: boolean;
 }
 
 export interface AttachOptions {
@@ -102,24 +116,32 @@ export function attachMediaStreamServer(
     // 2. Signature verification. Twilio signs the WS upgrade URL the
     //    same way it signs HTTP webhooks — auth_token + URL + (no
     //    params for upgrades) → HMAC-SHA1 → base64. Reject 403 on miss.
-    const authToken = await Promise.resolve(deps.authTokenGetter({}));
-    if (!authToken) {
-      logger.error('mediastream upgrade rejected: no auth token configured');
-      rejectUpgrade(socket, 500);
-      return;
-    }
-    const signature = (req.headers['x-twilio-signature'] as string | undefined) ?? '';
-    const fullUrl = reconstructUpgradeUrl(req, deps.publicBaseUrl);
-    let signatureOk = false;
-    try {
-      signatureOk = twilio.validateRequest(authToken, signature, fullUrl, {});
-    } catch {
-      signatureOk = false;
-    }
-    if (!signatureOk) {
-      logger.warn('mediastream upgrade rejected: invalid Twilio signature', { fullUrl });
-      rejectUpgrade(socket, 403);
-      return;
+    if (deps.authTestMode === true) {
+      // VQ2-007: Test-only escape hatch. Skip signature validation
+      // entirely so Layer 2 voice-quality tests can drive unsigned
+      // upgrades against an in-process server. Documented on the deps
+      // interface; production wiring never sets this flag.
+      logger.warn('mediastream upgrade: authTestMode=true → signature validation BYPASSED');
+    } else {
+      const authToken = await Promise.resolve(deps.authTokenGetter({}));
+      if (!authToken) {
+        logger.error('mediastream upgrade rejected: no auth token configured');
+        rejectUpgrade(socket, 500);
+        return;
+      }
+      const signature = (req.headers['x-twilio-signature'] as string | undefined) ?? '';
+      const fullUrl = reconstructUpgradeUrl(req, deps.publicBaseUrl);
+      let signatureOk = false;
+      try {
+        signatureOk = twilio.validateRequest(authToken, signature, fullUrl, {});
+      } catch {
+        signatureOk = false;
+      }
+      if (!signatureOk) {
+        logger.warn('mediastream upgrade rejected: invalid Twilio signature', { fullUrl });
+        rejectUpgrade(socket, 403);
+        return;
+      }
     }
 
     // 3. Hand off to ws — at this point we trust the upgrade.

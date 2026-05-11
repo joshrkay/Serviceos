@@ -2452,6 +2452,30 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_voice_sessions_call_sid
       ON voice_sessions (call_sid) WHERE call_sid IS NOT NULL;
   `,
+
+  // 15.8/15.9 — Persist the in-memory FSM transcript onto the voice_sessions
+  // row so the /api/interactions endpoint can surface full call transcripts
+  // without relying on the in-memory store (which is process-scoped and lost
+  // on restart). customer_id index improves the interactions list query that
+  // joins to customers for the "correct customer linked" requirement.
+  '092_voice_session_transcript': `
+    ALTER TABLE voice_sessions
+      ADD COLUMN IF NOT EXISTS transcript JSONB;
+    CREATE INDEX IF NOT EXISTS idx_voice_sessions_customer
+      ON voice_sessions (tenant_id, customer_id) WHERE customer_id IS NOT NULL;
+  `,
+
+  // 16D — Soft-delete support for users. When a Clerk user.deleted event is
+  // received the row is stamped with deleted_at rather than purged. Tenant
+  // data and the Twilio subaccount are intentionally NOT removed — they must
+  // be retained for audit and billing, and the subaccount must not be
+  // released until a manual deprovisioning step is performed by ops.
+  '093_users_deleted_at': `
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_users_deleted ON users(tenant_id, deleted_at)
+      WHERE deleted_at IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
