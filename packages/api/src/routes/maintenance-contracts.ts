@@ -38,8 +38,12 @@ interface MaintenanceContract {
 
 const contractsByTenant = new Map<string, MaintenanceContract[]>();
 
-function listForTenant(tenantId: string): MaintenanceContract[] {
+export function listForTenant(tenantId: string): MaintenanceContract[] {
   return contractsByTenant.get(tenantId) ?? [];
+}
+
+export function listForCustomer(tenantId: string, customerId: string): MaintenanceContract[] {
+  return listForTenant(tenantId).filter((c) => c.customer?.id === customerId);
 }
 
 function setForTenant(tenantId: string, rows: MaintenanceContract[]): void {

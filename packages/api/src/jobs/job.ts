@@ -19,6 +19,7 @@ export interface Job {
   assignedTechnicianId?: string;
   /** Inherits from `customer.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
+  contractId?: string;
   /**
    * Tier 4 (Deposit rules — PR 2). Required deposit amount in cents,
    * computed by `evaluateDepositRule` at the moment a contractual
@@ -83,6 +84,7 @@ export interface JobListOptions {
   status?: JobStatus;
   customerId?: string;
   technicianId?: string;
+  contractId?: string;
   search?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
@@ -314,6 +316,7 @@ export class InMemoryJobRepository implements JobRepository {
     if (options?.status) results = results.filter((j) => j.status === options.status);
     if (options?.customerId) results = results.filter((j) => j.customerId === options.customerId);
     if (options?.technicianId) results = results.filter((j) => j.assignedTechnicianId === options.technicianId);
+    if (options?.contractId) results = results.filter((j) => j.contractId === options.contractId);
     if (options?.search) {
       const q = options.search.toLowerCase();
       results = results.filter(

@@ -128,6 +128,7 @@ export function createJobRouter(
           status: req.query.status as any,
           customerId: req.query.customerId as string,
           technicianId: req.query.technicianId as string,
+          contractId: req.query.contractId as string,
           search: req.query.search as string,
           sort,
         };
