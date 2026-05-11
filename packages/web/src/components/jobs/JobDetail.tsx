@@ -1000,9 +1000,9 @@ export function JobDetailView({ id }: { id: string }) {
 
   async function saveTimeEntry() {
     if (!timeFormStart || !timeFormEnd) return;
-    const today = new Date().toISOString().split('T')[0];
-    const startISO = `${today}T${timeFormStart}:00Z`;
-    const endISO   = `${today}T${timeFormEnd}:00Z`;
+    const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in local time
+    const startISO = new Date(today + 'T' + timeFormStart).toISOString();
+    const endISO   = new Date(today + 'T' + timeFormEnd).toISOString();
     setTimeFormSaving(true);
     try {
       const clockInRes = await apiFetch('/api/time-entries/clock-in', {
