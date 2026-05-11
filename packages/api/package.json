@@ -14,6 +14,8 @@
     "voice-quality:watch": "vitest -c vitest.voice-quality.config.ts",
     "voice-quality:record": "VOICE_QUALITY_CASSETTE_MODE=record vitest run -c vitest.voice-quality.config.ts",
     "voice-quality:refresh": "VOICE_QUALITY_CASSETTE_MODE=refresh vitest run -c vitest.voice-quality.config.ts",
+    "voice-quality:layer2": "vitest run -c vitest.voice-quality-layer2.config.ts",
+    "voice-quality:layer2:weekly": "VOICE_QUALITY_LAYER2_WEEKLY=true vitest run -c vitest.voice-quality-layer2.config.ts",
     "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",

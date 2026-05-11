@@ -381,7 +381,12 @@ export function SettingsPage() {
             <p className="text-xs text-slate-400 mt-0.5">HVAC · Plumbing · Painting · Austin, TX</p>
             <p className="text-xs text-slate-400 mt-0.5">Owner</p>
           </div>
-          <button className="text-xs text-slate-400 hover:text-white transition-colors shrink-0">Edit</button>
+          <button
+            onClick={() => setBusinessProfileOpen(true)}
+            className="text-xs text-slate-400 hover:text-white transition-colors shrink-0"
+          >
+            Edit
+          </button>
         </div>
 
         {/* Customer Intake Form — featured card */}

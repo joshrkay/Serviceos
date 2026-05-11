@@ -1,0 +1,90 @@
+# VQ2-017 — Voice Quality Layer 2 weekly trend + Slack alerting.
+#
+# Runs the Layer 2 corpus suite once a week (Monday 06:00 UTC) and
+# posts a weekly trend summary to the voice-quality Slack channel. If
+# the overall pass rate drops more than 5pp week-over-week the workflow
+# also opens a tracking issue tagged `voice-quality-regression`.
+#
+# Cost shape: each weekly run hits real Anthropic + OpenAI APIs.
+# `VOICE_QUALITY_COST_CAP_CENTS=1000` ($10) is the per-suite ceiling
+# enforced by the runner (see runner-layer2.ts SUITE_COST_CAP_CENTS_DEFAULT).
+#
+# Trend persistence: v1 compares the current run to AT MOST one prior
+# report (read from `TREND_PRIOR_PATH` if set). The plan's 8-week S3
+# prefix history is a v1.5 follow-up — the trend script clearly flags
+# the missing-history case in its `notes`.
+#
+# Failure model: the trend / slack / auto-issue post-steps all use
+# `if: always()` and `continue-on-error: true` — the run itself is
+# informational (no gate). The Layer 2 step's outcome is what the
+# weekly run is reporting on; downstream alerting must not mask it.
+name: Voice Quality Layer 2 (weekly trend)
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'    # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # so the workflow can open regression issues
+
+jobs:
+  trend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      VOICE_QUALITY_LAYER2: 'true'
+      VOICE_QUALITY_LAYER2_WEEKLY: 'true'
+      VOICE_QUALITY_REPO: memory
+      VOICE_QUALITY_COST_CAP_CENTS: '1000'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - name: Run Layer 2 weekly suite
+        run: npm run voice-quality:layer2:weekly --workspace=packages/api
+      - name: Upload weekly report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-quality-layer2-weekly-${{ github.run_id }}
+          path: packages/api/voice-quality-layer2-report.json
+          retention-days: 90
+      - name: Build trend report
+        if: always()
+        run: npx ts-node .github/scripts/voice-quality-trend-report.ts
+        env:
+          REPORT_PATH: packages/api/voice-quality-layer2-report.json
+          TREND_OUTPUT_PATH: packages/api/voice-quality-trend-report.json
+      - name: Upload trend artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-quality-trend-report-${{ github.run_id }}
+          path: packages/api/voice-quality-trend-report.json
+          retention-days: 90
+      - name: Post Slack alert
+        if: always()
+        run: npx ts-node .github/scripts/post-voice-quality-slack.ts
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_VOICE_QUALITY_WEBHOOK }}
+          REPORT_PATH: packages/api/voice-quality-layer2-report.json
+          TREND_PATH: packages/api/voice-quality-trend-report.json
+      - name: Open regression issue if pass rate dropped >5pp
+        if: always()
+        run: npx ts-node .github/scripts/voice-quality-trend-report.ts --open-issue
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REPORT_PATH: packages/api/voice-quality-layer2-report.json
+          TREND_PATH: packages/api/voice-quality-trend-report.json

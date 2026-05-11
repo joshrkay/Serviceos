@@ -87,3 +87,52 @@ export function sessionTerminatedEvent(
 ): Extract<VoiceSessionEvent, { type: 'session_terminated' }> {
   return { type: 'session_terminated', cause, ts };
 }
+
+/**
+ * VQ2-004: TTFA-start marker. Emitted by the media-stream adapter the
+ * moment the STT provider returns a final transcript for the caller's
+ * turn (Whisper-final / Deepgram-final). Pairs with the next
+ * `audio_frame_emitted` event to compute time-to-first-audio.
+ */
+export const transcriptReceivedEvent = (
+  opts: { ts?: number } = {},
+): Extract<VoiceSessionEvent, { type: 'transcript_received' }> => ({
+  type: 'transcript_received',
+  ts: opts.ts ?? Date.now(),
+});
+
+/**
+ * VQ2-004: TTFA-stop marker. Emitted by the media-stream adapter on
+ * the FIRST outbound audio chunk of a turn (subsequent chunks in the
+ * same turn are suppressed). `byteCount` is the chunk size for sanity
+ * — a non-zero count means the WS actually carried audio, not just a
+ * mark/heartbeat frame.
+ */
+export const audioFrameEmittedEvent = (
+  opts: { byteCount: number; ts?: number },
+): Extract<VoiceSessionEvent, { type: 'audio_frame_emitted' }> => ({
+  type: 'audio_frame_emitted',
+  byteCount: opts.byteCount,
+  ts: opts.ts ?? Date.now(),
+});
+
+/** Convenience alias for the new variant constructor below. */
+export type SpeechOutboundEvent = Extract<VoiceSessionEvent, { type: 'speech_outbound' }>;
+
+/**
+ * VQ2-followup: emitted by the agent driver after each turn's outbound
+ * speech has been finalized. Layer 2 emits the Whisper-recovered
+ * transcription of the TTS audio the caller would have heard; Layer 1
+ * emits the synthesized confirmation/lookup string the driver was about
+ * to "speak". Both consumers (perceived-completion / reprompt graders)
+ * read by `turnIndex`, which is the zero-indexed turn position within
+ * the script.
+ */
+export const speechOutboundEvent = (
+  opts: { transcript: string; turnIndex: number; ts?: number },
+): SpeechOutboundEvent => ({
+  type: 'speech_outbound',
+  transcript: opts.transcript,
+  turnIndex: opts.turnIndex,
+  ts: opts.ts ?? Date.now(),
+});
