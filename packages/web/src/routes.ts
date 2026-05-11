@@ -100,6 +100,20 @@ function AppointmentEditRoute() {
   });
 }
 
+// Wrap EstimatesPage to pre-select the estimate from the URL param.
+function EstimateDetailRoute() {
+  const params = useParams<{ id: string }>();
+  if (!params.id) return null;
+  return React.createElement(EstimatesPage as React.ComponentType<{ defaultSelectedId?: string }>, { defaultSelectedId: params.id });
+}
+
+// Wrap InvoicesPage to pre-select the invoice from the URL param.
+function InvoiceDetailRoute() {
+  const params = useParams<{ id: string }>();
+  if (!params.id) return null;
+  return React.createElement(InvoicesPage as React.ComponentType<{ defaultSelectedId?: string }>, { defaultSelectedId: params.id });
+}
+
 export const router = createBrowserRouter([
   // ── Auth (fullscreen, no Shell) ───────────────────────────────────────────
   { path: '/login',  Component: LoginPage  },
@@ -136,8 +150,10 @@ export const router = createBrowserRouter([
       { path: 'leads/:id',      Component: LeadDetailRoute     },
       { path: 'estimates',      Component: EstimatesPage   },
       { path: 'estimates/new',  Component: EstimateCreate  },
+      { path: 'estimates/:id',  Component: EstimateDetailRoute },
       { path: 'invoices',       Component: InvoicesPage    },
       { path: 'invoices/new',   Component: InvoiceCreate   },
+      { path: 'invoices/:id',   Component: InvoiceDetailRoute },
       { path: 'contracts',      Component: MaintenanceContractsPage },
       { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'interactions',   Component: InteractionsPage },
