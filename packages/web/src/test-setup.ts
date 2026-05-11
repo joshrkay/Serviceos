@@ -34,12 +34,17 @@ const __defaultUseAuthResult = {
   isSignedIn: true,
   getToken: __defaultClerkGetToken,
 };
+const __defaultClerkSignOut = async () => {};
+const __defaultUseClerkResult = {
+  signOut: __defaultClerkSignOut,
+};
 
 vi.mock('@clerk/clerk-react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@clerk/clerk-react')>();
   return {
     ...actual,
     useAuth: () => __defaultUseAuthResult,
+    useClerk: () => __defaultUseClerkResult,
   };
 });
 

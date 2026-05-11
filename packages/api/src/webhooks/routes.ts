@@ -463,6 +463,84 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // ── 16D — user.deleted: soft-delete the users row; preserve all data ──
+      //
+      // Per QA 16.22: subsequent API requests with the deleted user's token
+      // must return 401. Clerk invalidates the JWT immediately on deletion so
+      // verifyRs256Token in the auth middleware handles that automatically.
+      // Our job here is to stamp deleted_at on the users row (migration 093)
+      // and emit an audit event.
+      //
+      // Per QA 16.23: tenant data in Postgres MUST NOT be purged — it is
+      // retained for audit and billing until an explicit purge is requested
+      // by the ops team (manual deprovisioning).
+      //
+      // Per QA 16.24: the tenant's Twilio subaccount MUST NOT be released
+      // automatically — releasing a number could redirect calls intended for
+      // the original tenant to a new assignee. Manual deprovisioning must
+      // include an explicit Twilio subaccount suspend/close step.
+      if (eventType === 'user.deleted') {
+        const userData = payload.data as Record<string, unknown>;
+        const userId = userData.id as string;
+
+        logger.info('user.deleted webhook received — soft-deleting users row', { userId });
+
+        if (deps.pool) {
+          try {
+            // The users table has RLS on tenant_id, but here we need to delete
+            // by clerk_user_id across whatever tenant the user belonged to.
+            // We use the system-level pattern (no SET LOCAL) with an explicit
+            // WHERE on clerk_user_id. The UPDATE only touches the matched row,
+            // so cross-tenant leakage is not possible.
+            const result = await deps.pool.query<{ id: string; tenant_id: string }>(
+              `UPDATE users
+               SET deleted_at = NOW(), updated_at = NOW()
+               WHERE clerk_user_id = $1 AND deleted_at IS NULL
+               RETURNING id, tenant_id`,
+              [userId],
+            );
+            const deletedRows = result.rows;
+            if (deletedRows.length > 0) {
+              logger.info('user.deleted: users row soft-deleted', {
+                userId,
+                affectedRows: deletedRows.length,
+                tenantId: deletedRows[0]?.tenant_id,
+              });
+
+              if (deps.auditRepo) {
+                for (const row of deletedRows) {
+                  await deps.auditRepo.create(createAuditEvent({
+                    tenantId: row.tenant_id,
+                    actorId: 'system:clerk_webhook',
+                    actorRole: 'system',
+                    eventType: 'user.deleted',
+                    entityType: 'user',
+                    entityId: row.id,
+                    metadata: {
+                      clerkUserId: userId,
+                      svixId,
+                      note: 'User row soft-deleted. Tenant data and Twilio subaccount intentionally retained — manual deprovisioning required.',
+                    },
+                  }));
+                }
+              }
+            } else {
+              logger.info('user.deleted: no users row found for clerk_user_id', { userId });
+            }
+          } catch (deleteErr) {
+            logger.error('user.deleted: soft-delete failed', {
+              userId,
+              error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+            });
+            // Do not rethrow — a failed soft-delete should not cause the
+            // webhook to 500 (Clerk would retry indefinitely). The user's
+            // JWT is already invalidated by Clerk regardless.
+          }
+        } else {
+          logger.warn('user.deleted: pool not configured — skipping soft-delete', { userId });
+        }
+      }
+
       await webhookRepo.updateStatus(svixId, 'processed');
       return res.status(200).json({ received: true });
 

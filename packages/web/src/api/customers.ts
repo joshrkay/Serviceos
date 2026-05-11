@@ -67,6 +67,9 @@ export async function getCustomerTimeline(
     ? `/api/customers/${encodeURIComponent(customerId)}/timeline?${qs}`
     : `/api/customers/${encodeURIComponent(customerId)}/timeline`;
   const res = await apiFetch(url);
+  if (res.status === 404) {
+    return { events: [], nextCursor: null };
+  }
   if (!res.ok) {
     throw new Error(`Failed to load timeline: ${res.status}`);
   }

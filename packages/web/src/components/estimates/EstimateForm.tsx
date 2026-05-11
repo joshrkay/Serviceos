@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   LineItemEditor,
@@ -36,6 +36,31 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   }));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [activeContract, setActiveContract] = useState<{ id: string; name: string; recurrenceRule?: string } | null>(null);
+  const jobIdLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // When job ID is entered, look up active agreements for the associated customer
+  useEffect(() => {
+    if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current);
+    const jobId = form.jobId.trim();
+    if (!jobId) { setActiveContract(null); return; }
+    jobIdLookupTimer.current = setTimeout(async () => {
+      try {
+        const jobRes = await apiFetch(`/api/jobs/${jobId}`);
+        if (!jobRes.ok) return;
+        const job = await jobRes.json() as { customerId?: string };
+        if (!job.customerId) return;
+        const agRes = await apiFetch(`/api/agreements?customerId=${job.customerId}&status=active`);
+        if (!agRes.ok) return;
+        const data = await agRes.json() as { data?: Array<{ id: string; name: string; recurrenceRule?: string }> };
+        const contracts = data.data ?? [];
+        setActiveContract(contracts.length > 0 ? contracts[0] : null);
+      } catch {
+        setActiveContract(null);
+      }
+    }, 600);
+    return () => { if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current); };
+  }, [form.jobId]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -127,6 +152,23 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
         >
           {error}
+        </div>
+      )}
+      {activeContract && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+          <p className="text-sm text-blue-800">
+            <strong>Active maintenance contract:</strong> {activeContract.name}
+            {activeContract.recurrenceRule && (
+              <span className="text-blue-600 ml-1">
+                ({activeContract.recurrenceRule.includes('MONTHLY') ? 'Monthly' :
+                  activeContract.recurrenceRule.includes('QUARTERLY') ? 'Quarterly' :
+                  activeContract.recurrenceRule.includes('YEARLY') ? 'Yearly' : activeContract.recurrenceRule})
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-blue-600 mt-1">
+            Service call fee may be waived under this plan. Consider adding a plan-specific line item.
+          </p>
         </div>
       )}
 
