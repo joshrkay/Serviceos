@@ -438,12 +438,16 @@ export function createApp(): express.Express {
     credentials: true,
   }));
 
-  // Rate limiting — applied before auth to protect all routes
+  // Rate limiting — applied before auth to protect all routes.
+  // In dev/test environments the limit is raised to avoid blocking
+  // the UI's concurrent requests during development.
+  const isDev = !config.NODE_ENV || config.NODE_ENV === 'dev' || config.NODE_ENV === 'test';
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,                  // per IP
+    max: isDev ? 5000 : 100,   // per IP (generous in dev)
     standardHeaders: true,
     legacyHeaders: false,
+    skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
   }));
   app.use('/webhooks', rateLimit({
     windowMs: 60 * 1000,      // 1 minute
