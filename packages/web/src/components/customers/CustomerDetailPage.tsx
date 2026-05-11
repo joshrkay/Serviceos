@@ -20,7 +20,7 @@ interface ApiContract {
   status?: string;
 }
 
-// ─── constants ───────────────────────────────────────────────────────────────
+// ─── constants ────────────────────────────────────────────────────────────────────
 const SVC_CHIP: Record<ServiceType, string> = {
   HVAC:     'bg-blue-50 text-blue-700 border-blue-100',
   Plumbing: 'bg-green-50 text-green-700 border-green-100',
@@ -53,7 +53,7 @@ const INV_STATUS_STYLE: Record<string, string> = {
   Overdue: 'bg-red-100 text-red-600',
 };
 
-// ─── Add Location Sheet ───────────────────────────────────────────────────────
+// ─── Add Location Sheet ─────────────────────────────────────────────────────────────────
 function AddLocationSheet({ onClose, onSave }: {
   onClose: () => void;
   onSave: (loc: ServiceLocation) => void;
@@ -173,7 +173,7 @@ function AddLocationSheet({ onClose, onSave }: {
   );
 }
 
-// ─── Location Card ────────────────────────────────────────────────────────────
+// ─── Location Card ──────────────────────────────────────────────────────────────────────────
 function LocationCard({ loc, isExpanded, onToggle, isNew }: {
   loc: ServiceLocation; isExpanded: boolean; onToggle: () => void; isNew?: boolean;
 }) {
@@ -256,7 +256,7 @@ function LocationCard({ loc, isExpanded, onToggle, isNew }: {
   );
 }
 
-// ─── Invoice status footer ────────────────────────────────────────────────────
+// ─── Invoice status footer ──────────────────────────────────────────────────────────────────
 function InvoiceStatusBar({ status, dueDate, paidDate, sentDate }: {
   status: string; dueDate?: string; paidDate?: string; sentDate?: string;
 }) {
@@ -346,7 +346,7 @@ function MaintenanceContractsSidebar({ customerId, contracts }: {
   );
 }
 
-// ─── Main page ────────────────────────────────────────────────────────────────
+// ─── Main page ──────────────────────────────────────────────────────────────────────────
 type Tab = 'overview' | 'locations' | 'history';
 type HistoryFilter = 'all' | 'invoices' | 'jobs' | 'estimates';
 
@@ -357,8 +357,8 @@ export function CustomerDetailPage() {
   const found = customers.find(c => c.id === id);
   const customerId = id ?? '';
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
-    '/api/agreements',
-    { filters: customerId ? { customerId } : {}, enabled: Boolean(customerId) },
+    `/api/customers/${customerId}/maintenance-contracts`,
+    { enabled: Boolean(customerId) },
   );
   const [tab,              setTab]           = useState<Tab>('history');
   const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
