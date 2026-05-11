@@ -80,7 +80,40 @@ const MANUAL_CATALOG: Record<ServiceType, CatalogItem[]> = {
   ],
 };
 
-// ─── Mock AI generator ────────────────────────────────────────────────────────
+// ─── AI suggestion call ──────────────────────────────────────────────────────
+// Posts to the real /api/estimates/suggest endpoint, which invokes
+// EstimateTaskHandler on the API and persists a draft_estimate proposal.
+// On any failure (no auth, 503 not-configured, network), falls back to
+// the local mock generator so the wizard remains usable in dev/demo.
+async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<AIResult> {
+  try {
+    const res = await apiFetch('/api/estimates/suggest', {
+      method: 'POST',
+      body: JSON.stringify({ description: input, ...(svcHint ? { serviceType: svcHint } : {}) }),
+    });
+    if (!res.ok) return generateEstimate(input, svcHint);
+    const data = (await res.json()) as {
+      lineItems?: Array<{ description: string; quantity: number; unitPrice: number; category?: string }>;
+      notes?: string;
+    };
+    const items: AILineItem[] = (data.lineItems ?? []).map(li => ({
+      description: li.description,
+      qty: li.quantity,
+      rate: li.unitPrice,
+      ...(li.category ? { note: li.category } : {}),
+    }));
+    if (items.length === 0) return generateEstimate(input, svcHint);
+    return {
+      description: input.length > 60 ? input.slice(0, 60) + '…' : input || 'Service',
+      explanation: data.notes ?? '',
+      items,
+    };
+  } catch {
+    return generateEstimate(input, svcHint);
+  }
+}
+
+// ─── Mock AI generator (fallback) ─────────────────────────────────────────────
 function generateEstimate(input: string, svcHint?: ServiceType): AIResult {
   const t = input.toLowerCase();
   const isHVAC  = svcHint === 'HVAC'     || /hvac|ac |condenser|refrigerant|furnace|duct|thermostat|heat pump|tune.?up|air filter/.test(t);
@@ -417,7 +450,10 @@ function VoiceInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 
   function build() {
     setPhase('generating');
-    setTimeout(() => { onResult(generateEstimate(transcript, svcType)); setPhase('done'); }, 2000);
+    void suggestEstimate(transcript, svcType).then(result => {
+      onResult(result);
+      setPhase('done');
+    });
   }
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -755,7 +791,10 @@ function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
   }
   function analyze() {
     setPhase('analyzing');
-    setTimeout(() => { onResult(generateEstimate(PHOTO_PROMPTS[svc], svc)); setPhase('done'); }, 2800);
+    void suggestEstimate(PHOTO_PROMPTS[svc], svc).then(result => {
+      onResult(result);
+      setPhase('done');
+    });
   }
 
   if (phase === 'idle' || phase === 'analyzing') return (

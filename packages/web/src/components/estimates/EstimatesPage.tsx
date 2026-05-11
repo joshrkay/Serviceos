@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
@@ -7,6 +7,7 @@ import {
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { apiFetch } from '../../utils/api-fetch';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -165,8 +166,67 @@ function ApprovalStepper({ est }: { est: EstCompat }) {
 }
 
 // ─── AI Pricing Suggestions ───────────────────────────────────────────────
-function AIPricingSuggestions({ estimateId, onAddLine }: { estimateId: string; onAddLine?: () => void }) {
-  const hints = PRICING_HINTS[estimateId] ?? [];
+type Hint = { id: string; type: 'ok' | 'tip' | 'warn'; text: string; action?: string };
+
+function AIPricingSuggestions({
+  estimateId,
+  description,
+  existingLineItems,
+  onAddLine,
+}: {
+  estimateId: string;
+  description?: string;
+  existingLineItems?: Array<{ description: string; qty: number; rate: number }>;
+  onAddLine?: () => void;
+}) {
+  const seeded = PRICING_HINTS[estimateId];
+  const [hints, setHints] = useState<Hint[]>(seeded ?? []);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (seeded) return;
+    if (!description) return;
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const res = await apiFetch('/api/estimates/suggest', {
+          method: 'POST',
+          body: JSON.stringify({
+            description: `Review the pricing on this estimate and suggest any missing or under-priced line items: ${description}`,
+            existingLineItems: existingLineItems?.map(li => ({
+              description: li.description,
+              quantity: li.qty,
+              unitPrice: li.rate,
+            })),
+          }),
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as {
+          lineItems?: Array<{ description: string; unitPrice: number }>;
+        };
+        const items = data.lineItems ?? [];
+        if (cancelled || items.length === 0) return;
+        setHints(
+          items.slice(0, 4).map((li, i) => ({
+            id: `ai-${estimateId}-${i}`,
+            type: 'tip' as const,
+            text: `${li.description} (~$${li.unitPrice.toLocaleString()})`,
+            action: 'Add line',
+          })),
+        );
+      } catch {
+        // swallow — panel hides itself when hints stay empty
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [estimateId, description, existingLineItems, seeded]);
+
+  if (loading && !hints.length) return null;
   if (!hints.length) return null;
 
   return (
@@ -667,7 +727,11 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   await updateEstimate({ lineItems: items.map((item, i) => uiLineToApi(item, i)) });
                 }}
               />
-              <AIPricingSuggestions estimateId={est.id} />
+              <AIPricingSuggestions
+                estimateId={est.id}
+                description={est.customerMessage ?? uiLineItems[0]?.description}
+                existingLineItems={uiLineItems}
+              />
             </div>
 
             {/* ── Right rail ── */}
