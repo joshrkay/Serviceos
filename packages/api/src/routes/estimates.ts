@@ -20,13 +20,29 @@ import {
 import { AuditRepository } from '../audit/audit';
 import { getNextEstimateNumber, SettingsRepository } from '../settings/settings';
 import { SendService } from '../notifications/send-service';
+import { LLMGateway } from '../ai/gateway/gateway';
+import { ProposalRepository } from '../proposals/proposal';
+import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
+
+/**
+ * Optional AI dependencies. When provided, mounts POST /suggest, which
+ * invokes EstimateTaskHandler to generate AI-suggested line items for
+ * the in-app estimate wizard and pricing-review panel. When absent, the
+ * /suggest route returns 503 so the FE can fall back to mock content
+ * without breaking the wizard.
+ */
+export interface EstimateAIDeps {
+  gateway: LLMGateway;
+  proposalRepo: ProposalRepository;
+}
 
 export function createEstimateRouter(
   estimateRepo: EstimateRepository,
   settingsRepo: SettingsRepository,
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
-  sendService?: SendService
+  sendService?: SendService,
+  aiDeps?: EstimateAIDeps
 ): Router {
   const router = Router();
 
@@ -200,6 +216,92 @@ export function createEstimateRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  // POST /suggest — invoke EstimateTaskHandler to generate AI line items
+  // for the in-app wizard (NewEstimateFlow) and detail-page pricing
+  // review. Persists the resulting proposal so the audit trail matches
+  // the voice-agent flow (voice-action-router uses the same handler).
+  // The FE consumes lineItems for immediate display; the proposalId lets
+  // the wizard reference the underlying record on save.
+  const suggestSchema = z.object({
+    description: z.string().min(1).max(5000),
+    serviceType: z.enum(['HVAC', 'Plumbing', 'Painting']).optional(),
+    customerId: z.string().uuid().optional(),
+    jobId: z.string().uuid().optional(),
+    existingLineItems: z
+      .array(
+        z.object({
+          description: z.string(),
+          quantity: z.number(),
+          unitPrice: z.number(),
+        })
+      )
+      .max(50)
+      .optional(),
+  });
+
+  router.post(
+    '/suggest',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:create'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!aiDeps) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'AI estimate suggestions are not configured for this environment',
+          });
+          return;
+        }
+        const parsed = suggestSchema.parse(req.body ?? {});
+
+        if (parsed.jobId) {
+          await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
+        }
+        if (parsed.customerId) {
+          await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
+        }
+
+        const handler = new EstimateTaskHandler(aiDeps.gateway);
+        const existingEntities: Record<string, unknown> = {};
+        if (parsed.serviceType) existingEntities.serviceType = parsed.serviceType;
+        if (parsed.customerId) existingEntities.customerId = parsed.customerId;
+        if (parsed.jobId) existingEntities.jobId = parsed.jobId;
+        if (parsed.existingLineItems) existingEntities.existingLineItems = parsed.existingLineItems;
+
+        const result = await handler.handle({
+          tenantId: req.auth!.tenantId,
+          userId: req.auth!.userId,
+          message: parsed.description,
+          existingEntities: Object.keys(existingEntities).length > 0 ? existingEntities : undefined,
+        });
+
+        // EstimateTaskHandler hardcodes sourceTrustTier='autonomous' for the
+        // voice-agent flow, which can auto-approve at ≥0.9 confidence and
+        // gets picked up by runExecutionSweep. For UI suggestions the user
+        // must explicitly commit — force draft so previewing a suggestion
+        // never writes a real estimate to the database.
+        const draftProposal = { ...result.proposal, status: 'draft' as const, approvedAt: undefined };
+        const persisted = await aiDeps.proposalRepo.create(draftProposal);
+        const payload = persisted.payload as {
+          lineItems?: Array<{ description: string; quantity: number; unitPrice: number; category?: string }>;
+          notes?: string;
+        };
+
+        res.status(200).json({
+          proposalId: persisted.id,
+          lineItems: payload.lineItems ?? [],
+          notes: payload.notes,
+          confidenceScore: persisted.confidenceScore,
+          status: persisted.status,
+        });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
