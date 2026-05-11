@@ -5,8 +5,9 @@ import { MemoryRouter } from 'react-router';
 import { TechnicianDayView } from './TechnicianDayView';
 
 // TechnicianDayView now uses useNavigate() so all renders need a router.
-const render: typeof rtlRender = (ui, ...rest) =>
-  rtlRender(<MemoryRouter>{ui}</MemoryRouter>, ...rest);
+function render(ui: React.ReactElement) {
+  return rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 describe('P6-019 — Technician day-of assigned-work view', () => {
   let onPositionSuccess: ((position: GeolocationPosition) => void) | null = null;

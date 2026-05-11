@@ -14,7 +14,6 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { customers } from '../../data/mock-data';
-import { apiFetch } from '../../utils/api-fetch';
 import { useNavigate } from 'react-router';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
@@ -927,9 +926,6 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </button>
                 </div>
               </div>
-                description={est.customerMessage ?? uiLineItems[0]?.description}
-                existingLineItems={uiLineItems}
-              />
             </div>
 
             {/* ── Right rail ── */}
