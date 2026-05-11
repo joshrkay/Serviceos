@@ -447,7 +447,7 @@ export function SchedulePage() {
       {!loading && (
         <div className="flex flex-col gap-3">
           {displayed
-            .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())
+            .sort((a, b) => a.scheduledStart.localeCompare(b.scheduledStart))
             .map(appt => {
               const tech = technicians.find(t => t.name === appt.technicianName);
               const techColor = tech?.color ?? '#94a3b8';
