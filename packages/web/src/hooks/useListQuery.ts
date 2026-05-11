@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useApiClient } from '../lib/apiClient';
 
 export interface ListQueryOptions {
@@ -44,15 +44,48 @@ export function useListQuery<T>(
   const [pageSize] = useState(initialOptions.pageSize ?? 25);
   const [search, setSearch] = useState(initialOptions.search ?? '');
   const [filters, setFilters] = useState(initialOptions.filters ?? {});
-  const [enabled] = useState(initialOptions.enabled ?? true);
+  const [enabled, setEnabled] = useState(initialOptions.enabled ?? true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Re-sync filters / enabled from props when the caller's initialOptions
+  // change. The hook holds these in state so consumers can drive them via
+  // setFilters/setSearch, but a route change (e.g. /customers/A →
+  // /customers/B reusing the same component instance) needs to rebind the
+  // query — without this, useState would keep the previous customerId and
+  // the next render shows the wrong customer's data. We compare a
+  // serialized key so inline-object filters with the same value don't
+  // trigger a spurious extra fetch on mount.
+  const filtersKey = JSON.stringify(initialOptions.filters ?? {});
+  const lastFiltersKeyRef = useRef(filtersKey);
+  useEffect(() => {
+    if (lastFiltersKeyRef.current === filtersKey) return;
+    lastFiltersKeyRef.current = filtersKey;
+    setFilters(initialOptions.filters ?? {});
+    // The parsed object is read via closure; depending on filtersKey is the
+    // intentional stable comparison.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersKey]);
+  useEffect(() => {
+    if (typeof initialOptions.enabled === 'boolean') {
+      setEnabled(initialOptions.enabled);
+    }
+  }, [initialOptions.enabled]);
+
+  // Monotonic request id. Each new fetch increments it; in-flight fetches
+  // check the current ref before committing to state and bail out if they
+  // were superseded. Without this, two requests fired in the same render
+  // tick (e.g. one with stale filters before the resync effect lands and
+  // one with the new filters) can resolve out of order and let the older
+  // response overwrite the newer data.
+  const requestVersionRef = useRef(0);
 
   const refetch = useCallback(async () => {
     if (!enabled) {
       setIsLoading(false);
       return;
     }
+    const myVersion = ++requestVersionRef.current;
     setIsLoading(true);
     setError(null);
     try {
@@ -63,11 +96,14 @@ export function useListQuery<T>(
         ...filters,
       });
       const response = await apiFetch(`${endpoint}?${params}`);
+      if (myVersion !== requestVersionRef.current) return;
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json();
+      if (myVersion !== requestVersionRef.current) return;
       setData(result.data ?? result);
       setTotal(result.total ?? result.length ?? 0);
     } catch (err) {
+      if (myVersion !== requestVersionRef.current) return;
       // Sign-out transitions surface as AbortError — treat as a non-error
       // (the request was deliberately cancelled). Real errors still surface.
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -76,7 +112,7 @@ export function useListQuery<T>(
         setError(err instanceof Error ? err.message : 'Unknown error');
       }
     } finally {
-      setIsLoading(false);
+      if (myVersion === requestVersionRef.current) setIsLoading(false);
     }
   }, [apiFetch, enabled, endpoint, page, pageSize, search, filters]);
 

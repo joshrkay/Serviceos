@@ -145,8 +145,6 @@ export const router = createBrowserRouter([
       { path: 'customers/:id',  Component: CustomerDetailRoute },
       { path: 'customers/:id/edit', Component: CustomerEditRoute },
       { path: 'appointments/:id/edit', Component: AppointmentEditRoute },
-      { path: 'leads',          Component: LeadsPage       },
-      { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'leads',          Component: LeadListRoute       },
       { path: 'leads/new',      Component: LeadCreateRoute     },
       { path: 'leads/:id',      Component: LeadDetailRoute     },
