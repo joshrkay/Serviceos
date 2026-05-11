@@ -54,7 +54,10 @@ function customerName(c: ApiCustomer): string {
 
 function formatAddress(loc: ApiLocation): string {
   const stateZip = [loc.state, loc.postalCode].filter(Boolean).join(' ');
-  return [loc.street1, loc.city, stateZip].filter(Boolean).join(', ');
+  return [loc.street1, loc.street2, loc.city, stateZip]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(', ');
 }
 
 function adaptLocation(loc: ApiLocation): ServiceLocation {
