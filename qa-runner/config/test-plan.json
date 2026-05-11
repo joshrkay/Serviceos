@@ -317,6 +317,112 @@
       ]
     },
     {
+      "name": "jobs",
+      "description": "Runbook §4 — job CRUD, validation, and lifecycle surface",
+      "depends_on": [
+        "customers"
+      ],
+      "tests": [
+        {
+          "id": "JOB-001",
+          "description": "List jobs returns 200",
+          "module": "jobs",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/jobs",
+            "expect_statuses": [
+              200
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT COUNT(*) AS c FROM jobs;",
+            "required": false
+          }
+        },
+        {
+          "id": "JOB-002",
+          "description": "Create job with empty body returns 400",
+          "module": "jobs",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/jobs",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {},
+            "expect_statuses": [
+              400,
+              422
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "JOB-003",
+          "description": "Get nonexistent job returns 404",
+          "module": "jobs",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/jobs/00000000-0000-0000-0000-000000000000",
+            "expect_statuses": [
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "JOB-004",
+          "description": "Time entries list returns 200 (job lifecycle adjacent)",
+          "module": "jobs",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/time-entries",
+            "expect_statuses": [
+              200
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    },
+    {
       "name": "estimates",
       "description": "Runbook \u00a75 \u2014 estimate CRUD and validation",
       "depends_on": [
@@ -474,6 +580,116 @@
       ]
     },
     {
+      "name": "appointments",
+      "description": "Runbook §7 — appointments / scheduling CRUD and validation",
+      "depends_on": [
+        "jobs"
+      ],
+      "tests": [
+        {
+          "id": "APPT-001",
+          "description": "List appointments (paginated) returns 200",
+          "module": "appointments",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/appointments?paginated=true",
+            "expect_statuses": [
+              200
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT COUNT(*) AS c FROM appointments;",
+            "required": false
+          }
+        },
+        {
+          "id": "APPT-002",
+          "description": "Create appointment with empty body returns 400",
+          "module": "appointments",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/appointments",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {},
+            "expect_statuses": [
+              400,
+              422
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "APPT-003",
+          "description": "Get nonexistent appointment returns 404",
+          "module": "appointments",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/appointments/00000000-0000-0000-0000-000000000000",
+            "expect_statuses": [
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "APPT-004",
+          "description": "Dispatch board returns 200 for today's date",
+          "module": "appointments",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN",
+            "TENANT_ID"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/dispatch/board?date={{today}}",
+            "headers": {
+              "x-tenant-id": "{{TENANT_ID}}"
+            },
+            "expect_statuses": [
+              200
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    },
+    {
       "name": "notifications",
       "description": "Runbook \u00a79 \u2014 dispatch record existence and idempotency",
       "depends_on": [
@@ -508,6 +724,126 @@
       ]
     },
     {
+      "name": "portal",
+      "description": "Runbook §10 — customer-facing public token routes (estimates, invoices, intake, feedback)",
+      "tests": [
+        {
+          "id": "PORTAL-001",
+          "description": "Public estimates route rejects malformed token with 404",
+          "module": "portal",
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/public/estimates/zzzzzzzz-not-a-real-token-zzzzzzzz",
+            "expect_statuses": [
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "PORTAL-002",
+          "description": "Public invoices route rejects malformed token with 404",
+          "module": "portal",
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/public/invoices/zzzzzzzz-not-a-real-token-zzzzzzzz",
+            "expect_statuses": [
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "PORTAL-003",
+          "description": "Public intake route rejects nonexistent tenant with 404",
+          "module": "portal",
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/public/intake/00000000-0000-0000-0000-000000000000/leads",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "firstName": "QA",
+              "lastName": "Intake{{timestamp}}",
+              "email": "qa+intake-{{timestamp}}@example.com",
+              "phone": "+15555{{rand4}}",
+              "serviceType": "ac_repair"
+            },
+            "expect_statuses": [
+              400,
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "PORTAL-004",
+          "description": "Public feedback route rejects nonexistent request id with 404",
+          "module": "portal",
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/public/feedback/00000000-0000-0000-0000-000000000000",
+            "expect_statuses": [
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "PORTAL-005",
+          "description": "Valid public estimate token loads the public estimate (env-gated)",
+          "module": "portal",
+          "requires_env": [
+            "TENANT_A_ESTIMATE_PUBLIC_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/public/estimates/{{TENANT_A_ESTIMATE_PUBLIC_TOKEN}}",
+            "expect_statuses": [
+              200
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    },
+    {
       "name": "contracts",
       "description": "Runbook \u00a713 \u2014 maintenance contract CRUD",
       "depends_on": [
@@ -534,6 +870,173 @@
           },
           "db_check": {
             "query": "SELECT COUNT(*) AS c FROM maintenance_agreements;",
+            "required": false
+          }
+        },
+        {
+          "id": "CTR-002",
+          "description": "Create agreement with empty body returns 400",
+          "module": "contracts",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/agreements",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {},
+            "expect_statuses": [
+              400,
+              422
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "CTR-003",
+          "description": "Get nonexistent agreement returns 404",
+          "module": "contracts",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/agreements/00000000-0000-0000-0000-000000000000",
+            "expect_statuses": [
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "CTR-004",
+          "description": "Run-now on nonexistent agreement returns 404",
+          "module": "contracts",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN"
+          ],
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/agreements/00000000-0000-0000-0000-000000000000/run-now",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {},
+            "expect_statuses": [
+              403,
+              404
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        }
+      ]
+    },
+    {
+      "name": "technician",
+      "description": "Runbook §12 — technician day surface and location update endpoint",
+      "depends_on": [
+        "auth"
+      ],
+      "tests": [
+        {
+          "id": "TECH-001",
+          "description": "Jobs list scoped by technicianId returns 200 (env-gated)",
+          "module": "technician",
+          "requires_env": [
+            "AUTH_BEARER_TOKEN",
+            "TECHNICIAN_ID"
+          ],
+          "api_check": {
+            "method": "GET",
+            "endpoint": "/api/jobs?technicianId={{TECHNICIAN_ID}}",
+            "expect_statuses": [
+              200
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "TECH-002",
+          "description": "Technician location update endpoint rejects unauthenticated POST with 401",
+          "module": "technician",
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/technician-location",
+            "no_auth": true,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "lat": 37.7749,
+              "lng": -122.4194
+            },
+            "expect_statuses": [
+              401,
+              403
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
+            "required": false
+          }
+        },
+        {
+          "id": "TECH-003",
+          "description": "Voice update endpoint exists and rejects unauthenticated POST",
+          "module": "technician",
+          "api_check": {
+            "method": "POST",
+            "endpoint": "/api/voice/transcribe",
+            "no_auth": true,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {},
+            "expect_statuses": [
+              401,
+              403
+            ]
+          },
+          "ui_check": {
+            "path": "/login",
+            "expect_text": "Fieldly"
+          },
+          "db_check": {
+            "query": "SELECT 1 AS ok;",
             "required": false
           }
         }

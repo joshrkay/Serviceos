@@ -199,6 +199,23 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           {error}
         </div>
       )}
+      {activeContract && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+          <p className="text-sm text-blue-800">
+            <strong>Active maintenance contract:</strong> {activeContract.name}
+            {activeContract.recurrenceRule && (
+              <span className="text-blue-600 ml-1">
+                ({activeContract.recurrenceRule.includes('MONTHLY') ? 'Monthly' :
+                  activeContract.recurrenceRule.includes('QUARTERLY') ? 'Quarterly' :
+                  activeContract.recurrenceRule.includes('YEARLY') ? 'Yearly' : activeContract.recurrenceRule})
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-blue-600 mt-1">
+            Service call fee may be waived under this plan. Consider adding a plan-specific line item.
+          </p>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-xs text-slate-500 md:col-span-2">
