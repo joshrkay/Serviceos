@@ -747,7 +747,7 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           const name = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || 'Customer';
           setEnrichedCustomer({ name, id: job.customerId, phone: cust.primaryPhone, email: cust.email });
         }
-        const loc = cust?.locations?.find((l: { id: string }) => l.id === job.locationId) ?? cust?.locations?.[0];
+        const loc = cust?.locations?.find((l: { id: string }) => l.id === job.locationId);
         if (loc) {
           setEnrichedLocation([loc.street1, loc.city, loc.state].filter(Boolean).join(', '));
         }
