@@ -1,8 +1,9 @@
+import asyncio
 import json
 import logging
 import os
 from langchain_anthropic import ChatAnthropic
-from supabase import create_client, Client
+from clients.service_os_api import ServiceOsApiClient
 from .state import AgentState, CustomerMatch, Proposal
 from .prompts import CLASSIFY_EXTRACT_SYSTEM
 
@@ -11,7 +12,6 @@ logger = logging.getLogger(__name__)
 # ─── Shared clients (initialized lazily) ────────────────────
 
 _llm = None
-_supabase: Client | None = None
 
 
 def _require_env(name: str) -> str:
@@ -31,16 +31,6 @@ def get_llm() -> ChatAnthropic:
             anthropic_api_key=_require_env("ANTHROPIC_API_KEY"),
         )
     return _llm
-
-
-def get_supabase() -> Client:
-    global _supabase
-    if _supabase is None:
-        _supabase = create_client(
-            _require_env("SUPABASE_URL"),
-            _require_env("SUPABASE_SERVICE_ROLE_KEY"),
-        )
-    return _supabase
 
 
 # ─── Node 1: Classify + Extract ─────────────────────────────
@@ -111,20 +101,20 @@ def resolve(state: AgentState) -> dict:
         }
 
     tenant_id = state.get("tenant_id", "")
-    supabase = get_supabase()
+    auth_token = state.get("auth_token", "")
+    if not auth_token:
+        logger.warning("Missing auth_token in agent state; cannot resolve customer via TS API")
+        return {"customer_match": None, "customer_alternatives": []}
 
-    # pg_trgm similarity query
-    query = supabase.rpc(
-        "match_customer",
-        {
-            "p_tenant_id": tenant_id,
-            "p_name": customer_name,
-            "p_threshold": 0.3,
-            "p_limit": 5,
-        },
-    ).execute()
-
-    matches = query.data or []
+    client = ServiceOsApiClient.from_env(auth_token)
+    matches = []
+    try:
+        matches = asyncio.run(
+            client.lookup_customer(tenant_id=tenant_id, name=customer_name, limit=5)
+        )
+    except Exception:
+        logger.exception("Customer lookup failed via TS API")
+        return {"customer_match": None, "customer_alternatives": []}
 
     if not matches:
         # No match — treat as new customer
@@ -141,7 +131,7 @@ def resolve(state: AgentState) -> dict:
     # Apply confidence scoring
     scored: list[CustomerMatch] = []
     for m in matches:
-        sim = m.get("sim_score", 0)
+        sim = m.get("sim_score", 0.8)
         if sim >= 0.95:
             conf = 0.99
         elif sim >= 0.80:

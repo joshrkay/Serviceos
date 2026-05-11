@@ -1,8 +1,8 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createServiceLocationSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createLocation,
@@ -25,23 +25,15 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:create'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const parsed = createServiceLocationSchema.parse(req.body);
-        // Cross-entity tenant guard: customerId must belong to the
-        // requesting tenant. Without this, tenant B could create a
-        // location whose customerId references a tenant A customer.
-        await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
-        const result = await createLocation(
-          { ...parsed, tenantId: req.auth!.tenantId },
-          locationRepo
-        );
-        res.status(201).json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
-      }
-    }
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = createServiceLocationSchema.parse(req.body);
+      await ownership.requireExists(req.auth!.tenantId, 'customer', parsed.customerId);
+      const result = await createLocation(
+        { ...parsed, tenantId: req.auth!.tenantId },
+        locationRepo
+      );
+      res.status(201).json(result);
+    })
   );
 
   router.get(
@@ -49,20 +41,15 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const customerId = req.query.customerId as string;
-        if (!customerId) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'customerId query parameter is required' });
-          return;
-        }
-        const result = await listByCustomer(req.auth!.tenantId, customerId, locationRepo);
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const customerId = req.query.customerId as string;
+      if (!customerId) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'customerId query parameter is required' });
+        return;
       }
-    }
+      const result = await listByCustomer(req.auth!.tenantId, customerId, locationRepo);
+      res.json(result);
+    })
   );
 
   router.get(
@@ -70,19 +57,14 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:view'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await getLocation(req.auth!.tenantId, req.params.id, locationRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await getLocation(req.auth!.tenantId, req.params.id, locationRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.put(
@@ -90,19 +72,14 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await updateLocation(req.auth!.tenantId, req.params.id, req.body, locationRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await updateLocation(req.auth!.tenantId, req.params.id, req.body, locationRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.post(
@@ -110,19 +87,14 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:delete'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await archiveLocation(req.auth!.tenantId, req.params.id, locationRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await archiveLocation(req.auth!.tenantId, req.params.id, locationRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   router.post(
@@ -130,19 +102,14 @@ export function createLocationRouter(
     requireAuth,
     requireTenant,
     requirePermission('locations:update'),
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const result = await setPrimary(req.auth!.tenantId, req.params.id, locationRepo);
-        if (!result) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await setPrimary(req.auth!.tenantId, req.params.id, locationRepo);
+      if (!result) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Location not found' });
+        return;
       }
-    }
+      res.json(result);
+    })
   );
 
   return router;

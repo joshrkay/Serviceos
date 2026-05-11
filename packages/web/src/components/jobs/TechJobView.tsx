@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ArrowLeft, Navigation, Phone, MapPin, Clock,
   CheckCircle2, Package, FileText, Camera, Mic,
@@ -7,13 +7,49 @@ import {
   MessageSquare, Check, Pencil,
 } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { jobs, technicians, customers } from '../../data/mock-data';
 import { ActivityTimeline } from './ActivityTimeline';
 import { CancelNoShowSheet } from './CancelNoShowSheet';
 import { CallScreen, TextSheet } from './JobSheets';
 import { CameraCapture } from '../shared/CameraCapture';
-import type { JobActivity, MaterialItem, ServiceType } from '../../data/mock-data';
 import type { CapturedMedia } from '../shared/CameraCapture';
+import { useApiClient } from '../../lib/apiClient';
+import type { JobActivity, MaterialItem, ServiceType } from '../../data/mock-data';
+
+// ─── API types ─────────────────────────────────────────────────────────────────
+interface ApiJobDetail {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  problemDescription?: string;
+  status: string;
+  priority?: string;
+  customerId?: string;
+  assignedTechnicianId?: string;
+  scheduledStart?: string;
+  serviceType?: string;
+  customer?: {
+    id: string;
+    displayName?: string;
+    firstName?: string;
+    lastName?: string;
+    primaryPhone?: string;
+    email?: string;
+    notes?: string;
+    locations?: Array<{ street1?: string; city?: string; state?: string; postalCode?: string }>;
+  };
+  technician?: {
+    id: string;
+    firstName?: string;
+    lastName?: string;
+    color?: string;
+  };
+}
+
+interface ApiNote {
+  id: string;
+  content: string;
+  createdAt: string;
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 type TechStatus  = 'en_route' | 'on_site' | 'in_progress' | 'waiting' | 'complete';
@@ -32,13 +68,22 @@ interface VoiceResult {
 const STATUS_FLOW: {
   key: TechStatus; label: string; cta: string;
   dotColor: string; ctaBg: string;
+  apiStatus: string;
 }[] = [
-  { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-blue-500',   ctaBg: 'bg-blue-600   hover:bg-blue-700'   },
-  { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-green-500',  ctaBg: 'bg-green-600  hover:bg-green-700'  },
-  { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-indigo-500', ctaBg: 'bg-indigo-600 hover:bg-indigo-700' },
-  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-amber-500',  ctaBg: 'bg-amber-600  hover:bg-amber-700'  },
-  { key: 'complete',    label: 'Complete',            cta: '',                dotColor: 'bg-green-500',  ctaBg: '' },
+  { key: 'en_route',    label: 'En Route',          cta: "I've Arrived",    dotColor: 'bg-blue-500',   ctaBg: 'bg-blue-600   hover:bg-blue-700',   apiStatus: 'in_progress' },
+  { key: 'on_site',     label: 'On Site',            cta: 'Start Job',       dotColor: 'bg-green-500',  ctaBg: 'bg-green-600  hover:bg-green-700',  apiStatus: 'in_progress' },
+  { key: 'in_progress', label: 'In Progress',        cta: 'Mark Complete',   dotColor: 'bg-indigo-500', ctaBg: 'bg-indigo-600 hover:bg-indigo-700', apiStatus: 'in_progress' },
+  { key: 'waiting',     label: 'Waiting for Parts',  cta: 'Resume Job',      dotColor: 'bg-amber-500',  ctaBg: 'bg-amber-600  hover:bg-amber-700',  apiStatus: 'in_progress' },
+  { key: 'complete',    label: 'Complete',            cta: '',                dotColor: 'bg-green-500',  ctaBg: '', apiStatus: 'completed' },
 ];
+
+// Map API status → TechStatus
+function apiStatusToTech(status: string): TechStatus {
+  if (status === 'completed') return 'complete';
+  if (status === 'in_progress') return 'in_progress';
+  if (status === 'scheduled') return 'en_route';
+  return 'en_route';
+}
 
 // ─── Parts catalog for voice parsing ──────────────────────────────────────────
 const PARTS_CATALOG: {
@@ -69,7 +114,6 @@ const PARTS_CATALOG: {
     entry: { name: 'Silicone Sealant', partNumber: 'SEAL-01', unitCost: 8.00, category: 'Material' } },
 ];
 
-// Status detection patterns
 const STATUS_PATTERNS: [RegExp, TechStatus][] = [
   [/\b(done|finish|finished|completed|all done|wrapping up|signed off|that'?s? it)\b/i, 'complete'],
   [/\b(starting|started|beginning|kicking off|on site|arrived|here now|let me in)\b/i, 'in_progress'],
@@ -95,13 +139,11 @@ function parseVoice(text: string): VoiceResult {
   const t   = text.toLowerCase();
   const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-  // Status
   let statusUpdate: TechStatus | undefined;
   for (const [pattern, status] of STATUS_PATTERNS) {
     if (pattern.test(t)) { statusUpdate = status; break; }
   }
 
-  // Parts
   const parts: MaterialItem[] = [];
   const seen = new Set<string>();
   for (const { keywords, entry } of PARTS_CATALOG) {
@@ -114,7 +156,6 @@ function parseVoice(text: string): VoiceResult {
     }
   }
 
-  // Always log as note
   const notes: FieldNote[] = [{
     id: `vn-${Date.now()}`,
     text: text.charAt(0).toUpperCase() + text.slice(1),
@@ -124,15 +165,6 @@ function parseVoice(text: string): VoiceResult {
 
   return { transcript: text, notes, parts, statusUpdate };
 }
-
-// Voice transcripts per status (deterministic for demo)
-const VOICE_SCRIPTS: Record<TechStatus, string> = {
-  en_route:    "On my way now, about 10 minutes out.",
-  on_site:     "Arrived. Customer let me in — the AC unit is in the side yard. Found a bad 45/5 MFD run capacitor on the compressor. Need to replace it and check the refrigerant level.",
-  in_progress: "Replaced the run capacitor. System was low — added 2 lbs of R-410A. Starting the recharge now. Looks like the contactor is pitted too, recommending a replace while I'm here.",
-  waiting:     "Waiting on a contactor. Ordered it — should be here in an hour. Letting the customer know.",
-  complete:    "All done. Replaced the capacitor, recharged the system, and swapped the contactor. Customer tested it, everything is cooling. Signed off.",
-};
 
 // ─── Waveform ──────────────────────────────────────────────────────────────────
 function Waveform({ active }: { active: boolean }) {
@@ -154,16 +186,23 @@ function Waveform({ active }: { active: boolean }) {
 
 // ─── Voice Hero ────────────────────────────────────────────────────────────────
 function VoiceHero({
-  techStatus, svcType, onResult,
+  jobId,
+  techStatus,
+  onResult,
+  apiFetch,
 }: {
+  jobId: string;
   techStatus: TechStatus;
-  svcType: ServiceType;
   onResult: (r: VoiceResult, applied: boolean) => void;
+  apiFetch: (url: string, init?: RequestInit) => Promise<Response>;
 }) {
   const [phase,   setPhase]   = useState<VoiceState>('idle');
   const [seconds, setSeconds] = useState(0);
   const [result,  setResult]  = useState<VoiceResult | null>(null);
+  const [micError, setMicError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     if (phase !== 'recording') return;
@@ -172,19 +211,59 @@ function VoiceHero({
   }, [phase]);
 
   useEffect(() => {
-    if (phase === 'recording' && seconds >= 10) stopRecording();
+    if (phase === 'recording' && seconds >= 30) stopRecording();
   }, [seconds, phase]);
 
-  function startRecording() { setPhase('recording'); setSeconds(0); }
+  async function startRecording() {
+    setMicError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mr = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg' });
+      mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mr.start(250);
+      mediaRecorderRef.current = mr;
+      setPhase('recording');
+      setSeconds(0);
+    } catch {
+      setMicError('Microphone access denied. Please allow microphone permissions.');
+    }
+  }
 
   function stopRecording() {
     if (timerRef.current) clearInterval(timerRef.current);
-    setPhase('processing');
-    setTimeout(() => {
-      const transcript = VOICE_SCRIPTS[techStatus];
-      setResult(parseVoice(transcript));
+    const mr = mediaRecorderRef.current;
+    if (!mr) return;
+
+    mr.onstop = async () => {
+      mr.stream.getTracks().forEach(t => t.stop());
+      setPhase('processing');
+      const mimeType = mr.mimeType || 'audio/webm';
+      const blob = new Blob(audioChunksRef.current, { type: mimeType });
+
+      try {
+        const formData = new FormData();
+        formData.append('audio', blob, `recording.${mimeType.includes('ogg') ? 'ogg' : 'webm'}`);
+        const res = await apiFetch('/api/voice/transcribe', { method: 'POST', body: formData });
+        if (res.ok) {
+          const data = await res.json() as { transcript?: string };
+          const transcript = data.transcript?.trim() ?? '';
+          if (transcript) {
+            setResult(parseVoice(transcript));
+            setPhase('result');
+            return;
+          }
+        }
+      } catch {
+        // Fall back to mic prompt message if transcription fails
+      }
+      // If transcription not available, show a generic placeholder result
+      const fallback = 'Voice update recorded.';
+      setResult(parseVoice(fallback));
       setPhase('result');
-    }, 1600);
+    };
+
+    if (mr.state !== 'inactive') mr.stop();
   }
 
   function confirm() {
@@ -196,9 +275,13 @@ function VoiceHero({
 
   if (phase === 'idle') return (
     <div className="flex flex-col items-center gap-4 py-6">
-      <button onClick={startRecording}
+      {micError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-600">
+          {micError}
+        </div>
+      )}
+      <button onClick={() => void startRecording()}
         className="group relative flex flex-col items-center gap-2.5">
-        {/* Ripple rings */}
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="size-24 rounded-full bg-slate-900/5 scale-0 group-hover:scale-100 transition-transform duration-300" />
         </div>
@@ -225,7 +308,7 @@ function VoiceHero({
         className="flex items-center gap-2 bg-red-500 text-white rounded-full px-6 py-2.5 text-sm hover:bg-red-600 active:scale-95 transition-all shadow-lg shadow-red-500/30">
         <StopCircle size={15} /> Done talking
       </button>
-      <p className="text-xs text-slate-400">Auto-stops at 10s</p>
+      <p className="text-xs text-slate-400">Auto-stops at 30s</p>
     </div>
   );
 
@@ -234,27 +317,24 @@ function VoiceHero({
       <div className="flex size-10 items-center justify-center rounded-full bg-indigo-100">
         <Sparkles size={18} className="text-indigo-600 animate-pulse" />
       </div>
-      <p className="text-sm text-slate-600">Processing…</p>
+      <p className="text-sm text-slate-600">Transcribing…</p>
     </div>
   );
 
   if (phase === 'result' && result) return (
     <div className="flex flex-col gap-3 py-3" style={{ animation: 'fadeUp 0.2s ease' }}>
-      {/* Transcript */}
       <div className="flex items-start gap-2.5">
         <div className="flex size-7 items-center justify-center rounded-full bg-slate-800 shrink-0">
           <Mic size={11} className="text-white" />
         </div>
         <div className="flex-1 bg-slate-100 rounded-2xl rounded-tl-sm px-3.5 py-2.5">
-          <p className="text-xs text-slate-400 mb-0.5">You said</p>
+          <p className="text-xs text-slate-400 mb-0.5">Transcript</p>
           <p className="text-sm text-slate-700 italic leading-relaxed">"{result.transcript}"</p>
         </div>
       </div>
 
-      {/* Parsed results */}
       <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3 flex flex-col gap-2">
         <p className="text-xs text-indigo-500">AI parsed</p>
-
         {result.statusUpdate && (
           <div className="flex items-center gap-2">
             <CheckCircle2 size={13} className="text-indigo-600 shrink-0" />
@@ -468,7 +548,7 @@ function MaterialsSection({ materials, onUpdate }: {
         <div className="flex size-7 items-center justify-center rounded-lg bg-amber-100 shrink-0">
           <Package size={13} className="text-amber-600" />
         </div>
-        <p className="flex-1 text-sm text-slate-800">Materials & Parts</p>
+        <p className="flex-1 text-sm text-slate-800">Materials &amp; Parts</p>
         {materials.length > 0 && (
           <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">{materials.length}</span>
         )}
@@ -493,7 +573,6 @@ function MaterialsSection({ materials, onUpdate }: {
                         <span className="text-xs text-slate-400">${m.unitCost.toFixed(2)}/ea</span>
                       </div>
                     </div>
-                    {/* Qty stepper */}
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button onClick={() => setQty(m.id, -1)}
                         className="flex size-7 items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100 active:scale-90 transition-all">
@@ -526,54 +605,128 @@ function MaterialsSection({ materials, onUpdate }: {
   );
 }
 
-// ─── Main page ──────────────────────────────────────────────────────────────────
-const SVC_ICON: Record<ServiceType, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
-const SVC_BG:   Record<ServiceType, string> = {
+// ─── SVC config maps ────────────────────────────────────────────────────────────
+const SVC_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
+const SVC_BG: Record<string, string> = {
   HVAC:     'bg-blue-900/40',
   Plumbing: 'bg-green-900/40',
   Painting: 'bg-violet-900/40',
 };
 const DELAY_OPTIONS = [10, 15, 20, 60] as const;
+type DelayOption = (typeof DELAY_OPTIONS)[number];
 
+// ─── Main page ──────────────────────────────────────────────────────────────────
 export function TechJobView({ id }: { id: string }) {
   const navigate = useNavigate();
-  const job       = jobs.find(j => j.id === id);
-  const customer  = customers.find(c => c.id === job?.customerId);
-  const tech      = technicians.find(t => t.name === job?.assignedTech);
+  const apiFetch = useApiClient();
 
+  const [jobData, setJobData] = useState<ApiJobDetail | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [techStatus, setTechStatus] = useState<TechStatus>('on_site');
   const [sheet,      setSheet]      = useState<TechSheet>(null);
-  const [activities, setActivities] = useState<JobActivity[]>(job?.activity ?? []);
-  const [materials,  setMaterials]  = useState<MaterialItem[]>(job?.materials ?? []);
-  const [photos,     setPhotos]     = useState<{ id: string; label: string; color: string; isReal?: boolean; url?: string }[]>(
-    (job?.photos ?? 0) > 0
-      ? Array.from({ length: Math.min(job!.photos!, 3) }, (_, i) => ({
-          id: `init-${i}`, label: PHOTO_LABELS[i], color: PHOTO_COLORS[i],
-        }))
-      : []
-  );
+  const [activities, setActivities] = useState<JobActivity[]>([]);
+  const [materials,  setMaterials]  = useState<MaterialItem[]>([]);
+  const [photos,     setPhotos]     = useState<{ id: string; label: string; color: string; isReal?: boolean; url?: string }[]>([]);
   const [notes,   setNotes]   = useState<FieldNote[]>([]);
   const [cameraOpen, setCam] = useState(false);
   const [isRunningBehind, setIsRunningBehind] = useState<boolean | null>(null);
-  const [delayMinutes, setDelayMinutes] = useState<(typeof DELAY_OPTIONS)[number] | null>(null);
+  const [delayMinutes, setDelayMinutes] = useState<DelayOption | null>(null);
 
-  if (!job) return (
-    <div className="flex h-full items-center justify-center">
-      <p className="text-slate-400 text-sm">Job not found</p>
-    </div>
-  );
+  const loadJob = useCallback(async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const res = await apiFetch(`/api/jobs/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as ApiJobDetail;
+      setJobData(data);
+      setTechStatus(apiStatusToTech(data.status));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load job');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [apiFetch, id]);
 
-  const mapsUrl       = `https://maps.google.com/?q=${encodeURIComponent(job.address)}`;
-  const customerPhone = customer?.phone ?? '(512) 555-0000';
-  const statusIdx     = STATUS_FLOW.findIndex(s => s.key === techStatus);
+  // Load persisted notes from API
+  const loadNotes = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/notes?entityType=job&entityId=${id}`);
+      if (!res.ok) return;
+      const data = await res.json() as { data?: ApiNote[] };
+      const apiNotes = (data.data ?? []).map<FieldNote>(n => ({
+        id: n.id,
+        text: n.content,
+        time: new Date(n.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+        source: 'typed',
+      }));
+      setNotes(apiNotes);
+    } catch {
+      // notes load failure is non-critical
+    }
+  }, [apiFetch, id]);
+
+  useEffect(() => {
+    void loadJob();
+    void loadNotes();
+  }, [loadJob, loadNotes]);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-slate-400 text-sm">Loading job…</div>
+      </div>
+    );
+  }
+
+  if (loadError || !jobData) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3">
+        <p className="text-slate-400 text-sm">{loadError ?? 'Job not found'}</p>
+        <button onClick={() => navigate(-1)} className="text-xs text-blue-600 hover:underline">← Back</button>
+      </div>
+    );
+  }
+
+  const customerName = jobData.customer
+    ? (jobData.customer.displayName || [jobData.customer.firstName, jobData.customer.lastName].filter(Boolean).join(' ') || 'Customer')
+    : 'Customer';
+  const primaryLoc = jobData.customer?.locations?.[0];
+  const address = primaryLoc
+    ? [primaryLoc.street1, primaryLoc.city, primaryLoc.state, primaryLoc.postalCode].filter(Boolean).join(', ')
+    : '';
+  const customerPhone = jobData.customer?.primaryPhone ?? '(512) 555-0000';
+  const customerNotes = jobData.customer?.notes ?? '';
+  const techName = jobData.technician
+    ? [jobData.technician.firstName, jobData.technician.lastName].filter(Boolean).join(' ')
+    : 'Technician';
+  const techColor = jobData.technician?.color ?? '#475569';
+  const techInitials = techName.split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase() || 'TC';
+  const svcType = (jobData.serviceType ?? 'HVAC') as ServiceType;
+
+  const mapsUrl = `https://maps.google.com/?q=${encodeURIComponent(address)}`;
+  const statusIdx = STATUS_FLOW.findIndex(s => s.key === techStatus);
   const currentStatus = STATUS_FLOW[statusIdx];
-  const isComplete    = techStatus === 'complete';
+  const isComplete = techStatus === 'complete';
   const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-  function advanceStatus() {
+  async function advanceStatus() {
     if (statusIdx >= STATUS_FLOW.length - 1) return;
     const next = STATUS_FLOW[statusIdx + 1];
     setTechStatus(next.key);
+
+    // Persist to API
+    try {
+      await apiFetch(`/api/jobs/${id}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: next.apiStatus }),
+      });
+    } catch {
+      // status update failure is non-critical for the field UI
+    }
+
     const msgs: Record<TechStatus, string> = {
       en_route: '', on_site: 'Arrived at job site', in_progress: 'Started work on the job',
       waiting: 'Waiting for parts', complete: 'Marked job complete',
@@ -581,35 +734,66 @@ export function TechJobView({ id }: { id: string }) {
     setActivities(prev => [...prev, {
       id: `tech-${Date.now()}`, type: 'check_in',
       content: msgs[next.key], time: now(),
-      author: tech?.name ?? 'Technician',
-      authorInitials: tech?.initials ?? 'TC',
-      authorColor: tech?.color ?? '#475569',
+      author: techName,
+      authorInitials: techInitials,
+      authorColor: techColor,
     }]);
+  }
+
+  async function saveNoteToApi(content: string, source: 'voice' | 'typed'): Promise<string | null> {
+    try {
+      const res = await apiFetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entityType: 'job', entityId: id, content }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { id?: string };
+        return data.id ?? null;
+      }
+    } catch {
+      // note save failure is non-critical
+    }
+    return null;
   }
 
   function handleVoiceResult(result: VoiceResult) {
     const t = now();
-    if (result.statusUpdate) setTechStatus(result.statusUpdate);
-    if (result.notes.length > 0) setNotes(prev => [...prev, ...result.notes]);
+    if (result.statusUpdate) {
+      setTechStatus(result.statusUpdate);
+      const apiStatus = STATUS_FLOW.find(s => s.key === result.statusUpdate)?.apiStatus ?? 'in_progress';
+      void apiFetch(`/api/jobs/${id}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: apiStatus }),
+      });
+    }
+    if (result.notes.length > 0) {
+      const newNotes = result.notes.map(n => ({ ...n, source: 'voice' as const }));
+      setNotes(prev => [...prev, ...newNotes]);
+      // Persist each voice note
+      result.notes.forEach(n => void saveNoteToApi(n.text, 'voice'));
+    }
     if (result.parts.length > 0) setMaterials(prev => [...prev, ...result.parts.map(p => ({ ...p, id: `vp-${Date.now()}-${Math.random()}` }))]);
     setActivities(prev => [...prev, {
       id: `va-${Date.now()}`, type: 'voice',
       content: `"${result.transcript.slice(0, 80)}${result.transcript.length > 80 ? '…' : ''}"`,
-      time: t, author: tech?.name ?? 'Technician',
-      authorInitials: tech?.initials ?? 'TC',
-      authorColor: tech?.color ?? '#475569',
+      time: t, author: techName,
+      authorInitials: techInitials,
+      authorColor: techColor,
       voiceDuration: 8 + Math.floor(Math.random() * 6),
     }]);
   }
 
-  function addNote(text: string) {
-    const n: FieldNote = { id: `n-${Date.now()}`, text, time: now(), source: 'typed' };
+  async function addNote(text: string) {
+    const savedId = await saveNoteToApi(text, 'typed');
+    const n: FieldNote = { id: savedId ?? `n-${Date.now()}`, text, time: now(), source: 'typed' };
     setNotes(prev => [...prev, n]);
     setActivities(prev => [...prev, {
       id: `na-${Date.now()}`, type: 'note', content: text, time: now(),
-      author: tech?.name ?? 'Technician',
-      authorInitials: tech?.initials ?? 'TC',
-      authorColor: tech?.color ?? '#475569',
+      author: techName,
+      authorInitials: techInitials,
+      authorColor: techColor,
     }]);
   }
 
@@ -624,9 +808,9 @@ export function TechJobView({ id }: { id: string }) {
       setActivities(prev => [...prev, {
         id: `ph-${Date.now()}`, type: 'photo',
         content: `${media.length} photo${media.length > 1 ? 's' : ''} added`,
-        time: now(), author: tech?.name ?? 'Technician',
-        authorInitials: tech?.initials ?? 'TC',
-        authorColor: tech?.color ?? '#475569',
+        time: now(), author: techName,
+        authorInitials: techInitials,
+        authorColor: techColor,
       }]);
     }
     setCam(false);
@@ -643,16 +827,16 @@ export function TechJobView({ id }: { id: string }) {
             <ArrowLeft size={14} /> Owner view
           </button>
           <div className="flex items-center gap-2">
-            {job.priority === 'Urgent' && (
+            {jobData.priority === 'urgent' && (
               <span className="flex items-center gap-1 text-xs bg-red-500 text-white rounded-full px-2 py-0.5">
                 <Zap size={10} /> Urgent
               </span>
             )}
-            <span className="text-xs text-slate-400">#{job.jobNumber}</span>
+            <span className="text-xs text-slate-400">#{jobData.jobNumber}</span>
             <span
               className="flex size-7 items-center justify-center rounded-full text-white text-xs"
-              style={{ background: tech?.color ?? '#475569' }}>
-              {tech?.initials ?? 'TC'}
+              style={{ background: techColor }}>
+              {techInitials}
             </span>
           </div>
         </div>
@@ -662,19 +846,23 @@ export function TechJobView({ id }: { id: string }) {
           <div className="max-w-lg mx-auto">
 
             {/* ── Job hero ── */}
-            <div className={`${SVC_BG[job.serviceType]} bg-slate-900 px-5 pt-5 pb-6`}>
+            <div className={`${SVC_BG[svcType] ?? SVC_BG.HVAC} bg-slate-900 px-5 pt-5 pb-6`}>
               <div className="flex items-start gap-3 mb-3">
-                <span className="text-3xl">{SVC_ICON[job.serviceType]}</span>
+                <span className="text-3xl">{SVC_ICON[svcType] ?? '🔧'}</span>
                 <div className="flex-1 min-w-0">
-                  <h2 className="text-white leading-tight">{job.customer}</h2>
+                  <h2 className="text-white leading-tight">{customerName}</h2>
                   <div className="flex items-center gap-1.5 mt-1">
                     <MapPin size={12} className="text-slate-400 shrink-0" />
-                    <p className="text-slate-300 text-sm truncate">{job.address}</p>
+                    <p className="text-slate-300 text-sm truncate">{address || 'No address on file'}</p>
                   </div>
-                  {job.scheduledDate && (
+                  {jobData.scheduledStart && (
                     <div className="flex items-center gap-1.5 mt-1">
                       <Clock size={12} className="text-slate-400 shrink-0" />
-                      <p className="text-slate-300 text-sm">{job.scheduledDate}{job.scheduledTime ? ` · ${job.scheduledTime}` : ''}</p>
+                      <p className="text-slate-300 text-sm">
+                        {new Date(jobData.scheduledStart).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                        {' · '}
+                        {new Date(jobData.scheduledStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </p>
                     </div>
                   )}
                 </div>
@@ -682,14 +870,17 @@ export function TechJobView({ id }: { id: string }) {
 
               <div className="bg-white/10 rounded-xl px-3.5 py-2.5 mb-4">
                 <p className="text-xs text-slate-400 mb-0.5">Job description</p>
-                <p className="text-sm text-white leading-relaxed">{job.description}</p>
+                <p className="text-sm text-white leading-relaxed">{jobData.summary}</p>
+                {jobData.problemDescription && (
+                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">{jobData.problemDescription}</p>
+                )}
               </div>
 
-              {/* Access notes */}
-              {job.notes && (
+              {/* Customer notes (access notes, preferences) */}
+              {customerNotes && (
                 <div className="flex items-start gap-2 bg-amber-500/20 border border-amber-400/30 rounded-xl px-3.5 py-2.5 mb-4">
                   <AlertTriangle size={13} className="text-amber-400 shrink-0 mt-0.5" />
-                  <p className="text-sm text-amber-200 leading-relaxed">{job.notes}</p>
+                  <p className="text-sm text-amber-200 leading-relaxed">{customerNotes}</p>
                 </div>
               )}
 
@@ -700,7 +891,7 @@ export function TechJobView({ id }: { id: string }) {
                   <Navigation size={15} className="text-violet-300 shrink-0" />
                   <div className="min-w-0">
                     <p className="text-xs text-slate-400">Directions</p>
-                    <p className="text-xs text-white truncate">{job.address.split(',')[0]}</p>
+                    <p className="text-xs text-white truncate">{address.split(',')[0] || 'Navigate'}</p>
                   </div>
                 </a>
                 <button onClick={() => setSheet('call')}
@@ -722,7 +913,6 @@ export function TechJobView({ id }: { id: string }) {
                   {currentStatus.label}
                 </span>
               </div>
-              {/* Progress dots */}
               <div className="flex items-center gap-1 mb-3">
                 {STATUS_FLOW.slice(0, 4).map((s, i) => {
                   const sIdx = STATUS_FLOW.indexOf(s);
@@ -736,7 +926,7 @@ export function TechJobView({ id }: { id: string }) {
                 })}
               </div>
               {!isComplete ? (
-                <button onClick={advanceStatus}
+                <button onClick={() => void advanceStatus()}
                   className={`flex items-center justify-center gap-2 w-full py-3.5 rounded-xl text-white text-sm transition-colors ${currentStatus.ctaBg}`}>
                   <CheckCircle2 size={16} /> {currentStatus.cta}
                 </button>
@@ -758,9 +948,10 @@ export function TechJobView({ id }: { id: string }) {
                 </div>
               </div>
               <VoiceHero
+                jobId={id}
                 techStatus={techStatus}
-                svcType={job.serviceType}
                 onResult={(result, applied) => { if (applied) handleVoiceResult(result); }}
+                apiFetch={apiFetch}
               />
             </div>
 
@@ -776,7 +967,11 @@ export function TechJobView({ id }: { id: string }) {
                     return (
                       <button
                         key={label}
-                        onClick={() => setIsRunningBehind(label === 'Yes')}
+                        onClick={() => {
+                          const behind = label === 'Yes';
+                          setIsRunningBehind(behind);
+                          if (!behind) setDelayMinutes(null);
+                        }}
                         className={`rounded-full px-3 py-1.5 text-xs border transition-colors ${
                           selected
                             ? 'bg-slate-900 text-white border-slate-900'
@@ -824,11 +1019,10 @@ export function TechJobView({ id }: { id: string }) {
 
             {/* ── Inline sections ── */}
             <div className="px-4 mt-4 flex flex-col gap-3 pb-4">
-              <NotesSection notes={notes} onAdd={addNote} />
+              <NotesSection notes={notes} onAdd={(text) => void addNote(text)} />
               <PhotosSection media={photos} onAdd={() => setCam(true)} />
               <MaterialsSection materials={materials} onUpdate={setMaterials} />
 
-              {/* Activity timeline */}
               {activities.length > 0 && (
                 <div className="rounded-2xl bg-white border border-slate-200 px-4 py-4">
                   <p className="text-sm text-slate-700 mb-3">Activity log</p>
@@ -851,7 +1045,7 @@ export function TechJobView({ id }: { id: string }) {
               className="flex size-12 items-center justify-center rounded-xl bg-slate-100 hover:bg-slate-200 transition-colors shrink-0">
               <Camera size={18} className="text-slate-700" />
             </button>
-            <button onClick={advanceStatus}
+            <button onClick={() => void advanceStatus()}
               className={`flex-1 flex items-center justify-center gap-2 rounded-xl text-white text-sm py-3 transition-colors ${currentStatus.ctaBg}`}>
               <CheckCircle2 size={16} /> {currentStatus.cta}
             </button>
@@ -861,22 +1055,24 @@ export function TechJobView({ id }: { id: string }) {
       </div>
 
       {/* ── Sheets ── */}
-      {sheet === 'cancel' && customer && (
+      {sheet === 'cancel' && (
         <CancelNoShowSheet
-          job={job} customerName={customer.name} customerPhone={customerPhone}
+          job={{ id, jobNumber: jobData.jobNumber, customer: customerName, customerId: jobData.customerId ?? '', address, serviceType: svcType, status: 'Active', priority: 'Normal', assignedTech: techName, description: jobData.summary, statusHistory: [], activity: [], materials: [] }}
+          customerName={customerName}
+          customerPhone={customerPhone}
           onClose={() => setSheet(null)}
         />
       )}
-      {sheet === 'call' && customer && (
+      {sheet === 'call' && (
         <CallScreen
-          name={customer.name} phone={customerPhone}
-          initials={customer.name.split(' ').map(n => n[0]).join('')}
-          color={tech?.color ?? '#475569'}
+          name={customerName} phone={customerPhone}
+          initials={customerName.split(' ').map((n: string) => n[0]).join('')}
+          color={techColor}
           onEnd={() => setSheet(null)}
         />
       )}
-      {sheet === 'text' && customer && (
-        <TextSheet name={customer.name} phone={customerPhone} onClose={() => setSheet(null)} />
+      {sheet === 'text' && (
+        <TextSheet name={customerName} phone={customerPhone} onClose={() => setSheet(null)} />
       )}
       {cameraOpen && <CameraCapture onClose={handleCameraClose} />}
 

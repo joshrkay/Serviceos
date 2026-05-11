@@ -1,0 +1,52 @@
+{
+  "id": "mumbled-name-recovery",
+  "bucket": "08-ambiguity",
+  "callerId": "+15555550805",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_08_mumbled_name",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_08_mumbled_maria",
+        "tenantId": "t_08_mumbled_name",
+        "firstName": "Maria",
+        "lastName": "Rodriguez",
+        "displayName": "Maria Rodriguez",
+        "companyName": null,
+        "primaryPhone": "+15555550805",
+        "secondaryPhone": null,
+        "email": "maria.rodriguez@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Hi this is Mmmmaria Roddrrgez calling about my appointment",
+      "expected": {
+        "intent": "lookup_appointments",
+        "escalates": false,
+        "spokenAnswerMatches": "agent identity-resolves via caller-id (not by parsing the mumbled name) and asks a single clarifying yes/no (e.g. 'I have you as Maria Rodriguez at this number — is that right?') rather than reprompting verbosely about how to spell the name"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": true,
+  "layer2Only": true
+}

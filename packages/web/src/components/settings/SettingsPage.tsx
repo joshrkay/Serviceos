@@ -1,22 +1,225 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
+import { useClerk } from '@clerk/clerk-react';
 import {
   ChevronRight, Building2, Users, Shield, Bell, Globe,
   CreditCard, Link, Zap, FileText, Sparkles, Copy, ExternalLink,
-  MapPin, Check, Store, RefreshCw, TrendingUp, Mail,
+  MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { QuickBooksModal } from './QuickBooksModal';
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
+import { apiFetch } from '../../utils/api-fetch';
+import { useMe } from '../../hooks/useMe';
+import { SupervisorBackupSection } from './SupervisorBackupSection';
+import { BusinessProfileSheet } from './BusinessProfileSheet';
+import { TerminologySheet } from './TerminologySheet';
+import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
+import { DepositRulesSheet } from './DepositRulesSheet';
+import { TeamMembersSheet } from './TeamMembersSheet';
+import { CalendarSyncSheet } from './CalendarSyncSheet';
+import { PaymentMethodsSheet } from './PaymentMethodsSheet';
+import { VerticalPacksSheet } from './VerticalPacksSheet';
+import {
+  fetchLanguageSettings,
+  updateLanguageSettings,
+} from '../../api/settings';
 
 export function SettingsPage() {
   const navigate = useNavigate();
-  const [aiAuto, setAiAuto]         = useState(true);
+  const { signOut } = useClerk();
+  const { me } = useMe();
+  // Tier 4 — Quick toggles: load from backend on mount, persist on
+  // toggle. aiAuto + reminders live on /api/settings (migration 075).
+  // spanishMode derives from /api/settings/language (P11-002).
+  const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/api/settings');
+        if (cancelled || !res.ok) return;
+        const data = (await res.json()) as {
+          autoApplyInternalUpdates?: boolean;
+          autoSendAppointmentReminders?: boolean;
+        };
+        if (typeof data.autoApplyInternalUpdates === 'boolean') {
+          setAiAuto(data.autoApplyInternalUpdates);
+        }
+        if (typeof data.autoSendAppointmentReminders === 'boolean') {
+          setReminders(data.autoSendAppointmentReminders);
+        }
+      } catch {
+        /* network hiccup — defaults remain */
+      }
+    })();
+    (async () => {
+      try {
+        const lang = await fetchLanguageSettings();
+        if (cancelled) return;
+        setSpanishMode(lang.defaultLanguage === 'es');
+      } catch {
+        /* language settings missing — default to English */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function persistToggle(field: 'aiAuto' | 'reminders' | 'spanishMode', value: boolean) {
+    if (field === 'spanishMode') {
+      try {
+        await updateLanguageSettings({ defaultLanguage: value ? 'es' : 'en' });
+      } catch {
+        toast.error('Could not save language preference');
+        setSpanishMode(!value); // revert
+      }
+      return;
+    }
+    const body =
+      field === 'aiAuto'
+        ? { autoApplyInternalUpdates: value }
+        : { autoSendAppointmentReminders: value };
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
+    } catch {
+      toast.error('Could not save preference');
+      // revert on failure
+      if (field === 'aiAuto') setAiAuto(!value);
+      else setReminders(!value);
+    }
+  }
+
+  function toggleAiAuto(value: boolean) {
+    setAiAuto(value);
+    void persistToggle('aiAuto', value);
+  }
+  function toggleReminders(value: boolean) {
+    setReminders(value);
+    void persistToggle('reminders', value);
+  }
+  function toggleSpanishMode(value: boolean) {
+    setSpanishMode(value);
+    void persistToggle('spanishMode', value);
+  }
   const [qbOpen, setQbOpen]         = useState(false);
   const [qbConnected, setQbConnected] = useState(false);
   const [suppliersOpen, setSuppliersOpen] = useState(false);
+  const [businessProfileOpen, setBusinessProfileOpen] = useState(false);
+  const [terminologyOpen, setTerminologyOpen] = useState(false);
+  const [aiRulesOpen, setAiRulesOpen] = useState(false);
+  const [depositRulesOpen, setDepositRulesOpen] = useState(false);
+  const [teamMembersOpen, setTeamMembersOpen] = useState(false);
+  const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
+  const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
+  const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
+  // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
+  // the user lands back here from Google's OAuth redirect. The
+  // server-side callback redirects to /settings?calendar_connected=1
+  // on success or ?calendar_error=<reason> when Google rejects /
+  // user declines (PR 320 review — Gemini).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const isConnected = params.get('calendar_connected') === '1';
+    const connectionError = params.get('calendar_error');
+    // Tier 4 (Payment methods — PR 1). Operator returns from Stripe
+    // Connect onboarding to /settings?stripe_connect=1. Auto-open
+    // the sheet so they see the freshly-mirrored status.
+    const stripeReturned = params.get('stripe_connect') === '1';
+
+    let needsUrlUpdate = false;
+    if (isConnected || connectionError) {
+      setCalendarSyncOpen(true);
+      if (connectionError) {
+        toast.error(`Calendar connection failed: ${connectionError}`);
+      }
+      needsUrlUpdate = true;
+    }
+    if (stripeReturned) {
+      setPaymentMethodsOpen(true);
+      needsUrlUpdate = true;
+    }
+    if (needsUrlUpdate) {
+      // Strip the params so a refresh doesn't re-open / re-toast.
+      params.delete('calendar_connected');
+      params.delete('calendar_error');
+      params.delete('stripe_connect');
+      const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
+      window.history.replaceState(null, '', next);
+    }
+  }, []);
   const [copied, setCopied]         = useState(false);
+  const [googleReviewUrl, setGoogleReviewUrl] = useState('');
+  const [yelpReviewUrl, setYelpReviewUrl]     = useState('');
+  const [savingReviews, setSavingReviews]     = useState(false);
+  const [reviewsSaved, setReviewsSaved]       = useState(false);
+  const [reviewsError, setReviewsError]       = useState('');
+
+  /**
+   * Tier 4 (Subscription — Fieldly billing). POST /api/billing/portal-session
+   * and redirect the operator to the Stripe-hosted portal where they can
+   * manage card, plan, view invoices, etc. Returns to /settings on close.
+   */
+  async function openBillingPortal() {
+    try {
+      const returnUrl = `${window.location.origin}/settings`;
+      const res = await apiFetch('/api/billing/portal-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ returnUrl }),
+      });
+      if (res.status === 503) {
+        toast.error('Subscription billing is not configured for this tenant');
+        return;
+      }
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON */
+        }
+        throw new Error(detail || `Portal failed (${res.status})`);
+      }
+      const data = (await res.json()) as { url: string };
+      window.location.assign(data.url);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not open billing portal';
+      toast.error(msg);
+    }
+  }
+
+  async function saveReviewUrls() {
+    setSavingReviews(true);
+    setReviewsError('');
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ googleReviewUrl, yelpReviewUrl }),
+      });
+      if (!res.ok) {
+        setReviewsError('Could not save. Please try again.');
+        return;
+      }
+      setReviewsSaved(true);
+      setTimeout(() => setReviewsSaved(false), 2000);
+    } catch {
+      setReviewsError('Network error. Please try again.');
+    } finally {
+      setSavingReviews(false);
+    }
+  }
 
   const intakeUrl = 'fieldly.app/intake/ortega-hvac';
 
@@ -30,32 +233,40 @@ export function SettingsPage() {
     {
       title: 'Business',
       items: [
-        { icon: Building2, label: 'Business profile',    description: 'Name, logo, address, phone',                      action: () => {} },
-        { icon: Globe,     label: 'Language & region',   description: 'English / Español, timezone',                     action: () => {} },
-        { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => {} },
+        { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
+        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
+        { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
+        { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
+        { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
       ],
     },
     {
       title: 'Team',
       items: [
-        { icon: Users,  label: 'Team members',        description: '3 active · Add or manage technicians', action: () => {} },
+        { icon: Users,  label: 'Team members',        description: 'View the roster and roles', action: () => setTeamMembersOpen(true) },
         { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => {} },
       ],
     },
     {
       title: 'AI & Automation',
       items: [
-        { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => {} },
+        { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
-        { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => {} },
+        { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
+      ],
+    },
+    {
+      title: 'Customer experience',
+      items: [
+        { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
       ],
     },
     {
       title: 'Payments & billing',
       items: [
-        { icon: CreditCard, label: 'Payment methods',        description: 'Card, ACH · Stripe connected',  action: () => {} },
-        { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => {} },
-        { icon: CreditCard, label: 'Fieldly subscription',   description: 'Pro plan · $79/mo',             action: () => {} },
+        { icon: CreditCard, label: 'Payment methods',        description: 'Connect Stripe to accept card + ACH', action: () => setPaymentMethodsOpen(true) },
+        { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
+        { icon: CreditCard, label: 'Fieldly subscription',   description: 'Manage card, plan, invoices', action: () => openBillingPortal() },
       ],
     },
     {
@@ -64,9 +275,8 @@ export function SettingsPage() {
         {
           icon: Link,
           label: 'Calendar sync',
-          description: 'Google Calendar connected',
-          badge: { label: 'Connected', color: 'bg-green-100 text-green-700' },
-          action: () => {},
+          description: 'Connect Google Calendar to your account',
+          action: () => setCalendarSyncOpen(true),
         },
         {
           icon: Link,
@@ -172,9 +382,14 @@ export function SettingsPage() {
           <div className="flex-1 min-w-0">
             <p className="text-white">Ortega HVAC &amp; Services</p>
             <p className="text-xs text-slate-400 mt-0.5">HVAC · Plumbing · Painting · Austin, TX</p>
-            <p className="text-xs text-slate-400 mt-0.5">Owner: Mike Ortega</p>
+            <p className="text-xs text-slate-400 mt-0.5">Owner</p>
           </div>
-          <button className="text-xs text-slate-400 hover:text-white transition-colors shrink-0">Edit</button>
+          <button
+            onClick={() => setBusinessProfileOpen(true)}
+            className="text-xs text-slate-400 hover:text-white transition-colors shrink-0"
+          >
+            Edit
+          </button>
         </div>
 
         {/* Customer Intake Form — featured card */}
@@ -223,17 +438,17 @@ export function SettingsPage() {
             {
               label: 'AI auto-apply for internal updates',
               description: 'Let the assistant apply safe internal changes without asking',
-              value: aiAuto, onChange: setAiAuto,
+              value: aiAuto, onChange: toggleAiAuto,
             },
             {
               label: 'Auto send appointment reminders',
               description: 'Text customers 2 hours before scheduled jobs',
-              value: reminders, onChange: setReminders,
+              value: reminders, onChange: toggleReminders,
             },
             {
               label: 'Spanish language mode',
               description: 'Interface and customer communications in Español',
-              value: spanishMode, onChange: setSpanishMode,
+              value: spanishMode, onChange: toggleSpanishMode,
             },
           ].map(({ label, description, value, onChange }) => (
             <div key={label} className="flex items-start justify-between gap-3 px-4 py-3.5">
@@ -249,6 +464,72 @@ export function SettingsPage() {
               </button>
             </div>
           ))}
+        </div>
+
+        {/* Reviews section */}
+        <div className="mb-4">
+          <p className="text-xs text-slate-400 mb-2 px-1">REVIEWS</p>
+          <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="flex size-7 items-center justify-center rounded-lg bg-amber-100">
+                <Star size={14} className="text-amber-600" />
+              </span>
+              <div>
+                <p className="text-sm text-slate-800">Public review links</p>
+                <p className="text-xs text-slate-400 mt-0.5">Shown to happy customers after they leave feedback</p>
+              </div>
+            </div>
+
+            <label htmlFor="google-review-url" className="block mt-3">
+              <span className="text-sm text-slate-700">Google Review URL</span>
+              <input
+                id="google-review-url"
+                type="url"
+                value={googleReviewUrl}
+                onChange={e => setGoogleReviewUrl(e.target.value)}
+                placeholder="https://g.page/r/..."
+                className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+              />
+              <span className="block text-xs text-slate-400 mt-1">
+                Customers with a 4+ rating will see a button linking here.
+              </span>
+            </label>
+
+            <label htmlFor="yelp-review-url" className="block mt-4">
+              <span className="text-sm text-slate-700">Yelp Review URL</span>
+              <input
+                id="yelp-review-url"
+                type="url"
+                value={yelpReviewUrl}
+                onChange={e => setYelpReviewUrl(e.target.value)}
+                placeholder="https://www.yelp.com/biz/..."
+                className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+              />
+              <span className="block text-xs text-slate-400 mt-1">
+                Customers with a 4+ rating will see a button linking here.
+              </span>
+            </label>
+
+            {reviewsError && (
+              <p className="mt-3 text-sm text-red-600">{reviewsError}</p>
+            )}
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              {reviewsSaved && (
+                <span className="flex items-center gap-1 text-xs text-green-700 bg-green-100 rounded-full px-2 py-0.5">
+                  <Check size={11} /> Saved
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={saveReviewUrls}
+                disabled={savingReviews}
+                className="rounded-xl bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-700 active:scale-[0.98] transition disabled:opacity-50"
+              >
+                {savingReviews ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Settings sections */}
@@ -317,7 +598,7 @@ export function SettingsPage() {
         {/* Sign out */}
         <div className="mt-4 flex flex-col gap-2">
           <button
-            onClick={() => navigate('/login')}
+            onClick={() => signOut({ redirectUrl: '/login' })}
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 hover:bg-slate-50 transition-colors text-left"
           >
             Sign out
@@ -337,9 +618,68 @@ export function SettingsPage() {
         />
       )}
 
+      {/* P12-005-fe — Supervisor backup + unsupervised routing.
+          Owner-only; the backend PUT /api/settings already enforces
+          the same rule via the existing settings:update permission,
+          so this gate is a UX nicety. Mounted only when role==='owner'
+          to avoid rendering disabled UI for dispatchers/techs. */}
+      {me?.role === 'owner' && (
+        <div className="px-4 md:px-6 pb-6">
+          <SupervisorBackupSection
+            initialBackupUserId={me.backup_supervisor_user_id ?? null}
+            initialRouting={me.unsupervised_proposal_routing}
+          />
+        </div>
+      )}
+
       {/* Suppliers sheet */}
       {suppliersOpen && (
         <SuppliersSheet serviceType="HVAC" onClose={() => setSuppliersOpen(false)} />
+      )}
+
+      {/* Business profile sheet — closes the first of the 13 settings stubs. */}
+      {businessProfileOpen && (
+        <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
+      )}
+
+      {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}
+      {terminologyOpen && (
+        <TerminologySheet onClose={() => setTerminologyOpen(false)} />
+      )}
+
+      {/* AI approval rules sheet — per-mode auto-approve threshold overrides. */}
+      {aiRulesOpen && (
+        <AIApprovalRulesSheet onClose={() => setAiRulesOpen(false)} />
+      )}
+
+      {/* Deposit rules sheet — strategy + amount + optional threshold. */}
+      {depositRulesOpen && (
+        <DepositRulesSheet onClose={() => setDepositRulesOpen(false)} />
+      )}
+
+      {/* Team members sheet — roster + role editing (PR 1 + PR 2).
+          Owner-only edit affordances; backend re-enforces via
+          users:edit_role. */}
+      {teamMembersOpen && (
+        <TeamMembersSheet
+          onClose={() => setTeamMembersOpen(false)}
+          canEditRoles={me?.role === 'owner'}
+        />
+      )}
+
+      {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
+      {calendarSyncOpen && (
+        <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
+      )}
+
+      {/* Payment methods sheet — Stripe Connect onboarding (PR 1). */}
+      {paymentMethodsOpen && (
+        <PaymentMethodsSheet onClose={() => setPaymentMethodsOpen(false)} />
+      )}
+
+      {/* Vertical packs sheet — activate HVAC / Plumbing / other service verticals. */}
+      {verticalPacksOpen && (
+        <VerticalPacksSheet onClose={() => setVerticalPacksOpen(false)} />
       )}
     </div>
   );

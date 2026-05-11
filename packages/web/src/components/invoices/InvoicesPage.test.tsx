@@ -7,9 +7,16 @@ import { InvoicesPage } from './InvoicesPage';
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../hooks/useMutation', () => ({ useMutation: vi.fn() }));
+vi.mock('sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 import { useListQuery } from '../../hooks/useListQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { toast } from 'sonner';
 
 const mockInvoices = [
   {
@@ -140,5 +147,112 @@ describe('InvoicesPage', () => {
   it('uses /api/invoices endpoint', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/invoices');
+  });
+});
+
+describe('P5-018 InvoicesPage — payment confirmation reflection', () => {
+  beforeEach(() => {
+    vi.mocked(useListQuery).mockReturnValue(defaultListResult);
+    vi.mocked(useMutation).mockReturnValue({ mutate: vi.fn(), isLoading: false, error: null });
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+  });
+
+  it('does NOT toast on initial render — only on a status TRANSITION to paid', () => {
+    // Initial load already includes a `paid` invoice (INV-002). That's
+    // not a transition, so no toast should fire.
+    renderPage();
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled();
+  });
+
+  it('toasts when an open invoice flips to paid between refetches', () => {
+    // First render: i1 is open.
+    const { rerender } = render(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+    expect(vi.mocked(toast.success)).not.toHaveBeenCalled();
+
+    // Simulate a refetch where i1 has flipped to paid.
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [
+        { ...mockInvoices[0], status: 'paid' },
+        mockInvoices[1],
+        mockInvoices[2],
+      ],
+    });
+
+    rerender(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+
+    expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(toast.success)).toHaveBeenCalledWith(
+      expect.stringContaining('INV-001'),
+    );
+  });
+
+  it('does not double-toast when the same paid status persists across refetches', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+
+    // i1 flips to paid.
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [
+        { ...mockInvoices[0], status: 'paid' },
+        mockInvoices[1],
+        mockInvoices[2],
+      ],
+    });
+    rerender(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+    expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
+
+    // Another refetch — still paid. Should NOT re-toast.
+    rerender(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+    expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
+  });
+
+  it('reflects status updates immediately when the underlying list query changes', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+    // Initially i1 is Unpaid.
+    expect(screen.getAllByText('Unpaid').length).toBeGreaterThan(0);
+
+    // Refetch — i1 is now paid.
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [
+        { ...mockInvoices[0], status: 'paid' },
+        mockInvoices[1],
+        mockInvoices[2],
+      ],
+    });
+    rerender(
+      <MemoryRouter>
+        <InvoicesPage />
+      </MemoryRouter>,
+    );
+
+    // 3 paid statuses now visible (was 1 paid before).
+    expect(screen.getAllByText('Paid').length).toBeGreaterThanOrEqual(2);
   });
 });

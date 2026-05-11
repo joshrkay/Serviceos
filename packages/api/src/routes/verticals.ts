@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
 import { isValidVerticalType, VerticalType } from '../shared/vertical-types';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { HVAC_CATEGORIES } from '../verticals/hvac/categories';
@@ -48,18 +48,21 @@ async function getActivePackByVerticalType(registry: VerticalPackRegistry, verti
 export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry): Router {
   const router = Router();
 
-  router.get('/', requireAuth, requireTenant, async (_req: AuthenticatedRequest, res: Response) => {
-    try {
+  router.get(
+    '/',
+    requireAuth,
+    requireTenant,
+    asyncRoute(async (_req: AuthenticatedRequest, res: Response) => {
       const packs = await verticalPackRegistry.list();
       res.json(packs.filter((pack) => pack.status === 'active'));
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
-    }
-  });
+    })
+  );
 
-  router.get('/:type', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
-    try {
+  router.get(
+    '/:type',
+    requireAuth,
+    requireTenant,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const verticalType = req.params.type;
       if (!isValidVerticalType(verticalType)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
@@ -73,14 +76,14 @@ export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry)
       }
 
       res.json(pack);
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
-    }
-  });
+    })
+  );
 
-  router.get('/:type/categories', requireAuth, requireTenant, async (req: AuthenticatedRequest, res: Response) => {
-    try {
+  router.get(
+    '/:type/categories',
+    requireAuth,
+    requireTenant,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const verticalType = req.params.type;
       if (!isValidVerticalType(verticalType)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
@@ -98,42 +101,34 @@ export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry)
         .filter((category) => category.parentId === parentId)
         .sort((a, b) => a.sortOrder - b.sortOrder);
       res.json(categories);
-    } catch (err) {
-      const { statusCode, body } = toErrorResponse(err);
-      res.status(statusCode).json(body);
-    }
-  });
+    })
+  );
 
   router.get(
     '/:type/terminology/:term',
     requireAuth,
     requireTenant,
-    async (req: AuthenticatedRequest, res: Response) => {
-      try {
-        const verticalType = req.params.type;
-        if (!isValidVerticalType(verticalType)) {
-          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
-          return;
-        }
-
-        const pack = await getActivePackByVerticalType(verticalPackRegistry, verticalType);
-        if (!pack) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Vertical pack not found' });
-          return;
-        }
-
-        const resolved = resolveTerminology(getVerticalTerminology(verticalType), req.params.term);
-        if (!resolved) {
-          res.status(404).json({ error: 'NOT_FOUND', message: 'Term not found' });
-          return;
-        }
-
-        res.json(resolved);
-      } catch (err) {
-        const { statusCode, body } = toErrorResponse(err);
-        res.status(statusCode).json(body);
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const verticalType = req.params.type;
+      if (!isValidVerticalType(verticalType)) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
+        return;
       }
-    }
+
+      const pack = await getActivePackByVerticalType(verticalPackRegistry, verticalType);
+      if (!pack) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Vertical pack not found' });
+        return;
+      }
+
+      const resolved = resolveTerminology(getVerticalTerminology(verticalType), req.params.term);
+      if (!resolved) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Term not found' });
+        return;
+      }
+
+      res.json(resolved);
+    })
   );
 
   return router;

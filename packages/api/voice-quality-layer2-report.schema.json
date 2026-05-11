@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-service-os.dev/schemas/voice-quality-layer2-report.json",
+  "title": "Layer2Report",
+  "description": "VQ2-015 — JSON shape produced by the Layer 2 report aggregator. Pinned for CI consumption + future trend tooling. Mirrors the TypeScript type in packages/api/src/ai/voice-quality/report-layer2.ts. The Layer 2 report wraps the per-script majority-vote verdicts (VQ2-012/013) with a launch-gate decision sized for the pre-deploy CI workflow (VQ2-016) and PR-comment poster (VQ-025). The top-level launchGate.pass boolean preserves Layer 1 contract so the existing PR-comment poster works against either report shape without a Layer 2 codepath.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rubricVersion",
+    "generatedAt",
+    "totalScripts",
+    "totalPassedAggregate",
+    "overallPassRate",
+    "perScriptVerdicts",
+    "callerExperience",
+    "cost",
+    "flakes",
+    "costCapped",
+    "launchGate"
+  ],
+  "properties": {
+    "rubricVersion": {
+      "type": "string",
+      "description": "Rubric file version this report was scored against (e.g. 'v1')."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp when buildLayer2Report ran."
+    },
+    "totalScripts": { "type": "integer", "minimum": 0 },
+    "totalPassedAggregate": { "type": "integer", "minimum": 0 },
+    "overallPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "perScriptVerdicts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/perScriptVerdict" }
+    },
+    "callerExperience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ttfaMedians",
+        "lookupMedians",
+        "repromptRatioOverall",
+        "perceivedCompletionRate"
+      ],
+      "properties": {
+        "ttfaMedians": { "$ref": "#/$defs/percentilePair" },
+        "lookupMedians": { "$ref": "#/$defs/percentilePair" },
+        "repromptRatioOverall": { "type": "number", "minimum": 0, "maximum": 1 },
+        "perceivedCompletionRate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalCents", "perScriptAverageCents", "perBucket"],
+      "properties": {
+        "totalCents": { "type": "number", "minimum": 0 },
+        "perScriptAverageCents": { "type": "number", "minimum": 0 },
+        "perBucket": {
+          "type": "object",
+          "description": "Best-effort per-bucket totals; stubbed empty at v1 (see report-layer2.ts module doc).",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "flakes": {
+      "type": "array",
+      "description": "scriptIds where the 3 runs disagreed on any binary outcome (AggregatedResult.flakeIndicator).",
+      "items": { "type": "string" }
+    },
+    "costCapped": {
+      "type": "array",
+      "description": "scriptIds where the per-script cost cap (VQ2-013) fired.",
+      "items": { "type": "string" }
+    },
+    "launchGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "blockers", "thresholds", "measured"],
+      "properties": {
+        "pass": {
+          "type": "boolean",
+          "description": "Top-level pass/fail. PR-comment poster reads this directly."
+        },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Human-readable reasons; empty when pass=true."
+        },
+        "thresholds": { "$ref": "#/$defs/launchGateThresholds" },
+        "measured": { "$ref": "#/$defs/launchGateMeasured" }
+      }
+    }
+  },
+  "$defs": {
+    "percentilePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50", "p95"],
+      "properties": {
+        "p50": { "type": "number", "minimum": 0 },
+        "p95": { "type": "number", "minimum": 0 }
+      }
+    },
+    "launchGateThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "floorAllScripts",
+        "overallPassRateMin",
+        "ttfaP95MaxMs",
+        "perceivedCompletionPassRateMin",
+        "costCappedScriptsMax"
+      ],
+      "properties": {
+        "floorAllScripts": { "type": "boolean", "const": true },
+        "overallPassRateMin": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ttfaP95MaxMs": { "type": "number", "minimum": 0 },
+        "perceivedCompletionPassRateMin": { "type": "number", "minimum": 0, "maximum": 1 },
+        "costCappedScriptsMax": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "launchGateMeasured": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "floorAllPass",
+        "overallPassRate",
+        "ttfaP95Ms",
+        "perceivedCompletionPassRate",
+        "costCappedScripts"
+      ],
+      "properties": {
+        "floorAllPass": { "type": "boolean" },
+        "overallPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ttfaP95Ms": { "type": "number", "minimum": 0 },
+        "perceivedCompletionPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "costCappedScripts": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "aggregatedResult": {
+      "type": "object",
+      "description": "VQ2-012 majority-vote verdict; treated as opaque additive shape here.",
+      "additionalProperties": true,
+      "required": ["floor", "disposition", "callerExperience", "perceivedCompletion", "flakeIndicator"],
+      "properties": {
+        "floor": { "type": "object" },
+        "disposition": { "type": "object" },
+        "callerExperience": { "type": "object" },
+        "perceivedCompletion": { "type": "object" },
+        "flakeIndicator": { "type": "boolean" }
+      }
+    },
+    "perScriptVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scriptId", "aggregated", "costCapped", "totalCostCents", "durationMs"],
+      "properties": {
+        "scriptId": { "type": "string" },
+        "aggregated": { "$ref": "#/$defs/aggregatedResult" },
+        "costCapped": { "type": "boolean" },
+        "totalCostCents": { "type": "number", "minimum": 0 },
+        "durationMs": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

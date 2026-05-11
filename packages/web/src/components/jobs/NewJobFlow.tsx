@@ -6,6 +6,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { customers, technicians } from '../../data/mock-data';
+import { apiFetch } from '../../utils/api-fetch';
 import type { Customer, ServiceType } from '../../data/mock-data';
 import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
@@ -369,6 +370,8 @@ export function NewJobFlow({
   const [vSeconds,    setVSeconds]    = useState(0);
   const [vTranscript, setVTranscript] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     if (vPhase !== 'recording') return;
@@ -377,12 +380,52 @@ export function NewJobFlow({
   }, [vPhase]);
   useEffect(() => { if (vPhase === 'recording' && vSeconds >= 9) stopRecording(); }, [vSeconds, vPhase]);
 
-  function startRecording() { setVPhase('recording'); setVSeconds(0); }
+  // Cleanup media stream on unmount
+  useEffect(() => {
+    return () => { mediaRecorderRef.current?.stream?.getTracks().forEach(t => t.stop()); };
+  }, []);
+
+  async function startRecording() {
+    setVPhase('recording'); setVSeconds(0);
+    audioChunksRef.current = [];
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      recorder.start();
+    } catch {
+      setVTranscript('(Microphone not available — use the manual flow instead)');
+      setVPhase('parsed');
+    }
+  }
   function stopRecording() {
     if (timerRef.current) clearInterval(timerRef.current);
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      setVPhase('parsed');
+      return;
+    }
     setVPhase('processing');
-    const sample = VOICE_SAMPLES[Math.floor(Math.random() * VOICE_SAMPLES.length)];
-    setTimeout(() => { setVTranscript(sample); setVPhase('parsed'); }, 1800);
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach(t => t.stop());
+      const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
+      try {
+        const fd = new FormData();
+        fd.append('audio', audioBlob, 'recording.webm');
+        const res = await apiFetch('/api/voice/transcribe', { method: 'POST', body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          setVTranscript(data.transcript || '(Could not transcribe)');
+        } else {
+          setVTranscript('(Transcription service unavailable)');
+        }
+      } catch {
+        setVTranscript('(Transcription service unavailable)');
+      }
+      setVPhase('parsed');
+    };
+    recorder.stop();
   }
   function buildFromVoice() {
     const result = parseVoice(vTranscript, customerOptions);
@@ -1293,7 +1336,11 @@ export function NewJobFlow({
           <div className="shrink-0 px-5 py-4 border-t border-slate-100 bg-white">
             <button
               onClick={createJob}
-              disabled={!parsed.customerId || !parsed.serviceType || creating}
+              // BUG-3 — disabled predicate must mirror the validation
+              // in `createJob()` (draft.*), otherwise the button can
+              // light up while createJob silently early-returns or, in
+              // the inverse case, stay disabled with no explanation.
+              disabled={!draft.customerId || !draft.locationId || !draft.description.trim() || creating}
               className="flex items-center justify-center gap-2 w-full rounded-xl bg-slate-900 text-white py-3.5 text-sm disabled:opacity-40 hover:bg-slate-700 transition-colors"
             >
               {creating
@@ -1301,8 +1348,14 @@ export function NewJobFlow({
                 : <><Check size={14} /> Create job {parsed.scheduledDate ? `· ${parsed.scheduledDate}` : ''}</>
               }
             </button>
-            {!parsed.customerId && (
-              <p className="text-xs text-amber-600 text-center mt-2">Couldn't detect customer — use "Fill it in" for manual entry</p>
+            {(!draft.customerId || !draft.locationId || !draft.description.trim()) && (
+              <p className="text-xs text-amber-600 text-center mt-2">
+                {!draft.customerId
+                  ? 'Couldn’t detect customer — use "Fill it in" for manual entry'
+                  : !draft.locationId
+                  ? 'Pick a service location to continue'
+                  : 'Add a short description to continue'}
+              </p>
             )}
             {createError && (
               <p className="text-xs text-red-500 text-center mt-2">{createError}</p>

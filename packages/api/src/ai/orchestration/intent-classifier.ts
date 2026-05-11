@@ -27,6 +27,22 @@ export type IntentType =
   | 'add_note'
   | 'send_invoice'
   | 'record_payment'
+  | 'emergency_dispatch'
+  // P11-001: voice lookup-skill family. Read-only intents — the
+  // adapter routes these straight to the `lookup_*` skill instead
+  // of the proposal-draft path.
+  | 'lookup_appointments'
+  | 'lookup_invoices'
+  | 'lookup_balance'
+  | 'lookup_jobs'
+  | 'lookup_agreements'
+  | 'lookup_account_summary'
+  | 'lookup_customer'
+  | 'lookup_estimates'
+  // P11-002: caller asks to switch the call language ("english please" /
+  // "hablo español"). The adapter consumes this as a signal to flip the
+  // session language — it is NOT a proposal-driving intent.
+  | 'language_switch'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -44,8 +60,27 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'add_note',
   'send_invoice',
   'record_payment',
+  'emergency_dispatch',
+  'lookup_appointments',
+  'lookup_invoices',
+  'lookup_balance',
+  'lookup_jobs',
+  'lookup_agreements',
+  'lookup_account_summary',
+  'lookup_customer',
+  'lookup_estimates',
+  'language_switch',
   'unknown',
 ] as const;
+
+/**
+ * P11-001: convenience predicate the FSM adapter uses to route
+ * `lookup_*` intents to the read-only skill family instead of the
+ * proposal-draft pipeline.
+ */
+export function isLookupIntent(intent: IntentType | undefined | null): boolean {
+  return typeof intent === 'string' && intent.startsWith('lookup_');
+}
 
 export interface ExtractedEntities {
   customerName?: string;
@@ -123,10 +158,43 @@ export interface IntentClassification {
    * pipeline. Empty / undefined when every enum is valid.
    */
   invalidEnumFields?: Array<{ field: string; value: unknown }>;
+  /**
+   * Token usage from the underlying LLM call, surfaced so callers
+   * (e.g., the calling-agent adapter) can feed the SessionCostTracker
+   * and enforce per-session caps. Omitted when the classifier
+   * short-circuits without an LLM call.
+   */
+  tokenUsage?: { input: number; output: number };
 }
 
 export interface ClassifyContext {
   tenantId: string;
+  /**
+   * Optional vertical-aware prompt section produced by
+   * `formatVerticalForCallerPrompt(pack)` in
+   * `packages/api/src/verticals/context-assembly.ts`. When supplied,
+   * it is appended to the system prompt as a tenant-scoped Context
+   * Block — the LLM gets the tenant's actual equipment terminology
+   * and service categories so callers saying "my heater is broken"
+   * map to the right canonical entity instead of a hallucinated one.
+   * Closes §3B from `docs/remaining-features.md`. Optional so callers
+   * that don't have a pack loaded (e.g. operator UI flows where
+   * tenants may not have onboarded a vertical yet) can omit it.
+   *
+   * §3D extension: the resolver now also includes the pack's
+   * `intakeQuestions` block in this same string when present.
+   */
+  verticalPromptSection?: string;
+  /**
+   * Optional caller-plan / membership context produced by
+   * `formatCallerPlanForPrompt(ctx)` in
+   * `packages/api/src/ai/orchestration/caller-plan-context.ts`.
+   * Closes §3C — when a customer with an active maintenance plan
+   * calls in, the agent acknowledges the plan in its replies and
+   * routes with priority. Optional: when caller is unknown or has
+   * no active plan the section is omitted.
+   */
+  planPromptSection?: string;
 }
 
 /**
@@ -164,21 +232,44 @@ Supported intents (return exactly ONE):
                            Examples: "Send invoice 1024 to the customer"
                                      "Issue the Acme invoice"
                                      "Send the invoice we just drafted"
-- "unknown"             — anything else: queries ("when is my next appointment"),
-                           genuinely ambiguous transcripts, or commands without
-                           a clear target.
-- "create_customer"     — user wants to create a NEW customer record in the CRM.
-                           Trigger phrasings include "create/add/new customer".
+- "unknown"             — anything else: genuinely ambiguous transcripts,
+                           or commands without a clear target. Note that
+                           read-only queries ("when is my next appointment",
+                           "how much do I owe") now have dedicated
+                           lookup_* intents below — only fall through to
+                           "unknown" when no lookup intent matches.
+- "create_customer"     — user wants to create a NEW customer record in the CRM,
+                           OR an inbound CALLER is signing up as a new customer
+                           themselves ("I'd like to sign up", "I'm a new
+                           customer", "first time calling, please add me").
+                           This is the highest-leak intent on inbound calls —
+                           if the caller is not already in the system and
+                           wants to become a customer, classify as
+                           create_customer with high confidence.
+                           Trigger phrasings include "create/add/new customer",
+                           "sign up", "set up an account", "become a customer",
+                           "first time calling", "add me to your system",
+                           and any natural caller-side phrasing for
+                           establishing a new account.
                            Extract the customer's displayName plus any stated
-                           email or phone. When only the name is given, still
-                           classify as create_customer so the downstream flow
-                           can ask a clarifying question — do NOT fall back
-                           to "unknown" just because email/phone are missing.
+                           email or phone. When only the name is given (or even
+                           no name at all — the caller-id phone is captured
+                           upstream), still classify as create_customer so the
+                           downstream flow can ask a clarifying question — do
+                           NOT fall back to "unknown" just because email/phone
+                           or even displayName are missing.
                            Examples: "Create a new customer named Alex"
                                      "Add customer Acme Corp, email alex@acme.com"
                                      "New customer: Sarah, phone 555-0100"
                                      "Add a customer called Jordan Lee"
                                      "Create customer Maria Gomez at maria@gomez.co"
+                                     "I'd like to sign up as a new customer"
+                                     "I'm a new customer"
+                                     "Can you set up an account for me?"
+                                     "I want to become a customer"
+                                     "First time calling, please add me"
+                                     "Quisiera registrarme como nuevo cliente"
+                                     "Soy un cliente nuevo"
 - "create_job"          — user wants to open a NEW job record (distinct from
                            scheduling an appointment). Extract customerName
                            and jobTitle.
@@ -226,8 +317,94 @@ Supported intents (return exactly ONE):
                            Examples: "Mark the Jones invoice paid, 450 cash"
                                      "Record a check for 200 from Smith, check 1042"
                                      "Rodriguez paid the invoice in full"
-- "unknown"             — anything else: queries ("when is my next
-                           appointment"), ambiguous transcripts, or edit
+- "emergency_dispatch"  — caller describes a life-safety or property-
+                           emergency situation requiring IMMEDIATE
+                           response: no heat/cool in extreme weather, gas
+                           smell, burning smell, smoke, sparks, flooding,
+                           burst pipe, sewage backup, no water. Skip normal
+                           intent confirmation — escalate directly to
+                           on-call dispatcher. Never auto-execute.
+                           Examples: "There's a gas smell coming from the furnace"
+                                     "My pipes burst and water is everywhere"
+                                     "No heat and it's 10 degrees outside"
+                                     "I smell burning from my AC unit"
+- "lookup_appointments" — caller is ASKING about their upcoming
+                           appointment(s). Read-only — never moves money
+                           or creates records. Routed to the
+                           lookup_appointments skill, which speaks the
+                           next visit + technician.
+                           Examples: "When is my next appointment?"
+                                     "What time are you coming on Tuesday?"
+                                     "Do I have a service call scheduled?"
+                                     "When are y'all coming out?"
+                                     "Remind me when my appointment is"
+- "lookup_invoices"     — caller is ASKING about invoices on their
+                           account. Read-only. The skill returns count
+                           + totals + per-invoice info.
+                           Examples: "Do I have any invoices outstanding?"
+                                     "What invoices do I owe?"
+                                     "Can you read me my open invoices?"
+                                     "How many bills do I have?"
+                                     "What's the latest invoice you sent me?"
+- "lookup_balance"      — caller is ASKING for the dollar total they
+                           owe right now. Read-only.
+                           Examples: "What's my balance?"
+                                     "How much do I owe?"
+                                     "What do I still owe you guys?"
+                                     "Can you tell me my account balance?"
+                                     "Total amount due on my account?"
+- "lookup_jobs"         — caller is ASKING about their recent or current
+                           jobs. Read-only.
+                           Examples: "What jobs do I have open?"
+                                     "Tell me about my last service call"
+                                     "What's the status of my repair?"
+                                     "Did you finish the work order?"
+                                     "What jobs are on my account?"
+- "lookup_agreements"   — caller is ASKING about their service plan /
+                           agreement / membership. Read-only.
+                           Examples: "When does my service plan run next?"
+                                     "Do I still have my maintenance agreement?"
+                                     "When's my next maintenance visit?"
+                                     "What's on my service contract?"
+                                     "Am I still on the membership plan?"
+- "language_switch"     — caller asks to switch the call language.
+                           Read-only, non-proposal — the adapter flips
+                           the session language and acknowledges. Trigger
+                           phrasings include "english please", "speak
+                           english", "hablo español", "en español".
+                           Spanish prompt examples (so the classifier
+                           handles bilingual mid-call switches):
+                              "Hablo español, por favor"
+                              "¿Puedo continuar en español?"
+                              "Switch to english please"
+                              "I'd rather speak english"
+- "lookup_account_summary" — caller asks an open-ended "what's on my
+                           account" / "give me an update" question.
+                           Read-only. The skill stitches the appointment,
+                           balance, and agreement summaries into a
+                           two-sentence digest.
+                           Examples: "What's on my account?"
+                                     "Give me a quick summary"
+                                     "Catch me up on my account"
+                                     "Where do I stand?"
+                                     "Tell me about my account"
+- "lookup_customer"     — caller is ASKING about the contact info or
+                           CRM record we have on file for them — name,
+                           phone, email, communication notes. Read-only.
+                           Examples: "Can you confirm my contact info?"
+                                     "What number do you have on file?"
+                                     "Read me the email you have for me"
+                                     "Do you have my correct address?"
+                                     "Check what's on my customer record"
+- "lookup_estimates"    — caller is ASKING about quotes/estimates on
+                           their account — count, totals, status of
+                           prior estimates. Read-only.
+                           Examples: "What estimates have you sent me?"
+                                     "Read me my open quotes"
+                                     "Did you send me an estimate yet?"
+                                     "What's the status of my quote?"
+                                     "How much was that estimate?"
+- "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
 Distinctions that matter:
@@ -423,6 +600,51 @@ function unknownResult(
   };
 }
 
+/**
+ * P18-001: deterministic short-circuit for caller-side sign-up
+ * phrasings. The voice-call flow has been losing every inbound
+ * non-customer because the LLM was returning 'unknown' for "I'd like
+ * to sign up as a new customer" — phrases that are unambiguously a
+ * `create_customer` intent. We detect those phrasings up-front with a
+ * cheap regex pass; the LLM is still consulted to extract entities
+ * (displayName / email / phone) but the intent decision is locked in
+ * by the regex so a model regression cannot silently re-introduce the
+ * leak. Returns the canonical phrase set the regex matched so the
+ * caller can override the LLM's intentType when (and only when) the
+ * regex fired.
+ *
+ * Keeps the bar tight: matches are anchored to whole-word phrasings
+ * to avoid false positives (e.g. "I'd like to set up an appointment"
+ * must NOT collapse to create_customer).
+ *
+ * Includes lightweight Spanish phrasings to keep parity with the
+ * P11-002 multilingual path — same intent, same confidence.
+ */
+const CREATE_CUSTOMER_SIGNUP_PATTERNS: ReadonlyArray<RegExp> = [
+  /\bsign(?:ing)?\s*up\b(?!.*\bappointment\b)/i,
+  /\bnew\s+customer\b/i,
+  /\bbecome\s+a\s+customer\b/i,
+  // PR #265 review fix: each "account/me" phrasing was firing on
+  // adjacent appointment/schedule wording — e.g. "set up an account
+  // for my appointment" was being collapsed to create_customer and
+  // overriding the LLM's correct create_appointment classification.
+  // Negative lookaheads exclude appointment/schedule context, and the
+  // generic "add me" was tightened to "add/register me to (your) system"
+  // so "add me to the schedule" stays in create_appointment.
+  /\bset\s+up\s+(?:an?\s+)?account\b(?!.*\b(?:appointment|schedule)\b)/i,
+  /\bopen\s+(?:an?\s+)?account\b(?!.*\b(?:appointment|schedule)\b)/i,
+  /\bfirst[-\s]time\s+calling\b/i,
+  /\b(?:add|register)\s+me\s+to\s+(?:your\s+)?system\b/i,
+  /\bregistrarme\b/i,
+  /\bcliente\s+nuevo\b/i,
+  /\bnuevo\s+cliente\b/i,
+];
+
+export function isCreateCustomerSignupPhrasing(transcript: string): boolean {
+  if (!transcript) return false;
+  return CREATE_CUSTOMER_SIGNUP_PATTERNS.some((rx) => rx.test(transcript));
+}
+
 export async function classifyIntent(
   transcript: string,
   context: ClassifyContext,
@@ -433,10 +655,32 @@ export async function classifyIntent(
     return unknownResult('empty transcript', 'empty_transcript');
   }
 
+  // Compose the system prompt: base classifier rules + (optional)
+  // tenant vertical context + (optional) caller plan context. Each
+  // optional block is delivered as a separate system message so it
+  // doesn't dilute the canonical intent taxonomy and so per-tenant
+  // prompt drift can't break the JSON contract enforced by the base
+  // prompt.
+  const systemMessages: Array<{ role: 'system'; content: string }> = [
+    { role: 'system', content: SYSTEM_PROMPT },
+  ];
+  if (context.verticalPromptSection && context.verticalPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Tenant vertical context (use ONLY for entity recognition; do not change the JSON output schema):\n${context.verticalPromptSection}`,
+    });
+  }
+  if (context.planPromptSection && context.planPromptSection.trim().length > 0) {
+    systemMessages.push({
+      role: 'system',
+      content: `Caller plan context (use to personalize the response; do not change the JSON output schema):\n${context.planPromptSection}`,
+    });
+  }
+
   const response = await gateway.complete({
     taskType: 'classify_intent',
     messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
+      ...systemMessages,
       { role: 'user', content: transcript },
     ],
     responseFormat: 'json',
@@ -447,9 +691,48 @@ export async function classifyIntent(
     metadata: { tenantId: context.tenantId },
   });
 
+  const tokenUsage = response.tokenUsage
+    ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
+    : undefined;
+
   const parsed = parseClassifierJson(response.content);
+  // P18-001: deterministic create_customer fallback. When the
+  // transcript carries a clear sign-up phrasing but the LLM returned
+  // 'unknown' (or low confidence), force the intent to create_customer
+  // so the voice agent never silently drops a non-customer caller.
+  // We keep any extracted entities the LLM did manage to pull, and
+  // pin confidence to 0.85 — comfortably above CLASSIFIER_CONFIDENCE_THRESHOLD
+  // and the FSM's TAU_INT (0.75 in the calling-agent transitions).
+  const signupOverride = isCreateCustomerSignupPhrasing(transcript);
   if (!parsed) {
-    return unknownResult('could not parse classifier output', 'parse_failed');
+    if (signupOverride) {
+      const result: IntentClassification = {
+        intentType: 'create_customer',
+        confidence: 0.85,
+        reasoning: 'sign-up phrasing matched deterministic pattern',
+      };
+      if (tokenUsage) result.tokenUsage = tokenUsage;
+      return result;
+    }
+    const result = unknownResult('could not parse classifier output', 'parse_failed');
+    if (tokenUsage) result.tokenUsage = tokenUsage;
+    return result;
+  }
+  if (tokenUsage) parsed.tokenUsage = tokenUsage;
+  if (
+    signupOverride &&
+    (parsed.intentType === 'unknown' ||
+      parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD ||
+      parsed.intentType !== 'create_customer')
+  ) {
+    const overridden: IntentClassification = {
+      intentType: 'create_customer',
+      confidence: Math.max(0.85, parsed.confidence),
+      reasoning: 'sign-up phrasing matched deterministic pattern',
+      extractedEntities: parsed.extractedEntities,
+    };
+    if (tokenUsage) overridden.tokenUsage = tokenUsage;
+    return overridden;
   }
 
   // Final guardrail: low confidence → unknown, even if the LLM picked an intent.
@@ -457,7 +740,7 @@ export async function classifyIntent(
   // can emit a clarification proposal that offers the low-confidence intent
   // as a suggestion ("did you mean: create invoice?") instead of dropping.
   if (parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD) {
-    return {
+    const lowConf: IntentClassification = {
       intentType: 'unknown',
       confidence: parsed.confidence,
       reasoning:
@@ -468,6 +751,8 @@ export async function classifyIntent(
       lowConfidenceIntent:
         parsed.intentType !== 'unknown' ? parsed.intentType : undefined,
     };
+    if (tokenUsage) lowConf.tokenUsage = tokenUsage;
+    return lowConf;
   }
 
   // Classifier picked 'unknown' at adequate confidence — nothing to route.

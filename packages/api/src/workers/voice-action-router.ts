@@ -15,6 +15,8 @@ import {
 import { InvoiceTaskHandler } from '../ai/tasks/invoice-task';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
+import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
+import { AvailabilityFinder } from '../ai/tasks/availability-finder';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -26,6 +28,7 @@ import {
   SendInvoiceTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
+  EmergencyDispatchTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 
 /**
@@ -73,9 +76,47 @@ export interface VoiceActionRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
   recentReferents?: RecentReferentProvider;
+  /**
+   * Optional: pre-draft slot-conflict checker for `create_appointment`
+   * proposals (P0-035). When present, the AI will emit a
+   * `voice_clarification` proposal instead of a conflicting
+   * `create_appointment` whenever the proposed slot overlaps an
+   * existing appointment for the same technician or customer.
+   *
+   * Wire this in `app.ts` with a `DefaultSlotConflictChecker` whose
+   * deps are the same `appointmentRepo`, `assignmentRepo`, and
+   * `jobRepo` already in scope. Leaving it undefined preserves the
+   * pre-P0-035 behavior — useful for tests that don't care about the
+   * pre-check path.
+   */
+  slotConflictChecker?: SlotConflictChecker;
+  /**
+   * Optional: availability finder used to surface alternative open
+   * slots in the voice_clarification proposal whenever
+   * `slotConflictChecker` rejects the AI's proposed time. The
+   * dispatcher sees up to 3 next-available windows for the same
+   * duration (and same technician, when one was proposed) so they
+   * don't have to scan the calendar by hand. Leaving this undefined
+   * preserves the no-alternatives wording.
+   */
+  availabilityFinder?: AvailabilityFinder;
+  /**
+   * Tier 4 / PR B — per-tenant auto-approve threshold override
+   * resolver. When wired, the worker loads the override before
+   * createProposal so the persisted Settings UI value affects the
+   * threshold decision. Optional: when absent, proposals fall through
+   * to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+   */
+  thresholdResolver?: (tenantId: string) => Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  >;
 }
 
-const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalType> = {
+// P11-001: lookup_* intents are READ-ONLY and never produce a
+// proposal — the Twilio adapter routes them to the lookup-skill family
+// directly. They're omitted from this map; the action router falls back
+// to `voice_clarification` for any IntentType not present here.
+const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, ProposalType>> = {
   create_invoice: 'draft_invoice',
   draft_estimate: 'draft_estimate',
   create_appointment: 'create_appointment',
@@ -90,6 +131,7 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
   add_note: 'add_note',
   send_invoice: 'send_invoice',
   record_payment: 'record_payment',
+  emergency_dispatch: 'emergency_dispatch',
 };
 
 /**
@@ -104,7 +146,12 @@ const INTENT_TO_PROPOSAL_TYPE: Record<Exclude<IntentType, 'unknown'>, ProposalTy
 class IssueInvoiceTaskHandler implements TaskHandler {
   readonly taskType: ProposalType = 'issue_invoice';
 
-  constructor(private readonly proposalRepo: ProposalRepository) {}
+  constructor(
+    private readonly proposalRepo: ProposalRepository,
+    private readonly thresholdResolver?: (tenantId: string) => Promise<
+      Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+    >,
+  ) {}
 
   async handle(context: TaskContext): Promise<TaskResult> {
     let invoiceId: string | undefined;
@@ -131,6 +178,18 @@ class IssueInvoiceTaskHandler implements TaskHandler {
       }
     }
 
+    // Codex P2 (PR #316): prefer the override the router already
+    // resolved at request entry. Re-resolving here means a transient
+    // failure on this single handler can desync issue_invoice from
+    // the rest of the request's intents (which use context). Fall
+    // back to the resolver only when context didn't carry one (e.g.
+    // legacy callers that don't go through voice-action-router).
+    const tenantThresholdOverride =
+      context.tenantThresholdOverride
+      ?? (this.thresholdResolver
+        ? await this.thresholdResolver(context.tenantId).catch(() => undefined)
+        : undefined);
+
     const input: CreateProposalInput = {
       tenantId: context.tenantId,
       proposalType: 'issue_invoice',
@@ -140,6 +199,7 @@ class IssueInvoiceTaskHandler implements TaskHandler {
         : context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     };
 
     const proposal = createProposal(input);
@@ -151,10 +211,17 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   const handlers = new Map<ProposalType, TaskHandler>();
   handlers.set('draft_invoice', new InvoiceTaskHandler(deps.gateway));
   handlers.set('draft_estimate', new EstimateTaskHandler(deps.gateway));
-  handlers.set('create_appointment', new CreateAppointmentAITaskHandler(deps.gateway));
+  handlers.set(
+    'create_appointment',
+    new CreateAppointmentAITaskHandler(
+      deps.gateway,
+      deps.slotConflictChecker,
+      deps.availabilityFinder,
+    ),
+  );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));
   handlers.set('update_estimate', new EstimateEditTaskHandler(deps.gateway));
-  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo));
+  handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
   handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
@@ -163,6 +230,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
+  handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   return handlers;
 }
 
@@ -284,6 +352,10 @@ async function emitClarification(
     ...(conversationId ? { conversationId } : {}),
   };
 
+  const tenantThresholdOverride = deps.thresholdResolver
+    ? await deps.thresholdResolver(tenantId).catch(() => undefined)
+    : undefined;
+
   const proposal = createProposal({
     tenantId,
     proposalType: 'voice_clarification',
@@ -297,6 +369,7 @@ async function emitClarification(
       ...(conversationId ? { conversationId } : {}),
       ...(recordingId ? { recordingId } : {}),
     },
+    ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
     createdBy: userId,
     // Deliberately NO sourceTrustTier. decideInitialStatus will land
     // this in 'draft' regardless of reason/confidence. A clarification
@@ -400,12 +473,26 @@ export function createVoiceActionRouterWorker(
       }
 
       const proposalType = INTENT_TO_PROPOSAL_TYPE[classification.intentType];
-      const handler = handlers.get(proposalType);
+      const handler = proposalType ? handlers.get(proposalType) : undefined;
       if (!handler) {
-        // Defensive — every non-unknown intent maps to a handler above.
-        log.warn('voice-action-router: no handler for intent', { proposalType });
+        // P11-001: lookup_* intents have no proposal mapping (read-only,
+        // routed to skill family by the FSM adapter). They're not a
+        // worker concern — bail without warning.
+        log.warn('voice-action-router: no handler for intent', {
+          intent: classification.intentType,
+          proposalType,
+        });
         return;
       }
+
+      // PR B — resolve the tenant's auto-approve threshold override
+      // ONCE per request and place it on the task context. Each
+      // handler picks it up and threads it through its
+      // CreateProposalInput. Best-effort: a resolver hiccup degrades
+      // to the locked product defaults rather than blocking the call.
+      const tenantThresholdOverride = deps.thresholdResolver
+        ? await deps.thresholdResolver(tenantId).catch(() => undefined)
+        : undefined;
 
       const context: TaskContext = {
         tenantId,
@@ -419,6 +506,7 @@ export function createVoiceActionRouterWorker(
           classification.intentType,
           classification.extractedEntities
         ),
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       };
 
       const { proposal } = await handler.handle(context);

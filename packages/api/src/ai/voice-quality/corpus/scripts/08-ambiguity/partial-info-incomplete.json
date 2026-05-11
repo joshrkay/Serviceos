@@ -1,0 +1,65 @@
+{
+  "id": "partial-info-incomplete",
+  "bucket": "08-ambiguity",
+  "callerId": "+15555550803",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_08_ambiguity_partial_info",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_08_partial_info_jane",
+        "tenantId": "t_08_ambiguity_partial_info",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550803",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Book me for some time next week.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent recognizes the create_appointment intent but the slot extraction is incomplete (no specific day/time within 'some time next week'); agent reprompts asking for a specific day and time and does NOT draft a proposal yet"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Tuesday at 2.",
+      "expected": {
+        "intent": "create_appointment",
+        "proposalType": "create_appointment",
+        "slots": {
+          "customerId": "cust_08_partial_info_jane",
+          "scheduledStart": "2026-05-12T21:00:00.000Z"
+        },
+        "escalates": false,
+        "spokenAnswerMatches": "agent now has enough information (Tuesday May 12 at 2pm) to draft the create_appointment proposal; an operator will confirm before booking"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

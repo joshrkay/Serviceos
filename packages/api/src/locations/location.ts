@@ -1,4 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
+import {
+  checkLocationDuplicatesPg,
+  DuplicateWarning,
+  isLocationDuplicateLoader,
+  LocationDuplicateLoader,
+  normalizeAddress,
+} from './dedup';
 
 export interface ServiceLocation {
   id: string;
@@ -56,7 +63,20 @@ export interface LocationRepository {
   findByCustomer(tenantId: string, customerId: string): Promise<ServiceLocation[]>;
   findByTenant(tenantId: string): Promise<ServiceLocation[]>;
   update(tenantId: string, id: string, updates: Partial<ServiceLocation>): Promise<ServiceLocation | null>;
+  /**
+   * P1-019: Find candidate duplicate addresses for a given customer
+   * within a single tenant. Optional on the interface (defaults to
+   * the InMemory implementation; Pg implementation does an indexed
+   * lookup). Excludes archived rows.
+   */
+  findDuplicateAddresses?(
+    tenantId: string,
+    customerId: string,
+    address: { street1: string; city: string; state: string; postalCode: string }
+  ): Promise<ServiceLocation[]>;
 }
+
+export type ServiceLocationWithWarnings = ServiceLocation & { warnings?: DuplicateWarning[] };
 
 export function validateLocationInput(input: CreateLocationInput): string[] {
   const errors: string[] = [];
@@ -93,9 +113,26 @@ export function validateLocationUpdateInput(
 export async function createLocation(
   input: CreateLocationInput,
   repository: LocationRepository
-): Promise<ServiceLocation> {
+): Promise<ServiceLocationWithWarnings> {
   const errors = validateLocationInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
+
+  // P1-019: Advisory dedup BEFORE writing — never blocks creation.
+  let warnings: DuplicateWarning[] | undefined;
+  if (isLocationDuplicateLoader(repository)) {
+    const found = await checkLocationDuplicatesPg(
+      {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        street1: input.street1,
+        city: input.city,
+        state: input.state,
+        postalCode: input.postalCode,
+      },
+      repository as LocationDuplicateLoader
+    );
+    if (found.length > 0) warnings = found;
+  }
 
   const location: ServiceLocation = {
     id: uuidv4(),
@@ -130,7 +167,8 @@ export async function createLocation(
     }
   }
 
-  return repository.create(location);
+  const created = await repository.create(location);
+  return warnings ? { ...created, warnings } : created;
 }
 
 export async function getLocation(
@@ -241,6 +279,27 @@ export class InMemoryLocationRepository implements LocationRepository {
     const updated = { ...l, ...updates };
     this.locations.set(id, updated);
     return { ...updated };
+  }
+
+  /**
+   * P1-019: In-memory mirror of the Pg-backed dedup query.
+   * Filters by tenant + customer first, then by normalized address.
+   */
+  async findDuplicateAddresses(
+    tenantId: string,
+    customerId: string,
+    address: { street1: string; city: string; state: string; postalCode: string }
+  ): Promise<ServiceLocation[]> {
+    const target = normalizeAddress(address);
+    return Array.from(this.locations.values())
+      .filter(
+        (l) =>
+          l.tenantId === tenantId &&
+          l.customerId === customerId &&
+          !l.isArchived &&
+          normalizeAddress(l) === target
+      )
+      .map((l) => ({ ...l }));
   }
 
   getAll(): ServiceLocation[] {

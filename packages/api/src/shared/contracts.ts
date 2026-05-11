@@ -148,6 +148,14 @@ export const createJobSchema = z.object({
   summary: z.string().min(1),
   problemDescription: z.string().optional(),
   priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+  /**
+   * Optional override for source attribution. Routes auto-populate this
+   * from the customer's `originatingLeadId` when omitted; pass an explicit
+   * id only when attaching a job to a lead that the customer wasn't
+   * originally created from (e.g., a returning customer who came in via
+   * a new ad campaign).
+   */
+  originatingLeadId: z.string().uuid().optional(),
 });
 
 export const createEstimateSchema = z.object({
@@ -199,6 +207,22 @@ export const delayAcknowledgmentSchema = z.object({
   isRunningBehind: z.boolean(),
   delayMinutes: delayMinutesSchema.optional(),
   reasonCode: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (value.isRunningBehind && value.delayMinutes === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['delayMinutes'],
+      message: 'delayMinutes is required when isRunningBehind is true',
+    });
+  }
+
+  if (!value.isRunningBehind && value.delayMinutes !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['delayMinutes'],
+      message: 'delayMinutes is not allowed when isRunningBehind is false',
+    });
+  }
 });
 
 export type DelayAcknowledgment = z.infer<typeof delayAcknowledgmentSchema>;
@@ -210,15 +234,83 @@ export const createNoteSchema = z.object({
   isPinned: z.boolean().optional(),
 });
 
+export const createCatalogItemSchema = z.object({
+  name: z.string().trim().min(1),
+  description: z.string().trim().optional(),
+  category: z.enum(['Labor', 'Parts', 'Materials']),
+  unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
+  unitPriceCents: z.number().int().nonnegative(),
+});
+
+export const updateCatalogItemSchema = createCatalogItemSchema.partial();
+
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
-  businessPhone: z.string().optional(),
-  businessEmail: z.string().email().optional(),
-  timezone: z.string().optional(),
+  // Codex P2 (PR #316): `.nullable()` so the Business profile sheet
+  // can clear a previously-set phone/email/timezone by sending null.
+  // JSON.stringify drops undefined keys (no-op on the route's update),
+  // so an explicit null is the only path to "clear this field".
+  businessPhone: z.string().nullable().optional(),
+  businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  timezone: z.string().nullable().optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultPaymentTermDays: z.number().int().nonnegative().optional(),
   terminologyPreferences: z.record(z.string()).optional(),
+  // Phase 12 — supervisor backup + unsupervised proposal routing.
+  // `backupSupervisorUserId: null` explicitly clears the backup.
+  backupSupervisorUserId: z.string().uuid().nullable().optional(),
+  unsupervisedProposalRouting: z
+    .enum(['queue_and_sms', 'queue_only', 'escalate_to_oncall'])
+    .optional(),
+  // Tier 4 — Quick-settings toggles persistence.
+  autoApplyInternalUpdates: z.boolean().optional(),
+  autoSendAppointmentReminders: z.boolean().optional(),
+  // Tier 4 — AI approval rules: per-mode auto-approve threshold override.
+  // Each entry is a confidence in [0, 1]. Missing keys fall back to
+  // DEFAULT_AUTO_APPROVE_THRESHOLDS in proposals/auto-approve.ts.
+  autoApproveThreshold: z
+    .object({
+      supervisor: z.number().min(0).max(1).optional(),
+      tech: z.number().min(0).max(1).optional(),
+      both: z.number().min(0).max(1).optional(),
+    })
+    .strict()
+    .optional(),
+  // Tier 4 — Deposit rules. Cross-field correlation enforced both at
+  // the DB layer (CHECK constraint) and here (z.refine) so a malformed
+  // request fails at validation time with a useful message rather than
+  // bouncing off a generic CHECK violation.
+  depositStrategy: z.enum(['percentage', 'fixed']).nullable().optional(),
+  depositPercentageBps: z.number().int().min(0).max(10000).nullable().optional(),
+  depositFixedCents: z.number().int().min(0).nullable().optional(),
+  depositRequiredAboveCents: z.number().int().min(0).nullable().optional(),
+  // Tier 4 (Deposit rules — PR 3a-extended). Selects whether the
+  // customer pays the deposit BEFORE they can approve the estimate
+  // ('before_approval') or AFTER ('after_approval'). Default behavior
+  // is 'after_approval'; existing tenants keep current flow.
+  depositTimingPolicy: z.enum(['before_approval', 'after_approval']).optional(),
+  // B1 — Per-tenant voice persona. null clears the field.
+  voiceAgentName: z.string().min(1).max(80).nullable().optional(),
+  voiceGreeting: z.string().min(1).max(500).nullable().optional(),
+}).superRefine((val, ctx) => {
+  if (val.depositStrategy === 'percentage') {
+    if (val.depositPercentageBps == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'depositPercentageBps is required when depositStrategy is "percentage"',
+        path: ['depositPercentageBps'],
+      });
+    }
+  } else if (val.depositStrategy === 'fixed') {
+    if (val.depositFixedCents == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'depositFixedCents is required when depositStrategy is "fixed"',
+        path: ['depositFixedCents'],
+      });
+    }
+  }
 });
 
 export const conversationAccessSchema = z.object({

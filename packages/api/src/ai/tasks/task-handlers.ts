@@ -6,6 +6,13 @@ export interface TaskContext {
   conversationId?: string;
   existingEntities?: Record<string, unknown>;
   userId: string;
+  /**
+   * Tier 4 / PR B — per-tenant auto-approve threshold override
+   * resolved by the entry-point (voice-action-router) and threaded
+   * onto each task's CreateProposalInput. Optional: when undefined,
+   * proposals fall through to DEFAULT_AUTO_APPROVE_THRESHOLDS.
+   */
+  tenantThresholdOverride?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
 }
 
 export interface TaskResult {
@@ -33,6 +40,9 @@ export class CreateCustomerTaskHandler implements TaskHandler {
       summary: context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     const proposal = createProposal(input);
@@ -54,6 +64,9 @@ export class CreateJobTaskHandler implements TaskHandler {
       summary: context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     const proposal = createProposal(input);
@@ -76,6 +89,9 @@ export class CreateAppointmentTaskHandler implements TaskHandler {
       summary: context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     const proposal = createProposal(input);
@@ -97,6 +113,9 @@ export class DraftEstimateTaskHandler implements TaskHandler {
       summary: context.message,
       sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
       createdBy: context.userId,
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     const proposal = createProposal(input);

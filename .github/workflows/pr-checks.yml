@@ -4,6 +4,13 @@ on:
   pull_request:
     branches: [main]
 
+# VQ-025 — `voice-quality` job posts a sticky PR comment with the
+# voice-quality report, which requires write access to PR comments.
+# `contents: read` is the standard checkout permission.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -37,3 +44,47 @@ jobs:
 
       - name: Coverage check
         run: npm run test:coverage
+
+  # VQ-024 — Voice Quality v1 Layer 1 corpus suite.
+  #
+  # Runs the 40-script voice-quality corpus against the InMemory repo
+  # bundle. Today's entry uses createMockLLMGateway (canned classifier
+  # response) — cassettes are not yet wired into the corpus runner.
+  # This is the fast PR-time signal that a code change broke the voice
+  # agent's orchestration / runner / event-bus / grader pipeline.
+  #
+  # Voice-quality is a required check. Use the override procedure in
+  # docs/superpowers/runbooks/voice-quality-launch-gate.md §4 when CI
+  # is red due to a confirmed test bug rather than an agent regression.
+  # The artifact upload step uses `if: always()` so failures stay visible.
+  #
+  # The plan calls for `needs: [typecheck]`, but the current pipeline
+  # bundles typecheck into the `test` job, so we depend on that.
+  voice-quality:
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run voice quality suite
+        run: npm run voice-quality --workspace=packages/api
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-quality-report
+          path: packages/api/voice-quality-report.json
+      # VQ-025 — Post the report as a sticky PR comment. Runs even when
+      # the corpus suite fails so the author still has a signal; the
+      # script handles a missing report file with a fallback message.
+      - name: Post voice quality summary to PR
+        if: always() && github.event_name == 'pull_request'
+        run: npx ts-node .github/scripts/post-voice-quality-pr-comment.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_PATH: packages/api/voice-quality-report.json

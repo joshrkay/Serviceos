@@ -1,18 +1,21 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { TranscriptionStatus, VoiceRecording, VoiceRepository } from './voice-service';
+import { CallOutcome, TranscriptionStatus, VoiceRecording, VoiceRepository } from './voice-service';
 
 function mapRow(row: Record<string, unknown>): VoiceRecording {
   return {
     id: row.id as string,
     tenantId: row.tenant_id as string,
-    fileId: row.file_id as string,
+    fileId: (row.file_id as string | null) ?? undefined,
     conversationId: row.conversation_id as string | undefined,
+    callSid: (row.call_sid as string | null) ?? undefined,
     status: row.status as TranscriptionStatus,
     transcript: row.transcript as string | undefined,
     transcriptMetadata: row.transcript_metadata as Record<string, unknown> | undefined,
     durationSeconds: row.duration_seconds != null ? Number(row.duration_seconds) : undefined,
     errorMessage: row.error_message as string | undefined,
+    outcome: (row.outcome as CallOutcome | null) ?? undefined,
+    detectedLanguage: (row.detected_language as string | null) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -33,7 +36,7 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
         [
           recording.id,
           recording.tenantId,
-          recording.fileId,
+          recording.fileId ?? null,
           recording.conversationId ?? null,
           recording.status,
           recording.transcript ?? null,
@@ -89,6 +92,63 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
       );
       if (queryResult.rows.length === 0) return null;
       return mapRow(queryResult.rows[0]);
+    });
+  }
+
+  async stampOutcome(
+    tenantId: string,
+    id: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET outcome    = $1,
+                updated_at = NOW()
+          WHERE id = $2 AND tenant_id = $3
+          RETURNING *`,
+        [outcome, id, tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
+  async stampOutcomeByCallSid(
+    tenantId: string,
+    callSid: string,
+    outcome: CallOutcome,
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET outcome    = $1,
+                updated_at = NOW()
+          WHERE tenant_id = $2 AND call_sid = $3 AND outcome IS NULL
+          RETURNING *`,
+        [outcome, tenantId, callSid],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
+    });
+  }
+
+  async stampDetectedLanguage(
+    tenantId: string,
+    id: string,
+    language: string,
+  ): Promise<VoiceRecording | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET detected_language = $1,
+                updated_at        = NOW()
+          WHERE id = $2 AND tenant_id = $3
+          RETURNING *`,
+        [language, id, tenantId],
+      );
+      if (result.rows.length === 0) return null;
+      return mapRow(result.rows[0]);
     });
   }
 }

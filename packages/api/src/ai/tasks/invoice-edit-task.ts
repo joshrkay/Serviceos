@@ -123,6 +123,10 @@ export class InvoiceEditTaskHandler implements TaskHandler {
       // Classified as `capture`, same as draft_invoice. The high
       // confidence threshold + operator review prevent surprise edits.
       sourceTrustTier: 'autonomous',
+      // PR B — propagate tenant override from context.
+      ...(context.tenantThresholdOverride
+        ? { tenantThresholdOverride: context.tenantThresholdOverride }
+        : {}),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

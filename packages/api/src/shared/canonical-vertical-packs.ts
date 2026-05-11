@@ -1,22 +1,36 @@
 import { v4 as uuidv4 } from 'uuid';
 import { VerticalPackRegistry, VerticalPack } from './vertical-pack-registry';
+import { createHvacPack } from '../verticals/packs/hvac';
+import { createPlumbingPack } from '../verticals/packs/plumbing';
 
-function buildCanonicalPack(
-  packId: string,
-  verticalType: VerticalPack['verticalType'],
-  displayName: string,
-  description: string
-): VerticalPack {
+/**
+ * Adapt a rich pack (from `verticals/packs/{hvac,plumbing}.ts`) into
+ * the canonical shape stored by the registry. The rich pack already
+ * carries terminology / categories / intake_questions / objection_scripts
+ * in `metadata` (see `createVerticalPack` in `verticals/registry.ts`),
+ * which means downstream consumers like `buildVerticalPromptResolver`
+ * can read them on lookup.
+ *
+ * Codex P1 (PR #315) — without this, canonical packs were seeded
+ * thin (only `{ canonical: true, seededBy: 'createApp' }` in metadata)
+ * and the §3B/3D/3E classifier-context path produced an empty section
+ * for every tenant. The resolver now sees the same rich metadata
+ * `loadPackConfig` derives at runtime.
+ */
+function adaptToCanonical(packId: string, rich: ReturnType<typeof createHvacPack>): VerticalPack {
   const now = new Date();
   return {
     id: uuidv4(),
     packId,
-    version: '1.0.0',
-    verticalType,
+    version: rich.version,
+    verticalType: rich.verticalType,
     status: 'active',
-    displayName,
-    description,
+    displayName: rich.displayName,
+    description: rich.description,
+    // Preserve rich metadata (terminology / categories / intake_questions /
+    // objection_scripts) but flag the canonical origin for diagnostics.
     metadata: {
+      ...(rich.metadata ?? {}),
       canonical: true,
       seededBy: 'createApp',
     },
@@ -25,26 +39,13 @@ function buildCanonicalPack(
   };
 }
 
-export function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): void {
-  registry.register(
-    buildCanonicalPack(
-      'hvac-v1',
-      'hvac',
-      'HVAC Pack',
-      'Canonical HVAC pack with terminology and categories for estimating.'
-    )
-  ).catch((err) => {
-    process.stderr.write(`[seed] Failed to register hvac-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
-  });
-
-  registry.register(
-    buildCanonicalPack(
-      'plumbing-v1',
-      'plumbing',
-      'Plumbing Pack',
-      'Canonical plumbing pack with terminology and categories for estimating.'
-    )
-  ).catch((err) => {
-    process.stderr.write(`[seed] Failed to register plumbing-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
-  });
+export async function seedCanonicalVerticalPacks(registry: VerticalPackRegistry): Promise<void> {
+  await Promise.all([
+    registry.register(adaptToCanonical('hvac-v1', createHvacPack())).catch((err) => {
+      process.stderr.write(`[seed] Failed to register hvac-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
+    }),
+    registry.register(adaptToCanonical('plumbing-v1', createPlumbingPack())).catch((err) => {
+      process.stderr.write(`[seed] Failed to register plumbing-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
+    }),
+  ]);
 }

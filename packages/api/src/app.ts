@@ -8,17 +8,63 @@ import { toErrorResponse } from './shared/errors';
 import { createPool } from './db/pool';
 import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
+import { createTelephonyRouter } from './routes/telephony';
+import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { attachMediaStreamServer } from './telephony/media-streams';
+import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import {
+  decodeClerkToken,
+  verifyRs256Token,
+} from './auth/clerk';
+import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
+import { DeepgramStreamingProvider } from './voice/transcription-providers';
 import { PgTenantRepository } from './auth/pg-tenant';
 
 // Route factories
 import { createCustomerRouter } from './routes/customers';
+import { createLeadsRouter } from './routes/leads';
 import { createLocationRouter } from './routes/locations';
 import { createJobRouter } from './routes/jobs';
 import { createAppointmentRouter } from './routes/appointments';
 import { createEstimateRouter } from './routes/estimates';
 import { createInvoiceRouter } from './routes/invoices';
+import { createUsersRouter } from './routes/users';
+import {
+  createCalendarIntegrationsRouter,
+  createCalendarOAuthCallbackRouter,
+} from './routes/calendar-integrations';
+import {
+  PgCalendarIntegrationRepository,
+  PgOAuthStateRepository,
+  InMemoryCalendarIntegrationRepository,
+  InMemoryOAuthStateRepository,
+} from './integrations/calendar-integration';
+import {
+  CalendarSyncService,
+  PgAppointmentCalendarEventRepository,
+  InMemoryAppointmentCalendarEventRepository,
+} from './integrations/calendar-sync';
+import { PgUserRepository } from './users/pg-user';
+import { InMemoryUserRepository } from './users/user';
+import { PgPendingInvitationRepository } from './users/pg-pending-invitation';
+import { InMemoryPendingInvitationRepository } from './users/pending-invitation';
+import { createBillingRouter } from './routes/billing';
+import { StripeConnectService } from './billing/stripe-connect';
+import { BillingService } from './billing/subscription';
 import { createPaymentRouter } from './routes/payments';
 import { createNoteRouter } from './routes/notes';
+import {
+  createMeRouter,
+  InMemoryUserModeService,
+  type MeUserRecord,
+  type MeTenantSettings,
+  type UserModeService,
+} from './routes/me';
+import { setUserModeLoader } from './middleware/auth';
+import {
+  setSupervisorPresenceLoader,
+  pgSupervisorPresenceLoader,
+} from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createVerticalRouter } from './routes/verticals';
@@ -27,14 +73,34 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createTechnicianLocationRouter } from './routes/technician-location';
+import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
+import { createJobFilesRouter } from './routes/job-files';
+import { createJobPhotosRouter } from './routes/job-photos';
+import { JobPhotoService } from './jobs/job-photo-service';
+import { InMemoryJobPhotoRepository } from './jobs/job-photo';
+import { PgJobPhotoRepository } from './jobs/pg-job-photo';
 import { createDispatchRoutes } from './dispatch/routes';
+import { createPublicFeedbackRouter } from './routes/public-feedback';
+import { createPublicIntakeRouter } from './routes/public-intake';
+import { createReportsRouter } from './routes/reports';
+import { createTimeEntriesRouter } from './routes/time-entries';
+import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
+import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
+import {
+  PgRevenueBySourceRepository,
+  InMemoryRevenueBySourceRepository,
+} from './reports/revenue-by-source';
+import { createFeedbackResponsesRouter } from './routes/feedback';
+import { createInteractionsRouter } from './routes/interactions';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
+import { InMemoryLeadRepository } from './leads/lead';
 import { InMemoryLocationRepository } from './locations/location';
 import { InMemoryJobRepository } from './jobs/job';
 import { InMemoryJobTimelineRepository } from './jobs/job-lifecycle';
@@ -43,33 +109,51 @@ import { InMemoryAssignmentRepository } from './appointments/assignment';
 import { InMemoryEstimateRepository } from './estimates/estimate';
 import { InMemoryInvoiceRepository } from './invoices/invoice';
 import { InMemoryPaymentRepository } from './invoices/payment';
+import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
 import { InMemorySettingsRepository } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
+import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
+import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
+import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
-import { InMemoryVoiceRepository } from './voice/voice-service';
-import { createTranscriptionProvider } from './voice/transcription-providers';
+import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
+import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
 import { InMemoryDispatchAnalyticsRepository } from './dispatch/analytics';
 import {
   InMemoryFeatureFlagStore,
   InMemoryFeatureFlagRepository,
   hydrateStoreFromRepository,
+  isFeatureEnabled,
   FeatureFlagRepository,
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
+import {
+  InMemoryTechnicianLocationAuthorizer,
+  PgTechnicianLocationAuthorizer,
+} from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
+import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
+import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
+import {
+  buildCallerPlanContext,
+  formatCallerPlanForPrompt,
+} from './ai/orchestration/caller-plan-context';
+import { createThresholdResolver } from './proposals/threshold-resolver';
+import { createVoicePersonaResolver } from './settings/voice-persona-resolver';
 import { InMemoryVerticalPackRegistry as InMemoryCanonicalVerticalPackRegistry } from './shared/vertical-pack-registry';
 
 // Postgres-backed repositories (production)
 import { PgCustomerRepository } from './customers/pg-customer';
+import { PgLeadRepository } from './leads/pg-lead';
 import { PgLocationRepository } from './locations/pg-location';
 import { PgJobRepository } from './jobs/pg-job';
 import { PgJobTimelineRepository } from './jobs/pg-job-lifecycle';
@@ -85,27 +169,112 @@ import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
 import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
+import { InMemoryVoiceSessionRepository } from './voice/voice-session';
+import { PgVoiceSessionRepository } from './voice/pg-voice-session';
 import { PgTechnicianLocationPingRepository } from './telemetry/pg-technician-location-ping';
 import { PgApprovalRepository } from './estimates/pg-approval';
 import { PgEditDeltaRepository } from './estimates/pg-edit-delta';
 import { PgPackActivationRepository } from './settings/pg-pack-activation';
 import { PgVerticalPackRegistry } from './shared/pg-vertical-pack-registry';
 import { InMemoryFileRepository } from './files/file-service';
+import { InMemoryJobFileRepository } from './files/job-file-repository';
 import { PgFileRepository } from './files/pg-file';
+import { PgJobFileRepository } from './files/pg-job-file';
+import { InMemoryCatalogItemRepository } from './catalog/catalog-item';
+import { PgCatalogItemRepository } from './catalog/pg-catalog-item';
 import { createStorageProvider } from './files/storage-provider';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
+import { PgWebhookEventRepository } from './webhooks/pg-webhook-event';
+import { PgAssignmentRepository } from './appointments/pg-assignment';
+import { PgDocumentRevisionRepository } from './ai/pg-document-revision';
+import { PgDiffAnalysisRepository } from './ai/pg-diff-analysis';
+import { PgDispatchAnalyticsRepository } from './dispatch/pg-analytics';
+import { PgDelayNoticeStateRepository } from './notifications/pg-delay-notice-state';
 import { PgQueue } from './queues/pg-queue';
+import {
+  InMemoryFeedbackRequestRepository,
+} from './feedback/feedback-request';
+import {
+  InMemoryFeedbackResponseRepository,
+} from './feedback/feedback-response';
+import { PgFeedbackRequestRepository } from './feedback/pg-feedback-request';
+import { PgFeedbackResponseRepository } from './feedback/pg-feedback-response';
+import { NoopFeedbackDispatcher, SmsProviderFeedbackDispatcher } from './feedback/dispatcher';
+import {
+  MessageDeliveryProvider,
+  InMemoryDeliveryProvider,
+} from './notifications/delivery-provider';
+import { TwilioDeliveryProvider } from './notifications/twilio-delivery-provider';
+import { SendService } from './notifications/send-service';
+import {
+  InMemoryDispatchRepository,
+  PgDispatchRepository,
+} from './notifications/dispatch-repository';
+import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
+import { PublicEstimateService } from './estimates/public-estimate-service';
+import { createPublicEstimatesRouter } from './routes/public-estimates';
+import { PublicInvoiceService } from './invoices/public-invoice-service';
+import { createPublicInvoicesRouter } from './routes/public-invoices';
+import { createPublicPaymentsRouter } from './routes/public-payments';
+import { createFeedbackSendWorker } from './workers/feedback-send';
+import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { InMemoryAgreementRepository } from './agreements/agreement';
+import { PgAgreementRepository } from './agreements/pg-agreement';
+import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
+import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
+import { createAgreementsRouter } from './routes/agreements';
+import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
+import {
+  InMemoryPortalSessionRepository,
+  PortalSessionRepository,
+} from './portal/portal-session';
+import { PgPortalSessionRepository } from './portal/pg-portal-session';
+import { createPortalRouter } from './routes/portal';
+import { createPublicPortalRouter } from './routes/public-portal';
+import { createJob as createJobDomain } from './jobs/job';
+import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
 import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker } from './workers/transcription';
+import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
+import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
+import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
+import { FrancLanguageDetector } from './voice/language-detector';
+import type { RetrieveAdapter } from './ai/orchestration/context-builder';
+// P11-002: language detector re-exported so the Twilio adapter (and any
+// future channel adapters) can resolve a session's language from the
+// customer override + tenant default + STT hint.
+export { detectLanguage } from './ai/orchestration/language-detector';
+import {
+  PgKnowledgeChunkRepository,
+  InMemoryKnowledgeChunkRepository,
+} from './ai/training/knowledge-chunks';
+import { InMemoryRetrievalEvalRunRepository } from './ai/training/retrieval-eval-run';
+import { PgRetrievalEvalRunRepository } from './ai/training/pg-retrieval-eval-run';
+import { InMemoryProposalExecutionRepository } from './proposals/proposal-execution';
+import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
+import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
+import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
+import {
+  OpenAICompatibleProvider,
+  type EmbeddingProvider,
+} from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
+import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
+import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
 import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import { createTtsProvider } from './ai/tts/tts-provider';
+import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
+import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
+import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
+import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
 import {
   createDiffAnalysisWorker,
@@ -113,6 +282,14 @@ import {
 } from './ai/diff-analysis';
 import { InMemoryDocumentRevisionRepository } from './ai/document-revision';
 import { createLogger } from './logging/logger';
+import { createRequestLoggingMiddleware, captureRequestError } from './middleware/request-logging';
+import {
+  createDelayNotificationWorker,
+  DelayNotificationCoordinator,
+  InMemoryDelayNoticeStateRepository,
+  NextCustomerSelector,
+  NoopDelayNotificationService,
+} from './notifications/delay-notifications';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -122,12 +299,131 @@ import {
   DevInMemoryTenantRepository,
 } from './auth/dev-auth-bypass';
 import { requireAuth } from './middleware/auth';
+import { withTenantTransaction } from './middleware/tenant-context';
+import type { TenantIntegrationStatus } from './integrations/status-machine';
 
-export function createApp() {
+/**
+ * In-memory dev fallback for the WebhookEvent idempotency repo.
+ *
+ * The Pg-backed variant (PgWebhookEventRepository, P0-020) sits on top of the
+ * `webhook_events` table. There is no shared interface declaration in the
+ * webhook-event source (only the Pg class), and per the P0-023 hard rules we
+ * cannot edit any pg-* source file. To keep the `pool ? Pg : InMemory`
+ * wiring pattern consistent across all six newly wired entities, a minimal
+ * Map-backed stub lives here. It mirrors PgWebhookEventRepository's public
+ * surface (recordReceipt / markProcessed / markFailed / findById /
+ * findUnprocessed) so dev runs without DATABASE_URL still type-check.
+ *
+ * Production and staging ALWAYS use the Pg variant — `createApp()` throws
+ * above if DATABASE_URL is missing in those environments. So this stub is a
+ * dev-only fallback by construction.
+ */
+class InMemoryWebhookEventRepository {
+  private events = new Map<string, {
+    id: string;
+    provider: string;
+    eventId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+    receivedAt: Date;
+    processedAt: Date | null;
+    processingError: string | null;
+  }>();
+
+  private key(provider: string, eventId: string): string {
+    return `${provider}:${eventId}`;
+  }
+
+  async recordReceipt(
+    provider: string,
+    eventId: string,
+    eventType: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ inserted: boolean; record: {
+    id: string;
+    provider: string;
+    eventId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+    receivedAt: Date;
+    processedAt: Date | null;
+    processingError: string | null;
+  } }> {
+    if (!provider) throw new Error('provider is required');
+    if (!eventId) throw new Error('eventId is required');
+    const k = this.key(provider, eventId);
+    const existing = this.events.get(k);
+    if (existing) {
+      return { inserted: false, record: { ...existing } };
+    }
+    const record = {
+      id: `${k}:${this.events.size + 1}`,
+      provider,
+      eventId,
+      eventType,
+      payload,
+      receivedAt: new Date(),
+      processedAt: null,
+      processingError: null,
+    };
+    this.events.set(k, record);
+    return { inserted: true, record: { ...record } };
+  }
+
+  async markProcessed(provider: string, eventId: string): Promise<void> {
+    const r = this.events.get(this.key(provider, eventId));
+    if (r) {
+      r.processedAt = new Date();
+      r.processingError = null;
+    }
+  }
+
+  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
+    const r = this.events.get(this.key(provider, eventId));
+    if (r) {
+      r.processingError = error;
+    }
+  }
+
+  async findById(provider: string, eventId: string) {
+    const r = this.events.get(this.key(provider, eventId));
+    return r ? { ...r } : null;
+  }
+
+  async findUnprocessed(limit = 100) {
+    return Array.from(this.events.values())
+      .filter((r) => r.processedAt === null && r.processingError === null)
+      .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
+      .slice(0, limit)
+      .map((r) => ({ ...r }));
+  }
+}
+
+export function createApp(): express.Express {
   const app = express();
 
-  // Body parsing
+  // Behind Railway / Cloudflare / any reverse proxy: trust the immediate
+  // hop so req.ip + X-Forwarded-For resolve correctly. Without this,
+  // express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on every
+  // request (500 with empty body) because it can't identify the real client.
+  app.set('trust proxy', 1);
+
+  // Stripe webhook needs the raw body for signature verification.
+  // Mount with express.raw() BEFORE express.json() so this path gets a Buffer
+  // and the global json() middleware skips it (body-parser sets req._body = true).
+  app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+  // Twilio posts application/x-www-form-urlencoded — mount the matching parser
+  // before global express.json() so /webhooks/twilio/* routes get populated
+  // req.body fields (used for signature verification + AccountSid match).
+  app.use('/webhooks/twilio', express.urlencoded({ extended: false }));
+
+  // Body parsing for all other routes
   app.use(express.json());
+
+  // Serve static frontend files from the built React app
+  const frontendPath = require('path').join(__dirname, '../../web/dist');
+  app.use(express.static(frontendPath));
 
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
@@ -153,6 +449,18 @@ export function createApp() {
     windowMs: 60 * 1000,      // 1 minute
     max: 30,
   }));
+  // Public invoice/estimate pages are unauthenticated but token-gated.
+  // Limit aggressively to slow token brute-force and view-count inflation.
+  app.use('/public', rateLimit({
+    windowMs: 60 * 1000,      // 1 minute
+    max: 30,                  // per IP
+  }));
+
+  const requestLogger = createLogger({
+    service: 'api-http',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  app.use(createRequestLoggingMiddleware(requestLogger));
 
   // Initialize repositories — use Postgres when DATABASE_URL is set, otherwise
   // fall back to in-memory for local development without a database.
@@ -181,19 +489,176 @@ export function createApp() {
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
+  // Prometheus metrics. Mounted on the public surface deliberately —
+  // production should rely on network-level allowlist (ingress / VPC).
+  app.get('/metrics', async (_req, res) => {
+    try {
+      const { renderMetrics } = await import('./monitoring/metrics');
+      const { contentType, body } = await renderMetrics();
+      res.setHeader('Content-Type', contentType);
+      res.send(body);
+    } catch (err) {
+      res.status(500).json({
+        error: 'METRICS_RENDER_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   // Webhook routes — mounted before Clerk JWT middleware because webhooks
   // use their own signature verification (svix for Clerk, stripe-signature for Stripe).
   // The settings repo is constructed early so the Clerk webhook tenant
   // bootstrap can seed a default TenantSettings row alongside the new
   // tenant — closes the onboarding hole where a new operator would 500
   // on their first POST /api/estimates.
-  const tenantRepo = pool ? new PgTenantRepository(pool) : undefined;
+  // BUG-2 — when there's no pool, every consumer must share ONE
+  // DevInMemoryTenantRepository instance, otherwise the public-intake
+  // path and the dev-auth-bypass middleware end up with disjoint
+  // tenant maps and customers created on one side don't resolve on
+  // the other.
+  const tenantRepo = pool
+    ? new PgTenantRepository(pool)
+    : new DevInMemoryTenantRepository();
   const webhookSettingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
+  // Constructed early so the Stripe webhook handler can record payments.
+  const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
+  // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
+  // and the rest of the app share a single instance — InMemory repos
+  // are stateful, so two separate `new InMemoryJobRepository()` calls
+  // would diverge in tests.
+  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
+  // Tier 4 (Team members — PR 3). Same hoist for pending invitations
+  // — the Clerk webhook reads them on user.created and the /api/users
+  // routes write them. Single shared InMemory in tests.
+  const pendingInvitationRepo = pool
+    ? new PgPendingInvitationRepository(pool)
+    : new InMemoryPendingInvitationRepository();
+  // Tier 4 (Subscription — Fieldly billing). Hoisted up so the Stripe
+  // webhook can update the cached subscription status when
+  // customer.subscription.* events arrive. Single instance shared
+  // with the /api/billing route. Requires both Pg pool + Stripe key
+  // to instantiate — InMemory tests skip the subscription mirror
+  // (the route surfaces 503 / null fields gracefully).
+  const billingService = pool && process.env.STRIPE_SECRET_KEY
+    ? new BillingService({
+        pool,
+        config: {
+          apiKey: process.env.STRIPE_SECRET_KEY,
+          portalConfigurationId: process.env.STRIPE_BILLING_PORTAL_CONFIGURATION,
+        },
+      })
+    : undefined;
+  // Tier 4 (Payment methods — PR 1). Stripe Connect onboarding for
+  // the tenant's customer-facing payments. Same Stripe API key as
+  // BillingService (Connect operations are first-party calls
+  // authenticated with our platform secret), but a separate service
+  // because the concerns are distinct.
+  const connectService = pool && process.env.STRIPE_SECRET_KEY
+    ? new StripeConnectService({
+        pool,
+        config: { apiKey: process.env.STRIPE_SECRET_KEY },
+      })
+    : undefined;
+  // Queue constructed here (before webhook router) so new-tenant webhooks can
+  // enqueue provisioning jobs synchronously during the request.
+  const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
+  const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
+  const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+
+  // Resolves per-tenant integration credentials for inbound webhook signature
+  // verification. Returns null when no row exists or the integration provider
+  // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
+  const integrationResolver = pool
+    ? async (tenantId: string, provider: 'twilio' | 'sendgrid') => {
+        const { decrypt } = await import('./integrations/crypto');
+        const { setTenantContext } = await import('./db/schema');
+        const encKey = process.env.TENANT_ENCRYPTION_KEY;
+
+        // tenant_integrations is FORCE RLS — must set app.current_tenant_id
+        // GUC on a dedicated client/transaction. Webhook handlers run outside
+        // withTenantTransaction so we open one here.
+        const client = await pool.connect();
+        let rows: Array<{
+          subaccount_sid: string | null;
+          auth_token_primary_enc: string | null;
+          auth_token_secondary_enc: string | null;
+          provider_data: Record<string, unknown>;
+        }> = [];
+        try {
+          await client.query('BEGIN');
+          await client.query(setTenantContext(tenantId));
+          const result = await client.query<{
+            subaccount_sid: string | null;
+            auth_token_primary_enc: string | null;
+            auth_token_secondary_enc: string | null;
+            provider_data: Record<string, unknown>;
+          }>(
+            `SELECT subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc, provider_data
+             FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = $2`,
+            [tenantId, provider]
+          );
+          rows = result.rows;
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+        const row = rows[0];
+        if (!row) return null;
+        // Decryption is only needed for Twilio auth tokens. SendGrid integrations
+        // store a public verification key (not encrypted) in provider_data, so
+        // the resolver shouldn't 403 valid SendGrid webhooks just because
+        // TENANT_ENCRYPTION_KEY isn't configured.
+        const canDecrypt = Boolean(encKey);
+        if (provider === 'twilio' && !canDecrypt) return null;
+        return {
+          tenantId,
+          provider,
+          subaccountSid: row.subaccount_sid ?? undefined,
+          authTokenPrimary: row.auth_token_primary_enc && canDecrypt
+            ? decrypt(row.auth_token_primary_enc, encKey!)
+            : undefined,
+          authTokenSecondary: row.auth_token_secondary_enc && canDecrypt
+            ? decrypt(row.auth_token_secondary_enc, encKey!)
+            : undefined,
+          sendgridPublicKeyPem: (row.provider_data?.sendgridPublicKeyPem as string | undefined),
+        };
+      }
+    : undefined;
+
   app.use(
     '/webhooks',
-    createWebhookRouter(config, { tenantRepo, settingsRepo: webhookSettingsRepo })
+    createWebhookRouter(config, {
+      tenantRepo,
+      settingsRepo: webhookSettingsRepo,
+      invoiceRepo: webhookInvoiceRepo,
+      paymentRepo: webhookPaymentRepo,
+      jobRepo,
+      // Tier 4 (Team members — PR 3). Invitee join-tenant path on
+      // user.created. The same shared pending invitation repo + pool
+      // backs the /api/users invite routes so an invite written by
+      // the route is found by the webhook on accept.
+      pendingInvitationRepo,
+      pool: pool ?? undefined,
+      // Tier 4 (Subscription — PR 1). Same instance the route uses,
+      // so a customer.subscription.* webhook updates the cached
+      // status the GET /api/billing/subscription endpoint reads.
+      // Wired only when both pool and STRIPE_SECRET_KEY exist.
+      billingService,
+      connectService,
+      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+      queue,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+      auditRepo: webhookAuditRepo,
+      webhookEventRepo,
+      integrationResolver,
+    })
   );
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
@@ -204,58 +669,92 @@ export function createApp() {
     app.use('/storage-dev', createDevStorageRouter());
   }
 
-  // Auth middleware for API routes
-  const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
-  app.use('/api', verifyClerkSession(clerkSecret));
-
-  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
-  // Accepts Clerk tokens without RS256/JWKS verification and
-  // auto-bootstraps a tenant per Clerk user. Exists because
-  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
-  // algorithm) — tracked as a production bug. No-op in non-dev.
-  if (isDevAuthBypassEnabled()) {
-    const devTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
-    app.use('/api', devAuthBypass({ tenantRepo: devTenantRepo }));
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
-      'Never enable this outside local dev.'
-    );
-  }
-
-  // Fail-closed: every /api/* request must carry a valid Clerk session.
-  // Individual routes still apply requireAuth/requireTenant/requirePermission
-  // as defense in depth, but this line makes it architecturally impossible
-  // for a new route to be silently public just because the author forgot
-  // to opt into the per-route gate. The decisions test suite guards this
-  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
-  app.use('/api', requireAuth);
-
   const customerRepo       = pool ? new PgCustomerRepository(pool)       : new InMemoryCustomerRepository();
+  const leadRepo           = pool ? new PgLeadRepository(pool)           : new InMemoryLeadRepository();
   const locationRepo       = pool ? new PgLocationRepository(pool)       : new InMemoryLocationRepository();
-  const jobRepo            = pool ? new PgJobRepository(pool)            : new InMemoryJobRepository();
+  // jobRepo is hoisted earlier so the Stripe webhook + everything else
+  // share a single InMemory instance during tests.
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
-  const assignmentRepo     = new InMemoryAssignmentRepository();
+  const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  // P5-017: Resolve the payment-link provider via the factory so the mock
+  // is hard-blocked in production. The factory throws at boot if
+  // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
+  // and emits a loud dev-mode warning when the mock is used.
+  const paymentLinkProvider = createPaymentLinkProvider(process.env);
+  // Reference the variable so TS doesn't drop it; the provider will be
+  // wired into routes/workers in a follow-up. The factory call itself is
+  // load-bearing — it asserts the production guard at boot time.
+  void paymentLinkProvider;
   const noteRepo           = pool ? new PgNoteRepository(pool)           : new InMemoryNoteRepository();
   const conversationRepo   = pool ? new PgConversationRepository(pool)   : new InMemoryConversationRepository();
   const settingsRepo       = pool ? new PgSettingsRepository(pool)       : new InMemorySettingsRepository();
-  const auditRepo          = pool ? new PgAuditRepository(pool)          : new InMemoryAuditRepository();
+  // PR B (Tier 4 / AI approval rules) — shared per-tenant
+  // auto-approve threshold resolver. One cached instance for all
+  // entry points (twilio adapter, inapp adapter, voice-action-router
+  // worker) so settings hits the DB at most once per tenant per TTL
+  // window across the whole process.
+  const thresholdResolver = createThresholdResolver(settingsRepo);
+  // B1 — per-tenant voice persona. 60-second LRU cache; shared by
+  // both the Twilio and in-app adapters.
+  const voicePersonaResolver = createVoicePersonaResolver(settingsRepo);
+  const auditRepo          = webhookAuditRepo;
+  // P11-001: voice lookup-skill audit log. The skills write one row
+  // per invocation through `LookupEventService` and the Twilio adapter
+  // pulls it from the deps bundle. InMemory in dev/test, Pg in prod.
+  const lookupEventRepo    = pool ? new PgLookupEventRepository(pool)    : new InMemoryLookupEventRepository();
+  const lookupEventService = new LookupEventService(lookupEventRepo);
+  // P11-001: hoisted so the Twilio lookup-skill family can read agreements.
+  // The richer agreement-service wiring (agreementRunRepo, generators,
+  // etc.) still happens further below — this declaration is purely so
+  // the read-only lookup branch has access.
+  const agreementRepo      = pool ? new PgAgreementRepository(pool)      : new InMemoryAgreementRepository();
   const templateRepo       = pool ? new PgEstimateTemplateRepository(pool) : new InMemoryEstimateTemplateRepository();
   const bundleRepo         = pool ? new PgServiceBundleRepository(pool)  : new InMemoryServiceBundleRepository();
   const qualityMetricsRepo = pool ? new PgQualityMetricsRepository(pool) : new InMemoryQualityMetricsRepository();
   const voiceRepo          = pool ? new PgVoiceRepository(pool)          : new InMemoryVoiceRepository();
+  const voiceSessionRepo   = pool ? new PgVoiceSessionRepository(pool)   : new InMemoryVoiceSessionRepository();
   const technicianLocationPingRepo = pool
     ? new PgTechnicianLocationPingRepository(pool)
     : new InMemoryTechnicianLocationPingRepository();
+  const technicianLocationAuthorizer = pool
+    ? new PgTechnicianLocationAuthorizer(pool)
+    : new InMemoryTechnicianLocationAuthorizer();
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
-  const queue              = pool ? new PgQueue(pool)                    : new InMemoryQueue();
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
+  const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
+  const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
+  const catalogRepo        = pool ? new PgCatalogItemRepository(pool)    : new InMemoryCatalogItemRepository();
+  const feedbackRequestRepo = pool ? new PgFeedbackRequestRepository(pool) : new InMemoryFeedbackRequestRepository();
+  const feedbackResponseRepo = pool ? new PgFeedbackResponseRepository(pool) : new InMemoryFeedbackResponseRepository();
+  // P10-001: portal session repo (single signed token per customer for the
+  // self-service portal). Wired here so both the authed creation route and
+  // the public token-resolver router share one instance.
+  const portalSessionRepo: PortalSessionRepository = pool
+    ? new PgPortalSessionRepository(pool)
+    : new InMemoryPortalSessionRepository();
+  // Agreement-runs are also surfaced on the public portal (read-only).
+  // Hoisted here so the public portal router (mounted before Clerk auth)
+  // can reference it. `agreementRepo` is already declared above (hoisted
+  // for the P11-001 voice lookup-skill family).
+  const agreementRunRepo = pool
+    ? new PgAgreementRunRepository(pool)
+    : new InMemoryAgreementRunRepository();
+  // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
+  // is wired here so a future webhook handler can pull it from app-level
+  // wiring without re-instantiating. The webhooks/routes.ts router still
+  // uses its own InMemoryWebhookRepository for the legacy
+  // (provider/event/svix-id) shape — that one is unchanged.
+  const webhookEventRepo2   = webhookEventRepo;
+  const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
+  // Reference the variable so TS doesn't drop it; downstream consumers will
+  // attach in a follow-up PR.
+  void webhookEventRepo2;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -266,7 +765,11 @@ export function createApp() {
     : new InMemoryCanonicalVerticalPackRegistry();
   seedCanonicalVerticalPacks(canonicalPackRegistry);
 
-  const transcriptionProvider = createTranscriptionProvider(process.env.AI_PROVIDER_API_KEY);
+  // Synchronous transcription function — used by POST /api/voice/transcribe.
+  const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
+
+  // URL-based provider for the queue worker pipeline.
+  const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
@@ -274,6 +777,86 @@ export function createApp() {
   const llmGateway = config.AI_PROVIDER_API_KEY
     ? createLLMGateway(config)
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
+
+  // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
+  // gateway routes chat completions through shadow/router logic that
+  // doesn't apply to embeddings (`text-embedding-3-small` only). When
+  // AI_PROVIDER_API_KEY is unset, embeddings are unavailable and the
+  // ingestion workers stay un-registered — the rest of the app boots.
+  const embeddingProvider: EmbeddingProvider | null = config.AI_PROVIDER_API_KEY
+    ? new OpenAICompatibleProvider({
+        apiKey: config.AI_PROVIDER_API_KEY,
+        baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
+      })
+    : null;
+
+  // Phase 4a-1 repositories — used by transcript-ingestion-worker and
+  // proposal-correction-worker. All Pg-backed in production with
+  // tenant-scoped RLS via PgBaseRepository.withTenant; InMemory in
+  // dev/test so the app boots without DATABASE_URL.
+  const knowledgeChunkRepo = pool
+    ? new PgKnowledgeChunkRepository(pool)
+    : new InMemoryKnowledgeChunkRepository();
+  const proposalExecutionRepo = pool
+    ? new PgProposalExecutionRepository(pool)
+    : new InMemoryProposalExecutionRepository();
+  const retrievalEvalRunRepo = pool
+    ? new PgRetrievalEvalRunRepository(pool)
+    : new InMemoryRetrievalEvalRunRepository();
+  const callTranscriptTurnRepo = pool
+    ? new PgCallTranscriptTurnRepository(pool)
+    : new InMemoryCallTranscriptTurnRepository();
+
+  const feedbackDispatcher =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER
+      ? new SmsProviderFeedbackDispatcher({
+          accountSid: process.env.TWILIO_ACCOUNT_SID,
+          authToken: process.env.TWILIO_AUTH_TOKEN,
+          fromNumber: process.env.TWILIO_FROM_NUMBER,
+        })
+      : new NoopFeedbackDispatcher();
+
+  // Customer-facing message delivery for estimates and invoices.
+  // Production wires Twilio (SMS) + Twilio SendGrid (email). Without
+  // the env vars, falls back to InMemoryDeliveryProvider so the app
+  // boots in dev without delivery credentials. Send routes return
+  // 503 when sendService is undefined.
+  const dispatchRepo = pool ? new PgDispatchRepository(pool) : new InMemoryDispatchRepository();
+  const messageDelivery: MessageDeliveryProvider | null =
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_AUTH_TOKEN &&
+    process.env.TWILIO_FROM_NUMBER &&
+    process.env.SENDGRID_API_KEY &&
+    process.env.SENDGRID_FROM_EMAIL
+      ? new TwilioDeliveryProvider({
+          sms: {
+            accountSid: process.env.TWILIO_ACCOUNT_SID,
+            authToken: process.env.TWILIO_AUTH_TOKEN,
+            fromNumber: process.env.TWILIO_FROM_NUMBER,
+          },
+          email: {
+            apiKey: process.env.SENDGRID_API_KEY,
+            fromEmail: process.env.SENDGRID_FROM_EMAIL,
+            fromName: process.env.SENDGRID_FROM_NAME,
+            replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
+          },
+        })
+      : process.env.NODE_ENV === 'production'
+        ? null
+        : new InMemoryDeliveryProvider();
+  const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
+  const sendService = messageDelivery
+    ? new SendService({
+        delivery: messageDelivery,
+        estimateRepo,
+        invoiceRepo,
+        jobRepo,
+        customerRepo,
+        settingsRepo,
+        dispatchRepo,
+        publicBaseUrl,
+      })
+    : undefined;
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -321,12 +904,39 @@ export function createApp() {
     transcriptionWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // Phase 4a-1 transcript-ingestion-worker only (proposal-correction-worker
+  // needs proposalRepo which is declared further down — registered after
+  // that). Without AI_PROVIDER_API_KEY the worker stays un-registered.
+  // Phase 4c: shared language detector (offline, microsecond-fast).
+  // Constructed once and threaded into every consumer that wants
+  // language telemetry — currently the transcript-ingestion-worker
+  // (per-call stamp) and the retrieve adapter (per-query log).
+  const languageDetector = new FrancLanguageDetector();
+
+  if (embeddingProvider) {
+    const transcriptIngestionWorker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: embeddingProvider,
+      languageDetector,
+    });
+    workerRegistry.set(
+      transcriptIngestionWorker.type,
+      transcriptIngestionWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
   // ── Diff-analysis worker (P0-018): compares two revision snapshots and
-  // persists a structured field-level delta. The worker, repo, and
-  // revision store are all in-memory today — PgDocumentRevisionRepository
-  // lands when estimate/invoice revisions graduate from dev fixtures.
-  const documentRevisionRepo = new InMemoryDocumentRevisionRepository();
-  const diffAnalysisRepo = new InMemoryDiffAnalysisRepository();
+  // persists a structured field-level delta. P0-023 graduates the revision
+  // store and the analysis store onto Postgres when DATABASE_URL is set —
+  // dev still uses the in-memory variants so tests boot without a DB.
+  const documentRevisionRepo = pool
+    ? new PgDocumentRevisionRepository(pool)
+    : new InMemoryDocumentRevisionRepository();
+  const diffAnalysisRepo = pool
+    ? new PgDiffAnalysisRepository(pool)
+    : new InMemoryDiffAnalysisRepository();
   const diffAnalysisWorker = createDiffAnalysisWorker(
     documentRevisionRepo,
     diffAnalysisRepo
@@ -359,11 +969,16 @@ export function createApp() {
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
   // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above; invoice delivery is
-  // currently a Noop (logs the dispatch shape, never sends bytes)
-  // until an outbound comms provider is integrated as a follow-up.
-  const invoiceDeliveryProvider = new NoopInvoiceDeliveryProvider();
-  const dispatchAnalyticsRepo = new InMemoryDispatchAnalyticsRepository();
+  // in-memory or Pg repos already wired above. Invoice delivery
+  // routes through the unified SendService when delivery credentials
+  // are configured; otherwise falls back to the Noop so the proposal
+  // executor stays exercised in dev/test without sending bytes.
+  const invoiceDeliveryProvider = sendService
+    ? new SendServiceInvoiceDeliveryProvider(sendService)
+    : new NoopInvoiceDeliveryProvider();
+  const dispatchAnalyticsRepo = pool
+    ? new PgDispatchAnalyticsRepository(pool)
+    : new InMemoryDispatchAnalyticsRepository();
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
@@ -375,7 +990,107 @@ export function createApp() {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
   });
-  const proposalExecutor = new ProposalExecutor(executionHandlers, proposalRepo);
+  // P18-001: replace the stub create_customer handler from the registry
+  // with the wired-up voice handler so an approved create_customer
+  // proposal actually persists a Customer row + audit trail. The base
+  // registry installs a synthetic-id stub so unit tests can run
+  // without a CustomerRepository dep; production overrides it here.
+  executionHandlers.set(
+    'create_customer',
+    new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo),
+  );
+  // Phase 4a-1: persist a proposal_executions row on success + fire the
+  // proposal-correction-worker. The onExecuted callback is failure-soft
+  // inside the executor itself (logs via console, never rethrows), so
+  // queue-send errors here can't break the executor's invariants.
+  const proposalExecutor = new ProposalExecutor(
+    executionHandlers,
+    proposalRepo,
+    undefined,
+    {
+      executionRepo: proposalExecutionRepo,
+      onExecuted: async (event) => {
+        if (event.status !== 'succeeded') return;
+        try {
+          await queue.send(
+            'proposal_correction',
+            {
+              tenantId: event.tenantId,
+              proposalId: event.proposalId,
+              ...(event.executionId ? { executionId: event.executionId } : {}),
+            },
+            `correction:${event.executionId ?? event.proposalId}:v1`,
+          );
+        } catch (err) {
+          // Logged inside the executor too; double-log is fine — this
+          // path is a real production failure (queue is down) worth
+          // noticing in both places.
+          // eslint-disable-next-line no-console
+          console.error('app: failed to enqueue proposal_correction', {
+            proposalId: event.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    },
+  );
+
+  // Phase 4a-1: register the proposal-correction-worker now that
+  // proposalRepo is in scope. Skipped silently when no embedder.
+  if (embeddingProvider) {
+    const proposalCorrectionWorker = createProposalCorrectionWorker({
+      proposalRepo,
+      proposalExecutionRepo,
+      knowledgeChunkRepo,
+      embeddings: embeddingProvider,
+      retrievalEvalRunRepo,
+    });
+    workerRegistry.set(
+      proposalCorrectionWorker.type,
+      proposalCorrectionWorker as import('./queues/queue').WorkerHandler<unknown>,
+    );
+  }
+
+  // Phase 4a-2: build the `retrieve` adapter consumed by
+  // `buildSourceContext` when callers want grounded RAG augmentation.
+  // Gated on `RAG_RETRIEVAL_ENABLED === 'true'` so the corpus can fill
+  // (Phase 4a-1 writers) before the reader fires in production. When
+  // the flag is off the adapter is `undefined` and `buildSourceContext`
+  // falls through to the legacy recency-only path. Phase 4b will pass
+  // this through to the FSM `intent_capture` state once we measure
+  // latency impact in 4a.
+  const ragRetrievalEnabled = process.env.RAG_RETRIEVAL_ENABLED === 'true';
+  const retrieveAdapter: RetrieveAdapter | undefined =
+    ragRetrievalEnabled && embeddingProvider
+      ? createRetrieveAdapter({
+          embeddings: embeddingProvider,
+          knowledgeChunkRepo,
+          retrievalEvalRunRepo,
+          languageDetector,
+        })
+      : undefined;
+  // The variable is wired into future `buildSourceContext` call sites
+  // (Phase 4b). Reference it once so the linter doesn't flag the
+  // construction during the gap between 4a-2 and 4b landing.
+  void retrieveAdapter;
+
+  const delayNoticeStateRepo = pool
+    ? new PgDelayNoticeStateRepository(pool)
+    : new InMemoryDelayNoticeStateRepository();
+  const delayNotificationCoordinator = new DelayNotificationCoordinator(
+    queue,
+    new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
+    delayNoticeStateRepo,
+  );
+  const delayNotificationWorker = createDelayNotificationWorker({
+    service: new NoopDelayNotificationService(),
+    stateRepo: delayNoticeStateRepo,
+    analyticsRepo: dispatchAnalyticsRepo,
+  });
+  workerRegistry.set(
+    delayNotificationWorker.type,
+    delayNotificationWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -398,14 +1113,57 @@ export function createApp() {
   // transcription worker's onTranscribed hook, classifies intent,
   // and persists a proposal via proposalRepo. Registered now that
   // proposalRepo is available.
+  //
+  // P0-035 wiring (PR #202 follow-up): pass a SlotConflictChecker so
+  // create_appointment proposals run a pre-draft availability check
+  // and emit a voice_clarification proposal on conflict instead of a
+  // create_appointment that the dispatcher will reject. Without this
+  // construction, the checker shipped in PR #201 is dead code.
+  const slotConflictChecker = new DefaultSlotConflictChecker({
+    appointmentRepo,
+    assignmentRepo,
+    jobRepo,
+  });
+  // Surface up to 3 alternative open slots in the voice_clarification
+  // proposal whenever the conflict checker rejects the AI's pick. The
+  // dispatcher gets concrete next-available windows instead of a
+  // "please pick another time" prompt.
+  const availabilityFinder = new DefaultAvailabilityFinder({
+    appointmentRepo,
+    assignmentRepo,
+  });
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    slotConflictChecker,
+    availabilityFinder,
+    thresholdResolver,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
     voiceActionRouterWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+
+  const feedbackSendWorker = createFeedbackSendWorker({
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    feedbackRequestRepo,
+    dispatcher: feedbackDispatcher,
+    publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+  });
+  workerRegistry.set(
+    feedbackSendWorker.type,
+    feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
+  );
+
+  if (pool) {
+    const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
+    workerRegistry.set(
+      provisionTwilioWorker.type,
+      provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
 
   // Unified queue poll loop: receives any message type and routes to the
   // matching worker by message.type. This is the single consumer for the
@@ -450,33 +1208,971 @@ export function createApp() {
     estimateRepo,
     invoiceRepo,
     appointmentRepo,
+    leadRepo,
   });
+
+  // Public feedback routes are mounted before /api auth middleware.
+  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+
+  // Public lead intake — embedded marketing-page form posts here.
+  // Tenant identified by UUID in the URL. The outer `/public` limiter
+  // (30/min/IP, mounted above) catches abuse; the intake-specific
+  // limiter below adds a tighter per-IP bucket because intake writes
+  // to the database (vs the read-only token-gated public flows).
+  // BUG-2 — share the single `tenantRepo` instance constructed at the
+  // top of this module so intake-created customers and dashboard-
+  // created customers resolve under the same tenant ID in dev.
+  const intakeTenantRepo = tenantRepo;
+  app.use(
+    '/public/intake',
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 10,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo)
+  );
+
+  // Public unauthenticated estimate approval flow (token-authenticated).
+  // STRIPE_SECRET_KEY is optional: deposit Stripe Payment Link minting
+  // (PR 3b) returns ValidationError when not configured rather than
+  // crashing — keeps the rest of the approval flow working in dev /
+  // test environments without a Stripe key.
+  const publicEstimateService = new PublicEstimateService({
+    estimateRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : null,
+  });
+  app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
+
+  // Public unauthenticated invoice payment flow (token-authenticated).
+  // Stripe Payment Link creation is enabled when STRIPE_SECRET_KEY is set.
+  // Tier 4 (Payment methods — PR 2). When the connectService is
+  // wired AND the tenant has an active Connect account with charges
+  // enabled, payments route directly to the tenant's account via
+  // the Stripe-Account header. Without it, payments stay on the
+  // legacy platform path.
+  const publicInvoiceService = new PublicInvoiceService({
+    invoiceRepo,
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    stripeConfig: process.env.STRIPE_SECRET_KEY
+      ? { apiKey: process.env.STRIPE_SECRET_KEY }
+      : undefined,
+    paymentRepo,
+    connectAccountResolver: connectService
+      ? {
+          resolveTenantConnectAccount: async (tenantId: string) => {
+            const view = await connectService.getAccount(tenantId);
+            if (!view.accountId) return null;
+            return {
+              accountId: view.accountId,
+              chargesEnabled: view.chargesEnabled,
+            };
+          },
+        }
+      : undefined,
+  });
+  app.use('/public/invoices', createPublicInvoicesRouter(publicInvoiceService));
+
+  // P10-001: Public, token-gated customer portal. Mounted BEFORE the
+  // global `/api` Clerk auth middleware because the portal token IS
+  // the auth — no Clerk session is involved. Routes resolve the
+  // `:token` URL param, set `req.portal = { tenantId, customerId,
+  // sessionId }`, and downstream queries scope to that tenant id.
+  app.use(
+    '/api/public/portal',
+    createPublicPortalRouter({
+      portalRepo: portalSessionRepo,
+      customerRepo,
+      estimateRepo,
+      invoiceRepo,
+      jobRepo,
+      agreementRepo,
+      appointmentRepo,
+      leadRepo,
+      auditRepo,
+      paymentLinkProvider,
+    }),
+  );
+
+  // P5-016: Public payments (Stripe PaymentIntent / Elements flow).
+  // Returns a `client_secret` so the customer's browser can confirm the
+  // payment directly with Stripe — card data never touches our server.
+  // Lives under /api/public-payments (not /public) so the frontend's
+  // existing /api/* base URL config picks it up.
+  app.use(
+    '/api/public-payments',
+    createPublicPaymentsRouter({
+      invoiceRepo,
+      stripeConfig: process.env.STRIPE_SECRET_KEY
+        ? { apiKey: process.env.STRIPE_SECRET_KEY }
+        : null,
+    }),
+  );
+
+  // Tier 4 (Calendar sync — PR 1). Per-user Google OAuth callback.
+  // The CALLBACK is mounted here (BEFORE the global /api requireAuth)
+  // because Google's redirect back from the consent screen has no
+  // Clerk session — the state nonce stored in oauth_states does the
+  // auth binding instead. The connect / list / delete endpoints are
+  // mounted later (after requireAuth) where they belong.
+  //
+  // Google client + secret are required for both initiating the
+  // consent flow AND exchanging the callback code; without them the
+  // /connect route returns ValidationError. Callback URL must match
+  // the one registered in the Google Cloud OAuth console.
+  const calendarIntegrationRepo = pool
+    ? new PgCalendarIntegrationRepository(pool)
+    : new InMemoryCalendarIntegrationRepository();
+  const oauthStateRepo = pool
+    ? new PgOAuthStateRepository(pool)
+    : new InMemoryOAuthStateRepository();
+  // Tier 4 (Calendar sync — PR 2). Sync service exposed on the
+  // auth'd router as POST /google/test-push so operators can verify
+  // their connection before relying on it for real appointments.
+  const appointmentCalendarEventRepo = pool
+    ? new PgAppointmentCalendarEventRepository(pool)
+    : new InMemoryAppointmentCalendarEventRepository();
+  const googleApiUrl =
+    process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
+  const googleConfig =
+    process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET
+      ? {
+          clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+          clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+          redirectUri: `${googleApiUrl}/api/calendar-integrations/google/callback`,
+        }
+      : undefined;
+  const calendarSyncService = new CalendarSyncService({
+    integrationRepo: calendarIntegrationRepo,
+    eventRepo: appointmentCalendarEventRepo,
+    googleConfig,
+  });
+  const calendarRouterDeps = {
+    integrationRepo: calendarIntegrationRepo,
+    stateRepo: oauthStateRepo,
+    googleConfig,
+    syncService: calendarSyncService,
+    // appBaseUrl is the FRONTEND URL we redirect the operator's
+    // browser back to after OAuth completes. The API/callback URL is
+    // separate (googleApiUrl). 5173 is the Vite dev default; matches
+    // publicBaseUrl elsewhere in this file.
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+  };
+  app.use(
+    '/api/calendar-integrations',
+    createCalendarOAuthCallbackRouter(calendarRouterDeps),
+  );
+
+  // ── Twilio telephony webhooks (P8-011) ────────────────────────────────────
+  // Mounted under /api/telephony but BEFORE the Clerk auth middleware so
+  // Twilio's signed POSTs aren't rejected for missing a Clerk session.
+  // Authentication is enforced inside the router via X-Twilio-Signature
+  // verification (twilio-signature.ts).
+  // Single shared voice session store: in-app and telephony both create
+  // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
+  // is uniform across channels. Process-local; idle-reaped via setInterval.
+  const voiceSessionStore = new VoiceSessionStore();
+  // OnCall repo is created here so both the telephony adapter (notify_oncall
+  // side effect) and the in-app adapter (escalation) share a single
+  // implementation. The in-app block below reuses this same instance.
+  const sharedOnCallRepo = pool ? new PgOnCallRepository(pool) : new InMemoryOnCallRepository();
+  // §3B + §3D: shared vertical-prompt resolver injected into both
+  // calling-agent adapters so per-tenant equipment terminology AND
+  // intake-question disambiguation reach the classifier.
+  const verticalPromptResolver = buildVerticalPromptResolver({
+    packActivationRepo,
+    canonicalPackRegistry,
+  });
+  // §3C: caller-plan resolver. Returns a prompt-shaped block when the
+  // caller's customerId resolves to an active maintenance agreement.
+  const callerPlanResolver = async (
+    tenantId: string,
+    customerId: string,
+  ): Promise<string | undefined> => {
+    const ctx = await buildCallerPlanContext(tenantId, customerId, agreementRepo);
+    const section = formatCallerPlanForPrompt(ctx);
+    return section.length > 0 ? section : undefined;
+  };
+  const twilioAdapter = new TwilioGatherAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    ...(pool ? { pool } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo: sharedOnCallRepo,
+    leadRepo,
+    // P11-001: lookup-skill family wiring. Without these the adapter
+    // falls back to a "let me get a person to help" line on lookup_*
+    // intents — the call doesn't crash, but the read-only path is
+    // unavailable. agreementRepo lives a few hundred lines down.
+    jobRepo,
+    appointmentRepo,
+    invoiceRepo,
+    agreementRepo,
+    lookupEvents: lookupEventService,
+    systemActorId: 'system:inbound-call',
+    businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+    ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+    // P8-014: when set, the initial inbound TwiML emits a
+    // <Start><Record recordingStatusCallback="..."/></Start> block so
+    // Twilio asynchronously records the entire call and POSTs metadata
+    // to /api/telephony/recording on completion.
+    recordingCallbackPath: '/api/telephony/recording',
+    verticalPromptResolver,
+    callerPlanResolver,
+    thresholdResolver,
+    voiceSessionRepo,
+    voiceRepo,
+    voicePersonaResolver,
+  });
+  // P8-012: feature flag the Media Streams (live audio) path. Default
+  // off — when off, the existing Gather adapter remains the only
+  // telephony surface. When on, /voice returns a <Connect><Stream/>
+  // TwiML and audio flows over the WebSocket attached below.
+  const mediaStreamsEnabled = process.env.TWILIO_MEDIA_STREAMS_ENABLED === 'true';
+
+  // Per-tenant Twilio token + tenant-id resolvers, keyed off
+  // tenant_integrations. Falls back to the legacy single-account env
+  // vars when no row matches — preserves the in-production single-tenant
+  // flow while unblocking inbound calls on provisioned subaccounts.
+  // Reads the table outside withTenantTransaction (FORCE RLS) using a
+  // dedicated transaction with set_config('app.current_tenant_id', ...).
+  // Both helpers issue cross-tenant lookups against tenant_integrations
+  // (we don't know the tenant yet — that's what we're looking up).
+  // Migration 074 added a permissive read policy gated on
+  // app.system_lookup = 'true'. Set it via SET LOCAL inside a short
+  // transaction; SET LOCAL drops on COMMIT and the connection returns
+  // to the pool clean.
+  const resolveTwilioAuthTokenForSubaccount = async (
+    accountSid: string | undefined,
+  ): Promise<string | undefined> => {
+    if (!accountSid || !pool) return process.env.TWILIO_AUTH_TOKEN;
+    const encKey = process.env.TENANT_ENCRYPTION_KEY;
+    if (!encKey) return process.env.TWILIO_AUTH_TOKEN;
+    try {
+      const { decrypt } = await import('./integrations/crypto');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query<{ auth_token_primary_enc: string | null }>(
+          `SELECT auth_token_primary_enc FROM tenant_integrations
+           WHERE provider = 'twilio' AND subaccount_sid = $1
+           LIMIT 1`,
+          [accountSid],
+        );
+        await client.query('COMMIT');
+        const enc = result.rows[0]?.auth_token_primary_enc;
+        return enc ? decrypt(enc, encKey) : process.env.TWILIO_AUTH_TOKEN;
+      } finally {
+        client.release();
+      }
+    } catch {
+      return process.env.TWILIO_AUTH_TOKEN;
+    }
+  };
+
+  const resolveTenantIdByPhoneNumber = async (
+    to: string,
+  ): Promise<string | undefined> => {
+    if (!to || !pool) return process.env.TWILIO_DEFAULT_TENANT_ID;
+    try {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.system_lookup', 'true', true)");
+        const result = await client.query<{ tenant_id: string }>(
+          `SELECT tenant_id FROM tenant_integrations
+           WHERE provider = 'twilio'
+             AND provider_data->>'phoneE164' = $1
+           LIMIT 1`,
+          [to],
+        );
+        await client.query('COMMIT');
+        return result.rows[0]?.tenant_id ?? process.env.TWILIO_DEFAULT_TENANT_ID;
+      } finally {
+        client.release();
+      }
+    } catch {
+      return process.env.TWILIO_DEFAULT_TENANT_ID;
+    }
+  };
+
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter: twilioAdapter,
+      authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      publicBaseUrl: process.env.PUBLIC_API_URL,
+      resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
+      mediaStreamsEnabled,
+      // P8-014: mount the recording webhook in production. Without this
+      // block the route is unreachable and Twilio's recordingStatusCallback
+      // POSTs 404 — call recordings would be lost. Pool / Twilio creds are
+      // optional from the router's perspective (handler degrades to
+      // "persistence skipped" with a warning) but should be wired in
+      // production environments.
+      recording: {
+        store: voiceSessionStore,
+        ...(pool ? { pool } : {}),
+        storage: storageProvider,
+        storageBucket,
+        ...(process.env.TWILIO_ACCOUNT_SID
+          ? { twilioAccountSid: process.env.TWILIO_ACCOUNT_SID }
+          : {}),
+        ...(process.env.TWILIO_AUTH_TOKEN
+          ? { twilioAuthToken: process.env.TWILIO_AUTH_TOKEN }
+          : {}),
+        // Phase 4a-1: enqueue transcript-ingestion when the recording row
+        // first lands. Skipped on Twilio retries (`inserted=false`) so
+        // we don't double-process the same call. Skipped silently when
+        // the embedding provider is unwired (no AI_PROVIDER_API_KEY).
+        ...(embeddingProvider
+          ? {
+              options: {
+                onPersisted: async (event) => {
+                  if (!event.inserted) return;
+                  const session = voiceSessionStore.findByCallSid(event.callSid);
+                  if (!session) {
+                    // Session was reaped (>30 min idle) before the
+                    // recording webhook fired. Known data-loss edge
+                    // case from the in-memory session store; not
+                    // something Phase 4a-1 fixes. Phase 4 architecture
+                    // doc covers persistent FSM state as a follow-up.
+                    return;
+                  }
+                  try {
+                    await queue.send(
+                      'transcript_ingestion',
+                      {
+                        tenantId: event.tenantId,
+                        voiceRecordingId: event.voiceRecordingId,
+                        transcript: [...session.transcript],
+                        ...(session.machine.currentContext.currentIntent
+                          ? { intent: session.machine.currentContext.currentIntent }
+                          : {}),
+                        // B2: thread the typed CallOutcome into the worker
+                        // payload so voice_recordings.outcome gets stamped
+                        // alongside voice_sessions.outcome. Optional —
+                        // the worker no-ops when undefined.
+                        ...(session.terminalOutcome
+                          ? { outcome: session.terminalOutcome }
+                          : {}),
+                        durationMs: Date.now() - session.createdAt.getTime(),
+                      },
+                      `transcript:${event.voiceRecordingId}:v1`,
+                    );
+                  } catch (err) {
+                    // eslint-disable-next-line no-console
+                    console.error('app: failed to enqueue transcript_ingestion', {
+                      voiceRecordingId: event.voiceRecordingId,
+                      error: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                },
+              },
+            }
+          : {}),
+      },
+      getHealth: () => {
+        const ttsEnabled =
+          !!process.env.ELEVENLABS_API_KEY || !!config.AI_PROVIDER_API_KEY;
+        const sttEnabled = !!process.env.DEEPGRAM_API_KEY;
+        const recordingEnabled =
+          !!process.env.TWILIO_ACCOUNT_SID &&
+          !!process.env.TWILIO_AUTH_TOKEN &&
+          !!process.env.STORAGE_BUCKET;
+        const messageDeliveryEnabled = !!sendService;
+        const databaseEnabled = !!pool;
+        const llmGatewayEnabled = !!config.AI_PROVIDER_API_KEY;
+        const warnings: string[] = [];
+        if (mediaStreamsEnabled && !sttEnabled) warnings.push('mediaStreams enabled but DEEPGRAM_API_KEY unset');
+        if (mediaStreamsEnabled && !ttsEnabled) warnings.push('mediaStreams enabled but no TTS key (ELEVENLABS_API_KEY)');
+        if (!process.env.PUBLIC_API_URL) warnings.push('PUBLIC_API_URL unset — Stream URL will be invalid');
+        if (!process.env.TWILIO_BUSINESS_NAME) warnings.push("TWILIO_BUSINESS_NAME unset — greeting says 'our team'");
+        if (!databaseEnabled) warnings.push('DATABASE_URL unset — proposals/outcomes will not persist');
+        if (!recordingEnabled) warnings.push('Recording disabled — STORAGE_* or TWILIO_* missing');
+        if (!messageDeliveryEnabled) warnings.push('send_invoice disabled — TWILIO_FROM_NUMBER / SENDGRID_* missing');
+        const ok =
+          (!mediaStreamsEnabled || (sttEnabled && ttsEnabled)) &&
+          databaseEnabled &&
+          llmGatewayEnabled;
+        return {
+          ok,
+          capabilities: {
+            mediaStreams: mediaStreamsEnabled,
+            tts: ttsEnabled,
+            stt: sttEnabled,
+            recording: recordingEnabled,
+            messageDelivery: messageDeliveryEnabled,
+            database: databaseEnabled,
+            llmGateway: llmGatewayEnabled,
+          },
+          config: {
+            publicBaseUrl: process.env.PUBLIC_API_URL ?? null,
+            businessName: process.env.TWILIO_BUSINESS_NAME ?? null,
+          },
+          warnings,
+        };
+      },
+    }),
+  );
+
+  // P8-012: attach the Media Streams WebSocketServer to the http.Server
+  // returned by app.listen(). We override `app.listen` so the bare
+  // `index.ts` entry point doesn't need any new wiring — when the
+  // server starts listening, the upgrade handler is already attached.
+  // The flag also gates whether DeepgramStreamingProvider is constructed
+  // (no DEEPGRAM_API_KEY required when the feature is disabled).
+  if (mediaStreamsEnabled) {
+    const deepgramKey = process.env.DEEPGRAM_API_KEY;
+    if (!deepgramKey) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[app] ⚠️  TWILIO_MEDIA_STREAMS_ENABLED=true but DEEPGRAM_API_KEY is unset. ' +
+        'Live-audio streaming will fail when calls connect. Set DEEPGRAM_API_KEY or ' +
+        'flip TWILIO_MEDIA_STREAMS_ENABLED=false.'
+      );
+    }
+    // ttsProvider is constructed below for the in-app adapter; we need
+    // it here too. Build a single instance and pass it to both.
+    const sharedTtsProvider = createTtsProvider({
+      TTS_PROVIDER: process.env.TTS_PROVIDER,
+      ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+      AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    });
+    const streamingProvider = deepgramKey
+      ? new DeepgramStreamingProvider(deepgramKey)
+      : null;
+    if (streamingProvider) {
+      const origListen = app.listen.bind(app);
+      // Wrap listen() so the WS upgrade handler is attached the moment
+      // the http.Server exists. Fire-and-forget; errors during attach
+      // are surfaced via the logger inside attachMediaStreamServer.
+      app.listen = ((...args: unknown[]) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const server = (origListen as any)(...args);
+        attachMediaStreamServer(
+          server,
+          {
+            store: voiceSessionStore,
+            streamingProvider,
+            ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
+              twilioAdapter.processCallerUtterance({
+                sessionId: session.id,
+                callSid,
+                speechResult,
+                tenantId,
+              }),
+            // B2: delegate outcome stamping to the gather adapter so all
+            // close paths (caller hangup, idle timeout, end_session, WS
+            // teardown, slow-consumer disconnect) stamp the same typed
+            // CallOutcome onto voice_sessions. Forward the FSM
+            // sideEffects so the actual `end_session.payload.reason`
+            // (e.g. 'abuse_detected:profanity') reaches deriveCallOutcome
+            // for non-hangup terminations.
+            finalizeOnClose: (session, reason, sideEffects) =>
+              twilioAdapter.finalizeTerminatedSession(session, sideEffects, reason),
+            // WS upgrades don't carry AccountSid; fall back to the master
+            // token. Per-tenant subaccount auth for media streams is a
+            // future-phase change (auth at first `start` message).
+            authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
+            ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+          },
+        );
+        return server;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+    }
+  }
+
+  // Client WebSocket gateway (subsumes SSE token streams for assistant
+  // chat + voice events, behind feature flags). Gated by
+  // CLIENT_WS_GATEWAY_ENABLED so production stays SSE-only until ramp.
+  const clientWsEnabled = process.env.CLIENT_WS_GATEWAY_ENABLED === 'true';
+  if (clientWsEnabled) {
+    const origListen = app.listen.bind(app);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    app.listen = ((...args: unknown[]) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const server = (origListen as any)(...args);
+      attachClientGateway(server, {
+        // Runtime kill switch: consult the persisted feature flag on
+        // every upgrade so flipping ws.client_gateway_enabled off
+        // immediately disables /api/ws without redeploy. The env-var
+        // gate above only controls whether the upgrade handler is
+        // attached at boot; this controls per-request acceptance.
+        isEnabled: () =>
+          isFeatureEnabled(
+            featureFlagStore,
+            RESILIENCE_FLAG_NAMES.clientGatewayEnabled,
+            { environment: process.env.NODE_ENV ?? 'development' },
+          ),
+        auth: {
+          authenticate: async (req) => {
+            // Token via Authorization header (rare for WS), Sec-WebSocket-Protocol,
+            // or ?token=...
+            const authHeader = req.headers.authorization;
+            const proto = (req.headers['sec-websocket-protocol'] as string | undefined) ?? '';
+            const url = new URL(req.url ?? '/', 'http://localhost');
+            const queryToken = url.searchParams.get('token') ?? undefined;
+            const headerToken =
+              authHeader && authHeader.startsWith('Bearer ')
+                ? authHeader.substring(7)
+                : undefined;
+            const protoToken = proto
+              .split(',')
+              .map((s) => s.trim())
+              .find((s) => s.startsWith('bearer.'))
+              ?.substring('bearer.'.length);
+            const token = headerToken || queryToken || protoToken;
+            if (!token) return null;
+
+            try {
+              const isHmacDev =
+                process.env.NODE_ENV !== 'production' &&
+                process.env.NODE_ENV !== 'prod' &&
+                process.env.CLERK_DEV_HMAC_TOKENS === 'true';
+              const payload = isHmacDev
+                ? decodeClerkToken(token, process.env.CLERK_SECRET_KEY ?? '')
+                : await verifyRs256Token(token, {
+                    pubKey: process.env.CLERK_PUBLISHABLE_KEY ?? '',
+                  });
+              if (!payload?.tenant_id) return null;
+              return {
+                tenantId: payload.tenant_id,
+                userId: payload.sub,
+              };
+            } catch {
+              return null;
+            }
+          },
+        },
+      });
+      return server;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+  }
+
+  // Auth middleware for API routes
+  const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
+  app.use('/api', verifyClerkSession(clerkSecret));
+
+  // DEV ONLY — hard-gated on NODE_ENV=dev + DEV_AUTH_BYPASS=true.
+  // Accepts Clerk tokens without RS256/JWKS verification and
+  // auto-bootstraps a tenant per Clerk user. Exists because
+  // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
+  // algorithm) — tracked as a production bug. No-op in non-dev.
+  if (isDevAuthBypassEnabled()) {
+    // BUG-2 — share the single tenantRepo constructed at the top of
+    // this module. Previously this branch instantiated its own
+    // DevInMemoryTenantRepository, leaving the dev-bypass and intake
+    // paths with disjoint tenant maps.
+    app.use('/api', devAuthBypass({ tenantRepo }));
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
+      'Never enable this outside local dev.'
+    );
+  }
+
+  // Fail-closed: every /api/* request must carry a valid Clerk session.
+  // Individual routes still apply requireAuth/requireTenant/requirePermission
+  // as defense in depth, but this line makes it architecturally impossible
+  // for a new route to be silently public just because the author forgot
+  // to opt into the per-route gate. The decisions test suite guards this
+  // invariant in packages/api/test/decisions/decisions.test.ts (D6).
+  app.use('/api', requireAuth);
+
+  // P0-024: open a request-scoped transaction with `app.current_tenant_id`
+  // set LOCAL so every query in the request reuses the same client and
+  // RLS fires automatically. Public routes (health, /public/*, and
+  // /api/public-payments) are mounted earlier and never reach this line.
+  // Skipped when no pool is wired (in-memory dev mode) — there's no
+  // database to attach a transaction to.
+  if (pool) {
+    app.use('/api', withTenantTransaction(pool));
+  }
 
   // Mount API routes
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
+  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
+  // P10-001: portal session creation/revocation. Mounted at
+  // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
+  // because routes/customers.ts is on the freeze list — the body
+  // carries the customerId. URL composition uses request host so
+  // the link points at this same deployment.
+  app.use(
+    '/api/portal-sessions',
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+  );
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership));
-  app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
+  app.use(
+    '/api/jobs',
+    createJobFilesRouter({
+      jobFileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/jobs',
+    createJobPhotosRouter({
+      service: new JobPhotoService(jobPhotoRepo, fileRepo, storageProvider),
+      fileRepo,
+      storage: storageProvider,
+      bucket: storageBucket,
+      auditRepo,
+    })
+  );
+  app.use(
+    '/api/appointments',
+    createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
+      delayNotificationCoordinator,
+    })
+  );
+  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
+  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+
+  // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
+  // invitation flow. Tenant scoping is enforced by the route's
+  // requireTenant + the repo's tenant context. Clerk integration is
+  // best-effort: missing CLERK_SECRET_KEY just persists the local
+  // intent; the operator can still re-send via dashboard and the
+  // webhook still attaches the invitee on accept (lookup is by email).
+  const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
+  app.use(
+    '/api/users',
+    createUsersRouter(userRepo, {
+      // Same instance the Clerk webhook reads on user.created — the
+      // accept side reads what the invite side wrote.
+      pendingInvitationRepo,
+      clerkSecretKey: process.env.CLERK_SECRET_KEY,
+      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    }),
+  );
+
+  // Tier 4 (Calendar sync — PR 1). Auth'd lifecycle endpoints.
+  // The OAuth callback was mounted earlier (before global
+  // requireAuth) on the same prefix; Express dispatches by method+path
+  // so the two registrations don't conflict.
+  app.use(
+    '/api/calendar-integrations',
+    createCalendarIntegrationsRouter(calendarRouterDeps),
+  );
+
+  // billingService is hoisted earlier so the Stripe webhook can use
+  // the same instance.
+  app.use('/api/billing', createBillingRouter({ billingService, connectService }));
+
+  // Tenant-scoped reporting (revenue by lead source / UTM).
+  const revenueBySourceRepo = pool
+    ? new PgRevenueBySourceRepository(pool)
+    : new InMemoryRevenueBySourceRepository();
+  app.use('/api/reports', createReportsRouter(revenueBySourceRepo));
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
+
+  // ── P12-001: /api/me — current user + mode ──────────────────────────────
+  // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
+  // dev / no-DB mode. The middleware-side mode loader is wired at the
+  // same time so requireTenant can populate `req.auth.mode` against the
+  // same data source used by the /api/me reads.
+  const userModeService: UserModeService = pool
+    ? {
+        async getUser(tenantId, userId) {
+          // P12-001 review fix — `userId` here is the Clerk subject
+          // (`req.auth.userId` = `payload.sub`), not the UUID PK on
+          // `users.id`. Lookup goes through `clerk_user_id`. The
+          // returned `user_id` continues to be the Clerk sub so
+          // downstream callers (the API surface) stay aligned with
+          // the auth-layer identity.
+          const r = await pool.query(
+            `SELECT clerk_user_id, tenant_id, role,
+                    COALESCE(can_field_serve, false) AS can_field_serve,
+                    COALESCE(current_mode, 'supervisor') AS current_mode,
+                    mode_changed_at
+             FROM users
+             WHERE tenant_id = $1 AND clerk_user_id = $2
+             LIMIT 1`,
+            [tenantId, userId],
+          );
+          if (r.rowCount === 0) return null;
+          const row = r.rows[0] as Record<string, unknown>;
+          const rec: MeUserRecord = {
+            user_id: String(row.clerk_user_id),
+            tenant_id: String(row.tenant_id),
+            role: String(row.role),
+            can_field_serve: Boolean(row.can_field_serve),
+            current_mode: row.current_mode as MeUserRecord['current_mode'],
+            mode_changed_at: row.mode_changed_at
+              ? new Date(row.mode_changed_at as string)
+              : null,
+          };
+          return rec;
+        },
+        async getTenantSettings(tenantId) {
+          const r = await pool.query(
+            `SELECT backup_supervisor_user_id,
+                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing
+             FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
+            [tenantId],
+          );
+          if (r.rowCount === 0) {
+            return {
+              backup_supervisor_user_id: null,
+              unsupervised_proposal_routing: 'queue_and_sms',
+            } as MeTenantSettings;
+          }
+          const row = r.rows[0] as Record<string, unknown>;
+          return {
+            backup_supervisor_user_id: row.backup_supervisor_user_id
+              ? String(row.backup_supervisor_user_id)
+              : null,
+            unsupervised_proposal_routing:
+              row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
+          };
+        },
+        async getTenantIntegrationStatuses(tenantId) {
+          const r = await pool.query(
+            `SELECT provider, status, updated_at
+             FROM tenant_integrations
+             WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          return r.rows.map((row) => ({
+            provider: String(row.provider),
+            status: String(row.status) as TenantIntegrationStatus,
+            updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
+          }));
+        },
+        async setMode(tenantId, userId, mode) {
+          // P12-001 review fix — `userId` is the Clerk subject; match
+          // on `clerk_user_id`, not the UUID PK. Without this the
+          // UPDATE silently no-ops in production.
+          const now = new Date();
+          await pool.query(
+            `UPDATE users
+             SET current_mode = $1, mode_changed_at = $2, updated_at = now()
+             WHERE tenant_id = $3 AND clerk_user_id = $4`,
+            [mode, now, tenantId, userId],
+          );
+          return { modeChangedAt: now };
+        },
+      }
+    : new InMemoryUserModeService();
+
+  // Wire the middleware-side mode loader. Reuses the same service so
+  // we don't drift between read paths.
+  setUserModeLoader(async (userId, tenantId) => {
+    try {
+      const u = await userModeService.getUser(tenantId, userId);
+      return u ? u.current_mode : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Phase 12 — wire the tenant-wide supervisor-presence loader. The
+  // proposal auto-approve threshold and the emergency-immediate-Dial
+  // helper both consult this. Keep wired in dev only when a Pool is
+  // available; otherwise the in-memory permissive default applies.
+  if (pool) {
+    setSupervisorPresenceLoader(pgSupervisorPresenceLoader(pool));
+  }
+
+  app.use('/api/me', createMeRouter(userModeService, auditRepo));
+  app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
-  app.use('/api/settings', createSettingsRouter(settingsRepo));
+
+  // 15.8/15.9 — Call log. Requires Postgres; falls back to 503 when pool
+  // is unavailable (dev without DATABASE_URL). Pool-guard matches pattern
+  // used by other pool-dependent routes above.
+  if (pool) {
+    app.use('/api/interactions', createInteractionsRouter({ pool }));
+  }
+  app.use(
+    '/api/settings',
+    createSettingsRouter(settingsRepo, {
+      activationRepo: packActivationRepo,
+      verticalPackRegistry: canonicalPackRegistry,
+    }),
+  );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue));
-  app.use('/api/technician-location', createTechnicianLocationRouter(technicianLocationPingRepo));
+  const voiceLogger = createLogger({
+    service: 'voice',
+    environment: process.env.NODE_ENV || 'development',
+    level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
+  });
+  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
+  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
+  app.use(
+    '/api/technician-location',
+    createTechnicianLocationRouter({
+      repository: technicianLocationPingRepo,
+      canSubmitForTechnician: (auth, technicianId) =>
+        technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
+    })
+  );
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
+
+  // ── Service agreements (P9-003) ─────────────────────────────────────────
+  // Recurring service contracts auto-generate a job + draft invoice on
+  // their cadence. Bypasses the proposals layer because the customer-
+  // signing-up step is the approval; subsequent runs execute it.
+  // (`agreementRepo` and `agreementRunRepo` are declared earlier so the
+  // public portal router can reference the same instance.)
+  const agreementsJobsService = {
+    async createJob(input: {
+      tenantId: string;
+      customerId: string;
+      locationId: string;
+      summary: string;
+      createdBy: string;
+    }) {
+      const job = await createJobDomain(
+        {
+          tenantId: input.tenantId,
+          customerId: input.customerId,
+          locationId: input.locationId,
+          summary: input.summary,
+          createdBy: input.createdBy,
+          actorRole: 'system',
+        },
+        jobRepo,
+        auditRepo,
+      );
+      return { id: job.id };
+    },
+  };
+  const agreementsInvoicesService = {
+    async createDraftInvoice(input: {
+      tenantId: string;
+      jobId: string;
+      priceCents: number;
+      description: string;
+      createdBy: string;
+    }) {
+      const invoice = await createInvoiceDomain(
+        {
+          tenantId: input.tenantId,
+          jobId: input.jobId,
+          invoiceNumber: `AGREEMENT-${Date.now()}`,
+          lineItems: [
+            {
+              id: `agreement-${Date.now()}`,
+              description: input.description,
+              quantity: 1,
+              unitPriceCents: input.priceCents,
+              totalCents: input.priceCents,
+              sortOrder: 0,
+              taxable: false,
+            },
+          ],
+          customerMessage: undefined,
+          createdBy: input.createdBy,
+        },
+        invoiceRepo,
+        auditRepo,
+      );
+      return { id: invoice.id };
+    },
+  };
+  app.use(
+    '/api/agreements',
+    createAgreementsRouter({
+      agreementRepo,
+      runRepo: agreementRunRepo,
+      auditRepo,
+      jobsService: agreementsJobsService,
+      invoicesService: agreementsInvoicesService,
+    }),
+  );
+
+  // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
+  // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
+  // from /api/agreements; in-memory only.
+  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter());
+
+  // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
+  // setInterval driver pattern as the execution-worker (P0-009). The
+  // tenant lister falls back to an empty list outside of pg mode so
+  // the in-memory dev server doesn't churn.
+  const agreementsLogger = createLogger({
+    service: 'recurring-agreements-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runRecurringAgreementsSweep({
+        agreementRepo,
+        runRepo: agreementRunRepo,
+        jobsService: agreementsJobsService,
+        invoicesService: agreementsInvoicesService,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        auditRepo,
+        logger: agreementsLogger,
+      });
+    } catch (err) {
+      agreementsLogger.error('Recurring-agreements sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60_000);
+
+  // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
+  // unified TTS provider, and the existing proposal/audit/oncall repos.
+  // The voiceSessionStore is shared with the Twilio adapter (created above).
+  const ttsProvider = createTtsProvider({
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+  });
+  const inAppVoiceAdapter = new InAppVoiceAdapter({
+    store: voiceSessionStore,
+    gateway: llmGateway,
+    ...(ttsProvider ? { ttsProvider } : {}),
+    proposalRepo,
+    auditRepo,
+    onCallRepo: sharedOnCallRepo,
+    ...(pool ? { pool } : {}),
+    verticalPromptResolver,
+    callerPlanResolver,
+    thresholdResolver,
+    voiceSessionRepo,
+    voicePersonaResolver,
+  });
+  app.use(
+    '/api/voice/sessions',
+    createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
 
   const featureFlagRepo: FeatureFlagRepository = pool
     ? new PgFeatureFlagRepository(pool)
@@ -486,14 +2182,75 @@ export function createApp() {
   // refilled from the repo asynchronously. isFeatureEnabled returns false
   // for missing flags, so the worst case during the hydration window is
   // that a flag reads as disabled for a few ms.
-  void hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  void (async () => {
+    const { seedResilienceFlags } = await import('./flags/resilience-flags');
+    try {
+      await seedResilienceFlags(featureFlagRepo);
+    } catch {
+      /* fire-and-forget — admin flags surface via the admin API */
+    }
+    await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
+  })();
   app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+
+  // Wire the WS publish-side kill switches: every call to publish()
+  // consults the feature flag store at runtime, so flipping
+  // ws.assistant_stream_enabled / ws.voice_events_enabled off
+  // immediately stops mirroring without redeploy.
+  const wsEnv = process.env.NODE_ENV ?? 'development';
+  setChannelGate((channel, tenantId) => {
+    const flag =
+      channel === 'assistant'
+        ? RESILIENCE_FLAG_NAMES.assistantStreamEnabled
+        : RESILIENCE_FLAG_NAMES.voiceEventsEnabled;
+    return isFeatureEnabled(featureFlagStore, flag, {
+      environment: wsEnv,
+      tenantId,
+    });
+  });
+
+  app.use(captureRequestError());
 
   // Global error handler
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const { statusCode, body } = toErrorResponse(err);
     res.status(statusCode).json(body);
   });
+
+  // Catch-all route for client-side routing — serves index.html for all non-API routes
+  // This allows the React SPA to handle routing on the client side
+  app.get('*', (req, res) => {
+    const frontendPath = require('path').join(__dirname, '../../web/dist');
+    const indexPath = require('path').join(frontendPath, 'index.html');
+    res.sendFile(indexPath);
+  });
+
+  // P0-023: Graceful shutdown — close the Postgres pool on SIGTERM/SIGINT so
+  // Railway's stop signal doesn't strand active connections. We use
+  // `process.once` so repeated `createApp()` calls inside the test runner
+  // don't stack handlers, and we exit only when the pool finishes draining
+  // (or after a 5s safety timeout). Server lifecycle is owned by index.ts —
+  // this handler only takes responsibility for the DB pool.
+  const shutdown = async (signal: NodeJS.Signals) => {
+    try {
+      // eslint-disable-next-line no-console
+      console.log(`[app] ${signal} received — closing voice sessions and pg pool`);
+      // Stop the voice-session-store reaper interval so the process can
+      // exit cleanly even when no DB pool is wired (dev / in-memory mode).
+      voiceSessionStore.dispose();
+      if (pool) {
+        await Promise.race([
+          pool.end(),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[app] shutdown failed', err);
+    }
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 
   return app;
 }

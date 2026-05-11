@@ -1,0 +1,72 @@
+{
+  "id": "two-intents-one-sentence",
+  "bucket": "08-ambiguity",
+  "callerId": "+15555550802",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_08_ambiguity_two_intents",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_08_two_intents_jane",
+        "tenantId": "t_08_ambiguity_two_intents",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550802",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_08_two_intents_tuesday",
+        "tenantId": "t_08_ambiguity_two_intents",
+        "customerId": "cust_08_two_intents_jane",
+        "scheduledStart": "2026-05-05T17:00:00.000Z",
+        "scheduledEnd": "2026-05-05T19:00:00.000Z",
+        "status": "scheduled",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-20T10:00:00.000Z"
+      }
+    ],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "Cancel my Tuesday and rebook Wednesday at 2pm.",
+      "expected": {
+        "intent": "reschedule_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent recognizes the compound intent as a reschedule (the dominant intent that combines a cancel + rebook against the same appointment) and confirms the new Wednesday 2pm slot, OR escalates because the compound utterance is ambiguous; the agent does NOT silently fire two separate proposals without confirmation"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Yes, that's right — Wednesday at 2pm.",
+      "expected": {
+        "intent": "reschedule_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent confirms the reschedule and explains an operator will approve before it is finalized; no auto-execution"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 11, 12]
+  },
+  "layer2Eligible": false
+}

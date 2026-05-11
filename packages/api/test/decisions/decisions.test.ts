@@ -203,7 +203,7 @@ describe('D2 — Voice debrief primary capture', () => {
     expect(providersTs).toMatch(/api\.openai\.com\/v1\/audio\/transcriptions/);
     // And the factory must still be invoked from app.ts.
     const appTs = await fs.readFile(path.resolve(API_SRC, 'app.ts'), 'utf8');
-    expect(appTs).toMatch(/createTranscriptionProvider/);
+    expect(appTs).toMatch(/createWhisperTranscriptionProvider/);
   });
 
   it('dev fallback is clearly marked and not used when AI_PROVIDER_API_KEY is set', async () => {
@@ -375,10 +375,11 @@ describe('D4 — Agent posture: reactive, stay in lane', () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe('D5 — Dedicated Twilio business line', () => {
-  it.fails('Twilio integration exists somewhere in packages/api/src', async () => {
+  it('Twilio integration exists somewhere in packages/api/src', async () => {
     const hits = await grepApiSrc(/twilio|Twilio/);
-    // Currently zero matches. When Twilio is integrated this test will
-    // start passing and must be flipped to it().
+    // Twilio Programmable Messaging (SMS) + Twilio SendGrid (email) wired
+    // in packages/api/src/notifications/. Tenant-level provisioning is
+    // still TODO (see it.todo cases below).
     expect(hits.length).toBeGreaterThan(0);
   });
 
@@ -528,8 +529,8 @@ describe('D7 — Cross-user visibility', () => {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe('D8 — Retention + memory synthesis', () => {
-  it('memory synthesis module exists', async () => {
-    const hits = await grepApiSrc(/synthesiz|memorySynthesis|MemorySynthesis/);
+  it.fails('memory synthesis module exists', async () => {
+    const hits = await grepApiSrc(/memorySynthesis|MemorySynthesis|memory[-_]synthesis/);
     expect(hits.length).toBeGreaterThan(0);
   });
 

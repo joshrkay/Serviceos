@@ -4,6 +4,19 @@ import { verifyWebhookSignature, handleWebhookEvent, InMemoryWebhookRepository }
 import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
+import { InvoiceRepository } from '../invoices/invoice';
+import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { JobRepository } from '../jobs/job';
+import { deriveDepositStatus } from '../jobs/deposit-rule';
+import { PendingInvitationRepository } from '../users/pending-invitation';
+import { BillingService } from '../billing/subscription';
+import { StripeConnectService } from '../billing/stripe-connect';
+import { ValidationError } from '../shared/errors';
+import { Queue } from '../queues/queue';
+import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
+import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
+import { verifySendGridSignature } from './sendgrid-signature';
+import { createAuditEvent, AuditRepository } from '../audit/audit';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -13,6 +26,64 @@ const webhookRepo = new InMemoryWebhookRepository();
 export interface WebhookRouterDeps {
   tenantRepo?: TenantRepository;
   settingsRepo?: SettingsRepository;
+  invoiceRepo?: InvoiceRepository;
+  paymentRepo?: PaymentRepository;
+  /**
+   * Tier 4 (Deposit rules — PR 3b). When wired, the Stripe webhook
+   * branches on `metadata.deposit_for_job_id` to credit
+   * `depositPaidCents` on the linked job. Optional so legacy harnesses
+   * without the deposit flow keep working.
+   */
+  jobRepo?: JobRepository;
+  /**
+   * Tier 4 (Team members — PR 3). When wired, the Clerk user.created
+   * webhook checks for a pending invitation by email — if one
+   * exists, the new user joins THAT tenant instead of bootstrapping
+   * a brand-new one. Optional so legacy harnesses keep working.
+   */
+  pendingInvitationRepo?: PendingInvitationRepository;
+  /**
+   * Tier 4 (Subscription — Fieldly billing). When wired, the Stripe
+   * webhook applies customer.subscription.* events onto tenants
+   * (cached subscription_status). Optional so legacy harnesses
+   * without Stripe configured still build the router.
+   */
+  billingService?: BillingService;
+  /**
+   * Tier 4 (Payment methods — PR 1). When wired, the Stripe webhook
+   * applies account.updated events onto tenants (cached
+   * stripe_connect_charges_enabled / payouts_enabled / status).
+   * Optional so legacy harnesses without Connect configured still
+   * build the router.
+   */
+  connectService?: StripeConnectService;
+  /**
+   * Pg pool for the invitee join-tenant path (writes a users row
+   * directly because we don't have an InsertUser repo yet — the
+   * existing webhook already uses `pool.query` for similar inline
+   * writes). When omitted the join-tenant path is a no-op (legacy
+   * fakes that don't track users).
+   */
+  pool?: import('pg').Pool;
+  stripeWebhookSecret?: string;
+  queue?: Queue;
+  appBaseUrl?: string;
+  webhookEventRepo?: {
+    recordReceipt(provider: string, eventId: string, eventType: string, payload: Record<string, unknown>): Promise<{ inserted: boolean }>;
+    markProcessed(provider: string, eventId: string): Promise<void>;
+  };
+  auditRepo?: AuditRepository;
+  integrationResolver?: (tenantId: string, provider: 'twilio' | 'sendgrid') => Promise<{
+    tenantId: string;
+    provider: 'twilio' | 'sendgrid';
+    subaccountSid?: string;
+    authTokenPrimary?: string;
+    authTokenSecondary?: string;
+    sendgridPublicKeyPem?: string;
+  } | null>;
+  provisioningQueue?: {
+    send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
+  };
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -92,15 +163,270 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
         logger.info('user.created webhook received', { userId, email: primaryEmail });
 
+        // Tier 4 (Team members — PR 3). Invitation acceptance path.
+        // If this user has a pending invitation, JOIN them to the
+        // inviting tenant with the invited role rather than
+        // bootstrapping a brand-new tenant.
+        //
+        // Lookup order (PR 319 review P1):
+        //   1. By invitation id from Clerk's public_metadata (set by
+        //      the invite route) — uniquely identifies the invitation
+        //      even if two tenants invited the same email.
+        //   2. By email — fallback ONLY when no invitation id was
+        //      provided. If an id was present but failed lookup or
+        //      sanity-check, we DO NOT fall back to email; that would
+        //      reintroduce the cross-tenant ambiguity the id was
+        //      meant to resolve (PR 319 review P1). Refusing the
+        //      stale/forged id falls through to the bootstrap path,
+        //      which is the safe outcome.
+        if (deps.pendingInvitationRepo && primaryEmail) {
+          const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
+          const invitationId = publicMeta?.invitation_id as string | undefined;
+          let pending = null;
+          if (invitationId) {
+            if (deps.pendingInvitationRepo.findById) {
+              pending = await deps.pendingInvitationRepo
+                .findById(invitationId)
+                .catch(() => null);
+              // Sanity check: id-matched invitation MUST also match
+              // email (defense against a replay where the metadata
+              // is forged). Already-accepted ones are also ignored.
+              if (pending && pending.email.toLowerCase() !== primaryEmail.toLowerCase()) {
+                logger.warn('Pending invitation id+email mismatch — refusing join', {
+                  userId, invitationId, expected: pending.email, got: primaryEmail,
+                });
+                pending = null;
+              }
+              if (pending && pending.acceptedAt) pending = null;
+            }
+            // Deliberately NO email fallback here — see comment above.
+          } else {
+            // No id present (e.g. a tenant invited without Clerk
+            // integration) — email lookup is the only path. The
+            // single pending-per-(tenant,email) unique index is the
+            // primary defense; same-email-across-tenants remains a
+            // known edge in this fallback path.
+            pending = await deps.pendingInvitationRepo
+              .findPendingByEmail(primaryEmail)
+              .catch(() => null);
+          }
+
+          if (pending) {
+            logger.info('Pending invitation found for new user', {
+              userId, email: primaryEmail, tenantId: pending.tenantId, role: pending.role,
+              matchedBy: invitationId ? 'id' : 'email',
+            });
+            try {
+              // PR 319 review (P2): only markAccepted AFTER the join
+              // write succeeded. Without this guard, a deps.pool=null
+              // configuration would consume the invitation without
+              // ever inserting the users row, and the invitee would
+              // have no access despite Clerk reporting acceptance.
+              if (!deps.pool) {
+                logger.error('pendingInvitation found but pool not wired — cannot join user', {
+                  userId, tenantId: pending.tenantId,
+                });
+                throw new Error('pool not configured for invitee join');
+              }
+              // Insert the users row directly. RLS requires the
+              // tenant GUC to be set; SET LOCAL only persists inside
+              // a transaction (PR 319 review P1), so the BEGIN /
+              // COMMIT block is mandatory — without it the SET LOCAL
+              // is a no-op and the INSERT fails the RLS policy.
+              //
+              // The tenantId is also asserted to look like a UUID
+              // before being interpolated into the SET LOCAL string
+              // (parameterized binding doesn't work for SET names).
+              // The id comes from the DB row (FK-backed), so this is
+              // belt + suspenders, but explicit prevents a future
+              // change from accidentally widening the column.
+              const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+              if (!UUID_RE.test(pending.tenantId)) {
+                throw new Error(`Invalid tenantId on pending invitation: ${pending.tenantId}`);
+              }
+              const client = await deps.pool.connect();
+              try {
+                await client.query('BEGIN');
+                await client.query(
+                  `SET LOCAL app.current_tenant_id = '${pending.tenantId}'`,
+                );
+                await client.query(
+                  `INSERT INTO users (
+                     id, tenant_id, clerk_user_id, email, role,
+                     first_name, last_name, created_at, updated_at
+                   ) VALUES (
+                     gen_random_uuid(), $1, $2, $3, $4,
+                     $5, $6, NOW(), NOW()
+                   )
+                   ON CONFLICT DO NOTHING`,
+                  [
+                    pending.tenantId,
+                    userId,
+                    primaryEmail,
+                    pending.role,
+                    (userData.first_name as string | null) ?? null,
+                    (userData.last_name as string | null) ?? null,
+                  ],
+                );
+                await client.query('COMMIT');
+              } catch (txErr) {
+                await client.query('ROLLBACK').catch(() => undefined);
+                throw txErr;
+              } finally {
+                client.release();
+              }
+              await deps.pendingInvitationRepo.markAccepted(pending.id);
+
+              // Push tenant_id back to Clerk public_metadata so the
+              // JWT carries the right tenant context on the next sign-in.
+              if (config.CLERK_SECRET_KEY) {
+                try {
+                  await fetch(`https://api.clerk.com/v1/users/${userId}`, {
+                    method: 'PATCH',
+                    headers: {
+                      Authorization: `Bearer ${config.CLERK_SECRET_KEY}`,
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      public_metadata: { tenant_id: pending.tenantId, role: pending.role },
+                    }),
+                  });
+                } catch (err) {
+                  logger.error('Clerk public_metadata sync failed (invitee path)', {
+                    userId, tenantId: pending.tenantId,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
+
+              if (deps.auditRepo) {
+                await deps.auditRepo.create(createAuditEvent({
+                  tenantId: pending.tenantId,
+                  actorId: userId,
+                  actorRole: pending.role,
+                  eventType: 'tenant.invitation.accepted',
+                  entityType: 'user',
+                  entityId: userId,
+                  metadata: {
+                    invitationId: pending.id,
+                    invitedBy: pending.invitedBy,
+                    email: primaryEmail,
+                  },
+                }));
+              }
+
+              await webhookRepo.updateStatus(svixId, 'processed');
+              return res.status(200).json({ received: true, joined: pending.tenantId });
+            } catch (joinErr) {
+              logger.error('Invitee join failed; falling back to bootstrap', {
+                userId, email: primaryEmail, tenantId: pending.tenantId,
+                error: joinErr instanceof Error ? joinErr.message : String(joinErr),
+              });
+              // Fall through to the bootstrap path below; the
+              // operator can manually clean up if needed.
+            }
+          }
+        }
+
         if (deps.tenantRepo && primaryEmail) {
           const result = await bootstrapTenant(userId, primaryEmail, deps.tenantRepo, {
             settingsRepository: deps.settingsRepo,
           });
+          const signupCorrelationId = `signup:${svixId}`;
           logger.info('Tenant bootstrap complete', {
             tenantId: result.tenantId,
             created: result.created,
             settingsSeeded: Boolean(deps.settingsRepo),
+            signupCorrelationId,
           });
+
+          // Enqueue Twilio subaccount provisioning for new tenants only.
+          // Idempotent — the worker checks tenant_integrations.status and
+          // skips if already active, so safe to re-enqueue on webhook replay.
+          if (result.created && deps.queue) {
+            const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
+            // Twilio callbacks land on the API origin and signatures are
+            // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
+            // recordTwilio). Prefer that; fall back to appBaseUrl/APP_PUBLIC_URL
+            // for single-origin dev/staging deployments.
+            const callbackBaseUrl =
+              process.env.PUBLIC_API_URL ??
+              deps.appBaseUrl ??
+              process.env.APP_PUBLIC_URL ??
+              'http://localhost:3000';
+            const payload: ProvisionTwilioPayload = {
+              tenantId: result.tenantId,
+              region: region ?? null,
+              baseUrl: callbackBaseUrl,
+            };
+            await deps.queue.send(
+              PROVISION_TWILIO_JOB_TYPE,
+              payload,
+              `provision-twilio-${result.tenantId}`
+            );
+            logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
+          }
+
+          if (deps.auditRepo) {
+            await deps.auditRepo.create(createAuditEvent({
+              tenantId: result.tenantId,
+              actorId: userId,
+              actorRole: 'owner',
+              eventType: 'tenant.signup.bootstrap.completed',
+              entityType: 'tenant',
+              entityId: result.tenantId,
+              correlationId: signupCorrelationId,
+              metadata: {
+                svixId,
+                clerkUserId: userId,
+                email: primaryEmail,
+                created: result.created,
+              },
+            }));
+          }
+
+          if (deps.provisioningQueue && result.created) {
+            const queuePayload = {
+              tenantId: result.tenantId,
+              ownerId: userId,
+              ownerEmail: primaryEmail,
+              signupCorrelationId,
+              webhookEventId: svixId,
+            };
+
+            void deps.provisioningQueue.send(
+              'tenant.provisioning.root.requested',
+              queuePayload,
+              `tenant-provisioning:${result.tenantId}`
+            ).then(async (queueMessageId) => {
+              if (deps.auditRepo) {
+                await deps.auditRepo.create(createAuditEvent({
+                  tenantId: result.tenantId,
+                  actorId: userId,
+                  actorRole: 'owner',
+                  eventType: 'tenant.signup.provisioning.enqueued',
+                  entityType: 'tenant',
+                  entityId: result.tenantId,
+                  correlationId: signupCorrelationId,
+                  metadata: {
+                    queueMessageId,
+                    queueType: 'tenant.provisioning.root.requested',
+                  },
+                }));
+              }
+              logger.info('Root provisioning orchestration enqueued', {
+                tenantId: result.tenantId,
+                queueMessageId,
+                signupCorrelationId,
+              });
+            }).catch((err) => {
+              logger.error('Failed to enqueue root provisioning orchestration', {
+                tenantId: result.tenantId,
+                signupCorrelationId,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              });
+            });
+          }
 
           // Write tenant_id back to Clerk user's public_metadata (best-effort)
           if (config.CLERK_SECRET_KEY) {
@@ -137,6 +463,84 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // ── 16D — user.deleted: soft-delete the users row; preserve all data ──
+      //
+      // Per QA 16.22: subsequent API requests with the deleted user's token
+      // must return 401. Clerk invalidates the JWT immediately on deletion so
+      // verifyRs256Token in the auth middleware handles that automatically.
+      // Our job here is to stamp deleted_at on the users row (migration 093)
+      // and emit an audit event.
+      //
+      // Per QA 16.23: tenant data in Postgres MUST NOT be purged — it is
+      // retained for audit and billing until an explicit purge is requested
+      // by the ops team (manual deprovisioning).
+      //
+      // Per QA 16.24: the tenant's Twilio subaccount MUST NOT be released
+      // automatically — releasing a number could redirect calls intended for
+      // the original tenant to a new assignee. Manual deprovisioning must
+      // include an explicit Twilio subaccount suspend/close step.
+      if (eventType === 'user.deleted') {
+        const userData = payload.data as Record<string, unknown>;
+        const userId = userData.id as string;
+
+        logger.info('user.deleted webhook received — soft-deleting users row', { userId });
+
+        if (deps.pool) {
+          try {
+            // The users table has RLS on tenant_id, but here we need to delete
+            // by clerk_user_id across whatever tenant the user belonged to.
+            // We use the system-level pattern (no SET LOCAL) with an explicit
+            // WHERE on clerk_user_id. The UPDATE only touches the matched row,
+            // so cross-tenant leakage is not possible.
+            const result = await deps.pool.query<{ id: string; tenant_id: string }>(
+              `UPDATE users
+               SET deleted_at = NOW(), updated_at = NOW()
+               WHERE clerk_user_id = $1 AND deleted_at IS NULL
+               RETURNING id, tenant_id`,
+              [userId],
+            );
+            const deletedRows = result.rows;
+            if (deletedRows.length > 0) {
+              logger.info('user.deleted: users row soft-deleted', {
+                userId,
+                affectedRows: deletedRows.length,
+                tenantId: deletedRows[0]?.tenant_id,
+              });
+
+              if (deps.auditRepo) {
+                for (const row of deletedRows) {
+                  await deps.auditRepo.create(createAuditEvent({
+                    tenantId: row.tenant_id,
+                    actorId: 'system:clerk_webhook',
+                    actorRole: 'system',
+                    eventType: 'user.deleted',
+                    entityType: 'user',
+                    entityId: row.id,
+                    metadata: {
+                      clerkUserId: userId,
+                      svixId,
+                      note: 'User row soft-deleted. Tenant data and Twilio subaccount intentionally retained — manual deprovisioning required.',
+                    },
+                  }));
+                }
+              }
+            } else {
+              logger.info('user.deleted: no users row found for clerk_user_id', { userId });
+            }
+          } catch (deleteErr) {
+            logger.error('user.deleted: soft-delete failed', {
+              userId,
+              error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+            });
+            // Do not rethrow — a failed soft-delete should not cause the
+            // webhook to 500 (Clerk would retry indefinitely). The user's
+            // JWT is already invalidated by Clerk regardless.
+          }
+        } else {
+          logger.warn('user.deleted: pool not configured — skipping soft-delete', { userId });
+        }
+      }
+
       await webhookRepo.updateStatus(svixId, 'processed');
       return res.status(200).json({ received: true });
 
@@ -146,6 +550,348 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       await webhookRepo.updateStatus(svixId, 'failed', message);
       return res.status(500).json({ error: 'Processing failed' });
     }
+  });
+
+  /**
+   * POST /webhooks/stripe
+   *
+   * Receives Stripe events for payment processing. Stripe signs the raw body
+   * with HMAC-SHA256 — the route is mounted with express.raw() BEFORE the
+   * global express.json() middleware so req.body is a Buffer here.
+   *
+   * Events handled:
+   *   checkout.session.completed → recordPayment() to mark invoice paid
+   */
+  router.post('/stripe', async (req: Request, res: Response) => {
+    const secret = deps.stripeWebhookSecret;
+    if (!secret) {
+      logger.warn('STRIPE_WEBHOOK_SECRET not configured — rejecting Stripe webhook');
+      return res.status(500).json({ error: 'Stripe webhook not configured' });
+    }
+
+    const signatureHeader = req.headers['stripe-signature'] as string | undefined;
+    if (!signatureHeader) {
+      return res.status(400).json({ error: 'Missing stripe-signature header' });
+    }
+
+    // req.body is a Buffer when express.raw() is mounted before express.json().
+    // Coerce to string for signature verification; do NOT re-serialize a parsed
+    // object (key order changes → signature mismatch).
+    const rawBodyStr: string = Buffer.isBuffer(req.body)
+      ? req.body.toString('utf8')
+      : (() => { throw new Error('Body pre-parsed; mount /webhooks/stripe before express.json()'); })();
+
+    // Re-use the existing verifyWebhookSignature() utility — handles timing-safe
+    // comparison and the 5-minute timestamp tolerance.
+    if (!verifyWebhookSignature(rawBodyStr, signatureHeader, secret)) {
+      logger.warn('Stripe webhook signature verification failed');
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    let event: { id: string; type: string; data: { object: Record<string, unknown> } };
+    try {
+      event = JSON.parse(rawBodyStr);
+    } catch {
+      return res.status(400).json({ error: 'Invalid JSON body' });
+    }
+
+    // Idempotency guard: reject replays and concurrent deliveries of the same
+    // Stripe event. webhookRepo is a module-level singleton so the dedup map
+    // persists across requests. Uses the existing handleWebhookEvent() pattern.
+    const { duplicate } = await handleWebhookEvent(
+      'stripe',
+      event.type,
+      event.data as Record<string, unknown>,
+      event.id,
+      webhookRepo,
+    );
+    if (duplicate) {
+      logger.info('Duplicate Stripe event — skipping', { eventId: event.id, type: event.type });
+      return res.status(200).json({ received: true, duplicate: true });
+    }
+
+    logger.info('Stripe webhook received', { eventId: event.id, type: event.type });
+
+    try {
+      if (event.type === 'checkout.session.completed') {
+        const session = event.data.object as {
+          metadata?: {
+            tenant_id?: string;
+            invoice_id?: string;
+            // Tier 4 (Deposit rules — PR 3b). When set, the session is
+            // a deposit collection rather than an invoice payment. The
+            // two metadata keys are mutually exclusive — public-estimate
+            // mints links with deposit_for_job_id only.
+            deposit_for_job_id?: string;
+          };
+          amount_total?: number;
+          payment_status?: string;
+        };
+
+        // Only process fully-paid sessions. For ACH/bank transfers, Stripe can
+        // fire checkout.session.completed with payment_status='unpaid' before
+        // funds clear — skip those and wait for the subsequent payment event.
+        if (session.payment_status !== 'paid') {
+          logger.info('Skipping incomplete Stripe checkout session', {
+            eventId: event.id, paymentStatus: session.payment_status,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        const tenantId = session.metadata?.tenant_id;
+        const invoiceId = session.metadata?.invoice_id;
+        const depositForJobId = session.metadata?.deposit_for_job_id;
+        const amountTotal = session.amount_total; // already in cents
+
+        // Tier 4 (Deposit rules — PR 3b). Deposit branch: credit
+        // depositPaidCents on the linked job. Cap at depositRequiredCents
+        // (the DB CHECK enforces the same bound) so an over-tap doesn't
+        // wedge the job row. Idempotency comes from the outer
+        // handleWebhookEvent dedup; a duplicate delivery would already
+        // have returned `duplicate: true` above.
+        if (depositForJobId && tenantId && amountTotal && amountTotal > 0) {
+          if (!deps.jobRepo) {
+            logger.error('Job repo not wired to Stripe webhook handler');
+            return res.status(500).json({ error: 'Deposit processing not configured' });
+          }
+          const job = await deps.jobRepo.findById(tenantId, depositForJobId);
+          if (!job) {
+            logger.warn('Deposit checkout for unknown job', {
+              eventId: event.id, tenantId, depositForJobId,
+            });
+            await webhookRepo.updateStatus(event.id, 'processed');
+            return res.status(200).json({ received: true, skipped: true });
+          }
+          const required = job.depositRequiredCents ?? 0;
+          const previouslyPaid = job.depositPaidCents ?? 0;
+          if (required <= 0) {
+            logger.warn('Deposit paid for job with no required deposit', {
+              eventId: event.id, tenantId, depositForJobId,
+            });
+            await webhookRepo.updateStatus(event.id, 'processed');
+            return res.status(200).json({ received: true, skipped: true });
+          }
+          const newPaid = Math.min(previouslyPaid + amountTotal, required);
+          await deps.jobRepo.update(tenantId, depositForJobId, {
+            depositPaidCents: newPaid,
+            depositStatus: deriveDepositStatus(required, newPaid),
+            updatedAt: new Date(),
+          });
+          logger.info('Deposit credited via Stripe checkout', {
+            tenantId, depositForJobId, amountTotal, newPaid, required,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, deposit: true });
+        }
+
+        if (!tenantId || !invoiceId || !amountTotal || amountTotal <= 0) {
+          logger.warn('Stripe checkout.session.completed missing or invalid metadata', {
+            eventId: event.id, tenantId, invoiceId, amountTotal,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        if (!deps.invoiceRepo || !deps.paymentRepo) {
+          logger.error('Invoice/payment repos not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Payment processing not configured' });
+        }
+
+        try {
+          await recordPayment(
+            {
+              tenantId,
+              invoiceId,
+              amountCents: amountTotal,
+              method: 'credit_card',
+              providerReference: 'stripe_checkout',
+              processedBy: 'stripe_webhook',
+            },
+            deps.invoiceRepo,
+            deps.paymentRepo,
+          );
+          logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
+        } catch (payErr) {
+          if (payErr instanceof ValidationError) {
+            if (payErr.message.includes('exceeds amount due')) {
+              // Overpayment: cap to whatever is still owed and retry.
+              const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+              if (!invoice || invoice.amountDueCents <= 0) {
+                logger.info('Invoice already fully paid (overpayment scenario)', { tenantId, invoiceId });
+              } else {
+                await recordPayment(
+                  {
+                    tenantId,
+                    invoiceId,
+                    amountCents: invoice.amountDueCents,
+                    method: 'credit_card',
+                    providerReference: 'stripe_checkout',
+                    processedBy: 'stripe_webhook',
+                  },
+                  deps.invoiceRepo,
+                  deps.paymentRepo,
+                );
+                logger.info('Invoice paid at capped amount', {
+                  tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
+                });
+              }
+            } else if (payErr.message.includes('status')) {
+              // Invoice already settled (paid/void/canceled) — idempotent success.
+              logger.info('Invoice already settled, ignoring Stripe payment', { tenantId, invoiceId });
+            } else {
+              throw payErr;
+            }
+          } else {
+            throw payErr;
+          }
+        }
+      }
+
+      // Tier 4 (Subscription — Fieldly billing). customer.subscription.*
+      // events update the tenant's cached subscription status. Match
+      // by stripe_customer_id (the BillingService persists it on
+      // first portal-open). Idempotent — we just write the latest
+      // snapshot. created/updated/deleted all share the same handler;
+      // 'deleted' typically arrives with status='canceled' so the
+      // mirror naturally reflects the lifecycle end.
+      if (
+        deps.billingService &&
+        (event.type === 'customer.subscription.created' ||
+          event.type === 'customer.subscription.updated' ||
+          event.type === 'customer.subscription.deleted')
+      ) {
+        const sub = event.data.object as {
+          id?: string;
+          customer?: string;
+          status?: string;
+        };
+        if (sub.id && sub.customer && sub.status) {
+          await deps.billingService.applySubscriptionEvent({
+            customerId: sub.customer,
+            subscriptionId: sub.id,
+            status: sub.status,
+          });
+          logger.info('Subscription status mirrored from Stripe', {
+            customerId: sub.customer, subscriptionId: sub.id, status: sub.status,
+          });
+        } else {
+          logger.warn('customer.subscription.* missing fields', {
+            eventId: event.id, type: event.type,
+          });
+        }
+      }
+
+      // Tier 4 (Payment methods — PR 1). account.updated events
+      // mirror Connect onboarding state onto the tenant's cached
+      // columns. Stripe sends these out-of-band of any user request,
+      // so the webhook is the only place we learn that KYC completed.
+      if (deps.connectService && event.type === 'account.updated') {
+        const account = event.data.object as {
+          id?: string;
+          charges_enabled?: boolean;
+          payouts_enabled?: boolean;
+        };
+        if (account.id) {
+          const result = await deps.connectService.applyAccountUpdated({
+            accountId: account.id,
+            chargesEnabled: Boolean(account.charges_enabled),
+            payoutsEnabled: Boolean(account.payouts_enabled),
+          });
+          logger.info('Connect account.updated mirrored', {
+            accountId: account.id,
+            chargesEnabled: account.charges_enabled,
+            payoutsEnabled: account.payouts_enabled,
+            updatedTenants: result.updatedTenants,
+          });
+        } else {
+          logger.warn('account.updated missing id', { eventId: event.id });
+        }
+      }
+
+      await webhookRepo.updateStatus(event.id, 'processed');
+      return res.status(200).json({ received: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      logger.error('Stripe webhook processing failed', { eventId: event.id, type: event.type, error: message });
+      await webhookRepo.updateStatus(event.id, 'failed', message);
+      return res.status(500).json({ error: 'Processing failed' });
+    }
+  });
+
+  const rejectBound = async (tenantId: string, reason: string, meta: Record<string, unknown>) => {
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(createAuditEvent({
+        tenantId,
+        actorId: 'system:webhook',
+        actorRole: 'system',
+        eventType: 'webhook.auth_failed',
+        entityType: 'webhook',
+        entityId: reason,
+        metadata: meta,
+      }));
+    }
+  };
+  const recordTwilio = async (kind: string, req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    const integration = await deps.integrationResolver?.(tenantId, 'twilio');
+    if (!integration || integration.provider !== 'twilio' || integration.tenantId !== tenantId) {
+      await rejectBound(tenantId, 'tenant_mismatch', { kind });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const params = Object.fromEntries(Object.entries((req.body ?? {}) as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+    const url = reconstructWebhookUrl(req, process.env.PUBLIC_API_URL);
+    const sig = req.header('x-twilio-signature');
+    const validPrimary = integration.authTokenPrimary
+      ? verifyTwilioSignature(sig, url, params, integration.authTokenPrimary)
+      : false;
+    const validSecondary = !validPrimary && integration.authTokenSecondary
+      ? verifyTwilioSignature(sig, url, params, integration.authTokenSecondary)
+      : false;
+    if (!validPrimary && !validSecondary) {
+      await rejectBound(tenantId, 'invalid_signature', { kind });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if ((req.body?.AccountSid as string | undefined) !== integration.subaccountSid) {
+      await rejectBound(tenantId, 'account_sid_mismatch', { kind, accountSid: req.body?.AccountSid });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const eventId = (req.body?.MessageSid as string | undefined) ?? (req.body?.CallSid as string | undefined);
+    if (!eventId) return res.status(400).json({ error: 'Missing MessageSid/CallSid' });
+    if (deps.webhookEventRepo) {
+      const rec = await deps.webhookEventRepo.recordReceipt('twilio', eventId, kind, req.body ?? {});
+      if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
+      await deps.webhookEventRepo.markProcessed('twilio', eventId);
+    }
+    return res.status(200).json({ received: true });
+  };
+  router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));
+  router.post('/twilio/sms/:tenantId', (req: Request, res: Response) => void recordTwilio('sms', req, res));
+  router.post('/twilio/status/:tenantId', (req: Request, res: Response) => void recordTwilio('status', req, res));
+
+  router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
+    const tenantId = req.params.tenantId;
+    const integration = await deps.integrationResolver?.(tenantId, 'sendgrid');
+    if (!integration || integration.provider !== 'sendgrid' || integration.tenantId !== tenantId) {
+      await rejectBound(tenantId, 'tenant_mismatch', { kind: 'sendgrid' });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const sig = req.header('x-twilio-email-event-webhook-signature');
+    const ts = req.header('x-twilio-email-event-webhook-timestamp');
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body ?? {}));
+    if (!verifySendGridSignature({ publicKeyPem: integration.sendgridPublicKeyPem ?? '', payload: raw, signatureBase64: sig, timestamp: ts })) {
+      await rejectBound(tenantId, 'invalid_signature', { kind: 'sendgrid' });
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
+    const first = Array.isArray(body) ? body[0] : body;
+    const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
+    if (deps.webhookEventRepo && eventId) {
+      const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });
+      if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
+      await deps.webhookEventRepo.markProcessed('sendgrid', eventId);
+    }
+    return res.status(200).json({ received: true });
   });
 
   return router;

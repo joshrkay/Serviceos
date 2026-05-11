@@ -16,6 +16,9 @@ import {
   parseClassifierJson,
 } from '../../../src/ai/orchestration/intent-classifier';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+import { formatVerticalForCallerPrompt } from '../../../src/verticals/context-assembly';
+import { createHvacPack } from '../../../src/verticals/packs/hvac';
+import { createPlumbingPack } from '../../../src/verticals/packs/plumbing';
 
 function mockGateway(jsonContent: string): LLMGateway {
   const gateway = {
@@ -263,6 +266,135 @@ describe('intent-classifier — classifyIntent', () => {
     expect(call.messages[1]).toEqual({ role: 'user', content: expect.any(String) });
   });
 
+  describe('§3B vertical-aware system prompt', () => {
+    it('emits a single system message when no vertical context is supplied', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+      );
+      await classifyIntent('create an invoice', { tenantId }, gateway);
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+
+    it('appends a second system message carrying the vertical prompt section', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.85 })
+      );
+      const verticalPromptSection = [
+        'Service vertical: HVAC Professional',
+        'Equipment and terminology recognized:',
+        '  - Furnace (heater, heating unit)',
+      ].join('\n');
+      await classifyIntent(
+        'my heater is broken',
+        { tenantId, verticalPromptSection },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Tenant vertical context');
+      expect(systemMessages[1].content).toContain('Furnace (heater, heating unit)');
+      // User message is still the last entry.
+      expect(call.messages[call.messages.length - 1]).toEqual({
+        role: 'user',
+        content: 'my heater is broken',
+      });
+    });
+
+    it('skips the vertical message when the section is empty / whitespace', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
+      );
+      await classifyIntent(
+        'create an invoice',
+        { tenantId, verticalPromptSection: '   \n\t  ' },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(1);
+    });
+
+    // End-to-end producer → consumer seam. The other tests in this block
+    // hand-craft the vertical string. This one threads the real
+    // formatVerticalForCallerPrompt() output for HVAC vs. plumbing packs
+    // through classifyIntent() so a regression in either side
+    // (helper renames, missing terminology, dropped wire-up) flips this
+    // test red — locking the §3B integration the calling agent depends on.
+    it('integration — HVAC vs plumbing pack output reaches the classifier prompt', async () => {
+      const hvacGateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 }),
+      );
+      await classifyIntent(
+        'my heater is broken',
+        { tenantId, verticalPromptSection: formatVerticalForCallerPrompt(createHvacPack()) },
+        hvacGateway,
+      );
+      const hvacCall = (hvacGateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const hvacSystem = hvacCall.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(hvacSystem).toHaveLength(2);
+      expect(hvacSystem[1].content).toContain('Furnace');
+      expect(hvacSystem[1].content).toContain('Air Conditioner');
+      expect(hvacSystem[1].content).not.toContain('Water Heater');
+
+      const plumbingGateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 }),
+      );
+      await classifyIntent(
+        'my pipe is leaking',
+        { tenantId, verticalPromptSection: formatVerticalForCallerPrompt(createPlumbingPack()) },
+        plumbingGateway,
+      );
+      const plumbingCall = (plumbingGateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const plumbingSystem = plumbingCall.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(plumbingSystem).toHaveLength(2);
+      expect(plumbingSystem[1].content).not.toContain('Furnace');
+    });
+  });
+
+  describe('§3C planPromptSection', () => {
+    it('appends a third system message with the caller plan context', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 })
+      );
+      await classifyIntent(
+        'when is my next visit',
+        {
+          tenantId,
+          verticalPromptSection: 'Service vertical: HVAC',
+          planPromptSection: 'Caller is on an active maintenance plan.\nPlans: Gold Membership',
+        },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(3);
+      expect(systemMessages[1].content).toContain('Tenant vertical context');
+      expect(systemMessages[2].content).toContain('Caller plan context');
+      expect(systemMessages[2].content).toContain('Gold Membership');
+    });
+
+    it('emits plan section only (no vertical) when only plan is supplied', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({ intentType: 'create_appointment', confidence: 0.9 })
+      );
+      await classifyIntent(
+        'when is my next visit',
+        {
+          tenantId,
+          planPromptSection: 'Caller is on an active maintenance plan.\nPlans: Gold',
+        },
+        gateway,
+      );
+      const call = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      const systemMessages = call.messages.filter((m: { role: string }) => m.role === 'system');
+      expect(systemMessages).toHaveLength(2);
+      expect(systemMessages[1].content).toContain('Caller plan context');
+    });
+  });
+
   it('handles empty transcript gracefully', async () => {
     const gateway = mockGateway(JSON.stringify({ intentType: 'unknown', confidence: 0 }));
     const result = await classifyIntent('', { tenantId }, gateway);
@@ -317,6 +449,76 @@ describe('intent-classifier — classifyIntent', () => {
       expect(result.extractedEntities?.displayName).toBe('Alex');
       expect(result.extractedEntities?.email).toBeUndefined();
       expect(result.extractedEntities?.phone).toBeUndefined();
+    });
+
+    it('PR #265 review — "set up an account for my appointment" stays as create_appointment (no false override)', async () => {
+      // The deterministic create_customer signup-phrasing regex used
+      // to fire on "set up an account" even when the sentence was
+      // unambiguously about scheduling. Negative-lookahead now
+      // excludes appointment/schedule context.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_appointment',
+          confidence: 0.9,
+          extractedEntities: { dateTimeDescription: 'tomorrow at 2pm' },
+        })
+      );
+      const result = await classifyIntent(
+        'Could you set up an account for my appointment tomorrow at 2pm?',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_appointment');
+    });
+
+    it('PR #265 review — "add me to the schedule" stays as create_appointment', async () => {
+      // The previous /\b(?:add|register)\s+me\b/i was so loose it
+      // caught any "add me" phrasing. Tightened to require "to (your) system".
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_appointment',
+          confidence: 0.88,
+          extractedEntities: { dateTimeDescription: 'next Tuesday' },
+        })
+      );
+      const result = await classifyIntent(
+        'Add me to the schedule for next Tuesday',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_appointment');
+    });
+
+    it('PR #265 review — "set up an account please" still classifies as create_customer', async () => {
+      // Negative lookahead must NOT swallow legitimate signup phrasings
+      // when no appointment/schedule context appears.
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'unknown',
+          confidence: 0.4,
+        })
+      );
+      const result = await classifyIntent(
+        'Set up an account please',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_customer');
+    });
+
+    it('PR #265 review — "register me to your system" classifies as create_customer', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'unknown',
+          confidence: 0.3,
+        })
+      );
+      const result = await classifyIntent(
+        'Please register me to your system',
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_customer');
     });
 
     it('routes genuinely ambiguous input to unknown so clarification can ask for the intent', async () => {

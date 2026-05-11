@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-service-os.dev/schemas/voice-quality-report.json",
+  "title": "VoiceQualityReport",
+  "description": "VQ-023 — JSON shape produced by the voice-quality report aggregator. Pinned for CI consumption + future tooling. Mirrors the TypeScript type in packages/api/src/ai/voice-quality/graders/report.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rubricVersion",
+    "generatedAt",
+    "totalScripts",
+    "totalPassed",
+    "overallPassRate",
+    "overallThreshold",
+    "meetsOverallThreshold",
+    "perBucket",
+    "perScript",
+    "costSummary",
+    "latencySummary",
+    "launchGate"
+  ],
+  "properties": {
+    "rubricVersion": {
+      "type": "string",
+      "description": "Rubric file version this report was scored against (e.g. 'v1')."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp when aggregate() ran."
+    },
+    "totalScripts": { "type": "integer", "minimum": 0 },
+    "totalPassed": { "type": "integer", "minimum": 0 },
+    "overallPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "overallThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+    "meetsOverallThreshold": { "type": "boolean" },
+    "perBucket": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/bucketVerdict" }
+    },
+    "perScript": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/perScriptVerdict" }
+    },
+    "costSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalCents", "perBucketAverageCents"],
+      "properties": {
+        "totalCents": { "type": "number", "minimum": 0 },
+        "perBucketAverageCents": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "latencySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50Ms", "p95Ms", "perBucketP95Ms"],
+      "properties": {
+        "p50Ms": { "type": "number", "minimum": 0 },
+        "p95Ms": { "type": "number", "minimum": 0 },
+        "perBucketP95Ms": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "launchGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "blockers"],
+      "properties": {
+        "pass": { "type": "boolean" },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bucketVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bucket",
+        "scriptCount",
+        "passCount",
+        "passRate",
+        "threshold",
+        "meetsThreshold",
+        "failedScripts"
+      ],
+      "properties": {
+        "bucket": { "type": "string" },
+        "scriptCount": { "type": "integer", "minimum": 0 },
+        "passCount": { "type": "integer", "minimum": 0 },
+        "passRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "meetsThreshold": { "type": "boolean" },
+        "failedScripts": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "floorResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failedCriteria", "reasons"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "failedCriteria": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "dispositionStructuredResult": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["passed", "failedCriteria", "reasons"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "failedCriteria": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "dispositionLlmResult": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["passed", "failedCriteria", "reasons"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "failedCriteria": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "reasons": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "perScriptVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scriptId",
+        "bucket",
+        "passed",
+        "floorResult",
+        "dispositionStructuredResult",
+        "durationMs",
+        "costCents",
+        "perTurnLatencyMs"
+      ],
+      "properties": {
+        "scriptId": { "type": "string" },
+        "bucket": { "type": "string" },
+        "passed": { "type": "boolean" },
+        "floorResult": { "$ref": "#/$defs/floorResult" },
+        "dispositionStructuredResult": {
+          "$ref": "#/$defs/dispositionStructuredResult"
+        },
+        "dispositionLlmResult": { "$ref": "#/$defs/dispositionLlmResult" },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "costCents": { "type": "number", "minimum": 0 },
+        "perTurnLatencyMs": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

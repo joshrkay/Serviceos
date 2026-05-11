@@ -33,6 +33,7 @@ import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository } from '../invoices/invoice';
 import { AppointmentRepository } from '../appointments/appointment';
+import { LeadRepository } from '../leads/lead';
 
 export type OwnedEntityType =
   | 'customer'
@@ -40,7 +41,8 @@ export type OwnedEntityType =
   | 'job'
   | 'estimate'
   | 'invoice'
-  | 'appointment';
+  | 'appointment'
+  | 'lead';
 
 export interface TenantOwnership {
   /**
@@ -53,6 +55,18 @@ export interface TenantOwnership {
     entityType: OwnedEntityType,
     entityId: string
   ): Promise<void>;
+  /**
+   * Same as `requireExists` but returns the loaded row so callers can
+   * read fields off it (e.g. customer.originatingLeadId for attribution
+   * propagation) without paying for a second findById round-trip.
+   * Returns `unknown` so the entity type doesn't leak into the
+   * interface; callers cast at the call site.
+   */
+  requireExistsAndLoad(
+    tenantId: string,
+    entityType: OwnedEntityType,
+    entityId: string
+  ): Promise<unknown>;
 }
 
 export interface TenantOwnershipDeps {
@@ -62,6 +76,12 @@ export interface TenantOwnershipDeps {
   estimateRepo: EstimateRepository;
   invoiceRepo: InvoiceRepository;
   appointmentRepo: AppointmentRepository;
+  /**
+   * Optional — only required when a route validates an `originatingLeadId`
+   * override (currently jobs.ts). Older callers built before P9 attribution
+   * landed don't need to pass it.
+   */
+  leadRepo?: LeadRepository;
 }
 
 /**
@@ -85,39 +105,57 @@ export function permissiveTenantOwnership(): TenantOwnership {
     async requireExists() {
       // intentionally a no-op
     },
+    async requireExistsAndLoad() {
+      return undefined;
+    },
   };
 }
 
 export function createTenantOwnership(deps: TenantOwnershipDeps): TenantOwnership {
+  async function load(
+    tenantId: string,
+    entityType: OwnedEntityType,
+    entityId: string
+  ): Promise<unknown> {
+    switch (entityType) {
+      case 'customer':
+        return deps.customerRepo.findById(tenantId, entityId);
+      case 'location':
+        return deps.locationRepo.findById(tenantId, entityId);
+      case 'job':
+        return deps.jobRepo.findById(tenantId, entityId);
+      case 'estimate':
+        return deps.estimateRepo.findById(tenantId, entityId);
+      case 'invoice':
+        return deps.invoiceRepo.findById(tenantId, entityId);
+      case 'appointment':
+        return deps.appointmentRepo.findById(tenantId, entityId);
+      case 'lead':
+        if (!deps.leadRepo) {
+          throw new Error(
+            "TenantOwnership requires deps.leadRepo to load 'lead' entities"
+          );
+        }
+        return deps.leadRepo.findById(tenantId, entityId);
+    }
+  }
+
+  function notFound(entityType: OwnedEntityType, entityId: string): NotFoundError {
+    // Capitalize the entity type so the error label reads naturally
+    // ("Customer not found", not "customer not found").
+    const label = entityType.charAt(0).toUpperCase() + entityType.slice(1);
+    return new NotFoundError(label, entityId);
+  }
+
   return {
     async requireExists(tenantId, entityType, entityId) {
-      let found: unknown = null;
-      switch (entityType) {
-        case 'customer':
-          found = await deps.customerRepo.findById(tenantId, entityId);
-          break;
-        case 'location':
-          found = await deps.locationRepo.findById(tenantId, entityId);
-          break;
-        case 'job':
-          found = await deps.jobRepo.findById(tenantId, entityId);
-          break;
-        case 'estimate':
-          found = await deps.estimateRepo.findById(tenantId, entityId);
-          break;
-        case 'invoice':
-          found = await deps.invoiceRepo.findById(tenantId, entityId);
-          break;
-        case 'appointment':
-          found = await deps.appointmentRepo.findById(tenantId, entityId);
-          break;
-      }
-      if (!found) {
-        // Capitalize the entity type so the error label reads naturally
-        // ("Customer not found", not "customer not found").
-        const label = entityType.charAt(0).toUpperCase() + entityType.slice(1);
-        throw new NotFoundError(label, entityId);
-      }
+      const found = await load(tenantId, entityType, entityId);
+      if (!found) throw notFound(entityType, entityId);
+    },
+    async requireExistsAndLoad(tenantId, entityType, entityId) {
+      const found = await load(tenantId, entityType, entityId);
+      if (!found) throw notFound(entityType, entityId);
+      return found;
     },
   };
 }

@@ -50,6 +50,12 @@ function inputFor(
     createdBy: context.userId,
     missingFields: missingFields.length > 0 ? missingFields : undefined,
     sourceTrustTier: opts?.trust,
+    // PR B — pass through the tenant threshold override the router
+    // resolved at request entry. All 8 voice-extended task call sites
+    // route through this helper, so this is a single touch point.
+    ...(context.tenantThresholdOverride
+      ? { tenantThresholdOverride: context.tenantThresholdOverride }
+      : {}),
   };
 }
 
@@ -224,6 +230,26 @@ export class RecordPaymentTaskHandler implements TaskHandler {
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── emergency_dispatch ─────────────
+//
+// Fast-path — irreversible action class. Proposal creation is the only
+// step; the state machine skips entity_resolution and intent_confirm.
+export class EmergencyDispatchTaskHandler implements TaskHandler {
+  readonly taskType = 'emergency_dispatch' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const payload: Record<string, unknown> = {
+      emergencyDescription: context.message,
+      detectedKeywords: [],
+    };
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
       taskType: this.taskType,
     };
   }

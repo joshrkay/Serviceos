@@ -3,12 +3,36 @@ import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
 
+/**
+ * Phase 12 — supervisor-mode-related settings on tenant_settings.
+ *
+ * Schema lives in migration 063 (P12-001). The repository round-trips
+ * these alongside the rest of TenantSettings; the routes layer
+ * exposes them via the existing PUT /api/settings handler with
+ * enum validation on `unsupervisedProposalRouting`.
+ */
+export type UnsupervisedProposalRouting =
+  | 'queue_and_sms'
+  | 'queue_only'
+  | 'escalate_to_oncall';
+
+export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedProposalRouting> = [
+  'queue_and_sms',
+  'queue_only',
+  'escalate_to_oncall',
+];
+
 export interface TenantSettings {
   id: string;
   tenantId: string;
   businessName: string;
-  businessPhone?: string;
-  businessEmail?: string;
+  // Codex P2 (PR #316): allow null on optional string fields so the
+  // update path can carry "clear this column" through the type system.
+  // Reads from PgSettings always normalize NULL → undefined via mapRow,
+  // so callers consuming TenantSettings rows in normal flows will see
+  // undefined; null only appears transiently in update inputs.
+  businessPhone?: string | null;
+  businessEmail?: string | null;
   timezone: string;
   estimatePrefix: string;
   invoicePrefix: string;
@@ -17,6 +41,85 @@ export interface TenantSettings {
   defaultPaymentTermDays: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /**
+   * Phase 12 — userId of the backup supervisor invoked when the
+   * primary supervisor switches to tech mode. Null = no backup
+   * (unsupervised routing applies). Validated by the route as a
+   * non-empty string; FK enforcement happens at the DB.
+   */
+  backupSupervisorUserId?: string | null;
+  /**
+   * Phase 12 — what to do with low-confidence proposals while the
+   * tenant is unsupervised. See `auto-approve.ts` and the routing
+   * worker (follow-up). Default `'queue_and_sms'`.
+   */
+  unsupervisedProposalRouting?: UnsupervisedProposalRouting;
+  /**
+   * Tier 4 (Settings stubs) — when true, low-risk internal updates
+   * the AI proposes are applied automatically. When false, every
+   * change requires a human tap. Default false (stricter).
+   */
+  autoApplyInternalUpdates?: boolean;
+  /**
+   * Tier 4 (Settings stubs) — when true, the system text-messages
+   * customers ~2h before scheduled appointments. Default true.
+   */
+  autoSendAppointmentReminders?: boolean;
+  /**
+   * Tier 4 (AI approval rules) — per-mode override of the proposal
+   * auto-approve threshold. Consumed by
+   * `proposals/auto-approve.ts:resolveAutoApproveThreshold` via the
+   * `tenantOverride` field. A missing key (or `undefined` value)
+   * falls through to `DEFAULT_AUTO_APPROVE_THRESHOLDS`. Each value is
+   * a confidence threshold in `[0, 1]`.
+   *
+   * Wiring this map into the actual proposal-creation hot path is
+   * tracked separately (PR B) — this PR persists the value
+   * end-to-end (Settings UI ↔ DB) without yet feeding it to
+   * `createProposal`. Behavior unchanged until the wire-up lands.
+   */
+  autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /**
+   * Tier 4 (Deposit rules — PR 1: data plane only). Strategy + amount
+   * for requiring a deposit before work begins. Consumed by the
+   * estimate-flow integration that lands in PR 2; this PR persists
+   * the settings end-to-end without changing behavior.
+   *
+   * Field correlation rules (mirrored by the migration's CHECK):
+   *   - When `depositStrategy` is null/undefined, no deposit applies.
+   *   - When `depositStrategy === 'percentage'`, `depositPercentageBps`
+   *     must be set (0–10000 = 0%–100%).
+   *   - When `depositStrategy === 'fixed'`, `depositFixedCents` must
+   *     be set (non-negative integer).
+   *   - `depositRequiredAboveCents` is an optional threshold: when
+   *     null, the rule applies to every estimate; otherwise only
+   *     estimates whose total `>=` this amount require a deposit.
+   */
+  depositStrategy?: 'percentage' | 'fixed' | null;
+  depositPercentageBps?: number | null;
+  depositFixedCents?: number | null;
+  depositRequiredAboveCents?: number | null;
+  /**
+   * Tier 4 (Deposit rules — PR 3a-extended). Controls when the
+   * customer is prompted to pay the deposit relative to estimate
+   * approval. See migration 079 for accepted values. Default
+   * 'after_approval' (preserves existing flow).
+   */
+  depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /**
+   * B1 — Per-tenant voice persona. When set, the calling agent uses
+   * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
+   * help?"). Null = use the default generic opener.
+   */
+  voiceAgentName?: string | null;
+  /**
+   * B1 — Per-tenant voice persona. When set, this text replaces the
+   * entire static portion of the greeting (the "Thank you for calling
+   * …" or "Hi, this is your assistant" segment). For the telephony
+   * channel the recording-disclosure sentence is still appended after
+   * the custom greeting text. Null = use default.
+   */
+  voiceGreeting?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -36,14 +139,38 @@ export interface CreateSettingsInput {
 
 export interface UpdateSettingsInput {
   businessName?: string;
-  businessPhone?: string;
-  businessEmail?: string;
-  timezone?: string;
+  // Codex P2 (PR #316): explicit null = clear field. Sending `undefined`
+  // means "don't touch" because JSON.stringify drops it; sending null
+  // routes through PgSettings.update's `value ?? null` to a SQL NULL.
+  businessPhone?: string | null;
+  businessEmail?: string | null;
+  timezone?: string | null;
   estimatePrefix?: string;
   invoicePrefix?: string;
   defaultPaymentTermDays?: number;
   terminologyPreferences?: Record<string, string>;
   activeVerticalPacks?: string[];
+  /** Phase 12 — null clears the backup. */
+  backupSupervisorUserId?: string | null;
+  /** Phase 12 — see `UnsupervisedProposalRouting` for accepted values. */
+  unsupervisedProposalRouting?: UnsupervisedProposalRouting;
+  /** Tier 4 — auto-apply low-risk internal AI updates without asking. */
+  autoApplyInternalUpdates?: boolean;
+  /** Tier 4 — auto-text customers ~2h before scheduled appointments. */
+  autoSendAppointmentReminders?: boolean;
+  /** Tier 4 — per-mode override of the proposal auto-approve threshold. */
+  autoApproveThreshold?: Partial<Record<'supervisor' | 'tech' | 'both', number>>;
+  /** Tier 4 (Deposit rules) — see TenantSettings doc for correlation rules. */
+  depositStrategy?: 'percentage' | 'fixed' | null;
+  depositPercentageBps?: number | null;
+  depositFixedCents?: number | null;
+  depositRequiredAboveCents?: number | null;
+  /** Tier 4 — when the deposit is collected relative to approval. */
+  depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /** B1 — voice persona name; null clears the field. */
+  voiceAgentName?: string | null;
+  /** B1 — custom greeting text; null clears the field. */
+  voiceGreeting?: string | null;
 }
 
 export interface SettingsRepository {
@@ -89,7 +216,12 @@ export function validateUpdateSettingsInput(
 }
 
 function validateCommonSettingsFields(
-  input: Pick<CreateSettingsInput, 'timezone' | 'estimatePrefix' | 'invoicePrefix' | 'defaultPaymentTermDays'>
+  input: {
+    timezone?: string | null;
+    estimatePrefix?: string;
+    invoicePrefix?: string;
+    defaultPaymentTermDays?: number;
+  }
 ): string[] {
   const errors: string[] = [];
   if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
@@ -244,7 +376,16 @@ export async function updateSettings(
     throw new Error(`Validation failed: ${errors.join('; ')}`);
   }
 
-  return repository.update(tenantId, { ...normalizedInput, updatedAt: new Date() });
+  // Codex P2 (PR #316): UpdateSettingsInput allows null on optional
+  // string fields so callers can clear them. Repos accept null at
+  // runtime (Pg's `value ?? null` becomes a SQL NULL; InMemory just
+  // stores the null). The type cast bridges the gap without widening
+  // every TenantSettings consumer to handle null reads — those still
+  // see undefined because mapRow normalizes NULL → undefined.
+  return repository.update(
+    tenantId,
+    { ...normalizedInput, updatedAt: new Date() } as Partial<TenantSettings>,
+  );
 }
 
 /**
@@ -323,6 +464,31 @@ export async function getNextInvoiceNumber(
   return `${settings.invoicePrefix}${String(num).padStart(4, '0')}`;
 }
 
+/**
+ * Tier 4 — entity-label keys the Terminology sheet edits.
+ * These describe how the tenant wants ServiceOS to refer to common
+ * CRM entities (e.g. "Quote" instead of "Estimate", "Project" instead
+ * of "Job"). Distinct from per-vertical equipment terminology keys
+ * which come from the active pack at runtime.
+ *
+ * Used by `validateTerminologyPreferences` so a PUT /api/settings can
+ * persist these regardless of which vertical packs are active. The
+ * onboarding route already writes these keys directly through the
+ * repo; this allowlist makes them editable through the API too.
+ */
+export const ENTITY_LABEL_TERMINOLOGY_KEYS = [
+  'jobTerm',
+  'estimateTerm',
+  'invoiceTerm',
+  'customerTerm',
+  'appointmentTerm',
+  'workerTerm',
+  // Onboarding seeds these too — included here so a re-save of the
+  // existing payload doesn't accidentally fail validation.
+  'teamSize',
+  'ownerName',
+] as const;
+
 export function validateTerminologyPreferences(
   preferences: Record<string, string>,
   validKeys?: string[]
@@ -332,6 +498,9 @@ export function validateTerminologyPreferences(
     errors.push('terminologyPreferences must be an object');
     return errors;
   }
+  const allowed = validKeys
+    ? new Set([...validKeys, ...ENTITY_LABEL_TERMINOLOGY_KEYS])
+    : null;
   for (const [key, value] of Object.entries(preferences)) {
     if (!key || key.trim().length === 0) {
       errors.push('terminologyPreferences key must not be empty');
@@ -339,7 +508,7 @@ export function validateTerminologyPreferences(
     if (typeof value !== 'string' || value.trim().length === 0) {
       errors.push(`terminologyPreferences value for "${key}" must be a non-empty string`);
     }
-    if (validKeys && !validKeys.includes(key)) {
+    if (allowed && !allowed.has(key)) {
       errors.push(`terminologyPreferences key "${key}" is not a recognized term for the active vertical`);
     }
   }

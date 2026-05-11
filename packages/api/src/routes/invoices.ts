@@ -8,15 +8,22 @@ import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoiceWithNextNumber,
   listInvoices,
+  listInvoicesWithMeta,
   getInvoice,
   updateInvoice,
   issueInvoice,
   transitionInvoiceStatus,
   InvoiceRepository,
+  InvoiceStatus,
+  DEFAULT_INVOICE_LIMIT,
+  MAX_INVOICE_LIMIT,
 } from '../invoices/invoice';
-import { AuditRepository } from '../audit/audit';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
+import { SendService } from '../notifications/send-service';
+import { Job, JobRepository } from '../jobs/job';
 
 const nestedPaymentSchema = z.object({
   amountCents: z.number().int().positive(),
@@ -30,7 +37,12 @@ export function createInvoiceRouter(
   settingsRepo: SettingsRepository,
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
-  paymentRepo?: PaymentRepository
+  paymentRepo?: PaymentRepository,
+  sendService?: SendService,
+  // Tier 4 (Deposit rules — PR 3c). Optional so legacy harnesses
+  // without a job repo still build the router; deposit credit only
+  // fires when both jobRepo + paymentRepo are wired.
+  jobRepo?: JobRepository,
 ): Router {
   const router = Router();
 
@@ -42,16 +54,22 @@ export function createInvoiceRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createInvoiceSchema.parse(req.body);
-        // Cross-entity tenant guard: jobId must belong to the
-        // requesting tenant. estimateId is optional — guard it only
-        // when present.
-        await ownership.requireExists(req.auth!.tenantId, 'job', parsed.jobId);
+        // Cross-entity tenant guard + load: requireExistsAndLoad returns
+        // the job so we can read originatingLeadId for attribution
+        // propagation without a second findById round-trip.
+        const job = (await ownership.requireExistsAndLoad(
+          req.auth!.tenantId,
+          'job',
+          parsed.jobId
+        )) as Job | undefined;
         if (parsed.estimateId) {
           await ownership.requireExists(req.auth!.tenantId, 'estimate', parsed.estimateId);
         }
+
         const result = await createInvoiceWithNextNumber(
           {
             ...parsed,
+            originatingLeadId: job?.originatingLeadId,
             tenantId: req.auth!.tenantId,
             createdBy: req.auth!.userId,
           },
@@ -59,7 +77,57 @@ export function createInvoiceRouter(
           settingsRepo,
           auditRepo
         );
-        res.status(201).json(result);
+
+        // Tier 4 (Deposit rules — PR 3c). When the linked job has a
+        // paid deposit that hasn't been credited to any invoice yet,
+        // apply it as a system payment + reduce amountDue on this
+        // invoice. No-op when the deposit is 0, already-consumed, or
+        // when the deps haven't been wired (legacy harnesses). Failure
+        // here must NOT bounce the invoice creation — we already
+        // returned the invoice number and the customer expects a
+        // record. Surface as a structured log + an audit event so
+        // dispatch can reconcile manually.
+        let credited = result;
+        if (jobRepo && paymentRepo && job) {
+          try {
+            const credit = await applyDepositCreditToInvoice(
+              result,
+              job,
+              invoiceRepo,
+              paymentRepo,
+              jobRepo,
+            );
+            if (credit) credited = credit.invoice;
+          } catch (creditErr) {
+            // Best-effort. Invoice exists with the right total; the
+            // unconsumed deposit stays on the job and operations can
+            // apply it manually if this hook misfires repeatedly.
+            //
+            // CRITICAL: the audit-write below ALSO has to be best-effort.
+            // A storage hiccup must not flip a successful invoice
+            // creation to a 500 — the client would retry and create a
+            // duplicate invoice (a separate row, since the first
+            // POST already returned a real id). PR 319 review feedback.
+            const message = creditErr instanceof Error ? creditErr.message : String(creditErr);
+            try {
+              await auditRepo.create(
+                createAuditEvent({
+                  tenantId: req.auth!.tenantId,
+                  actorId: req.auth!.userId,
+                  actorRole: 'system',
+                  eventType: 'invoice.deposit_credit_failed',
+                  entityType: 'invoice',
+                  entityId: result.id,
+                  metadata: { jobId: job.id, error: message },
+                }),
+              );
+            } catch {
+              // Audit write failure cannot block the response — the
+              // invoice is real and the client should see it.
+            }
+          }
+        }
+        res.status(201).json(credited);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -75,9 +143,69 @@ export function createInvoiceRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
-        const result = jobId
-          ? await invoiceRepo.findByJob(req.auth!.tenantId, jobId)
-          : await listInvoices(req.auth!.tenantId, invoiceRepo);
+        const status = typeof req.query.status === 'string' ? req.query.status as InvoiceStatus : undefined;
+        const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+        const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+
+        // P1-018 — date range filters: dueAfter / dueBefore (ISO).
+        const dueAfter = typeof req.query.dueAfter === 'string' ? req.query.dueAfter : undefined;
+        const dueBefore = typeof req.query.dueBefore === 'string' ? req.query.dueBefore : undefined;
+        const fromDueDate = dueAfter ? new Date(dueAfter) : undefined;
+        const toDueDate = dueBefore ? new Date(dueBefore) : undefined;
+        if (fromDueDate && Number.isNaN(fromDueDate.getTime())) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'dueAfter must be a valid ISO date' });
+          return;
+        }
+        if (toDueDate && Number.isNaN(toDueDate.getTime())) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'dueBefore must be a valid ISO date' });
+          return;
+        }
+
+        // Legacy single-job lookup still returns the bare array shape so
+        // existing UI code continues to work without an opt-in.
+        if (jobId && req.query.paginated !== 'true' && req.query.limit === undefined && req.query.offset === undefined) {
+          const result = await invoiceRepo.findByJob(req.auth!.tenantId, jobId);
+          res.json(result);
+          return;
+        }
+
+        const wantsPaginated =
+          req.query.paginated === 'true' ||
+          req.query.limit !== undefined ||
+          req.query.offset !== undefined;
+
+        const limitRaw = req.query.limit as string | undefined;
+        const offsetRaw = req.query.offset as string | undefined;
+        const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_INVOICE_LIMIT;
+        const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
+        if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_INVOICE_LIMIT)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `limit must be between 1 and ${MAX_INVOICE_LIMIT}`,
+          });
+          return;
+        }
+        if (offsetRaw !== undefined && (Number.isNaN(offset) || offset < 0)) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'offset must be a non-negative integer',
+          });
+          return;
+        }
+
+        const baseOptions = { status, jobId, search, fromDueDate, toDueDate, sort } as const;
+
+        if (wantsPaginated) {
+          const result = await listInvoicesWithMeta(req.auth!.tenantId, invoiceRepo, {
+            ...baseOptions,
+            limit,
+            offset,
+          });
+          res.json(result);
+          return;
+        }
+
+        const result = await listInvoices(req.auth!.tenantId, invoiceRepo, baseOptions);
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -208,6 +336,45 @@ export function createInvoiceRouter(
           return;
         }
         res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
+  );
+
+  router.post(
+    '/:id/send',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!sendService) {
+          res
+            .status(503)
+            .json({
+              error: 'NOT_CONFIGURED',
+              message: 'Message delivery is not configured for this environment',
+            });
+          return;
+        }
+        const parsed = z.object({
+          channel: z.enum(['sms', 'email', 'both']).default('sms'),
+          recipientPhone: z.string().optional(),
+          recipientEmail: z.string().optional(),
+          customMessage: z.string().optional(),
+        }).safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+          return;
+        }
+        const result = await sendService.sendInvoice({
+          tenantId: req.auth!.tenantId,
+          invoiceId: req.params.id,
+          ...parsed.data,
+        });
+        res.status(202).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

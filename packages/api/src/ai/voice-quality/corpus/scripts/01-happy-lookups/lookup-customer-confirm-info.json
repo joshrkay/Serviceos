@@ -1,0 +1,48 @@
+{
+  "id": "lookup-customer-confirm-info",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550102",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_customer",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_customer_carlos",
+        "tenantId": "t_01_lookup_customer",
+        "firstName": "Carlos",
+        "lastName": "Rivera",
+        "displayName": "Carlos Rivera",
+        "companyName": null,
+        "primaryPhone": "+15555550102",
+        "secondaryPhone": null,
+        "email": "carlos.rivera@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": true,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-10T09:00:00.000Z",
+        "updatedAt": "2026-04-01T09:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "I'd like to confirm my contact information on file",
+      "expected": {
+        "intent": "lookup_customer",
+        "spokenAnswerMatches": "read back the contact info on file for Carlos Rivera (phone +1 555 555 0102 and email carlos.rivera@example.com)"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5],
+    "appliesDisposition": [9, 12]
+  },
+  "layer2Eligible": true
+}

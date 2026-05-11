@@ -9,6 +9,17 @@ import request from 'supertest';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { buildTestApp, TEST_TENANT_ID, TEST_USER_ID } from './test-app';
 import type { Express } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
+import { createJobRouter } from '../../src/routes/jobs';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryQueue } from '../../src/queues/queue';
+import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import type { Customer } from '../../src/customers/customer';
+import type { ServiceLocation } from '../../src/locations/location';
+import type { TenantOwnership } from '../../src/shared/tenant-ownership';
 
 describe('GET /api/jobs', () => {
   let app: Express;
@@ -93,6 +104,71 @@ describe('GET /api/jobs', () => {
   });
 });
 
+describe('P1-018 — listJobs filtering + pagination', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function seedJob(summary: string) {
+    return request(app).post('/api/jobs').send({
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      summary,
+    });
+  }
+
+  it('filter by status returns only matching jobs', async () => {
+    const j1 = await seedJob('Replace condenser');
+    await seedJob('Flush drain');
+    await seedJob('Tune-up');
+
+    await request(app).post(`/api/jobs/${j1.body.id}/transition`).send({ status: 'scheduled' });
+
+    const res = await request(app).get('/api/jobs?status=scheduled');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].id).toBe(j1.body.id);
+  });
+
+  it('search by ILIKE on summary (case-insensitive)', async () => {
+    await seedJob('Install Heat Pump');
+    await seedJob('Replace water heater');
+    const res = await request(app).get('/api/jobs?search=HEAT');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+  });
+
+  it('pagination with limit/offset returns { data, total }', async () => {
+    for (let i = 0; i < 4; i++) {
+      await seedJob(`Job ${i}`);
+    }
+    const res = await request(app).get('/api/jobs?limit=2&offset=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.total).toBe(4);
+  });
+
+  it('rejects limit > 200 with 400', async () => {
+    const res = await request(app).get('/api/jobs?limit=500');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('total reflects post-filter count when status is applied', async () => {
+    const j1 = await seedJob('A');
+    await seedJob('B');
+    await seedJob('C');
+    await request(app).post(`/api/jobs/${j1.body.id}/transition`).send({ status: 'scheduled' });
+
+    const res = await request(app).get('/api/jobs?status=scheduled&paginated=true&limit=10');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.data).toHaveLength(1);
+  });
+});
+
 describe('POST /api/jobs', () => {
   let app: Express;
 
@@ -135,6 +211,78 @@ describe('POST /api/jobs', () => {
     expect(res.body.details.fields).toHaveProperty('customerId');
     expect(res.body.details.fields).toHaveProperty('locationId');
   });
+
+  it('rejects a location that belongs to a different customer', async () => {
+    const routeApp = express();
+    routeApp.use(express.json());
+    routeApp.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER_ID,
+        sessionId: 'session-test-1',
+        tenantId: TEST_TENANT_ID,
+        role: 'owner',
+      };
+      next();
+    });
+
+    const customer: Customer = {
+      id: 'cust-a',
+      tenantId: TEST_TENANT_ID,
+      firstName: 'Jordan',
+      lastName: 'Runbook',
+      displayName: 'Jordan Runbook',
+      preferredChannel: 'none',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: TEST_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const mismatchedLocation: ServiceLocation = {
+      id: 'loc-b',
+      tenantId: TEST_TENANT_ID,
+      customerId: 'cust-b',
+      street1: '200 Rental Rd',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78702',
+      country: 'US',
+      isPrimary: false,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const ownership: TenantOwnership = {
+      async requireExists() {},
+      async requireExistsAndLoad(_tenantId, entityType) {
+        if (entityType === 'customer') return customer;
+        if (entityType === 'location') return mismatchedLocation;
+        return undefined;
+      },
+    };
+
+    routeApp.use(
+      '/api/jobs',
+      createJobRouter(
+        new InMemoryJobRepository(),
+        new InMemoryJobTimelineRepository(),
+        new InMemoryAuditRepository(),
+        ownership,
+        new InMemoryQueue(),
+        new NoopFeedbackDispatcher(),
+      ),
+    );
+
+    const res = await request(routeApp).post('/api/jobs').send({
+      customerId: 'cust-a',
+      locationId: 'loc-b',
+      summary: 'Cross-customer location attempt',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.message).toMatch(/location does not belong to customer/i);
+  });
 });
 
 describe('GET /api/jobs/:id', () => {
@@ -175,6 +323,88 @@ describe('GET /api/jobs/:id', () => {
     // Verify the job IS visible under the test tenant
     const res = await request(app).get(`/api/jobs/${created.body.id}`);
     expect(res.status).toBe(200);
+  });
+
+  it('does not enrich a job with a location from a different customer', async () => {
+    const routeApp = express();
+    routeApp.use(express.json());
+    routeApp.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER_ID,
+        sessionId: 'session-test-1',
+        tenantId: TEST_TENANT_ID,
+        role: 'owner',
+      };
+      next();
+    });
+
+    const customer: Customer = {
+      id: 'cust-a',
+      tenantId: TEST_TENANT_ID,
+      firstName: 'Jordan',
+      lastName: 'Runbook',
+      displayName: 'Jordan Runbook',
+      preferredChannel: 'none',
+      smsConsent: false,
+      communicationNotes: 'Gate code is 1234.',
+      isArchived: false,
+      createdBy: TEST_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const mismatchedLocation: ServiceLocation = {
+      id: 'loc-b',
+      tenantId: TEST_TENANT_ID,
+      customerId: 'cust-b',
+      street1: '200 Rental Rd',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78702',
+      country: 'US',
+      isPrimary: false,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const ownership: TenantOwnership = {
+      async requireExists() {},
+      async requireExistsAndLoad(_tenantId, entityType) {
+        if (entityType === 'customer') return customer;
+        if (entityType === 'location') return mismatchedLocation;
+        return undefined;
+      },
+    };
+    const jobRepo = new InMemoryJobRepository();
+    routeApp.use(
+      '/api/jobs',
+      createJobRouter(
+        jobRepo,
+        new InMemoryJobTimelineRepository(),
+        new InMemoryAuditRepository(),
+        ownership,
+        new InMemoryQueue(),
+        new NoopFeedbackDispatcher(),
+      ),
+    );
+    const created = await jobRepo.create({
+      id: 'job-1',
+      tenantId: TEST_TENANT_ID,
+      customerId: 'cust-a',
+      locationId: 'loc-b',
+      jobNumber: 'JOB-0001',
+      summary: 'Imported bad row',
+      status: 'new',
+      priority: 'normal',
+      createdBy: TEST_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const res = await request(routeApp).get(`/api/jobs/${created.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.customer.displayName).toBe('Jordan Runbook');
+    expect(res.body.customer.locations).toEqual([]);
   });
 });
 

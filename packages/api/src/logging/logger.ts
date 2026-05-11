@@ -1,4 +1,4 @@
-import { redactSecrets } from './redact';
+import { redactSecrets, serializeRedacted } from './redact';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -51,7 +51,7 @@ export function createLogger(opts: {
       ...meta,
     });
 
-    const output = JSON.stringify(entry);
+    const output = serializeRedacted(entry, 'standard');
     if (level === 'error') {
       process.stderr.write(output + '\n');
     } else {

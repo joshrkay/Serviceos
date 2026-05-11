@@ -204,6 +204,51 @@ describe('GET /api/invoices', () => {
   });
 });
 
+describe('P1-018 — listInvoices filter + pagination', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('filter by status=draft returns only drafts', async () => {
+    const r1 = await createInvoice(app, { jobId: 'job-1' });
+    await createInvoice(app, { jobId: 'job-2' });
+    // Issue r1 → status becomes 'open'
+    await request(app).post(`/api/invoices/${r1.body.id}/issue`).send({});
+
+    const res = await request(app).get('/api/invoices?status=draft');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].status).toBe('draft');
+  });
+
+  it('pagination with limit/offset returns { data, total }', async () => {
+    for (let i = 0; i < 3; i++) {
+      await createInvoice(app, { jobId: `job-${i}` });
+    }
+    const res = await request(app).get('/api/invoices?limit=2&offset=0');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.total).toBe(3);
+  });
+
+  it('rejects limit > 200 with 400', async () => {
+    const res = await request(app).get('/api/invoices?limit=500');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('legacy ?jobId= still returns bare array (backwards compat)', async () => {
+    await createInvoice(app, { jobId: 'job-1' });
+    await createInvoice(app, { jobId: 'job-2' });
+    const res = await request(app).get('/api/invoices?jobId=job-1');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(1);
+  });
+});
+
 describe('POST /api/invoices/:id/payment', () => {
   let app: Express;
 

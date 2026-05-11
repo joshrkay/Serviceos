@@ -130,6 +130,116 @@ function getMissingItemRules(verticalType?: VerticalType): MissingItemRule[] {
   }
 }
 
+/**
+ * §3E — render the pack's `objectionScripts` as a prompt-shaped block.
+ * Two distinct uses:
+ *   1. Detection — the classifier sees the trigger patterns and learns
+ *      which utterances should fire `objection_detected`.
+ *   2. Reframe — when an objection is detected, the agent reads off
+ *      the matching `reframe` string verbatim before continuing.
+ *
+ * Returns '' for null/empty pack so callers can unconditionally
+ * concatenate. Mirrors the §3B/§3C/§3D formatter shapes.
+ */
+export function formatObjectionScriptsForPrompt(
+  pack: import('./registry').VerticalPack | null | undefined,
+): string {
+  if (!pack) return '';
+  const scripts = pack.objectionScripts ?? [];
+  if (scripts.length === 0) return '';
+
+  const lines: string[] = [
+    'Objection-handling scripts (use the matching reframe verbatim when caller says something matching the trigger patterns):',
+  ];
+  for (const s of scripts) {
+    lines.push(`  - id: ${s.id}`);
+    lines.push(`    triggers: ${s.patterns.join(', ')}`);
+    lines.push(`    reframe: "${s.reframe}"`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * §3D — render the pack's `intakeQuestions` as a prompt-shaped block
+ * the calling agent injects into the classifier system prompt. The
+ * questions are reference material the LLM uses when classifier
+ * confidence is below TAU_INT — instead of asking a generic "Can you
+ * tell me more?" the agent picks a vertical-specific clarifying
+ * question.
+ *
+ * Returns '' for null/undefined pack OR a pack with no intake
+ * questions, so callers can unconditionally concatenate.
+ */
+export function formatIntakeQuestionsForPrompt(
+  pack: import('./registry').VerticalPack | null | undefined,
+): string {
+  if (!pack) return '';
+  const questions = pack.intakeQuestions ?? [];
+  if (questions.length === 0) return '';
+
+  const lines: string[] = ['Disambiguation questions to use when caller intent is unclear:'];
+  for (const q of questions) {
+    const intentLabel = q.intent ? ` [intent: ${q.intent}]` : '';
+    lines.push(`  - "${q.question}"${intentLabel}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build a prompt section the calling agent can inject into its system
+ * prompt for the `intent_capture` and downstream states. Closes §3B from
+ * `docs/remaining-features.md`: without this, the agent receives the
+ * VerticalContext as raw structure with no instructions on how to use it.
+ *
+ * The output is plain text shaped for an LLM:
+ *   Service vertical: <name>
+ *   Industry context: <description>
+ *   Equipment and terminology recognized:
+ *     - <DisplayLabel> (alias, alias)
+ *     ...
+ *   Service types offered:
+ *     - <Category name>: <description>
+ *
+ * Returns an empty string when no pack is provided so callers can
+ * unconditionally concatenate the result.
+ *
+ * Emergency indicators, intake disambiguation questions, and objection
+ * scripts (§3D / §3E) are tracked separately — their data shape isn't
+ * on `VerticalPack` yet. Once those fields land, extend this formatter
+ * with additional sections.
+ */
+export function formatVerticalForCallerPrompt(
+  pack: import('./registry').VerticalPack | null | undefined,
+): string {
+  if (!pack) return '';
+
+  const lines: string[] = [];
+  const displayName = pack.displayName ?? pack.name;
+  if (displayName) lines.push(`Service vertical: ${displayName}`);
+  if (pack.description) lines.push(`Industry context: ${pack.description}`);
+
+  const terminology = pack.terminology ?? {};
+  const equipmentLines = Object.values(terminology).map((entry) => {
+    const aliases = entry.aliases.length > 0 ? ` (${entry.aliases.join(', ')})` : '';
+    return `  - ${entry.displayName}${aliases}`;
+  });
+  if (equipmentLines.length > 0) {
+    lines.push('Equipment and terminology recognized:');
+    lines.push(...equipmentLines);
+  }
+
+  const categories = pack.categories ?? [];
+  if (categories.length > 0) {
+    lines.push('Service types offered:');
+    for (const cat of categories) {
+      const desc = cat.description ? `: ${cat.description}` : '';
+      lines.push(`  - ${cat.name}${desc}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 export function buildContextPromptSection(context: VerticalContext): string {
   const sections: string[] = [];
 
