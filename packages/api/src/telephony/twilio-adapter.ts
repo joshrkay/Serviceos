@@ -1657,6 +1657,121 @@ export class TwilioGatherAdapter {
     fallbackReason: string,
   ): void {
     this.processor.finalizeTerminatedSession(session, sideEffects, fallbackReason);
+    if (session.terminalOutcome) return;
+    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
+    const reason =
+      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
+        ? endSessionEffect.payload.reason
+        : undefined) ?? fallbackReason;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason: reason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = reason;
+    void this.persistSessionEnded(session, reason, outcome);
+  }
+
+  /**
+   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
+   * fire-and-forget; errors are swallowed (outcome stamping is
+   * best-effort, never breaks a call flow).
+   */
+  private async persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!this.deps.voiceSessionRepo) return;
+    try {
+      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
+        // can surface the full conversation without relying on the
+        // process-scoped VoiceSessionStore.
+        transcript: session.transcript.length > 0 ? [...session.transcript] : undefined,
+        // Stamp the customer FK so the interactions list can join to
+        // the customers table and surface the linked customer.
+        ...(session.customerId !== undefined ? { customerId: session.customerId } : {}),
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
+    }
+  }
+
+  private async runSummary(session: VoiceSession): Promise<void> {
+    const durationMs = Date.now() - session.createdAt.getTime();
+
+    // Skip when the caller hung up before speaking — there's nothing to
+    // summarize and the LLM call wastes tokens generating filler. The
+    // outcome stamp below still runs.
+    if (session.transcript.length === 0) {
+      logger.info('runSummary: skipping (empty transcript)', {
+        sessionId: session.id,
+      });
+    } else {
+      const intentDetected = session.machine.currentContext.currentIntent;
+      const SUMMARY_RETRY_DELAYS_MS = [200, 800];
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt <= SUMMARY_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          await summarizeSession({
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            transcript: session.transcript,
+            proposalIds: session.proposalIds,
+            durationMs,
+            gateway: this.deps.gateway,
+            ...(intentDetected ? { intentDetected } : {}),
+            ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+          });
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < SUMMARY_RETRY_DELAYS_MS.length) {
+            await new Promise((r) => {
+              const t = setTimeout(r, SUMMARY_RETRY_DELAYS_MS[attempt]);
+              if (typeof t.unref === 'function') t.unref();
+            });
+          }
+        }
+      }
+      if (lastErr) {
+        // After bounded retries, don't bubble — the call has ended and the
+        // outcome stamp + audit log carry the operationally important data.
+        // Logged at warn so on-call sees a visible signal in metrics.
+        logger.warn('summarizeSession failed after retries', {
+          error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+          sessionId: session.id,
+          attempts: SUMMARY_RETRY_DELAYS_MS.length + 1,
+        });
+      }
+    }
+
+    const callSid = session.machine.currentContext.callSid;
+    if (this.deps.voiceRepo?.stampOutcomeByCallSid && callSid) {
+      try {
+        await this.deps.voiceRepo.stampOutcomeByCallSid(
+          session.tenantId,
+          callSid,
+          this.deriveCallOutcome(session),
+        );
+      } catch (err) {
+        logger.warn('stampOutcomeByCallSid failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid,
+        });
+      }
+    }
   }
 
   /**
