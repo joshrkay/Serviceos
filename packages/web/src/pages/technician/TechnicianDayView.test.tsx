@@ -1,7 +1,14 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { MemoryRouter } from 'react-router';
 import { TechnicianDayView } from './TechnicianDayView';
+
+// TechnicianDayView calls useNavigate() internally (per the merge that
+// added job-detail navigation), so it requires a Router ancestor.
+function renderWithRouter(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 describe('P6-019 — Technician day-of assigned-work view', () => {
   let onPositionSuccess: ((position: GeolocationPosition) => void) | null = null;
@@ -53,25 +60,25 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
   });
 
   it('renders the technician day view', async () => {
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
     expect(screen.getByTestId('technician-day-view')).toBeInTheDocument();
     expect(screen.getByText('My Schedule')).toBeInTheDocument();
   });
 
   it('shows loading state initially', () => {
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
     expect(screen.getByTestId('technician-day-loading')).toBeInTheDocument();
   });
 
   it('displays appointments after loading', async () => {
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     const appointments = await screen.findAllByTestId('technician-day-appointment');
     expect(appointments).toHaveLength(2);
   });
 
   it('displays customer name and location', async () => {
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     expect(await screen.findByText('Jane Doe')).toBeInTheDocument();
     expect(screen.getByText('123 Main St')).toBeInTheDocument();
@@ -81,7 +88,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
 
   it('shows map link for next appointment', async () => {
     vi.setSystemTime(new Date('2026-03-14T08:00:00Z'));
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     const link = await screen.findByTestId('technician-day-next-map-link');
     expect(link).toHaveAttribute('href', expect.stringContaining('google.com/maps'));
@@ -89,7 +96,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
 
   it('answers AI question about next appointment', async () => {
     vi.setSystemTime(new Date('2026-03-14T08:00:00Z'));
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     await screen.findByText('Jane Doe');
     fireEvent.click(screen.getByTestId('technician-day-ask-ai'));
@@ -98,7 +105,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
   });
 
   it('allows editing appointment time', async () => {
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     await screen.findByText('Jane Doe');
     fireEvent.click(screen.getAllByTestId('technician-day-edit')[0]);
@@ -121,7 +128,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
       statusText: 'Internal Server Error',
     } as never);
 
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     expect(await screen.findByTestId('technician-day-error')).toBeInTheDocument();
   });
@@ -132,7 +139,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
       json: () => Promise.resolve({ appointments: [] }),
     } as never);
 
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
 
     expect(await screen.findByTestId('technician-day-empty')).toBeInTheDocument();
     expect(screen.getByText('No appointments scheduled for today')).toBeInTheDocument();
@@ -141,7 +148,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
   it('ignores low-accuracy GPS pings for lateness prompting', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
     await screen.findByText('Jane Doe');
 
     onPositionSuccess?.({
@@ -161,7 +168,7 @@ describe('P6-019 — Technician day-of assigned-work view', () => {
   it('escalates to dispatcher queue after technician response timeout', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date('2026-03-14T11:20:00Z'));
-    render(<TechnicianDayView technicianId="tech-1" />);
+    renderWithRouter(<TechnicianDayView technicianId="tech-1" />);
     await screen.findByText('Jane Doe');
 
     const staleBaseTime = Date.now() - (20 * 60 * 1000);

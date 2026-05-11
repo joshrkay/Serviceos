@@ -34,12 +34,10 @@ const __defaultUseAuthResult = {
   isSignedIn: true,
   getToken: __defaultClerkGetToken,
 };
-// BUG-1 — `SettingsPage` (and any other component reaching for the
-// signed-in user's session) now calls `useClerk()` directly so the
-// default mock provides a stable no-op `signOut`. Tests can still
-// override this with their own `vi.mock(...)` block when they need
-// to assert on signOut.
-const __defaultUseClerkResult = { signOut: vi.fn() };
+const __defaultClerkSignOut = async () => {};
+const __defaultUseClerkResult = {
+  signOut: __defaultClerkSignOut,
+};
 
 vi.mock('@clerk/clerk-react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@clerk/clerk-react')>();
