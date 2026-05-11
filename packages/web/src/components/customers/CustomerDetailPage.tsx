@@ -16,8 +16,8 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 interface ApiContract {
   id: string;
-  title: string;
-  cadence?: string;
+  name: string;
+  recurrenceRule?: string;
   status?: string;
 }
 
@@ -371,8 +371,14 @@ function MaintenanceContractsSidebar({ customerId, contracts }: {
                   to={`/contracts/${contract.id}`}
                   className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs text-blue-700 hover:bg-blue-100 transition-colors"
                 >
-                  {contract.title}
-                  {contract.cadence ? <span className="text-blue-500">· {contract.cadence}</span> : null}
+                  {contract.name}
+                  {contract.recurrenceRule && (
+                    <span className="text-blue-500">
+                      · {contract.recurrenceRule.includes('MONTHLY') ? 'Monthly' :
+                         contract.recurrenceRule.includes('QUARTERLY') ? 'Quarterly' :
+                         contract.recurrenceRule.includes('YEARLY') ? 'Yearly' : ''}
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>
@@ -411,6 +417,8 @@ export function CustomerDetailPage() {
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
     customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
     { enabled: Boolean(customerId) },
+    '/api/agreements',
+    { filters: customerId ? { customerId } : {}, enabled: Boolean(customerId) },
   );
   const [tab,              setTab]           = useState<Tab>('history');
   // The AddLocationSheet is currently in-memory only — it doesn't POST to

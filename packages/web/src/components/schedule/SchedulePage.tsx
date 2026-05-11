@@ -6,6 +6,7 @@ import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -66,6 +67,7 @@ function buildWeekDays(today: Date) {
 
 export function SchedulePage() {
   const navigate = useNavigate();
+  const workerTerm = useWorkerTerm();
   const today = useMemo(() => new Date(), []);
   const weekDays = useMemo(() => buildWeekDays(today), [today]);
   const todayIso = useMemo(() => today.toISOString().split('T')[0], [today]);
@@ -308,7 +310,7 @@ export function SchedulePage() {
                   {t.initials}
                 </span>
               )}
-              {name === 'All' ? 'All techs' : name.split(' ')[0]}
+              {name === 'All' ? `All ${workerTerm}s` : name.split(' ')[0]}
             </button>
           );
         })}
