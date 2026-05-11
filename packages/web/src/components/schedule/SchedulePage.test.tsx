@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { SchedulePage } from './SchedulePage';
 
@@ -14,13 +14,17 @@ vi.mock('../../data/mock-data', () => ({
 
 import { apiFetch } from '../../utils/api-fetch';
 
-const today = new Date().toISOString().split('T')[0];
+// Pin the suite clock so date-window URL assertions are deterministic
+// and the suite can't flake across a UTC day boundary.
+const TODAY = '2025-05-20';
+const PREV  = '2025-05-19';
+const NEXT  = '2025-05-21';
 
 const appt1 = {
   id: 'appt-1',
   jobId: 'j1',
-  scheduledStart: `${today}T09:00:00.000Z`,
-  scheduledEnd: `${today}T10:00:00.000Z`,
+  scheduledStart: `${TODAY}T09:00:00.000Z`,
+  scheduledEnd: `${TODAY}T10:00:00.000Z`,
   status: 'scheduled',
   timezone: 'America/Chicago',
 };
@@ -28,8 +32,8 @@ const appt1 = {
 const appt2 = {
   id: 'appt-2',
   jobId: 'j2',
-  scheduledStart: `${today}T11:00:00.000Z`,
-  scheduledEnd: `${today}T12:00:00.000Z`,
+  scheduledStart: `${TODAY}T11:00:00.000Z`,
+  scheduledEnd: `${TODAY}T12:00:00.000Z`,
   status: 'scheduled',
   timezone: 'America/Chicago',
 };
@@ -79,8 +83,16 @@ function setupApi(appointments: unknown[] = [appt1, appt2], jobs: Record<string,
 }
 
 beforeEach(() => {
+  // shouldAdvanceTime keeps @testing-library's waitFor / findBy* polling
+  // working under fake timers — without it those helpers hang.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date(`${TODAY}T12:00:00Z`));
   vi.clearAllMocks();
   setupApi();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 function renderPage() {
@@ -141,8 +153,8 @@ describe('SchedulePage', () => {
       );
       expect(apptCall).toBeDefined();
       const url = String(apptCall![0]);
-      expect(url).toContain('fromDate=');
-      expect(url).toContain('toDate=');
+      expect(url).toContain(`fromDate=${TODAY}`);
+      expect(url).toContain(`toDate=${TODAY}`);
       expect(url).toContain('sort=asc');
     });
   });
@@ -172,6 +184,7 @@ describe('SchedulePage', () => {
         String(u).startsWith('/api/appointments?'),
       );
       expect(apptCall).toBeDefined();
+      expect(String(apptCall![0])).toContain(`fromDate=${PREV}`);
     });
   });
 
@@ -191,6 +204,7 @@ describe('SchedulePage', () => {
         String(u).startsWith('/api/appointments?'),
       );
       expect(apptCall).toBeDefined();
+      expect(String(apptCall![0])).toContain(`fromDate=${NEXT}`);
     });
   });
 
@@ -216,8 +230,8 @@ describe('SchedulePage', () => {
     const overlapAppt = {
       ...appt2,
       jobId: 'j1', // also Carlos (t1)
-      scheduledStart: `${today}T09:30:00.000Z`,
-      scheduledEnd: `${today}T10:30:00.000Z`,
+      scheduledStart: `${TODAY}T09:30:00.000Z`,
+      scheduledEnd: `${TODAY}T10:30:00.000Z`,
     };
     setupApi([appt1, overlapAppt], { j1: job1 });
     renderPage();
