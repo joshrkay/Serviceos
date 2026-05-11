@@ -331,6 +331,14 @@ export function SchedulePage() {
 
       if (!isLatest()) return;
       setEnriched(withConflicts);
+    } catch {
+      // Network/CORS rejections need the same clear-stale-data treatment
+      // as a non-OK HTTP response — otherwise a failed day-switch leaves
+      // the previous day's appointments visible against the new date.
+      if (isLatest()) {
+        setAppointments([]);
+        setEnriched([]);
+      }
     } finally {
       if (isLatest()) setLoading(false);
     }

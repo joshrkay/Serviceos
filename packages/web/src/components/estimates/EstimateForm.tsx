@@ -132,7 +132,13 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           setJobLookupError(null);
         }
       } catch {
-        if (!cancelled) setJobLookupError('Failed to load job');
+        if (!cancelled) {
+          // Clear the preview so a thrown lookup (network/CORS/timeout)
+          // can't leave the previous job's customer/location visible
+          // alongside a new, unresolvable id.
+          setJobInfo(null);
+          setJobLookupError('Failed to load job');
+        }
       }
     }, 400);
     return () => { cancelled = true; clearTimeout(timer); };
