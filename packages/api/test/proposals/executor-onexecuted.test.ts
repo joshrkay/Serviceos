@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { ProposalExecutor, ProposalExecutionEvent } from '../../src/proposals/execution/executor';
 import {
   Proposal,
   InMemoryProposalRepository,
   createProposal,
+  ProposalType,
 } from '../../src/proposals/proposal';
 import { ExecutionHandler } from '../../src/proposals/execution/handlers';
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
@@ -56,8 +57,8 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
   it('writes a proposal_executions row on success and fires onExecuted with executionId', async () => {
     const repo = new InMemoryProposalRepository();
     const executionRepo = new InMemoryProposalExecutionRepository();
-    const onExecuted = vi.fn(async () => undefined);
-    const handlers = new Map([['create_customer', passingHandler('entity-42')]]);
+    const onExecuted = vi.fn(async (_event: ProposalExecutionEvent) => undefined);
+    const handlers = new Map<ProposalType, ExecutionHandler>([['create_customer', passingHandler('entity-42')]]);
     const proposal = approvedProposal();
     await repo.create(proposal);
 
@@ -83,8 +84,8 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
   it('writes a failed proposal_executions row on handler failure and fires onExecuted with status=failed', async () => {
     const repo = new InMemoryProposalRepository();
     const executionRepo = new InMemoryProposalExecutionRepository();
-    const onExecuted = vi.fn(async () => undefined);
-    const handlers = new Map([['create_customer', failingHandler('handler-blew-up')]]);
+    const onExecuted = vi.fn(async (_event: ProposalExecutionEvent) => undefined);
+    const handlers = new Map<ProposalType, ExecutionHandler>([['create_customer', failingHandler('handler-blew-up')]]);
     const proposal = approvedProposal();
     await repo.create(proposal);
 
@@ -106,7 +107,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
 
   it('callback errors do not surface as execute() errors (failure-soft)', async () => {
     const repo = new InMemoryProposalRepository();
-    const handlers = new Map([['create_customer', passingHandler()]]);
+    const handlers = new Map<ProposalType, ExecutionHandler>([['create_customer', passingHandler()]]);
     const proposal = approvedProposal();
     await repo.create(proposal);
 
@@ -123,10 +124,10 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
 
   it('without executionRepo: no row written, onExecuted still fires (executionId undefined)', async () => {
     const repo = new InMemoryProposalRepository();
-    const handlers = new Map([['create_customer', passingHandler()]]);
+    const handlers = new Map<ProposalType, ExecutionHandler>([['create_customer', passingHandler()]]);
     const proposal = approvedProposal();
     await repo.create(proposal);
-    const onExecuted = vi.fn(async () => undefined);
+    const onExecuted = vi.fn(async (_event: ProposalExecutionEvent) => undefined);
 
     const executor = new ProposalExecutor(handlers, repo, undefined, { onExecuted });
     await executor.execute(proposal, { tenantId: TENANT_A, executedBy: 'user-1' });
@@ -138,7 +139,7 @@ describe('ProposalExecutor — Phase 4a-1 onExecuted + proposal_executions row',
   it('idempotency-key on the proposal flows into the proposal_executions row', async () => {
     const repo = new InMemoryProposalRepository();
     const executionRepo = new InMemoryProposalExecutionRepository();
-    const handlers = new Map([['create_customer', passingHandler()]]);
+    const handlers = new Map<ProposalType, ExecutionHandler>([['create_customer', passingHandler()]]);
     const proposal = approvedProposal();
     proposal.idempotencyKey = 'idem-7';
     await repo.create(proposal);

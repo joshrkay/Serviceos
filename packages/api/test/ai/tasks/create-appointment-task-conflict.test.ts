@@ -16,6 +16,7 @@ import {
   SlotConflictResult,
 } from '../../../src/ai/tasks/slot-conflict-checker';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+import type { FindOpenSlotsInput } from '../../../src/ai/tasks/availability-finder';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -184,7 +185,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       end: new Date('2026-04-21T14:00:00Z'),
     };
     const finder = {
-      find: vi.fn(async () => ({ ok: true as const, slots: [altSlot] })),
+      find: vi.fn(async (_input: FindOpenSlotsInput) => ({ ok: true as const, slots: [altSlot] })),
     };
     const handler = new CreateAppointmentAITaskHandler(
       mockGateway(baseLlmJson),
@@ -222,7 +223,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       },
     });
     const finder = {
-      find: vi.fn(async () => ({ ok: false as const, reason: 'connection reset' })),
+      find: vi.fn(async (_input: FindOpenSlotsInput) => ({ ok: false as const, reason: 'connection reset' })),
     };
     const handler = new CreateAppointmentAITaskHandler(
       mockGateway(baseLlmJson),
@@ -258,7 +259,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       },
     });
     const finder = {
-      find: vi.fn(async () => ({
+      find: vi.fn(async (_input: FindOpenSlotsInput) => ({
         ok: true as const,
         slots: [
           {
@@ -291,7 +292,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       reason: 'database unreachable',
     });
     const finder = {
-      find: vi.fn(async () => ({ ok: true as const, slots: [] })),
+      find: vi.fn(async (_input: FindOpenSlotsInput) => ({ ok: true as const, slots: [] })),
     };
     const handler = new CreateAppointmentAITaskHandler(
       mockGateway(baseLlmJson),
@@ -320,7 +321,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       },
     });
     const finder = {
-      find: vi.fn(async () => ({ ok: true as const, slots: [] })),
+      find: vi.fn(async (_input: FindOpenSlotsInput) => ({ ok: true as const, slots: [] })),
     };
     const handler = new CreateAppointmentAITaskHandler(
       mockGateway(baseLlmJson),
@@ -349,7 +350,7 @@ describe('CreateAppointmentAITaskHandler P0-035 slot-conflict pre-check', () => 
       },
     });
     const finder = {
-      find: vi.fn(async () => ({ ok: true as const, slots: [] })),
+      find: vi.fn(async (_input: FindOpenSlotsInput) => ({ ok: true as const, slots: [] })),
     };
     const handler = new CreateAppointmentAITaskHandler(
       mockGateway(baseLlmJson),

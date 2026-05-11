@@ -85,6 +85,16 @@ export function loadCorpus(corpusRoot?: string): VoiceQualityScript[] {
 }
 
 /**
+ * VQ2-014 — Layer 2 corpus loader. Returns the subset of `loadCorpus()`
+ * where `layer2Eligible === true`. Layer-2-only scripts (those with
+ * `layer2Only: true`) are included here even though Layer 1 skips them,
+ * so the Layer 2 runner exercises the full audio-only corpus.
+ */
+export function loadLayer2Corpus(corpusRoot?: string): VoiceQualityScript[] {
+  return loadCorpus(corpusRoot).filter((s) => s.layer2Eligible);
+}
+
+/**
  * Load and validate a single script file. Throws on filesystem
  * errors, malformed JSON, or schema validation errors. Each error
  * carries the file path so call-sites (and CLI tooling) can produce

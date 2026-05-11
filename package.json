@@ -18,18 +18,28 @@
     "migrate:dryrun": "npm run migrate:dryrun --workspace=packages/api",
     "e2e": "playwright test",
     "e2e:smoke": "playwright test e2e/smoke.spec.ts",
+    "e2e:coverage-sweep": "COVERAGE_SWEEP=1 playwright test --project=coverage-sweep",
     "e2e:ui": "playwright test --ui",
     "e2e:report": "playwright show-report",
-    "qa:smoke-tools": "node qa-runner/src/orchestrator.mjs smoke",
+    "e2e:db:setup": "tsx e2e/fixtures/setup-test-db.ts",
+    "e2e:db:seed": "tsx e2e/fixtures/seed-journey-fixtures.ts",
+    "e2e:db:teardown": "tsx e2e/fixtures/teardown-test-db.ts",
+    "e2e:qa-matrix": "QA_MATRIX=1 playwright test --project=qa-matrix",
+    "qa:doctor": "tsx scripts/qa-matrix-doctor.ts",
+    "qa:smoke-tools": "tsx scripts/qa-smoke-tools.ts",
+    "qa:matrix:run": "bash scripts/qa-matrix-run.sh",
     "qa:run": "node qa-runner/src/orchestrator.mjs run",
     "qa:report": "node qa-runner/src/orchestrator.mjs summary",
-    "qa:doctor": "node qa-runner/src/orchestrator.mjs doctor",
     "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report"
   },
   "devDependencies": {
+    "@clerk/testing": "^2.0.27",
     "@playwright/test": "^1.59.1",
+    "@testcontainers/postgresql": "^11.13.0",
     "@types/pg": "^8.18.0",
     "pg": "^8.20.0",
+    "testcontainers": "^11.13.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.4.0"
   }
 }

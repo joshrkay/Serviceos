@@ -23,6 +23,11 @@ serviceos_training/.pytest_cache/
 /test-results/
 /playwright/.cache/
 
+# Ephemeral test-DB state files (written by e2e/fixtures/setup-test-db.ts and
+# seed-journey-fixtures.ts; consumed by teardown-test-db.ts). Never commit.
+e2e/fixtures/.test-db-state.json
+e2e/fixtures/.journey-fixtures.env
+
 # QA matrix run artifacts (reports folders are kept; transient outputs ignored)
 /qa/artifacts/*
 !/qa/artifacts/.gitkeep
@@ -31,3 +36,7 @@ serviceos_training/.pytest_cache/
 
 # Voice Quality v1 corpus runner — generated JSON report (VQ-009)
 packages/api/voice-quality-report.json
+# Voice Quality v1 Layer 2 corpus runner — generated reports (VQ2-016)
+packages/api/voice-quality-layer2-report.json
+packages/api/voice-quality-layer2-vitest-report.json
+packages/api/voice-quality-layer2-failures/

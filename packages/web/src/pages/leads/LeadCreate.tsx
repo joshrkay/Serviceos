@@ -39,6 +39,18 @@ const empty: FormState = {
   notes: '',
 };
 
+function parseDollarCents(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(trimmed);
+  if (!match) {
+    throw new Error('Estimated value must be a non-negative dollar amount with up to two decimal places.');
+  }
+  const dollars = Number.parseInt(match[1], 10);
+  const cents = Number.parseInt((match[2] ?? '').padEnd(2, '0'), 10);
+  return dollars * 100 + cents;
+}
+
 export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
   const [form, setForm] = useState<FormState>(empty);
   const [error, setError] = useState<string | null>(null);
@@ -58,20 +70,12 @@ export function LeadCreate({ onCreated, onCancel }: LeadCreateProps) {
         return;
       }
 
-      // Convert dollars → integer cents. We multiply by 100 then round to
-      // avoid float drift; reject anything non-numeric.
       let cents: number | undefined;
-      if (form.estimatedValueDollars.trim()) {
-        const num = Number(form.estimatedValueDollars);
-        if (!Number.isFinite(num) || num < 0) {
-          setError('Estimated value must be a non-negative number.');
-          return;
-        }
-        cents = Math.round(num * 100);
-        if (!Number.isInteger(cents)) {
-          setError('Estimated value resulted in a non-integer cents value.');
-          return;
-        }
+      try {
+        cents = parseDollarCents(form.estimatedValueDollars);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Estimated value is invalid.');
+        return;
       }
 
       const body = {

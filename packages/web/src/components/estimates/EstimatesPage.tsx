@@ -1,17 +1,20 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
-  CheckCircle2, Copy, Phone, Mail, Sparkles,
+  CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
+  Briefcase, MapPin,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { apiFetch } from '../../utils/api-fetch';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { customers } from '../../data/mock-data';
+import { useNavigate } from 'react-router';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
 
@@ -90,31 +93,88 @@ function uiLineToApi(item: LineItem, sortOrder: number): Partial<ApiLineItem> {
 
 type LineItem = { description: string; qty: number; rate: number };
 
-// ─── Pricing Suggestions (mock AI) ───────────────────────────────────────
-const PRICING_HINTS: Record<string, Array<{ id: string; type: 'ok' | 'tip' | 'warn'; text: string; action?: string }>> = {
-  e1: [
-    { id: 'e1-s1', type: 'ok',   text: 'Labor rate ($650/day) is competitive for Austin exterior painting' },
-    { id: 'e1-s2', type: 'tip',  text: 'Consider adding a surface repair contingency line (+$150–200)', action: 'Add line' },
-    { id: 'e1-s3', type: 'warn', text: '4 gal of paint at 2,400 sq ft may run tight — 5 gal recommended', action: 'Adjust qty' },
-  ],
-  e2: [
-    { id: 'e2-s1', type: 'ok',  text: 'Carrier 4-ton unit pricing ($2,800) is within current wholesale range' },
-    { id: 'e2-s2', type: 'tip', text: 'Installation labor at $950 is below Austin market ($1,100–$1,400)', action: 'Adjust rate' },
-    { id: 'e2-s3', type: 'tip', text: 'Add 1-year parts & labor warranty (+$250 typical)', action: 'Add line' },
-  ],
-  e3: [
-    { id: 'e3-s1', type: 'ok', text: 'Carrier 3.5-ton unit at $2,200 is competitive' },
-    { id: 'e3-s2', type: 'ok', text: 'Installation labor at $850 is within Austin market range' },
-  ],
-  e4: [
-    { id: 'e4-s1', type: 'ok',  text: 'Drain cleaning at $120/drain is within Austin service range' },
-    { id: 'e4-s2', type: 'tip', text: 'Consider adding a service-call base fee (+$65–85)', action: 'Add line' },
-  ],
-  e5: [
-    { id: 'e5-s1', type: 'ok',  text: 'Nest thermostat install price ($220) is standard for Austin' },
-    { id: 'e5-s2', type: 'tip', text: 'Refrigerant top-off at $85/unit may not cover a full charge — check qty', action: 'Check qty' },
-  ],
-};
+// ─── AI suggestion types ──────────────────────────────────────────────────
+interface AISuggestion {
+  id: string;
+  type: 'ok' | 'tip' | 'warn';
+  text: string;
+  /** If present, "Accept" will append this line item to the estimate */
+  lineItem?: { description: string; qty: number; rate: number };
+}
+
+/** Generate context-aware AI suggestions from actual line items */
+function deriveAISuggestions(items: LineItem[]): AISuggestion[] {
+  const text = items.map(i => i.description.toLowerCase()).join(' ');
+  const total = items.reduce((s, i) => s + i.qty * i.rate, 0);
+  const suggestions: AISuggestion[] = [];
+
+  const hasLabor = /labor|labour|hrs|hours|install/i.test(text);
+  const hasHVAC  = /hvac|ac|condenser|refrigerant|furnace|thermostat|capacitor/i.test(text);
+  const hasPlumb = /drain|pipe|faucet|heater|plumb|clog/i.test(text);
+  const hasPaint = /paint|primer|coat|wall|exterior|interior/i.test(text);
+
+  if (hasHVAC) {
+    if (!hasLabor) {
+      suggestions.push({ id: 'ai-hvac-labor', type: 'tip',
+        text: 'No labor line item detected — typical HVAC jobs include 2–4 hours at $95/hr',
+        lineItem: { description: 'Labor – 2 hrs', qty: 2, rate: 95 } });
+    } else {
+      suggestions.push({ id: 'ai-hvac-labor-ok', type: 'ok',
+        text: 'Labor line detected — verify hours match job complexity' });
+    }
+    if (/capacitor/i.test(text)) {
+      suggestions.push({ id: 'ai-cap-ok', type: 'ok',
+        text: 'Capacitor replacement pricing ($25–45) is in the standard Austin range' });
+      if (!/diagnostic|service.?call/i.test(text)) {
+        suggestions.push({ id: 'ai-diag', type: 'tip',
+          text: 'Add a diagnostic fee — covers assessment if customer declines repair',
+          lineItem: { description: 'Diagnostic fee', qty: 1, rate: 85 } });
+      }
+    }
+    if (/refrigerant/i.test(text)) {
+      suggestions.push({ id: 'ai-refrig', type: 'warn',
+        text: 'Confirm R-410A charge amount — full recharge requires 2–4 lbs depending on system size' });
+    }
+  }
+
+  if (hasPlumb) {
+    if (!hasLabor) {
+      suggestions.push({ id: 'ai-plumb-labor', type: 'tip',
+        text: 'No labor line item — plumbing repairs typically include 1–2 hours at $110/hr',
+        lineItem: { description: 'Labor – 2 hrs', qty: 2, rate: 110 } });
+    } else {
+      suggestions.push({ id: 'ai-plumb-labor-ok', type: 'ok',
+        text: 'Labor line detected — confirm hours match drain or pipe complexity' });
+    }
+  }
+
+  if (hasPaint) {
+    if (!hasLabor) {
+      suggestions.push({ id: 'ai-paint-labor', type: 'tip',
+        text: 'No labor line — painting projects typically bill by full day ($650) or half day ($350)',
+        lineItem: { description: 'Labor – 2 hrs', qty: 2, rate: 95 } });
+    }
+    if (/exterior/i.test(text) && !/power.?wash|wash/i.test(text)) {
+      suggestions.push({ id: 'ai-wash', type: 'tip',
+        text: 'Exterior jobs typically require power washing before painting',
+        lineItem: { description: 'Power wash & surface prep', qty: 1, rate: 180 } });
+    }
+  }
+
+  if (!hasHVAC && !hasPlumb && !hasPaint && items.length > 0) {
+    if (!hasLabor) {
+      suggestions.push({ id: 'ai-generic-labor', type: 'tip',
+        text: 'Consider adding a labor line item to account for technician time',
+        lineItem: { description: 'Labor – 2 hrs', qty: 2, rate: 95 } });
+    }
+    if (total > 0) {
+      suggestions.push({ id: 'ai-generic-ok', type: 'ok',
+        text: `Estimate total $${total.toFixed(2)} — verify line items match the approved scope` });
+    }
+  }
+
+  return suggestions;
+}
 
 const HINT_STYLE = {
   ok:   { bg: 'bg-green-50  border-green-200',  icon: 'text-green-600',  dot: 'bg-green-500'  },
@@ -165,34 +225,122 @@ function ApprovalStepper({ est }: { est: EstCompat }) {
 }
 
 // ─── AI Pricing Suggestions ───────────────────────────────────────────────
-function AIPricingSuggestions({ estimateId, onAddLine }: { estimateId: string; onAddLine?: () => void }) {
-  const hints = PRICING_HINTS[estimateId] ?? [];
+function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
+  estimateId: string;
+  items: LineItem[];
+  onLineItemAccepted?: (item: LineItem) => void;
+}) {
+  const [triggered, setTriggered] = useState(false);
+  const [loading, setLoading]     = useState(false);
+  const [hints, setHints]         = useState<AISuggestion[]>([]);
+  const [accepted, setAccepted]   = useState<Set<string>>(new Set());
+  const [accepting, setAccepting] = useState<string | null>(null);
+
+  async function triggerSuggestions() {
+    setLoading(true);
+    setTriggered(true);
+    // Simulate brief AI processing delay, then derive suggestions from line items
+    await new Promise(r => setTimeout(r, 1200));
+    setHints(deriveAISuggestions(items));
+    setLoading(false);
+  }
+
+  async function acceptSuggestion(hint: AISuggestion) {
+    if (!hint.lineItem) return;
+    setAccepting(hint.id);
+    try {
+      // estimate_line_items.id is a UUID; the pg repo wipes-and-reinserts on
+      // update, so generating fresh UUIDs (instead of synthetic "li-..." ids)
+      // keeps the PATCH payload valid against the Postgres schema.
+      const newItem = {
+        description: hint.lineItem.description,
+        quantity: hint.lineItem.qty,
+        unitPriceCents: Math.round(hint.lineItem.rate * 100),
+        totalCents: Math.round(hint.lineItem.qty * hint.lineItem.rate * 100),
+        sortOrder: items.length,
+        taxable: false,
+        id: crypto.randomUUID(),
+      };
+      const res = await apiFetch(`/api/estimates/${estimateId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ lineItems: [
+          ...items.map((item, i) => ({
+            description: item.description,
+            quantity: item.qty,
+            unitPriceCents: Math.round(item.rate * 100),
+            totalCents: Math.round(item.qty * item.rate * 100),
+            sortOrder: i,
+            taxable: false,
+            id: crypto.randomUUID(),
+          })),
+          newItem,
+        ]}),
+      });
+      if (res.ok) {
+        setAccepted(prev => new Set([...prev, hint.id]));
+        onLineItemAccepted?.(hint.lineItem!);
+      }
+    } finally {
+      setAccepting(null);
+    }
+  }
+
+  if (!triggered) {
+    return (
+      <button
+        onClick={triggerSuggestions}
+        className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-100 transition-colors w-full"
+      >
+        <Sparkles size={13} className="text-indigo-500 shrink-0" />
+        Get AI line-item suggestions
+        <span className="ml-auto text-xs text-indigo-400">~5s</span>
+      </button>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3">
+        <Sparkles size={13} className="text-indigo-500 animate-pulse shrink-0" />
+        <p className="text-sm text-indigo-700">Analyzing line items…</p>
+      </div>
+    );
+  }
+
   if (!hints.length) return null;
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
         <Sparkles size={13} className="text-indigo-500" />
-        <p className="text-sm text-slate-700">Pricing review</p>
-        <span className="ml-auto text-xs text-slate-400">AI analysis</span>
+        <p className="text-sm text-slate-700">AI pricing suggestions</p>
+        <span className="ml-auto text-xs text-slate-400">{hints.length} suggestions</span>
       </div>
       <div className="flex flex-col divide-y divide-slate-50">
         {hints.map(h => {
           const style = HINT_STYLE[h.type];
           const Icon  = HINT_ICON[h.type];
+          const isAccepted = accepted.has(h.id);
+          const isAccepting = accepting === h.id;
           return (
-            <div key={h.id} className="flex items-start gap-3 px-4 py-3">
+            <div key={h.id} className={`flex items-start gap-3 px-4 py-3 ${isAccepted ? 'opacity-50' : ''}`}>
               <span className={`flex size-6 shrink-0 items-center justify-center rounded-full mt-0.5 ${style.bg.split(' ')[0]}`}>
                 <Icon size={11} className={style.icon} />
               </span>
               <p className="flex-1 text-sm text-slate-700 leading-snug">{h.text}</p>
-              {h.action && (
+              {h.lineItem && !isAccepted && (
                 <button
-                  onClick={h.action === 'Add line' ? onAddLine : undefined}
-                  className="shrink-0 text-xs text-blue-600 hover:text-blue-700 hover:underline transition-colors"
+                  onClick={() => acceptSuggestion(h)}
+                  disabled={isAccepting}
+                  className="shrink-0 text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-2.5 py-1 hover:bg-green-100 transition-colors disabled:opacity-50"
                 >
-                  {h.action}
+                  {isAccepting ? '…' : `+ ${h.lineItem.description}`}
                 </button>
+              )}
+              {isAccepted && (
+                <span className="shrink-0 text-xs text-green-600 flex items-center gap-1">
+                  <Check size={10} /> Added
+                </span>
               )}
             </div>
           );
@@ -575,7 +723,8 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
 
 // ─── Estimate Detail ──────────────────────────────────────────────────────
 function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: () => void }) {
-  const { data: est, isLoading, error } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
+  const navigate = useNavigate();
+  const { data: est, isLoading, error, refetch } = useDetailQuery<ApiEstimate>('/api/estimates', estimateId);
   const { mutate: updateEstimate } = useMutation<Record<string, unknown>, ApiEstimate>('PUT', `/api/estimates/${estimateId}`);
   const { mutate: transitionEstimate } = useMutation<{ status: string }, ApiEstimate>('POST', `/api/estimates/${estimateId}/transition`);
 
@@ -584,6 +733,70 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [previewOpen,  setPreviewOpen]  = useState(false);
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
+
+  // Enriched customer/location from the linked job
+  const [enrichedCustomer, setEnrichedCustomer] = useState<{ name: string; id: string; phone?: string; email?: string } | null>(null);
+  const [enrichedLocation, setEnrichedLocation] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!est?.jobId) return;
+    let cancelled = false;
+    apiFetch(`/api/jobs/${est.jobId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(async (job) => {
+        if (!job || cancelled) return;
+        const [custRes, locRes] = await Promise.all([
+          job.customerId ? apiFetch(`/api/customers/${job.customerId}`).catch(() => null) : Promise.resolve(null),
+          job.locationId ? apiFetch(`/api/locations/${job.locationId}`).catch(() => null) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        if (custRes?.ok) {
+          const cust = await custRes.json();
+          const name = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || 'Customer';
+          setEnrichedCustomer({ name, id: job.customerId, phone: cust.primaryPhone, email: cust.email });
+        }
+        if (locRes?.ok) {
+          const loc = await locRes.json();
+          setEnrichedLocation([loc.street1, loc.city, loc.state].filter(Boolean).join(', '));
+        }
+      })
+      .catch(() => null);
+    return () => { cancelled = true; };
+  }, [est?.jobId]);
+
+  // Notes
+  const [notes, setNotes]       = useState<Array<{ id: string; content: string; createdAt: string }>>([]);
+  const [notesLoaded, setNotesLoaded] = useState(false);
+  const [noteText,    setNoteText]    = useState('');
+  const [savingNote,  setSavingNote]  = useState(false);
+
+  useEffect(() => {
+    apiFetch(`/api/notes?entityType=estimate&entityId=${estimateId}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((data: Array<{ id: string; content: string; createdAt: string }>) => {
+        setNotes(data);
+        setNotesLoaded(true);
+      })
+      .catch(() => setNotesLoaded(true));
+  }, [estimateId]);
+
+  async function saveNote() {
+    if (!noteText.trim()) return;
+    setSavingNote(true);
+    try {
+      const res = await apiFetch('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ entityType: 'estimate', entityId: estimateId, content: noteText.trim() }),
+      });
+      if (res.ok) {
+        const saved = await res.json();
+        setNotes(prev => [...prev, saved]);
+        setNoteText('');
+      }
+    } finally {
+      setSavingNote(false);
+    }
+  }
 
   // Sync lineItems from API data when it loads
   const apiLineItems = est?.lineItems ?? [];
@@ -613,11 +826,14 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   }
 
   // Build a mock Estimate-like object for the sub-components that still need it
+  const effectiveCustomerName = enrichedCustomer?.name
+    ?? (customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer');
+  const effectiveCustomerId = enrichedCustomer?.id ?? est.customerId ?? customer?.id ?? '';
   const estCompat = {
     id: est.id,
     estimateNumber: est.estimateNumber,
-    customer: customer ? (customer.displayName || [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Customer') : 'Customer',
-    customerId: est.customerId ?? customer?.id ?? '',
+    customer: effectiveCustomerName,
+    customerId: effectiveCustomerId,
     description: est.customerMessage ?? '',
     status,
     lineItems: uiLineItems,
@@ -667,27 +883,91 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   await updateEstimate({ lineItems: items.map((item, i) => uiLineToApi(item, i)) });
                 }}
               />
-              <AIPricingSuggestions estimateId={est.id} />
+              <AIPricingSuggestions
+                estimateId={est.id}
+                items={uiLineItems}
+                onLineItemAccepted={(item) => {
+                  setLineItems(prev => [...(prev.length ? prev : uiLineItems), item]);
+                  refetch();
+                }}
+              />
+
+              {/* Notes section */}
+              <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
+                  <MessageSquare size={13} className="text-slate-400" />
+                  <p className="text-sm text-slate-700">Notes</p>
+                  <span className="ml-auto text-xs text-slate-400">{notes.length}</span>
+                </div>
+                {notesLoaded && notes.length > 0 && (
+                  <div className="divide-y divide-slate-50">
+                    {notes.map(n => (
+                      <div key={n.id} className="px-4 py-3">
+                        <p className="text-sm text-slate-700 leading-snug">{n.content}</p>
+                        <p className="text-xs text-slate-400 mt-1">{new Date(n.createdAt).toLocaleString()}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="px-4 py-3 border-t border-slate-50 flex flex-col gap-2">
+                  <textarea
+                    value={noteText}
+                    onChange={e => setNoteText(e.target.value)}
+                    rows={2}
+                    placeholder="Add a note…"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm resize-none focus:outline-none focus:border-blue-400 transition-colors"
+                  />
+                  <button
+                    onClick={saveNote}
+                    disabled={savingNote || !noteText.trim()}
+                    className="self-end rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+                  >
+                    {savingNote ? 'Saving…' : 'Save note'}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* ── Right rail ── */}
             <div className="flex flex-col gap-4">
               <ApprovalStepper est={estCompat} />
 
+              {/* Job link */}
+              {est.jobId && (
+                <button
+                  onClick={() => navigate(`/jobs/${est.jobId}`)}
+                  className="flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-4 py-3 hover:border-slate-300 hover:bg-slate-50 transition-colors text-left"
+                >
+                  <Briefcase size={13} className="text-slate-400 shrink-0" />
+                  <p className="text-sm text-slate-700 flex-1">View linked job</p>
+                  <ChevronRight size={13} className="text-slate-300" />
+                </button>
+              )}
+
               {/* Customer card */}
-              {customer && (
+              {(customer || enrichedCustomer) && (
                 <div className="rounded-xl bg-white border border-slate-200 px-4 py-4">
                   <p className="text-xs text-slate-400 mb-2">Customer</p>
-                  <p className="text-sm text-slate-900">{estCompat.customer}</p>
+                  <button
+                    onClick={() => estCompat.customerId && navigate(`/customers/${estCompat.customerId}`)}
+                    className="text-sm text-slate-900 hover:text-blue-600 transition-colors text-left"
+                  >
+                    {estCompat.customer}
+                  </button>
+                  {enrichedLocation && (
+                    <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                      <MapPin size={10} /> {enrichedLocation}
+                    </p>
+                  )}
                   <div className="flex flex-col gap-1.5 mt-2">
-                    {customer.primaryPhone && (
-                      <a href={`tel:${customer.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
-                        <Phone size={11} /> {customer.primaryPhone}
+                    {(enrichedCustomer?.phone ?? customer?.primaryPhone) && (
+                      <a href={`tel:${enrichedCustomer?.phone ?? customer?.primaryPhone}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-green-700 transition-colors">
+                        <Phone size={11} /> {enrichedCustomer?.phone ?? customer?.primaryPhone}
                       </a>
                     )}
-                    {customer.email && (
-                      <a href={`mailto:${customer.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
-                        <Mail size={11} /> {customer.email}
+                    {(enrichedCustomer?.email ?? customer?.email) && (
+                      <a href={`mailto:${enrichedCustomer?.email ?? customer?.email}`} className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-700 transition-colors">
+                        <Mail size={11} /> {enrichedCustomer?.email ?? customer?.email}
                       </a>
                     )}
                   </div>
@@ -801,15 +1081,26 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
   { label: 'Approved', value: 'Approved' },
 ];
 
-export function EstimatesPage() {
+export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
+  const navigate = useNavigate();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
-  const [selected,         setSelected]      = useState<string | null>(null);
+  const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
+
+  // Keep `selected` in sync with the route param so deep-links and in-place
+  // route changes (/estimates/:id → /estimates/:other) reopen the right
+  // detail view instead of holding onto the previous selection.
+  useEffect(() => {
+    setSelected(defaultSelectedId ?? null);
+  }, [defaultSelectedId]);
 
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
 
   if (selected) {
-    return <EstimateDetail estimateId={selected} onBack={() => setSelected(null)} />;
+    return <EstimateDetail estimateId={selected} onBack={() => {
+      setSelected(null);
+      if (defaultSelectedId) navigate('/estimates');
+    }} />;
   }
 
   const normalizedData = data.map(e => ({

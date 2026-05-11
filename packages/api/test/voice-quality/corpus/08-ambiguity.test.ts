@@ -99,6 +99,7 @@ describe('VQ-017 — Bucket 08 ambiguity / reprompt', () => {
     (scriptId) => {
       const golden = loadGoldenForScript(scriptId, CORPUS_ROOT);
       expect(Array.isArray(golden)).toBe(true);
+      if (!Array.isArray(golden)) return;
       if (scriptId === 'partial-info-incomplete') {
         // Turn 1 reprompts (no proposal); turn 2 lands a
         // create_appointment proposal once the slot is provided.
@@ -117,6 +118,105 @@ describe('VQ-017 — Bucket 08 ambiguity / reprompt', () => {
 
   it.each(SCRIPT_IDS)(
     'VQ-017 — cassette stub for %s is valid JSON with empty entries',
+    (scriptId) => {
+      const cassettePath = path.join(
+        CORPUS_ROOT,
+        'cassettes',
+        `${scriptId}.json`,
+      );
+      const raw = readFileSync(cassettePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      expect(parsed.scriptId).toBe(scriptId);
+      expect(parsed.version).toBe(1);
+      expect(parsed.rubricVersion).toBe('v1');
+      expect(parsed.entries).toEqual([]);
+    },
+  );
+});
+
+/**
+ * VQ2-014 — Bucket 08 audio-only scripts.
+ *
+ * Two scripts that exercise failure modes Layer 1 cassettes cannot
+ * fairly grade — Whisper-only mishearing (mumbled name) and the
+ * end-of-speech detector (mid-sentence pause). Both are flagged
+ * `layer2Eligible: true, layer2Only: true` so the Layer 1 corpus
+ * runner skips them but the Layer 2 runner picks them up.
+ */
+const VQ2_014_SCRIPT_IDS = [
+  'mumbled-name-recovery',
+  'mid-sentence-pause',
+] as const;
+
+describe('VQ2-014 — Bucket 08 audio-only Layer-2 scripts', () => {
+  it.each(VQ2_014_SCRIPT_IDS)(
+    'VQ2-014 — script %s parses + loads',
+    (scriptId) => {
+      const file = path.join(
+        CORPUS_ROOT,
+        'scripts',
+        '08-ambiguity',
+        `${scriptId}.json`,
+      );
+      const script = loadScript(file);
+      expect(script.id).toBe(scriptId);
+      expect(script.bucket).toBe('08-ambiguity');
+      // Single-turn audio-only scripts.
+      expect(script.turns.length).toBe(1);
+      expect(script.callerId).toMatch(/^\+1\d{10}$/);
+      expect(script.callerIdBlocked).toBe(false);
+    },
+  );
+
+  it.each(VQ2_014_SCRIPT_IDS)(
+    'VQ2-014 — script %s has layer2Eligible: true',
+    (scriptId) => {
+      const file = path.join(
+        CORPUS_ROOT,
+        'scripts',
+        '08-ambiguity',
+        `${scriptId}.json`,
+      );
+      const script = loadScript(file);
+      expect(script.layer2Eligible).toBe(true);
+    },
+  );
+
+  it.each(VQ2_014_SCRIPT_IDS)(
+    'VQ2-014 — script %s has layer2Only: true',
+    (scriptId) => {
+      const file = path.join(
+        CORPUS_ROOT,
+        'scripts',
+        '08-ambiguity',
+        `${scriptId}.json`,
+      );
+      const script = loadScript(file);
+      expect(script.layer2Only).toBe(true);
+    },
+  );
+
+  it.each(VQ2_014_SCRIPT_IDS)(
+    'VQ2-014 — golden file for %s exists and parses',
+    (scriptId) => {
+      const golden = loadGoldenForScript(scriptId, CORPUS_ROOT);
+      expect(Array.isArray(golden)).toBe(true);
+      if (scriptId === 'mid-sentence-pause') {
+        // Booker turn lands a create_appointment proposal.
+        expect(golden).toHaveLength(1);
+        expect(golden[0]).toMatchObject({
+          proposalType: 'create_appointment',
+        });
+      } else {
+        // The mumbled-name lookup is a non-mutation path — the agent
+        // identity-resolves and confirms; no proposal drafted.
+        expect(golden).toEqual([]);
+      }
+    },
+  );
+
+  it.each(VQ2_014_SCRIPT_IDS)(
+    'VQ2-014 — cassette stub for %s is valid JSON with empty entries',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,

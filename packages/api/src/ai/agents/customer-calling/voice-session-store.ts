@@ -67,6 +67,41 @@ export type VoiceSessionEvent =
       type: 'session_terminated';
       cause: 'hangup' | 'cost_cap' | 'cap_exceeded' | 'completed';
       ts: number;
+    }
+  /**
+   * VQ2-004: TTFA-start marker. The STT provider returned a final
+   * transcript for the caller's turn — this is the moment the agent
+   * begins formulating a response. Layer 2 uses Whisper batch (not
+   * streaming VAD), so semantically this is "transcript received,"
+   * not "caller silence detected." Used as the start-of-clock for
+   * `ttfaPerTurn` in `voice-quality/audio/audio-timings.ts`.
+   */
+  | { type: 'transcript_received'; ts: number }
+  /**
+   * VQ2-004: TTFA-stop marker. The first outbound audio frame for a
+   * new turn was just enqueued to the WS. Subsequent frames in the
+   * same turn do not re-emit; the per-turn flag is reset on the next
+   * `transcript_received`. `byteCount` is the chunk size of the first
+   * frame for a sanity check (non-zero ⇒ real audio, not a heartbeat).
+   */
+  | { type: 'audio_frame_emitted'; ts: number; byteCount: number }
+  /**
+   * VQ2-followup: per-turn agent transcript recovered after the agent
+   * finished speaking. In Layer 2 (`AudioModeDriver`) this is the
+   * Whisper-recovered transcription of the actual TTS audio the caller
+   * heard; in Layer 1 (`TextModeDriver`) it is the synthesized
+   * confirmation/lookup string the driver was about to "speak". Graders
+   * (perceived-completion, reprompt) consume this so they can judge the
+   * caller-perceived turn directly instead of relying on the script's
+   * `expected.spokenAnswerMatches` placeholder.
+   */
+  | {
+      type: 'speech_outbound';
+      /** Transcript of what the agent said this turn. */
+      transcript: string;
+      /** Zero-indexed turn within the session. */
+      turnIndex: number;
+      ts: number;
     };
 
 export interface TranscriptEntry {

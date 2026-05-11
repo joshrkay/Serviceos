@@ -373,3 +373,71 @@ Don't simply raise the cap to make CI green — that defeats the floor.
 | See the rubric                                        | `packages/api/src/ai/voice-quality/rubric/rubric.v1.json`                                                        |
 | Read the spec                                         | `docs/superpowers/specs/2026-05-03-voice-quality-v1-design.md` §7 (operational integration), §3 (rubric)         |
 | Find the implementation plan                          | `docs/superpowers/plans/2026-05-03-voice-quality-v1-layer-1.md`                                                  |
+
+---
+
+## Layer 2 launch gate
+
+Layer 2 is the *go/no-go* gate for putting the voice agent in front of real callers. It runs the real audio path (Whisper + Claude live + TTS) against a 14-script subset of the corpus, applies caller-experience graders, and uses 2-of-3 voting to survive non-determinism.
+
+### Layer 2 thresholds (from `report-layer2.ts:DEFAULT_LAYER2_THRESHOLDS`)
+
+| Threshold | Value | Source |
+|---|---|---|
+| Floor (criteria 1-8) — all scripts unanimous-of-three | 100% | Voting strategy §"unanimous-of-three on safety" |
+| Overall pass rate (disposition + caller-experience + perceived completion) | ≥ 85% (≥ 12/14) | Plan §VQ2-015 |
+| TTFA P95 across all turns (median across 3 runs) | ≤ 800ms | Plan §"caller-experience thresholds" — Avoca's published competitive bar |
+| Perceived completion pass rate (LLM-judged) | ≥ 90% | Plan §VQ2-010 |
+| Cost-capped scripts | 0 | Plan §VQ2-013 |
+
+### Layer 2 launch decision flow
+
+Updated from spec §7.4 — what was a footnote becomes a hard gate:
+
+1. Layer 1 ≥ 90% overall pass for 7 consecutive nightly runs on `main`
+2. **Layer 2 ≥ 85% pass + TTFA P95 median ≤ 800ms + perceived completion ≥ 90% + 0 cost-capped + no flakes on bucket-1/2 happy-path scripts for 4 consecutive weekly runs**
+3. Total cost < $10/run for those 4 runs
+4. Engineering lead + product manual sign-off on the Layer 2 trend report
+5. Pilot tenant onboarded; live traffic routed with human CSR shadow (escalation-first mode) for 1 week
+6. Sample N=20 real calls human-graded against rubric. Real-world pass rate ≥ 85% → expand to full handling.
+
+Layer 2 sign-off REQUIRES VP-eng (not just doc-owner). The gate is the launch.
+
+### Layer 2 override procedure
+
+Same template as Layer 1 §4, with stricter approval:
+
+1. File a tracking issue: `voice-quality-layer2: <bucket> — <scriptId> — override on <release-branch>`
+2. Required body:
+   - Failing scripts + criteria
+   - Per-run JSON excerpts (not just summary — show the disagreement across 3 runs)
+   - Judge transcripts (for criterion 12 / soft slots)
+   - Why this is a test bug or known limitation, NOT an agent regression
+3. Approval signatures: VP-eng + product. Single thumbs-up insufficient.
+4. PR description must include:
+   ```
+   ## Voice Quality Layer 2 Override
+   Justification: <issue link>
+   Approved by VP-eng: <name>
+   Approved by product: <name>
+   Buckets affected: <list>
+   ```
+5. Override expires in 48h. Within that window: test fixed, OR agent fixed, OR rubric explicitly relaxed via `rubric.v2.json` + new gate version.
+
+### Why Layer 2 is stricter
+
+- Layer 1 catches code regressions on every PR — fast feedback, low cost
+- Layer 2 catches model regressions (cassettes can't), audio comprehension issues (text-mode can't), real latency (text-mode can't), real conversational flow (text-mode can't)
+- A Layer 2 failure is the strongest signal we have that real callers will have a bad experience
+- Therefore: Layer 2 overrides are rare and require executive accountability
+
+### Quarterly judge-validation (mirrors Layer 1)
+
+Same as Layer 1 §5: every quarter, sample 20 random verdicts, human re-grade, compute agreement, recalibrate prompt or fall back to structured-only on disagreement classes if <90% agreement.
+
+### Layer 2 v1 limitations (deferred to v1.5+)
+
+- Single-prior weekly trend (no 8-week history yet)
+- InMemory repos (no Pg variant in Layer 2)
+- WS emulator (no real Twilio rig)
+- Real-mode driver wiring is a TODO in the entry test (currently skips); first priority follow-up after v1 ships

@@ -43,6 +43,11 @@ import {
   ConnectionRegistry,
   globalConnectionRegistry,
 } from '../../ws/connection-registry';
+import {
+  transcriptReceivedEvent,
+  audioFrameEmittedEvent,
+} from '../../ai/voice-quality/events';
+import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -188,6 +193,8 @@ interface RuntimeState {
   slowConsumerTimer: NodeJS.Timeout | null;
   /** True after we've released our slot in the connection registry. */
   registryReleased: boolean;
+  /** Guards against calling ws.close() more than once. */
+  wsCloseInitiated: boolean;
   /**
    * B2 — captures the most recent FSM dispatch's SideEffect[] when an
    * `end_session` effect was emitted. Threaded through `finalizeOnClose`
@@ -196,6 +203,15 @@ interface RuntimeState {
    * Empty for non-FSM close paths (idle timer, slow consumer, WS error).
    */
   pendingFinalizeEffects: ReadonlyArray<SideEffect>;
+  /**
+   * VQ2-004 — per-turn first-frame guard. Set to `true` when a final
+   * transcript arrives (`transcript_received` was just emitted). Reset
+   * to `false` after the first outbound media chunk of the turn is
+   * enqueued, so subsequent frames in the same turn don't re-emit
+   * `audio_frame_emitted`. Stored on the adapter (not the session)
+   * because the lifecycle is strictly bound to this WS connection.
+   */
+  awaitingFirstAudioFrame: boolean;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -275,7 +291,9 @@ export class TwilioMediaStreamAdapter {
       unackedMarks: 0,
       slowConsumerTimer: null,
       registryReleased: true,
+      wsCloseInitiated: false,
       pendingFinalizeEffects: [],
+      awaitingFirstAudioFrame: false,
     };
   }
 
@@ -473,6 +491,14 @@ export class TwilioMediaStreamAdapter {
     const tenantId = this.state.tenantId;
     if (!session || !callSid || !tenantId) return;
 
+    // VQ2-004: TTFA-start. Stamp the moment the STT provider returned a
+    // final transcript on the session bus and arm the per-turn
+    // first-frame guard so the next outbound chunk emits
+    // `audio_frame_emitted`. Emitted BEFORE speechTurn to capture the
+    // full agent-thinking window.
+    this.state.awaitingFirstAudioFrame = true;
+    session.events.emit(VOICE_EVENT_CHANNEL, transcriptReceivedEvent());
+
     let sideEffects: SideEffect[] = [];
     try {
       sideEffects = await this.deps.store.withSessionLock(session.id, () =>
@@ -572,6 +598,17 @@ export class TwilioMediaStreamAdapter {
         streamSid: this.state.streamSid,
         media: { payload },
       });
+      // VQ2-004: TTFA-stop. Emit `audio_frame_emitted` ONCE per turn,
+      // on the first chunk that lands on the queue. The flag is armed
+      // by `onTranscriptEvent` and disarmed here so subsequent chunks
+      // in the same turn (and barge-in `clear` events) don't re-emit.
+      if (this.state.awaitingFirstAudioFrame && this.state.session) {
+        this.state.awaitingFirstAudioFrame = false;
+        this.state.session.events.emit(
+          VOICE_EVENT_CHANNEL,
+          audioFrameEmittedEvent({ byteCount: chunk.length }),
+        );
+      }
       frameCount++;
 
       // Insert a periodic mark so Twilio can ack and we can pace.
@@ -695,6 +732,11 @@ export class TwilioMediaStreamAdapter {
   }
 
   private closeWs(code: number, reason: string): void {
+    // Guard prevents ws.close() being called twice (which overwrites the
+    // close code). Does NOT set state.closed so handleClose can still run
+    // its cleanup (registry release, timers) when the 'close' event fires.
+    if (this.state.wsCloseInitiated) return;
+    this.state.wsCloseInitiated = true;
     try {
       this.state.ws.close(code, reason);
     } catch {
