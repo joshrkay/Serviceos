@@ -943,6 +943,13 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
+  // Keep `selected` in sync with the route param so deep-links and in-place
+  // route changes (/invoices/:id → /invoices/:other) reopen the right
+  // detail view instead of holding onto the previous selection.
+  useEffect(() => {
+    setSelected(defaultSelectedId ?? null);
+  }, [defaultSelectedId]);
+
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
 
   // P5-018 — Auto-refresh loop. Webhooks update the DB; the dispatcher
@@ -974,7 +981,10 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
   }, [data]);
 
   if (selected) {
-    return <InvoiceDetail invoiceId={selected} onBack={() => setSelected(null)} />;
+    return <InvoiceDetail invoiceId={selected} onBack={() => {
+      setSelected(null);
+      if (defaultSelectedId) navigate('/invoices');
+    }} />;
   }
 
   const normalizedData = data.map(i => ({

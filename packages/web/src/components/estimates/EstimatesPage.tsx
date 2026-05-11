@@ -1082,14 +1082,25 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 ];
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
+  const navigate = useNavigate();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
+  // Keep `selected` in sync with the route param so deep-links and in-place
+  // route changes (/estimates/:id → /estimates/:other) reopen the right
+  // detail view instead of holding onto the previous selection.
+  useEffect(() => {
+    setSelected(defaultSelectedId ?? null);
+  }, [defaultSelectedId]);
+
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
 
   if (selected) {
-    return <EstimateDetail estimateId={selected} onBack={() => setSelected(null)} />;
+    return <EstimateDetail estimateId={selected} onBack={() => {
+      setSelected(null);
+      if (defaultSelectedId) navigate('/estimates');
+    }} />;
   }
 
   const normalizedData = data.map(e => ({

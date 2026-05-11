@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FileText, Loader } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
@@ -54,6 +54,10 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   const [submitting, setSubmitting] = useState(false);
   const [estimateLookupStatus, setEstimateLookupStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [estimateInfo, setEstimateInfo] = useState<{ estimateNumber: string; totalCents: number } | null>(null);
+  // Tracks fields that the prior successful estimate lookup auto-populated.
+  // On a subsequent failed lookup we clear those fields so the form can't be
+  // submitted with stale scope from the old estimate.
+  const autofilledFromEstimateRef = useRef<{ jobIdFromEstimate: boolean; itemCount: number } | null>(null);
 
   // Auto-populate line items when a valid estimate ID is entered
   useEffect(() => {
@@ -61,6 +65,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
     if (!id || id.length < 10) {
       setEstimateLookupStatus('idle');
       setEstimateInfo(null);
+      autofilledFromEstimateRef.current = null;
       return;
     }
     let cancelled = false;
@@ -69,7 +74,18 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       try {
         const res = await apiFetch(`/api/estimates/${id}`);
         if (!res.ok) {
-          if (!cancelled) setEstimateLookupStatus('error');
+          if (cancelled) return;
+          setEstimateLookupStatus('error');
+          setEstimateInfo(null);
+          const prior = autofilledFromEstimateRef.current;
+          if (prior) {
+            setForm((prev) => ({
+              ...prev,
+              jobId: prior.jobIdFromEstimate ? '' : prev.jobId,
+              items: prev.items.length === prior.itemCount ? [emptyDraft()] : prev.items,
+            }));
+            autofilledFromEstimateRef.current = null;
+          }
           return;
         }
         const data = await res.json();
@@ -81,11 +97,17 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
           unitPriceDollars: (li.unitPriceCents / 100).toFixed(2),
           taxable: li.taxable ?? false,
         }));
-        setForm((prev) => ({
-          ...prev,
-          jobId: prev.jobId || data.jobId || '',
-          items: items.length > 0 ? items : prev.items,
-        }));
+        let jobIdFromEstimate = false;
+        setForm((prev) => {
+          const nextJobId = prev.jobId || data.jobId || '';
+          jobIdFromEstimate = !prev.jobId && !!data.jobId;
+          return {
+            ...prev,
+            jobId: nextJobId,
+            items: items.length > 0 ? items : prev.items,
+          };
+        });
+        autofilledFromEstimateRef.current = { jobIdFromEstimate, itemCount: items.length };
         setEstimateInfo({
           estimateNumber: data.estimateNumber,
           totalCents: data.totals?.totalCents ?? data.totalCents ?? 0,
