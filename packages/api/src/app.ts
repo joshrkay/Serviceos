@@ -222,6 +222,7 @@ import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
 import { PgAgreementRunRepository } from './agreements/pg-agreement-run';
 import { createAgreementsRouter } from './routes/agreements';
+import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -513,7 +514,14 @@ export function createApp(): express.Express {
   // bootstrap can seed a default TenantSettings row alongside the new
   // tenant — closes the onboarding hole where a new operator would 500
   // on their first POST /api/estimates.
-  const tenantRepo = pool ? new PgTenantRepository(pool) : undefined;
+  // BUG-2 — when there's no pool, every consumer must share ONE
+  // DevInMemoryTenantRepository instance, otherwise the public-intake
+  // path and the dev-auth-bypass middleware end up with disjoint
+  // tenant maps and customers created on one side don't resolve on
+  // the other.
+  const tenantRepo = pool
+    ? new PgTenantRepository(pool)
+    : new DevInMemoryTenantRepository();
   const webhookSettingsRepo = pool
     ? new PgSettingsRepository(pool)
     : new InMemorySettingsRepository();
@@ -1214,9 +1222,10 @@ export function createApp(): express.Express {
   // (30/min/IP, mounted above) catches abuse; the intake-specific
   // limiter below adds a tighter per-IP bucket because intake writes
   // to the database (vs the read-only token-gated public flows).
-  // Uses an in-memory dev tenant repo when running without a pool so
-  // local dev / tests still work.
-  const intakeTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
+  // BUG-2 — share the single `tenantRepo` instance constructed at the
+  // top of this module so intake-created customers and dashboard-
+  // created customers resolve under the same tenant ID in dev.
+  const intakeTenantRepo = tenantRepo;
   app.use(
     '/public/intake',
     rateLimit({
@@ -1767,8 +1776,11 @@ export function createApp(): express.Express {
   // verifyClerkSession uses HMAC-SHA256 (not Clerk's real signing
   // algorithm) — tracked as a production bug. No-op in non-dev.
   if (isDevAuthBypassEnabled()) {
-    const devTenantRepo = tenantRepo ?? new DevInMemoryTenantRepository();
-    app.use('/api', devAuthBypass({ tenantRepo: devTenantRepo }));
+    // BUG-2 — share the single tenantRepo constructed at the top of
+    // this module. Previously this branch instantiated its own
+    // DevInMemoryTenantRepository, leaving the dev-bypass and intake
+    // paths with disjoint tenant maps.
+    app.use('/api', devAuthBypass({ tenantRepo }));
     // eslint-disable-next-line no-console
     console.warn(
       '[app] ⚠️  DEV_AUTH_BYPASS=true — accepting Clerk tokens WITHOUT signature verification. ' +
@@ -2095,6 +2107,11 @@ export function createApp(): express.Express {
       invoicesService: agreementsInvoicesService,
     }),
   );
+
+  // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
+  // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
+  // from /api/agreements; in-memory only.
+  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter());
 
   // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
   // setInterval driver pattern as the execution-worker (P0-009). The

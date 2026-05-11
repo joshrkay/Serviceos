@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { CustomerPicker, CustomerOption } from '../forms/CustomerPicker';
 
@@ -17,6 +17,16 @@ interface State {
   priority: typeof PRIORITIES[number];
 }
 
+interface ServiceLocationOption {
+  id: string;
+  label?: string;
+  street1: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  isPrimary: boolean;
+}
+
 const initial: State = {
   customer: null,
   locationId: '',
@@ -29,8 +39,44 @@ const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
 export function JobForm({ onCreated, onCancel }: JobFormProps) {
   const [form, setForm] = useState<State>(initial);
+  const [locations, setLocations] = useState<ServiceLocationOption[]>([]);
+  const [locationsLoading, setLocationsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!form.customer) {
+      setLocations([]);
+      setForm((previous) => ({ ...previous, locationId: '' }));
+      return;
+    }
+    setLocationsLoading(true);
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/locations?customerId=${encodeURIComponent(form.customer!.id)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as ServiceLocationOption[];
+        if (cancelled) return;
+        setLocations(data);
+        const primary = data.find((location) => location.isPrimary) ?? data[0];
+        setForm((previous) => ({
+          ...previous,
+          locationId: primary?.id ?? '',
+        }));
+      } catch {
+        if (!cancelled) {
+          setLocations([]);
+          setForm((previous) => ({ ...previous, locationId: '' }));
+        }
+      } finally {
+        if (!cancelled) setLocationsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [form.customer]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -96,19 +142,30 @@ export function JobForm({ onCreated, onCancel }: JobFormProps) {
           <label className="text-xs text-slate-500">Customer *</label>
           <CustomerPicker
             value={form.customer}
-            onChange={(c) => setForm((p) => ({ ...p, customer: c }))}
+            onChange={(c) => setForm((p) => ({ ...p, customer: c, locationId: '' }))}
             required
           />
         </div>
         <label className="text-xs text-slate-500">
-          Service location ID *
-          <input
+          Service location *
+          <select
             value={form.locationId}
             onChange={(e) =>
               setForm((p) => ({ ...p, locationId: e.target.value }))
             }
+            disabled={!form.customer || locationsLoading}
             className={inputCls}
-          />
+          >
+            <option value="">
+              {locationsLoading ? 'Loading locations...' : 'Select a service location'}
+            </option>
+            {locations.map((location) => (
+              <option key={location.id} value={location.id}>
+                {location.label || location.street1}
+                {location.isPrimary ? ' (Primary)' : ''} - {location.street1}, {location.city}, {location.state} {location.postalCode}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="text-xs text-slate-500">
           Summary *

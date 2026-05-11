@@ -47,7 +47,32 @@ describe('JobCreate (P11-006)', () => {
       status: 200,
       json: async () => ({ data: [{ id: 'cust-1', firstName: 'Carol' }] }),
     } as unknown as Response);
-    // Second call: POST /api/jobs.
+    // Second call: locations for selected customer.
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: 'loc-1',
+          label: 'Home',
+          street1: '100 Main St',
+          city: 'Austin',
+          state: 'TX',
+          postalCode: '78701',
+          isPrimary: true,
+        },
+        {
+          id: 'loc-2',
+          label: 'Rental',
+          street1: '200 Rental Rd',
+          city: 'Austin',
+          state: 'TX',
+          postalCode: '78702',
+          isPrimary: false,
+        },
+      ],
+    } as unknown as Response);
+    // Third call: POST /api/jobs.
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,
       status: 201,
@@ -71,8 +96,13 @@ describe('JobCreate (P11-006)', () => {
     );
     fireEvent.click(screen.getByTestId('customer-option-cust-1'));
 
-    fireEvent.change(screen.getByLabelText(/Service location ID/i), {
-      target: { value: 'loc-1' },
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Service location/i)).toHaveValue('loc-1');
+      expect(screen.getByText(/Home \(Primary\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/Rental/i)).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText(/Service location/i), {
+      target: { value: 'loc-2' },
     });
     fireEvent.change(screen.getByLabelText(/Summary/i), {
       target: { value: 'Fix the sink' },
@@ -88,7 +118,7 @@ describe('JobCreate (P11-006)', () => {
       expect(postCall![0]).toBe('/api/jobs');
       const body = JSON.parse((postCall![1] as RequestInit).body as string);
       expect(body.customerId).toBe('cust-1');
-      expect(body.locationId).toBe('loc-1');
+      expect(body.locationId).toBe('loc-2');
       expect(body.summary).toBe('Fix the sink');
       expect(body.priority).toBe('normal');
     });
