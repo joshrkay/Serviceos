@@ -18,6 +18,7 @@ const baseCustomer = {
   secondaryPhone: '',
   email: 'alice@example.com',
   preferredChannel: 'email',
+  communicationNotes: 'Prefers afternoon appointments.',
 };
 
 describe('P11-007 CustomerEdit', () => {
@@ -73,6 +74,34 @@ describe('P11-007 CustomerEdit', () => {
     expect(putCall[1]?.method).toBe('PUT');
     const body = JSON.parse(putCall[1]?.body as string);
     expect(body.firstName).toBe('Alicia');
+  });
+
+  it('PUTs an empty string when clearing customer notes', async () => {
+    vi.mocked(apiFetch)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => baseCustomer,
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...baseCustomer, communicationNotes: '' }),
+      } as unknown as Response);
+
+    render(<CustomerEdit customerId="c-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('communicationNotes')).toHaveValue('Prefers afternoon appointments.');
+    });
+
+    fireEvent.change(screen.getByLabelText('communicationNotes'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => {
+      const body = JSON.parse(vi.mocked(apiFetch).mock.calls[1][1]?.body as string);
+      expect(body.communicationNotes).toBe('');
+    });
   });
 
   it('shows error when neither name nor company is set', async () => {

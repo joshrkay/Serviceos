@@ -1,0 +1,986 @@
+/**
+ * VoiceTurnProcessor — closure-captured agent loop extracted from
+ * `TwilioGatherAdapter` so both production AND the Layer 2 voice-quality
+ * harness can drive the real agent through a single factory.
+ *
+ * Production (`app.ts`) wires `attachMediaStreamServer` with a `speechTurn`
+ * that delegates to `TwilioGatherAdapter#processCallerUtterance`. That
+ * method (~170 LOC) plus the helpers it transitively reaches
+ * (`recordCost`, `executeSideEffects`, `handleAuditLog`,
+ * `handleCreateProposal`, `handleNotifyOncall`, the prompt/threshold
+ * resolvers, the FSM-confirm-template expansion, the terminated-session
+ * finalize, and the end-of-call summary) all lived on the adapter class
+ * and so could not be reused without instantiating the whole adapter.
+ *
+ * This module re-homes that surface as a closure-captured factory:
+ *
+ *   - `speechTurn`               — the SpeechTurnHandler the media-streams
+ *                                  adapter calls; same body as the old
+ *                                  `processCallerUtterance` minus the
+ *                                  `session` lookup (the WS adapter already
+ *                                  resolves it from `start.callSid`).
+ *   - `finalizeTerminatedSession`— derive + stash CallOutcome + best-effort
+ *                                  persist to voice_sessions. Same
+ *                                  signature `(session, sideEffects, reason)`
+ *                                  the route layer + media-streams `finalizeOnClose`
+ *                                  expect.
+ *   - `executeSideEffects`,
+ *     `recordCost`,
+ *     `expandIntentConfirmTemplate`,
+ *     `resolveVerticalPromptSection`,
+ *     `resolvePlanPromptSection`,
+ *     `resolveThresholdOverride`,
+ *     `runSummary`               — exposed so the rest of `TwilioGatherAdapter`
+ *                                  (handleInbound, _handleGatherLocked,
+ *                                  initializeStreamSession, queueCallbackProposal,
+ *                                  finalizeTwiml) can call them directly
+ *                                  instead of duplicating logic.
+ *
+ * The ephemeral `pendingTransferTwiml` session map is accepted as a dep
+ * so the adapter and processor share the same Map instance. When the
+ * adapter omits it, a fresh empty Map is created — useful for tests.
+ *
+ * Production behavior is preserved verbatim: same audit emissions, same
+ * proposal payload shape, same FSM dispatch order, same cost tracking,
+ * same voice-event emissions.
+ */
+
+import { v4 as uuidv4 } from 'uuid';
+import type { Pool } from 'pg';
+import { classifyIntent } from '../orchestration/intent-classifier';
+import { confirmIntent } from '../skills/confirm-intent';
+import { summarizeSession } from '../skills/summarize-session';
+import { escalateToHuman } from '../skills/escalate-to-human';
+import { estimateCostCents } from '../skills/session-cost-tracker';
+import {
+  intentClassifiedEvent,
+  costIncurredEvent,
+  sessionTerminatedEvent,
+} from '../voice-quality/events';
+import { TAU_INT } from '../agents/customer-calling/transitions';
+import type {
+  CallingAgentEvent,
+  SideEffect,
+} from '../agents/customer-calling/types';
+import type {
+  VoiceSession,
+  VoiceSessionStore,
+} from '../agents/customer-calling/voice-session-store';
+import { deriveCallOutcome } from '../agents/customer-calling/outcome-mapper';
+import type { VoiceSessionRepository } from '../../voice/voice-session';
+import type {
+  ProposalRepository,
+  ProposalType,
+} from '../../proposals/proposal';
+import { createProposal as buildProposal } from '../../proposals/proposal';
+import type { LeadRepository } from '../../leads/lead';
+import type { AuditRepository } from '../../audit/audit';
+import { createAuditEvent } from '../../audit/audit';
+import type { OnCallRepository } from '../../oncall/rotation';
+import type { TwilioCallControl } from '../../telephony/twilio-call-control';
+import { maskPhone } from '../../telephony/twilio-call-control';
+import type { DispatcherPhoneResolver } from '../skills/escalate-to-human';
+import type { TenantCredentialResolver } from '../../integrations/credentials';
+import type { JobRepository } from '../../jobs/job';
+import type { AppointmentRepository } from '../../appointments/appointment';
+import type { InvoiceRepository } from '../../invoices/invoice';
+import type { AgreementRepository } from '../../agreements/agreement';
+import type { CustomerRepository } from '../../customers/customer';
+import type { EstimateRepository } from '../../estimates/estimate';
+import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import type { LLMGateway } from '../gateway/gateway';
+import type {
+  VoiceRepository,
+  CallOutcome,
+} from '../../voice/voice-service';
+import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
+import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
+import { createLogger } from '../../logging/logger';
+
+const logger = createLogger({
+  service: 'ai.voice-turn.processor',
+  environment: process.env.NODE_ENV || 'development',
+});
+
+/**
+ * XML-escape (mirrors `twilio-adapter.ts#xmlEscape`). Re-implemented
+ * locally so this module never imports back from `telephony/twilio-adapter`,
+ * which would create a circular import once the adapter delegates here.
+ */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/** Map a classifier intent string to the typed ProposalType bucket. */
+function intentToProposalType(intent: string | undefined): ProposalType {
+  switch (intent) {
+    case 'create_invoice':
+      return 'draft_invoice';
+    case 'update_invoice':
+      return 'update_invoice';
+    case 'issue_invoice':
+      return 'issue_invoice';
+    case 'send_invoice':
+      return 'send_invoice';
+    case 'record_payment':
+      return 'record_payment';
+    case 'draft_estimate':
+      return 'draft_estimate';
+    case 'update_estimate':
+      return 'update_estimate';
+    case 'create_appointment':
+      return 'create_appointment';
+    case 'reschedule_appointment':
+      return 'reschedule_appointment';
+    case 'cancel_appointment':
+      return 'cancel_appointment';
+    case 'reassign_appointment':
+      return 'reassign_appointment';
+    case 'create_customer':
+      return 'create_customer';
+    case 'create_job':
+      return 'create_job';
+    case 'add_note':
+      return 'add_note';
+    case 'emergency_dispatch':
+      return 'emergency_dispatch';
+    default:
+      return 'voice_clarification';
+  }
+}
+
+export interface VoiceTurnProcessorDeps {
+  store: VoiceSessionStore;
+  gateway: LLMGateway;
+  pool?: Pool;
+  auditRepo?: AuditRepository;
+  proposalRepo?: ProposalRepository;
+  onCallRepo?: OnCallRepository;
+  leadRepo?: LeadRepository;
+  systemActorId?: string;
+  businessName: string;
+  publicBaseUrl?: string;
+  callControl?: TwilioCallControl;
+  dispatcherPhoneResolver?: DispatcherPhoneResolver;
+  recordingCallbackPath?: string;
+  jobRepo?: JobRepository;
+  appointmentRepo?: AppointmentRepository;
+  invoiceRepo?: InvoiceRepository;
+  agreementRepo?: AgreementRepository;
+  customerRepo?: CustomerRepository;
+  estimateRepo?: EstimateRepository;
+  lookupEvents?: LookupEventService;
+  credentialResolver?: TenantCredentialResolver;
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
+  callerPlanResolver?: (
+    tenantId: string,
+    customerId: string,
+  ) => Promise<string | undefined>;
+  thresholdResolver?: (
+    tenantId: string,
+  ) => Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  >;
+  voiceSessionRepo?: VoiceSessionRepository;
+  voiceRepo?: VoiceRepository;
+  voicePersonaResolver?: VoicePersonaResolver;
+  /**
+   * Optional shared map. When the host (TwilioGatherAdapter) provides
+   * its own Map instance, the processor reads/writes the same instance
+   * so the host's other entry points (handleInbound, handleNotifyOncall,
+   * etc.) see the same state. When omitted, a fresh empty Map is
+   * created — appropriate for tests and standalone harness use.
+   */
+  pendingTransferTwiml?: Map<string, string>;
+  /**
+   * Optional callback fired when a session terminates so the host can
+   * trigger any post-terminate work. The adapter wires this so its
+   * existing `runSummary` path still kicks off after a terminal turn.
+   *
+   * `speechTurn` `await`s this callback (wrapped in try/catch). The
+   * callback may return immediately by spawning its own background work
+   * (production keeps fire-and-forget summary inside the adapter's
+   * wiring to preserve Twilio webhook latency), OR it may await its
+   * own work (Layer 2 awaits `runSummary` so the runner's per-run
+   * suite-cost-tracker snapshot includes the summary's gateway spend).
+   *
+   * When omitted, the processor falls back to a fire-and-forget
+   * `runSummary` for parity with the adapter's legacy behavior.
+   */
+  onSessionTerminated?: (session: VoiceSession) => void | Promise<void>;
+}
+
+export interface VoiceTurnProcessor {
+  /**
+   * Drives a single speech turn through the FSM and returns the
+   * resulting side effects. Matches the `SpeechTurnHandler` contract
+   * `attachMediaStreamServer` accepts so it can be wired directly.
+   */
+  speechTurn: SpeechTurnHandler;
+  /**
+   * Derive + stash the typed CallOutcome on the session and kick off
+   * the best-effort `voice_sessions` persist. Idempotent.
+   */
+  finalizeTerminatedSession(
+    session: VoiceSession,
+    sideEffects: ReadonlyArray<SideEffect>,
+    fallbackReason: string,
+  ): void;
+  /** Execute audit/proposal/notify_oncall side effects against wired repos. */
+  executeSideEffects(
+    session: VoiceSession,
+    sideEffects: SideEffect[],
+    tenantId: string,
+  ): Promise<void>;
+  /** Push token usage into the cost tracker. Returns true on cap exceeded. */
+  recordCost(
+    session: VoiceSession,
+    usage: { input: number; output: number } | undefined,
+  ): boolean;
+  /** Replace a placeholder `intent_confirm` tts_play with a concrete readback. */
+  expandIntentConfirmTemplate(
+    sideEffects: SideEffect[],
+    intentType: string,
+  ): void;
+  resolveVerticalPromptSection(
+    tenantId: string,
+  ): Promise<string | undefined>;
+  resolvePlanPromptSection(
+    tenantId: string,
+    customerId: string | undefined,
+  ): Promise<string | undefined>;
+  resolveThresholdOverride(
+    tenantId: string,
+  ): Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  >;
+  /** Persist the end-of-call summary. Best-effort. */
+  runSummary(session: VoiceSession): Promise<void>;
+}
+
+export function createVoiceTurnProcessor(
+  deps: VoiceTurnProcessorDeps,
+): VoiceTurnProcessor {
+  const pendingTransferTwiml =
+    deps.pendingTransferTwiml ?? new Map<string, string>();
+
+  // ─── Helpers (formerly private methods on TwilioGatherAdapter) ──────
+
+  async function resolveVerticalPromptSection(
+    tenantId: string,
+  ): Promise<string | undefined> {
+    if (!deps.verticalPromptResolver) return undefined;
+    try {
+      return await deps.verticalPromptResolver(tenantId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function resolvePlanPromptSection(
+    tenantId: string,
+    customerId: string | undefined,
+  ): Promise<string | undefined> {
+    if (!deps.callerPlanResolver || !customerId) return undefined;
+    try {
+      return await deps.callerPlanResolver(tenantId, customerId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function resolveThresholdOverride(
+    tenantId: string,
+  ): Promise<
+    Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
+  > {
+    if (!deps.thresholdResolver) return undefined;
+    try {
+      return await deps.thresholdResolver(tenantId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function recordCost(
+    session: VoiceSession,
+    usage: { input: number; output: number } | undefined,
+  ): boolean {
+    if (!usage) return false;
+    const cents = estimateCostCents(usage.input, usage.output);
+    const events = session.costTracker.recordUsage({
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      costCents: cents,
+    });
+    session.events.emit(
+      'voice-event',
+      costIncurredEvent(cents, session.costTracker.totals.costCents),
+    );
+    const exceeded = events.some((e) => e.type === 'cost_cap_exceeded');
+    if (exceeded) {
+      session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+    }
+    return exceeded;
+  }
+
+  function expandIntentConfirmTemplate(
+    sideEffects: SideEffect[],
+    intentType: string,
+  ): void {
+    for (const fx of sideEffects) {
+      if (
+        fx.type === 'tts_play' &&
+        (fx.payload.text === 'intent_confirm' ||
+          fx.payload.template === 'confirm_intent')
+      ) {
+        fx.payload.text = `Just to confirm — ${intentType.replace(/_/g, ' ')}. Is that right?`;
+      }
+    }
+  }
+
+  async function handleAuditLog(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    if (!deps.auditRepo) {
+      logger.debug('audit_log (no auditRepo wired)', {
+        tenantId,
+        payload: fx.payload,
+      });
+      return;
+    }
+    const eventType =
+      typeof fx.payload.eventType === 'string'
+        ? fx.payload.eventType
+        : 'agent.calling.unknown';
+    try {
+      const ev = createAuditEvent({
+        tenantId,
+        actorId: deps.systemActorId ?? 'calling-agent',
+        actorRole: 'system',
+        eventType,
+        entityType: 'voice_session',
+        entityId: session.id,
+        correlationId: session.id,
+        metadata: fx.payload,
+      });
+      await deps.auditRepo.create(ev);
+    } catch (err) {
+      logger.warn('audit_log persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  async function handleCreateProposal(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+    sideEffectsSink: SideEffect[],
+  ): Promise<void> {
+    if (!deps.proposalRepo) {
+      logger.info('create_proposal (no proposalRepo wired)', {
+        tenantId,
+        payload: fx.payload,
+      });
+      return;
+    }
+    const intent =
+      typeof fx.payload.intent === 'string' ? fx.payload.intent : undefined;
+    const entities =
+      typeof fx.payload.entities === 'object' && fx.payload.entities !== null
+        ? (fx.payload.entities as Record<string, unknown>)
+        : {};
+    try {
+      const tenantThresholdOverride = await resolveThresholdOverride(tenantId);
+      const proposal = buildProposal({
+        tenantId,
+        proposalType: intentToProposalType(intent),
+        payload: {
+          intent,
+          entities,
+          sessionId: session.id,
+          callSid: session.callSid,
+        },
+        summary: intent ? `Voice intent: ${intent}` : 'Voice clarification needed',
+        sourceContext: {
+          source: 'calling-agent',
+          channel: 'telephony',
+          sessionId: session.id,
+        },
+        aiRunId: uuidv4(),
+        createdBy:
+          typeof fx.payload.customerId === 'string'
+            ? fx.payload.customerId
+            : deps.systemActorId ?? 'calling-agent',
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+      });
+      const stored = await deps.proposalRepo.create(proposal);
+      session.proposalIds.push(stored.id);
+      const followUps = session.machine.dispatch({
+        type: 'proposal_queued',
+        proposalId: stored.id,
+      });
+      sideEffectsSink.push(...followUps);
+    } catch (err) {
+      logger.warn('create_proposal persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      const recovery = session.machine.dispatch({
+        type: 'system_failure',
+        reason: 'proposal_persist_failed',
+      });
+      sideEffectsSink.push(...recovery);
+    }
+  }
+
+  function dialResultUrl(sessionId: string): string {
+    const path = `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`;
+    if (deps.publicBaseUrl) {
+      return `${deps.publicBaseUrl.replace(/\/+$/, '')}${path}`;
+    }
+    return path;
+  }
+
+  async function handleNotifyOncall(
+    session: VoiceSession,
+    fx: SideEffect,
+    tenantId: string,
+  ): Promise<void> {
+    if (!deps.onCallRepo || !deps.auditRepo) {
+      logger.warn('notify_oncall (oncall/audit repos not wired)', {
+        tenantId,
+        payload: fx.payload,
+      });
+      return;
+    }
+    const reason =
+      typeof fx.payload.reason === 'string' ? fx.payload.reason : 'low_confidence';
+    try {
+      const result = await escalateToHuman({
+        tenantId,
+        sessionId: session.id,
+        reason: reason as Parameters<typeof escalateToHuman>[0]['reason'],
+        channel: 'telephony',
+        onCallRepo: deps.onCallRepo,
+        auditRepo: deps.auditRepo,
+        session,
+        ...(deps.callControl ? { callControl: deps.callControl } : {}),
+        ...(deps.dispatcherPhoneResolver
+          ? { dispatcherPhoneResolver: deps.dispatcherPhoneResolver }
+          : {}),
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        dialActionUrl: dialResultUrl(session.id),
+      });
+
+      if (result.transfer) {
+        pendingTransferTwiml.set(session.id, result.transfer.fallbackTwiml);
+        logger.info('notify_oncall: dialing dispatcher', {
+          sessionId: session.id,
+          rotationIndex: result.transfer.rotationIndex,
+          dispatcherPhone: maskPhone(result.transfer.dispatcherPhone),
+        });
+      } else if (!result.escalated && deps.callControl) {
+        await queueCallbackProposalInternal(
+          session,
+          tenantId,
+          reason,
+          'rotation_empty',
+        );
+        const safeName = xmlEscape(deps.businessName);
+        pendingTransferTwiml.set(
+          session.id,
+          `<?xml version="1.0" encoding="UTF-8"?>` +
+            `<Response>` +
+            `<Say voice="Polly.Joanna">I'm sorry, no one is available right now. ${safeName} will call you back as soon as possible. Thank you for calling.</Say>` +
+            `<Hangup/>` +
+            `</Response>`,
+        );
+        session.ended = true;
+      }
+    } catch (err) {
+      logger.warn('escalateToHuman failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /**
+   * Internal duplicate of the adapter's `queueCallbackProposal` used by
+   * `handleNotifyOncall` when the rotation cascade is empty. The adapter
+   * retains its public `queueCallbackProposal` for the route layer; both
+   * paths build the same proposal shape.
+   */
+  async function queueCallbackProposalInternal(
+    session: VoiceSession,
+    tenantId: string,
+    reason: string,
+    outcome: 'rotation_empty' | 'rotation_exhausted',
+  ): Promise<void> {
+    if (!deps.proposalRepo) {
+      logger.warn('queueCallbackProposal: proposalRepo not wired', {
+        sessionId: session.id,
+        outcome,
+      });
+      return;
+    }
+    try {
+      const tenantThresholdOverride = await resolveThresholdOverride(tenantId);
+      const proposal = buildProposal({
+        tenantId,
+        proposalType: 'voice_clarification',
+        payload: {
+          intent: 'customer_callback_required',
+          reason,
+          outcome,
+          sessionId: session.id,
+          callSid: session.callSid,
+        },
+        summary: `Customer callback required (${outcome})`,
+        sourceContext: {
+          source: 'calling-agent',
+          channel: 'telephony',
+          sessionId: session.id,
+          escalationReason: reason,
+        },
+        aiRunId: uuidv4(),
+        createdBy: deps.systemActorId ?? 'calling-agent',
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+      });
+      const stored = await deps.proposalRepo.create(proposal);
+      session.proposalIds.push(stored.id);
+      if (deps.auditRepo) {
+        try {
+          const auditEvent = createAuditEvent({
+            tenantId,
+            actorId: deps.systemActorId ?? 'calling-agent',
+            actorRole: 'system',
+            eventType: 'customer_callback_required',
+            entityType: 'voice_session',
+            entityId: session.id,
+            correlationId: session.id,
+            metadata: {
+              proposalId: stored.id,
+              reason,
+              outcome,
+              callSid: session.callSid,
+            },
+          });
+          await deps.auditRepo.create(auditEvent);
+        } catch (err) {
+          logger.warn('queueCallbackProposal: audit persist failed', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
+      }
+      deps.callControl?.clearCursor(session.id);
+    } catch (err) {
+      logger.warn('queueCallbackProposal failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  async function executeSideEffects(
+    session: VoiceSession,
+    sideEffects: SideEffect[],
+    tenantId: string,
+  ): Promise<void> {
+    if (sideEffects.length > 0) {
+      deps.store.touch(session.id);
+    }
+    for (const fx of sideEffects) {
+      if (fx.type === 'audit_log') {
+        await handleAuditLog(session, fx, tenantId);
+      } else if (fx.type === 'create_proposal') {
+        await handleCreateProposal(session, fx, tenantId, sideEffects);
+      } else if (fx.type === 'notify_oncall') {
+        await handleNotifyOncall(session, fx, tenantId);
+      }
+    }
+  }
+
+  // ─── Outcome / persistence ──────────────────────────────────────────
+
+  async function persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!deps.voiceSessionRepo) return;
+    try {
+      await deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel:
+          session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
+        // can surface the full conversation without relying on the
+        // process-scoped VoiceSessionStore. (Mirrors the adapter's
+        // legacy persistSessionEnded; that path is now bypassed because
+        // the processor sets terminalOutcome first, so without these
+        // fields transcript+customerId were silently dropped from
+        // voice_sessions for any session ending via the extracted
+        // speechTurn.)
+        ...(session.transcript.length > 0
+          ? { transcript: [...session.transcript] }
+          : {}),
+        // Stamp the customer FK so the interactions list can join to
+        // the customers table and surface the linked customer.
+        ...(session.customerId !== undefined
+          ? { customerId: session.customerId }
+          : {}),
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
+    }
+  }
+
+  function finalizeTerminatedSession(
+    session: VoiceSession,
+    sideEffects: ReadonlyArray<SideEffect>,
+    fallbackReason: string,
+  ): void {
+    if (session.terminalOutcome) return;
+    const endSessionEffect = [...sideEffects]
+      .reverse()
+      .find((e) => e.type === 'end_session');
+    const reason =
+      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
+        ? endSessionEffect.payload.reason
+        : undefined) ?? fallbackReason;
+    const outcome = deriveCallOutcome({
+      finalState: session.machine.currentState,
+      endedReason: reason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = reason;
+    void persistSessionEnded(session, reason, outcome);
+  }
+
+  async function runSummary(session: VoiceSession): Promise<void> {
+    const durationMs = Date.now() - session.createdAt.getTime();
+
+    if (session.transcript.length === 0) {
+      logger.info('runSummary: skipping (empty transcript)', {
+        sessionId: session.id,
+      });
+    } else {
+      const intentDetected = session.machine.currentContext.currentIntent;
+      const SUMMARY_RETRY_DELAYS_MS = [200, 800];
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt <= SUMMARY_RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          await summarizeSession({
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            transcript: session.transcript,
+            proposalIds: session.proposalIds,
+            durationMs,
+            gateway: deps.gateway,
+            ...(intentDetected ? { intentDetected } : {}),
+            ...(deps.pool ? { pool: deps.pool } : {}),
+          });
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < SUMMARY_RETRY_DELAYS_MS.length) {
+            await new Promise((r) => {
+              const t = setTimeout(r, SUMMARY_RETRY_DELAYS_MS[attempt]);
+              if (typeof t.unref === 'function') t.unref();
+            });
+          }
+        }
+      }
+      if (lastErr) {
+        logger.warn('summarizeSession failed after retries', {
+          error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+          sessionId: session.id,
+          attempts: SUMMARY_RETRY_DELAYS_MS.length + 1,
+        });
+      }
+    }
+
+    const callSid = session.machine.currentContext.callSid;
+    if (deps.voiceRepo?.stampOutcomeByCallSid && callSid) {
+      try {
+        await deps.voiceRepo.stampOutcomeByCallSid(
+          session.tenantId,
+          callSid,
+          deriveOutcomeFromSession(session),
+        );
+      } catch (err) {
+        logger.warn('stampOutcomeByCallSid failed', {
+          error: err instanceof Error ? err.message : String(err),
+          callSid,
+        });
+      }
+    }
+  }
+
+  /**
+   * Local duplicate of the adapter's `deriveCallOutcome` for use inside
+   * `runSummary`. The adapter retains its own (used by
+   * `stampCallOutcomeByCallSid`); both branches return the same value
+   * for the same session.
+   */
+  function deriveOutcomeFromSession(session: VoiceSession): CallOutcome {
+    const ctx = session.machine.currentContext;
+    if (ctx.escalationReason) {
+      if (ctx.escalationReason.startsWith('system_failure')) return 'failed';
+      if (ctx.escalationReason.startsWith('cost_cap_exceeded')) return 'failed';
+      if (ctx.escalationReason.startsWith('callback_required'))
+        return 'callback_required';
+      if (ctx.escalationReason.startsWith('abuse_detected')) return 'failed';
+      return 'escalated_to_human';
+    }
+    if (session.proposalIds.length > 0) return 'completed';
+    if (ctx.currentIntent && ctx.currentIntent !== 'unknown') return 'completed';
+    const hadCallerSpeech = session.transcript.some((line) =>
+      line.startsWith('caller:'),
+    );
+    if (!hadCallerSpeech) return 'dropped';
+    return 'no_intent';
+  }
+
+  // ─── Speech turn (formerly processCallerUtterance) ──────────────────
+
+  const speechTurn: SpeechTurnHandler = async ({
+    session,
+    speechResult,
+    callSid: _callSid,
+    tenantId,
+  }): Promise<SideEffect[]> => {
+    // Note: `processCallerUtterance` historically took `sessionId` and
+    // looked up the session via the store. The mediastream adapter
+    // already resolves the session before invoking us, so we accept it
+    // directly. The unknown-session fallback is preserved for the
+    // (rare) case where callers pass through a stale session.
+    if (!session) {
+      logger.warn('speechTurn: missing session');
+      return [
+        {
+          type: 'tts_play',
+          payload: {
+            text: "I'm sorry, your session has ended. Please call again.",
+          },
+        },
+        { type: 'end_session', payload: { reason: 'session_not_found' } },
+      ];
+    }
+
+    // 1. Append caller utterance to transcript.
+    deps.store.appendTranscript(session.id, {
+      speaker: 'caller',
+      text: speechResult,
+      ts: Date.now(),
+    });
+
+    const sideEffectsAll: SideEffect[] = [];
+    const currentState = session.machine.currentState;
+
+    if (speechResult.trim().length === 0) {
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+      await executeSideEffects(session, sideEffectsAll, tenantId);
+      return sideEffectsAll;
+    }
+
+    if (currentState === 'intent_confirm') {
+      try {
+        const ctx = session.machine.currentContext;
+        const intentSummary = ctx.currentIntent ?? 'that';
+        const confirmation = await confirmIntent({
+          intentSummary,
+          callerResponse: speechResult,
+          tenantId,
+          gateway: deps.gateway,
+        });
+        const capExceeded = recordCost(session, confirmation.tokenUsage);
+        if (capExceeded) {
+          sideEffectsAll.push(
+            ...session.machine.dispatch({ type: 'cost_cap_exceeded' }),
+          );
+        } else if (confirmation.confirmed) {
+          sideEffectsAll.push(
+            ...session.machine.dispatch({ type: 'confirmed' }),
+          );
+        } else {
+          sideEffectsAll.push(
+            ...session.machine.dispatch({
+              type: 'correction',
+              newTranscript: confirmation.correction ?? speechResult,
+            }),
+          );
+        }
+      } catch (err) {
+        logger.error('speechTurn: confirmIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'correction',
+            newTranscript: speechResult,
+          }),
+        );
+      }
+    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+      let classifierEvent: CallingAgentEvent | null = null;
+      const verticalPromptSection = await resolveVerticalPromptSection(tenantId);
+      const planPromptSection = await resolvePlanPromptSection(
+        tenantId,
+        session.customerId,
+      );
+      try {
+        const classification = await classifyIntent(
+          speechResult,
+          { tenantId, verticalPromptSection, planPromptSection },
+          deps.gateway,
+        );
+        session.events.emit(
+          'voice-event',
+          intentClassifiedEvent({
+            intentType: classification.intentType,
+            confidence: classification.confidence,
+            tokenUsage: classification.tokenUsage,
+          }),
+        );
+        const capExceeded = recordCost(session, classification.tokenUsage);
+        if (capExceeded) {
+          classifierEvent = { type: 'cost_cap_exceeded' };
+        } else if (
+          classification.confidence >= TAU_INT &&
+          classification.intentType !== 'unknown'
+        ) {
+          classifierEvent = {
+            type: 'intent_classified',
+            intentType: classification.intentType,
+            entities: (classification.extractedEntities ?? {}) as Record<
+              string,
+              unknown
+            >,
+            confidence: classification.confidence,
+          };
+        } else {
+          classifierEvent = {
+            type: 'confidence_low',
+            threshold: TAU_INT,
+            score: classification.confidence,
+          };
+        }
+      } catch (err) {
+        logger.error('speechTurn: classifyIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+        classifierEvent = { type: 'confidence_low', threshold: TAU_INT, score: 0 };
+      }
+
+      sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
+
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        session.machine.currentState === 'entity_resolution'
+      ) {
+        const refs: Record<string, string> = {};
+        for (const [k, v] of Object.entries(classifierEvent.entities)) {
+          if (typeof v === 'string') refs[k] = v;
+        }
+        sideEffectsAll.push(
+          ...session.machine.dispatch({ type: 'entity_resolved', refs }),
+        );
+        expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+      }
+    } else {
+      logger.info('speechTurn: unhandled state, treating as confidence_low', {
+        state: currentState,
+        sessionId: session.id,
+      });
+      sideEffectsAll.push(
+        ...session.machine.dispatch({
+          type: 'confidence_low',
+          threshold: TAU_INT,
+          score: 0,
+        }),
+      );
+    }
+
+    await executeSideEffects(session, sideEffectsAll, tenantId);
+
+    const ttsLast = [...sideEffectsAll]
+      .reverse()
+      .find((e) => e.type === 'tts_play');
+    if (ttsLast && typeof ttsLast.payload.text === 'string') {
+      deps.store.appendTranscript(session.id, {
+        speaker: 'agent',
+        text: ttsLast.payload.text,
+        ts: Date.now(),
+      });
+    }
+    if (session.machine.currentState === 'terminated' && !session.ended) {
+      session.ended = true;
+      finalizeTerminatedSession(session, sideEffectsAll, 'caller_hangup');
+      // Defer summary kick-off to the host so it can decide on retry /
+      // background semantics. We `await` the callback so hosts that
+      // need summary spend to land within a snapshot window (Layer 2
+      // entry test) can do so deterministically; production keeps the
+      // fire-and-forget tradeoff inside its callback wiring to preserve
+      // Twilio webhook latency. When no host hook is wired we run
+      // summary inline (still fire-and-forget) for parity with the
+      // adapter's legacy behavior.
+      if (deps.onSessionTerminated) {
+        try {
+          await deps.onSessionTerminated(session);
+        } catch (err) {
+          logger.warn('onSessionTerminated callback threw', {
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: session.id,
+          });
+        }
+      } else {
+        void runSummary(session).catch(() => {
+          /* swallow — summary is best-effort */
+        });
+      }
+    }
+
+    return sideEffectsAll;
+  };
+
+  return {
+    speechTurn,
+    finalizeTerminatedSession,
+    executeSideEffects,
+    recordCost,
+    expandIntentConfirmTemplate,
+    resolveVerticalPromptSection,
+    resolvePlanPromptSection,
+    resolveThresholdOverride,
+    runSummary,
+  };
+}

@@ -7,7 +7,7 @@ import {
   AlertTriangle, Home, CheckCircle2, AlertCircle, ChevronRight,
 } from 'lucide-react';
 import {
-  customers, jobs, estimates, invoices,
+  jobs, estimates, invoices,
   ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
@@ -17,8 +17,8 @@ import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiContract {
   id: string;
-  title: string;
-  cadence?: string;
+  name: string;
+  recurrenceRule?: string;
   status?: string;
 }
 
@@ -36,12 +36,41 @@ interface ApiCustomerDetail {
 
 interface ApiLocation {
   id: string;
-  street1?: string;
-  city?: string;
-  state?: string;
-  postalCode?: string;
-  isPrimary?: boolean;
+  customerId: string;
   label?: string;
+  street1: string;
+  street2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  isPrimary: boolean;
+}
+
+function customerName(c: ApiCustomer): string {
+  return (
+    c.displayName?.trim() ||
+    [c.firstName, c.lastName].filter(Boolean).join(' ').trim() ||
+    'Customer'
+  );
+}
+
+function formatAddress(loc: ApiLocation): string {
+  const stateZip = [loc.state, loc.postalCode].filter(Boolean).join(' ');
+  return [loc.street1, loc.street2, loc.city, stateZip]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+function adaptLocation(loc: ApiLocation): ServiceLocation {
+  return {
+    id: loc.id,
+    nickname: loc.label?.trim() || (loc.isPrimary ? 'Home' : 'Service location'),
+    address: formatAddress(loc),
+    serviceTypes: [],
+    isPrimary: loc.isPrimary,
+    jobCount: 0,
+  };
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -344,8 +373,14 @@ function MaintenanceContractsSidebar({ customerId, contracts }: {
                   to={`/contracts/${contract.id}`}
                   className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs text-blue-700 hover:bg-blue-100 transition-colors"
                 >
-                  {contract.title}
-                  {contract.cadence ? <span className="text-blue-500">· {contract.cadence}</span> : null}
+                  {contract.name}
+                  {contract.recurrenceRule && (
+                    <span className="text-blue-500">
+                      · {contract.recurrenceRule.includes('MONTHLY') ? 'Monthly' :
+                         contract.recurrenceRule.includes('QUARTERLY') ? 'Quarterly' :
+                         contract.recurrenceRule.includes('YEARLY') ? 'Yearly' : ''}
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>
@@ -423,9 +458,23 @@ export function CustomerDetailPage() {
     : mockFound;
 
   const customerId = id ?? '';
+
+  const { data: customer, error: customerError } =
+    useDetailQuery<ApiCustomer>('/api/customers', customerId || null);
+
+  const { data: apiLocations } = useListQuery<ApiLocation>('/api/locations', {
+    filters: customerId ? { customerId } : {},
+    enabled: Boolean(customerId),
+  });
+
+  // Maintenance contracts / service agreements live on /api/agreements
+  // (per-tenant, filterable by customerId). The earlier nested
+  // /api/customers/:id/maintenance-contracts path was never mounted on
+  // the API and would 404 for every customer. useListQuery now resyncs
+  // its filters on prop change, so route navigation rebinds correctly.
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
-    customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
-    { enabled: Boolean(customerId) && Boolean(found) },
+    '/api/agreements',
+    { filters: customerId ? { customerId } : {}, enabled: Boolean(customerId) },
   );
   // Real jobs from API for this customer (must be called before early returns)
   const { data: apiRealJobs } = useListQuery<{ id: string; jobNumber: string; summary: string; status: string; createdAt?: string }>(
@@ -433,7 +482,11 @@ export function CustomerDetailPage() {
     { enabled: Boolean(id) }
   );
   const [tab,              setTab]           = useState<Tab>('history');
-  const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
+  // The AddLocationSheet is currently in-memory only — it doesn't POST to
+  // /api/locations — so we hold the added entries separately and merge them
+  // with what the API returns instead of seeding shared state via an effect
+  // (which would loop on every new array reference from useListQuery).
+  const [localLocations,   setLocalLocations] = useState<ServiceLocation[]>([]);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
   const [showAddLoc,       setShowAddLoc]    = useState(false);
   const [newLocIds,        setNewLocIds]     = useState<Set<string>>(new Set());
@@ -470,6 +523,24 @@ export function CustomerDetailPage() {
   const custEstimates = estimates.filter(e => e.customerId === id);
   const custInvoices  = invoices.filter(i => i.customerId === id);
 
+  const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
+  const found = {
+    name: customerName(customer),
+    phone: customer.primaryPhone ?? '',
+    email: customer.email ?? '',
+    address: primaryLoc?.address ?? '',
+    notes: customer.communicationNotes,
+    tags: customer.tags,
+    jobCount: custJobs.length,
+    memberSince: undefined as string | undefined,
+    totalRevenue: undefined as number | undefined,
+    lastService: undefined as string | undefined,
+  };
+
+  const multiLocation   = locations.length > 1;
+  const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
+  const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
+
   const tabs: Tab[] = multiLocation
     ? ['overview', 'locations', 'history']
     : ['overview', 'history'];
@@ -478,7 +549,7 @@ export function CustomerDetailPage() {
     setExpanded(s => { const n = new Set(s); n.has(locId) ? n.delete(locId) : n.add(locId); return n; });
   }
   function handleAddLocation(loc: ServiceLocation) {
-    setLocations(p => [...p, loc]);
+    setLocalLocations(p => [...p, loc]);
     setNewLocIds(s => new Set([...s, loc.id]));
     setExpanded(s => new Set([...s, loc.id]));
     setTab('locations');

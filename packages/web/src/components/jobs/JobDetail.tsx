@@ -12,6 +12,8 @@ import { calcMaterialsTotal, calcEstimateTotal, estimates } from '../../data/moc
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { useApiClient } from '../../lib/apiClient';
+import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -101,6 +103,7 @@ function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefine
       : (api.locations?.[0]?.street1 ?? ''),
     notes: api.communicationNotes,
     serviceType: 'HVAC',
+    notes: api.communicationNotes ?? api.notes,
     locations: [],
     jobCount: 0,
     openJobs: 0,
@@ -348,8 +351,8 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
 }
 
 // ─── Schedule + Tech Card ──────────────────────────────────────────────────
-function ScheduleTechCard({ job, tech, onCallTech }: {
-  job: Job; tech: Technician | undefined; onCallTech: () => void;
+function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
+  job: Job; tech: Technician | undefined; onCallTech: () => void; workerTerm: string;
 }) {
   const techStatusLabel =
     job.status === 'Active' || job.status === 'In Progress' ? 'On site now' :
@@ -383,7 +386,7 @@ function ScheduleTechCard({ job, tech, onCallTech }: {
         <div className="px-4 py-4">
           <div className="flex items-center gap-1.5 mb-3">
             <User size={13} className="text-slate-400" />
-            <p className="text-xs text-slate-400">Technician</p>
+            <p className="text-xs text-slate-400">{workerTerm}</p>
           </div>
           {tech ? (
             <>
@@ -408,7 +411,7 @@ function ScheduleTechCard({ job, tech, onCallTech }: {
             </>
           ) : (
             <button className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 transition-colors">
-              <Plus size={13} /> Assign technician
+              <Plus size={13} /> Assign {workerTerm.toLowerCase()}
             </button>
           )}
         </div>
@@ -947,6 +950,8 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
 // ─── Main Component ───────────────────────────────────────────────────────
 export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
+  const apiFetch = useApiClient();
+  const workerTerm = useWorkerTerm();
 
   const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
   const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
@@ -1119,7 +1124,7 @@ export function JobDetailView({ id }: { id: string }) {
         />
       )}
       <StatusStepper job={job} />
-      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} />
+      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} workerTerm={workerTerm} />
       <DescriptionCard job={job} />
       {job.estimateId && (
         <EstimateScopeCard

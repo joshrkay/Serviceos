@@ -18,6 +18,10 @@ export interface VoiceSessionRow {
   endedAt?: Date;
   endedReason?: string;
   outcome?: CallOutcome;
+  /** Persisted transcript turns from migration 092. */
+  transcript?: string[];
+  /** FK to customers — set by adapter when caller is identified. */
+  customerId?: string;
 }
 
 export interface CreateVoiceSessionInput {
@@ -26,6 +30,8 @@ export interface CreateVoiceSessionInput {
   channel: VoiceSessionChannel;
   callSid?: string;
   state: string;
+  /** Optional customer FK set when the caller is identified at session start. */
+  customerId?: string;
 }
 
 export interface MarkVoiceSessionEndedInput {
@@ -47,6 +53,23 @@ export interface MarkVoiceSessionEndedInput {
    */
   channel: VoiceSessionChannel;
   callSid?: string;
+  /**
+   * Accumulated transcript turns from the in-memory FSM. Persisted onto
+   * voice_sessions.transcript (migration 092) so /api/interactions can
+   * surface full call content without relying on the process-scoped store.
+   */
+  transcript?: string[];
+  /** Customer FK to stamp for the interactions list join. */
+  customerId?: string;
+}
+
+export interface ListVoiceSessionsOptions {
+  limit?: number;
+  offset?: number;
+  /** Filter to sessions that have ended (have endedAt set). */
+  endedOnly?: boolean;
+  /** Filter to sessions linked to a specific customer. */
+  customerId?: string;
 }
 
 export interface VoiceSessionRepository {
@@ -65,6 +88,11 @@ export interface VoiceSessionRepository {
     input: MarkVoiceSessionEndedInput,
   ): Promise<VoiceSessionRow | null>;
   findById(tenantId: string, id: string): Promise<VoiceSessionRow | null>;
+  /**
+   * List voice sessions for a tenant, newest first. Used by
+   * /api/interactions to surface the call log.
+   */
+  findByTenant(tenantId: string, opts?: ListVoiceSessionsOptions): Promise<VoiceSessionRow[]>;
 }
 
 export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
@@ -76,6 +104,7 @@ export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
       tenantId: input.tenantId,
       channel: input.channel,
       ...(input.callSid !== undefined ? { callSid: input.callSid } : {}),
+      ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
       state: input.state,
       startedAt: new Date(),
     };
@@ -103,6 +132,8 @@ export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
     row.endedAt = input.endedAt;
     row.endedReason = input.endedReason;
     row.outcome = input.outcome;
+    if (input.transcript !== undefined) row.transcript = input.transcript;
+    if (input.customerId !== undefined) row.customerId = input.customerId;
     this.rows.set(id, row);
     return { ...row };
   }
@@ -111,5 +142,16 @@ export class InMemoryVoiceSessionRepository implements VoiceSessionRepository {
     const row = this.rows.get(id);
     if (!row || row.tenantId !== tenantId) return null;
     return { ...row };
+  }
+
+  async findByTenant(tenantId: string, opts: ListVoiceSessionsOptions = {}): Promise<VoiceSessionRow[]> {
+    const { limit = 50, offset = 0, endedOnly, customerId } = opts;
+    let results = Array.from(this.rows.values())
+      .filter((r) => r.tenantId === tenantId)
+      .filter((r) => !endedOnly || r.endedAt !== undefined)
+      .filter((r) => !customerId || r.customerId === customerId)
+      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+    results = results.slice(offset, offset + limit);
+    return results.map((r) => ({ ...r }));
   }
 }

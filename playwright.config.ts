@@ -15,10 +15,18 @@ const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
 const includeQaMatrix = process.env.QA_MATRIX === '1';
+// Lever 3 of the QA strategy — see qa/reports/2026-05-11/coverage-sweep-runbook.md.
+// Opt-in to avoid running it on every PR; it visits every authenticated route
+// and requires a real running stack (or E2E_BASE_URL pointing at one).
+const includeCoverageSweep = process.env.COVERAGE_SWEEP === '1';
 
 export default defineConfig({
   testDir: './e2e',
   testIgnore: ['**/qa-matrix/**'],
+  // globalSetup runs once before any test. It primes the Clerk testing-token
+  // flow when E2E_CLERK_* env vars are present, and is a no-op otherwise so
+  // smoke tests still run on a bare runner. See e2e/global-setup.ts.
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   forbidOnly: isCI,
   retries: isCI ? 2 : 1,
@@ -42,7 +50,10 @@ export default defineConfig({
     {
       name: 'chromium',
       testDir: './e2e',
-      testIgnore: ['**/qa-matrix/**'],
+      // Exclude both the qa-matrix specs (their own project) and the
+      // coverage-sweep spec (opt-in via the dedicated project below) so
+      // the default `npm run e2e` does not run them.
+      testIgnore: ['**/qa-matrix/**', '**/coverage-sweep.spec.ts'],
       use: { ...devices['Desktop Chrome'] },
     },
     ...(includeQaMatrix
@@ -60,11 +71,28 @@ export default defineConfig({
           },
         ]
       : []),
+    ...(includeCoverageSweep
+      ? [
+          {
+            // Lever-3 coverage sweep — visits every authenticated route and
+            // asserts (a) no console / page errors, (b) primary buttons are
+            // wired to a handler, (c) data fetches return 2xx. Opt-in via
+            // COVERAGE_SWEEP=1 (set by `npm run e2e:coverage-sweep`).
+            // See qa/reports/2026-05-11/coverage-sweep-runbook.md.
+            name: 'coverage-sweep',
+            testDir: './e2e',
+            testMatch: ['coverage-sweep.spec.ts'],
+            testIgnore: [],
+            use: { ...devices['Desktop Chrome'] },
+          },
+        ]
+      : []),
   ],
 
-  globalTeardown: process.env.QA_MATRIX === '1'
-    ? './e2e/qa-matrix/helpers/report-builder.ts'
-    : undefined,
+  // globalTeardown is the mirror of globalSetup — handles both the ephemeral
+  // DB cleanup (when E2E_USE_TEST_DB=true) and the QA matrix report builder
+  // (when QA_MATRIX=1). Each branch is no-op when its env flag is absent.
+  globalTeardown: './e2e/global-teardown.ts',
 
   webServer: skipWebServer
     ? undefined

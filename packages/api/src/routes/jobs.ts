@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createJobSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { toErrorResponse, ValidationError } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import { Customer, CustomerRepository } from '../customers/customer';
 import {
@@ -54,7 +54,14 @@ export function createJobRouter(
           'customer',
           parsed.customerId
         )) as Customer | undefined;
-        await ownership.requireExists(req.auth!.tenantId, 'location', parsed.locationId);
+        const location = (await ownership.requireExistsAndLoad(
+          req.auth!.tenantId,
+          'location',
+          parsed.locationId
+        )) as ServiceLocation | undefined;
+        if (location && location.customerId !== parsed.customerId) {
+          throw new ValidationError('Service location does not belong to customer');
+        }
 
         // Resolve source attribution: explicit body override wins;
         // otherwise inherit from the customer.
