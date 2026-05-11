@@ -120,8 +120,8 @@ export function createDispatchRoutes(deps: {
 
         return res.json({ appointments: enriched, total: result.total });
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Internal server error';
-        return res.status(500).json({ error: message });
+        const { statusCode, body } = toErrorResponse(err);
+        return res.status(statusCode).json(body);
       }
     },
   );
