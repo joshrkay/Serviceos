@@ -19,8 +19,6 @@
  */
 
 import { clerkSetup } from '@clerk/testing/playwright';
-import { setupTestDb, writeStateFile } from './fixtures/setup-test-db';
-import { seedJourneyFixtures } from './fixtures/seed-journey-fixtures';
 
 export default async function globalSetup(): Promise<void> {
   // --- BEGIN: ephemeral-DB block ---
@@ -78,6 +76,12 @@ export default async function globalSetup(): Promise<void> {
 
 async function bootstrapEphemeralDb(): Promise<void> {
   console.log('[e2e globalSetup] E2E_USE_TEST_DB=true — bootstrapping ephemeral DB…');
+
+  // Lazy-import so smoke runs (E2E_USE_TEST_DB unset) never load the
+  // testcontainers/pg dependency graph and never trip on this module's
+  // own bootstrap issues — only the DB path needs these.
+  const { setupTestDb, writeStateFile } = await import('./fixtures/setup-test-db');
+  const { seedJourneyFixtures } = await import('./fixtures/seed-journey-fixtures');
 
   // 1. Start (or adopt) the test DB IN THIS PROCESS. If we own a
   //    container, setupTestDb() stores the ref in module state so

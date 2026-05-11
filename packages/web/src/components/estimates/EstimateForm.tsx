@@ -57,6 +57,8 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [activeContract, setActiveContract] = useState<{ id: string; name: string; recurrenceRule?: string } | null>(null);
   const contractLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // When job ID is entered, look up active agreements for the associated customer.
+  // `cancelled` guards against state updates after unmount or a newer jobId.
   useEffect(() => {
     if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
     const jobId = form.jobId.trim();
