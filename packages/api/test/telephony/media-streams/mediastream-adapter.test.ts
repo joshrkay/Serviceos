@@ -26,6 +26,7 @@ import type {
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
+import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -161,7 +162,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       event: 'media',
       media: { payload: 'AAAA' },
     });
-    expect(session.send).toHaveBeenCalledWith(Buffer.from('AAAA', 'base64'));
+    expect(session.send).toHaveBeenCalledWith(decodeTwilioInboundFrame('AAAA'));
 
     handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.95 });
     await new Promise((r) => setImmediate(r));

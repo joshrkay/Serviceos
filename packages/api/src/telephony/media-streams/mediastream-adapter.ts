@@ -729,6 +729,9 @@ export class TwilioMediaStreamAdapter {
   }
 
   private closeWs(code: number, reason: string): void {
+    // Set closed before calling ws.close() so synchronous 'close' event
+    // listeners (e.g. in test doubles) don't re-enter handleClose.
+    this.state.closed = true;
     try {
       this.state.ws.close(code, reason);
     } catch {

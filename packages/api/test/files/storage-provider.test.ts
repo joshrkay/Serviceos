@@ -165,7 +165,7 @@ describe('DevStorageProvider', () => {
       bucket: 'serviceos-dev',
       publicUrlBase: 'http://localhost:3000/storage-dev',
     });
-    expect(await (provider as unknown as { getObjectMetadata(): Promise<null> }).getObjectMetadata()).toBeNull();
+    expect(await provider.getObjectMetadata('serviceos-dev', 'tenant-1/file-1/voice.webm')).toBeNull();
   });
 });
 
