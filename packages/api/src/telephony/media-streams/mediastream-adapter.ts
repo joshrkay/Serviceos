@@ -193,6 +193,8 @@ interface RuntimeState {
   slowConsumerTimer: NodeJS.Timeout | null;
   /** True after we've released our slot in the connection registry. */
   registryReleased: boolean;
+  /** Guards against calling ws.close() more than once. */
+  wsCloseInitiated: boolean;
   /**
    * B2 — captures the most recent FSM dispatch's SideEffect[] when an
    * `end_session` effect was emitted. Threaded through `finalizeOnClose`
@@ -289,6 +291,7 @@ export class TwilioMediaStreamAdapter {
       unackedMarks: 0,
       slowConsumerTimer: null,
       registryReleased: true,
+      wsCloseInitiated: false,
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
     };
@@ -729,9 +732,11 @@ export class TwilioMediaStreamAdapter {
   }
 
   private closeWs(code: number, reason: string): void {
-    // Set closed before calling ws.close() so synchronous 'close' event
-    // listeners (e.g. in test doubles) don't re-enter handleClose.
-    this.state.closed = true;
+    // Guard prevents ws.close() being called twice (which overwrites the
+    // close code). Does NOT set state.closed so handleClose can still run
+    // its cleanup (registry release, timers) when the 'close' event fires.
+    if (this.state.wsCloseInitiated) return;
+    this.state.wsCloseInitiated = true;
     try {
       this.state.ws.close(code, reason);
     } catch {
