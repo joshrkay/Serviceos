@@ -18,38 +18,26 @@ import { useListQuery } from '../../hooks/useListQuery';
 const contracts = [
   {
     id: 'mc-1',
-    name: 'HVAC Annual Plan',
+    title: 'HVAC Annual Plan',
     status: 'active',
-    customer: { displayName: 'Alice Smith' },
-    location: { street1: '123 Main St' },
     cadence: 'Monthly',
-    serviceWindow: 'Mon-Fri 8-12',
   },
   {
     id: 'mc-2',
-    name: 'Plumbing Bi-Weekly',
+    title: 'Plumbing Bi-Weekly',
     status: 'paused',
-    customer: { displayName: 'Bob Jones' },
-    location: { street1: '456 Oak Ave' },
     cadence: 'Bi-weekly',
-    serviceWindow: 'Tue-Thu 1-4',
   },
   {
     id: 'mc-3',
-    name: 'Paint Care',
+    title: 'Paint Care',
     status: 'cancelled',
-    customer: { displayName: 'Charlie Ray' },
-    location: { street1: '789 Pine Rd' },
     cadence: 'Quarterly',
-    serviceWindow: 'Anytime',
   },
   {
     id: 'mc-4',
-    name: 'Filter Club',
-    customer: { displayName: 'Delta Home' },
-    location: { street1: '100 Market St' },
+    title: 'Filter Club',
     cadence: 'Monthly',
-    serviceWindow: 'Anytime',
   },
 ];
 
@@ -82,7 +70,7 @@ function renderPage() {
 describe('MaintenanceContractsPage', () => {
   it('uses maintenance contracts endpoint', () => {
     renderPage();
-    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/agreements');
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/maintenance-contracts');
   });
 
   it('renders heading, stats, and contracts', () => {

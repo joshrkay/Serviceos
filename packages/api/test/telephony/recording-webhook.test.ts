@@ -246,7 +246,7 @@ describe('P8-014 record_call recording webhook', () => {
   describe('happy path', () => {
     it('fetches Twilio bytes, PUTs to S3, and inserts a voice_recordings row', async () => {
       const fakeBytes = Buffer.from('ID3FAKEMP3CONTENT');
-      const fetchRecording = vi.fn(async () => fakeBytes);
+      const fetchRecording = vi.fn(async (_url: string, _sid: string, _token: string) => fakeBytes);
       const uploadCalls: Array<{ url: string; bytes: Buffer; contentType: string }> = [];
       const uploadObject = vi.fn(async (url: string, bytes: Buffer, contentType: string) => {
         uploadCalls.push({ url, bytes, contentType });
@@ -354,13 +354,6 @@ describe('P8-014 record_call recording webhook', () => {
     });
 
     it('falls back to resolveTenantId when no session matches the CallSid', async () => {
-      // Recording callbacks can land on a different process instance or
-      // arrive after a session has been reaped. The webhook accepts a
-      // `resolveTenantIdFallback` (wired by the route from the parent
-      // `resolveTenantId`) so the recording is still persisted instead
-      // of dropped on the floor. Twilio's signature is verified upstream,
-      // so trusting `Called`/`To` here is no less safe than trusting any
-      // other signed field.
       const fakeBytes = Buffer.from('mp3');
       const fetchRecording = vi.fn(async () => fakeBytes);
       const uploadObject = vi.fn(async () => undefined);
@@ -377,18 +370,11 @@ describe('P8-014 record_call recording webhook', () => {
 
       expect(res.status).toBe(200);
       expect(pool.voiceRows).toHaveLength(1);
-      // Tenant came from the fallback (resolveTenantId returns TENANT_ID
-      // in the harness), not from the payload.
       expect(pool.voiceRows[0].tenant_id).toBe(TENANT_ID);
       expect(fetchRecording).toHaveBeenCalled();
     });
 
     it('returns 200 (no row) when no session matches and no fallback is wired', async () => {
-      // Build a router without `recording.resolveTenantIdFallback` by
-      // not wiring `resolveTenantId` to anything useful (returns
-      // undefined). Since `createTelephonyRouter` always passes
-      // `resolveTenantId` through, simulate the no-fallback case by
-      // having it return undefined for the orphan CallSid.
       const fakeBytes = Buffer.from('mp3');
       const fetchRecording = vi.fn(async () => fakeBytes);
       const uploadObject = vi.fn(async () => undefined);
@@ -441,9 +427,6 @@ describe('P8-014 record_call recording webhook', () => {
 
   describe('auth token redaction', () => {
     it('strips TWILIO_AUTH_TOKEN from error messages bubbled up by failures', async () => {
-      // Force the Twilio fetch to throw an error string that contains
-      // the auth token. The handler must redact it before logging /
-      // returning.
       const fetchRecording = vi.fn(async () => {
         throw new Error(
           `Auth Basic ${Buffer.from(
@@ -453,8 +436,6 @@ describe('P8-014 record_call recording webhook', () => {
       });
       const { app, pool } = buildHarness({ fetchRecording });
 
-      // Capture all log lines — the logger writes structured JSON to
-      // process.stderr / process.stdout.
       const stderrChunks: string[] = [];
       const stdoutChunks: string[] = [];
       const stderrSpy = vi
@@ -481,18 +462,12 @@ describe('P8-014 record_call recording webhook', () => {
       stdoutSpy.mockRestore();
 
       expect(res.status).toBe(500);
-      // The bubbled response body must not include the token.
       expect(res.text).not.toContain(TWILIO_AUTH_TOKEN);
-      // The token must not appear in any log line.
       const allLogLines = [...stderrChunks, ...stdoutChunks];
       for (const line of allLogLines) {
         expect(line).not.toContain(TWILIO_AUTH_TOKEN);
       }
-      // But the redaction marker should appear somewhere — at least one
-      // log line acknowledges the failure with the scrubbed message.
       expect(allLogLines.some((l) => l.includes('<redacted>'))).toBe(true);
-
-      // No row was inserted (fetch failed before persistence).
       expect(pool.voiceRows).toHaveLength(0);
     });
   });

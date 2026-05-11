@@ -101,5 +101,5 @@ export async function buildTestApp(): Promise<TestApp> {
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 
-  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, appointmentRepo, proposalRepo, settingsRepo, auditRepo };
+  return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, paymentRepo, appointmentRepo, proposalRepo, settingsRepo, auditRepo };
 }

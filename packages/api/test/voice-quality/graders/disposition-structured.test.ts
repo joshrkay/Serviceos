@@ -72,7 +72,7 @@ function makeProposal(payload: Record<string, unknown>, type = 'create_appointme
     id: 'p-1',
     tenantId: 't-1',
     proposalType: type as Proposal['proposalType'],
-    status: 'pending',
+    status: 'ready_for_review',
     payload,
     summary: 'test proposal',
     createdBy: 'agent',
@@ -185,7 +185,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
         },
       ],
     });
-    // Agent paraphrased the note — same hard fields, soft text differs.
     const obs = makeObservation({
       events: [intentEvent('add_note', 1_000)],
       proposals: [
@@ -217,7 +216,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     });
     const obs = makeObservation({
       events: [intentEvent('escalate', 1_000)],
-      // No escalation_triggered event.
     });
 
     const result = gradeDispositionStructured(obs, script);
@@ -306,7 +304,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
         },
       ],
     });
-    // All three differ; only Id and date should land in hardSlotMismatches.
     const obs = makeObservation({
       events: [intentEvent('i', 1_000)],
       proposals: [
@@ -329,10 +326,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
   });
 
   it('PR#265 review — per-turn escalation correlation: escalation only on turn 2 does NOT retroactively mark turn 1 escalated', () => {
-    // Two-turn script: turn 1 expects no escalation, turn 2 expects
-    // escalation. A single `escalation_triggered` event lands AFTER
-    // turn 2's intent_classified. Turn 1 must be graded as not
-    // escalated even though the call as a whole did escalate.
     const script = makeScript({
       turns: [
         {
@@ -365,11 +358,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
   });
 
   it('PR#265 review — per-turn escalation correlation: escalation between turn 1 and turn 2 is attributed to turn 2', () => {
-    // The escalation event's timestamp falls between turn 1 and turn
-    // 2's intent_classified events. Per the per-turn heuristic, it
-    // belongs to the FOLLOWING turn (the agent's response window for
-    // turn 1 produced the escalation, observed at-or-before turn 2's
-    // intent classification).
     const script = makeScript({
       turns: [
         {
@@ -400,9 +388,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
   });
 
   it('PR#265 review — per-turn escalation correlation: an escalation event in every turn-window marks every turn escalated', () => {
-    // Heuristic: an escalation belongs to turn i iff
-    // intent[i-1].ts < esc.ts <= intent[i].ts (lower bound is -Inf
-    // for turn 0, upper bound is +Inf for the last turn).
     const script = makeScript({
       turns: [
         {
@@ -419,10 +404,8 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     });
     const obs = makeObservation({
       events: [
-        // esc before intent[0] — falls into turn 0's (-Inf, 1000] window.
         escalationEvent('r1', 800),
         intentEvent('i1', 1_000),
-        // esc between intents — falls into turn 1's (1000, 2000] window.
         escalationEvent('r2', 1_500),
         intentEvent('i2', 2_000),
       ],
@@ -450,7 +433,6 @@ describe('VQ-021 — gradeDispositionStructured', () => {
         },
       ],
     });
-    // Wrong intent, no escalation, wrong customerId.
     const obs = makeObservation({
       events: [intentEvent('cancel_appointment', 1_000)],
       proposals: [makeProposal({ customerId: 'c-OTHER' }, 'create_appointment')],

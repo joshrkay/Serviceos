@@ -1861,7 +1861,13 @@ export function createApp(): express.Express {
     })
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
+  app.use(
+    '/api/estimates',
+    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService, {
+      gateway: llmGateway,
+      proposalRepo,
+    }),
+  );
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and

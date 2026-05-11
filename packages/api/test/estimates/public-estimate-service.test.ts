@@ -116,7 +116,9 @@ async function buildHarness(): Promise<Harness> {
     id: uuidv4(),
     tenantId: TENANT,
     customerId: c.id,
-    title: 'AC tune-up',
+    locationId: 'loc-1',
+    jobNumber: 'JOB-001',
+    summary: 'AC tune-up',
     status: 'scheduled',
     priority: 'normal',
     createdBy: 'user-1',
@@ -596,7 +598,7 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     });
     const est = await seedEstimateWithTotal(100000);
 
-    const stripeFetch = vi.fn(async () =>
+    const stripeFetch = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'plink_test_123', url: 'https://checkout.stripe.com/c/plink_test_123' }),
     );
     const service = new PublicEstimateService({
@@ -605,7 +607,7 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
       jobRepo: h.job,
       settingsRepo: h.settings,
       stripeConfig: { apiKey: 'sk_test_xxx' },
-      stripeFetch,
+      stripeFetch: stripeFetch as unknown as typeof fetch,
     });
 
     const result = await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
@@ -641,7 +643,7 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
       jobRepo: h.job,
       settingsRepo: h.settings,
       stripeConfig: { apiKey: 'sk_test_xxx' },
-      stripeFetch,
+      stripeFetch: stripeFetch as unknown as typeof fetch,
     });
     await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
     await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
@@ -657,7 +659,7 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
       jobRepo: h.job,
       settingsRepo: h.settings,
       stripeConfig: { apiKey: 'sk_test_xxx' },
-      stripeFetch,
+      stripeFetch: stripeFetch as unknown as typeof fetch,
     });
     await expect(service.getOrCreateDepositCheckoutUrl(est.viewToken!)).rejects.toThrow(
       /No deposit is required/,
@@ -683,7 +685,7 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
       jobRepo: h.job,
       settingsRepo: h.settings,
       stripeConfig: { apiKey: 'sk_test_xxx' },
-      stripeFetch: vi.fn(),
+      stripeFetch: vi.fn() as unknown as typeof fetch,
     });
     await expect(service.getOrCreateDepositCheckoutUrl(est.viewToken!)).rejects.toThrow(
       /already been paid/,
