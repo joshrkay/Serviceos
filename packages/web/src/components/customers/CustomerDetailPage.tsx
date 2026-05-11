@@ -407,7 +407,7 @@ export function CustomerDetailPage() {
 
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
     customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
-    { enabled: Boolean(customerId) && Boolean(customer) },
+    { enabled: Boolean(customerId) },
   );
   const [tab,              setTab]           = useState<Tab>('history');
   // The AddLocationSheet is currently in-memory only — it doesn't POST to
@@ -436,16 +436,26 @@ export function CustomerDetailPage() {
     );
   }
 
-  if (!customer) return (
-    <div className="h-full flex flex-col items-center justify-center gap-4">
-      <p className="text-slate-400 text-sm">
-        {customerError ? 'Failed to load customer' : 'Customer not found'}
-      </p>
-      <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
-        ← Back to customers
-      </button>
-    </div>
-  );
+  if (!customer) {
+    // useDetailQuery surfaces fetch failures as `HTTP <status>` strings;
+    // a 404 is the "customer doesn't exist" case we want to call out
+    // explicitly. Anything else is a real failure.
+    const isNotFound = !customerError || customerError.includes('404');
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-4">
+        <p className="text-slate-400 text-sm">
+          {isNotFound ? 'Customer not found' : 'Failed to load customer'}
+        </p>
+        <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
+          ← Back to customers
+        </button>
+      </div>
+    );
+  }
+
+  const custJobs      = jobs.filter(j => j.customerId === id);
+  const custEstimates = estimates.filter(e => e.customerId === id);
+  const custInvoices  = invoices.filter(i => i.customerId === id);
 
   const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
   const found = {
@@ -455,7 +465,7 @@ export function CustomerDetailPage() {
     address: primaryLoc?.address ?? '',
     notes: customer.communicationNotes,
     tags: customer.tags,
-    jobCount: 0,
+    jobCount: custJobs.length,
     memberSince: undefined as string | undefined,
     totalRevenue: undefined as number | undefined,
     lastService: undefined as string | undefined,
@@ -464,10 +474,6 @@ export function CustomerDetailPage() {
   const multiLocation   = locations.length > 1;
   const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
   const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
-
-  const custJobs      = jobs.filter(j => j.customerId === id);
-  const custEstimates = estimates.filter(e => e.customerId === id);
-  const custInvoices  = invoices.filter(i => i.customerId === id);
 
   const tabs: Tab[] = multiLocation
     ? ['overview', 'locations', 'history']
