@@ -8,6 +8,7 @@ import {
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { apiFetch } from '../../utils/api-fetch';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -926,6 +927,9 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </button>
                 </div>
               </div>
+                description={est.customerMessage ?? uiLineItems[0]?.description}
+                existingLineItems={uiLineItems}
+              />
             </div>
 
             {/* ── Right rail ── */}
