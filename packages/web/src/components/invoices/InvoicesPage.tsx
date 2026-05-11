@@ -939,6 +939,7 @@ const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
 const INVOICE_LIST_REFRESH_MS = 30_000;
 
 export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
+  const navigate = useNavigate();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
