@@ -291,14 +291,15 @@ export class PublicEstimateService {
   private async toView(estimate: Estimate): Promise<PublicEstimateView> {
     const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
     const customer = job
-      ? await this.deps.customerRepo.findById(estimate.tenantId, job.customerId)
-      : null;
-    const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
+    const [customer, settings, locs] = await Promise.all([
+      job ? this.deps.customerRepo.findById(estimate.tenantId, job.customerId) : Promise.resolve(null),
+      this.deps.settingsRepo.findByTenant(estimate.tenantId),
+      job?.locationId && this.deps.locationRepo ? this.deps.locationRepo.findByCustomer(estimate.tenantId, job.customerId) : Promise.resolve([]),
+    ]);
 
     // Fetch the job's service location for the approval page (QA 5.14)
     let serviceAddress: string | undefined;
-    if (job?.locationId && this.deps.locationRepo) {
-      const locs = await this.deps.locationRepo.findByCustomer(estimate.tenantId, job.customerId);
+    if (job?.locationId && locs.length > 0) {
       const loc = locs.find(l => l.id === job.locationId);
       if (loc) {
         serviceAddress = [loc.street1, loc.city, loc.state, loc.postalCode]
