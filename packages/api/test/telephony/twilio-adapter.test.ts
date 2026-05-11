@@ -726,15 +726,18 @@ describe('TwilioGatherAdapter.handleGather', () => {
       type: 'system_failure',
       reason: 'manual',
     });
-    // executeSideEffects is private; access via cast for the test.
+    // executeSideEffects now lives on the shared VoiceTurnProcessor;
+    // reach in via the private `processor` field for the test.
     const adapterAny = adapter as unknown as {
-      executeSideEffects: (
-        s: typeof session,
-        fx: unknown,
-        t: string,
-      ) => Promise<void>;
+      processor: {
+        executeSideEffects: (
+          s: typeof session,
+          fx: unknown,
+          t: string,
+        ) => Promise<void>;
+      };
     };
-    await adapterAny.executeSideEffects(session, sideEffects, 'tenant-abc');
+    await adapterAny.processor.executeSideEffects(session, sideEffects, 'tenant-abc');
 
     // The transfer TwiML was queued.
     const twiml = adapter.takePendingTransferTwiml(sid);
@@ -789,13 +792,15 @@ describe('TwilioGatherAdapter.handleGather', () => {
       reason: 'manual',
     });
     const adapterAny = adapter as unknown as {
-      executeSideEffects: (
-        s: typeof session,
-        fx: unknown,
-        t: string,
-      ) => Promise<void>;
+      processor: {
+        executeSideEffects: (
+          s: typeof session,
+          fx: unknown,
+          t: string,
+        ) => Promise<void>;
+      };
     };
-    await adapterAny.executeSideEffects(session, sideEffects, 'tenant-abc');
+    await adapterAny.processor.executeSideEffects(session, sideEffects, 'tenant-abc');
 
     const twiml = adapter.takePendingTransferTwiml(sid);
     expect(twiml).toBeDefined();
