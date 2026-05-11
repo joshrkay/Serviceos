@@ -17,8 +17,8 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryQueue } from '../../src/queues/queue';
 import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
-import type { Customer } from '../../src/customers/customer';
-import type { ServiceLocation } from '../../src/locations/location';
+import { Customer, InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryLocationRepository, ServiceLocation } from '../../src/locations/location';
 import type { TenantOwnership } from '../../src/shared/tenant-ownership';
 
 describe('GET /api/jobs', () => {
@@ -375,6 +375,9 @@ describe('GET /api/jobs/:id', () => {
       },
     };
     const jobRepo = new InMemoryJobRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    await customerRepo.create(customer);
+    const locationRepo = new InMemoryLocationRepository();
     routeApp.use(
       '/api/jobs',
       createJobRouter(
@@ -384,6 +387,8 @@ describe('GET /api/jobs/:id', () => {
         ownership,
         new InMemoryQueue(),
         new NoopFeedbackDispatcher(),
+        customerRepo,
+        locationRepo,
       ),
     );
     const created = await jobRepo.create({

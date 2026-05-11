@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import {
   jobs, estimates, invoices,
-  ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
+  Customer, ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { useListQuery } from '../../hooks/useListQuery';
@@ -44,14 +44,6 @@ interface ApiLocation {
   state: string;
   postalCode: string;
   isPrimary: boolean;
-}
-
-function customerName(c: ApiCustomer): string {
-  return (
-    c.displayName?.trim() ||
-    [c.firstName, c.lastName].filter(Boolean).join(' ').trim() ||
-    'Customer'
-  );
 }
 
 function formatAddress(loc: ApiLocation): string {
@@ -422,25 +414,18 @@ export function CustomerDetailPage() {
       .catch(() => []);
   }, [id]);
 
-  // Build a compatible Customer object from API data, falling back to mock data
-  const mockFound = customers.find(c => c.id === id);
-  const found = apiCustomer
+  // Build a compatible Customer object from API data.
+  const found: Customer | undefined = apiCustomer
     ? {
-        ...( mockFound ?? {
-          id: apiCustomer.id,
-          name: apiCustomer.displayName ?? [apiCustomer.firstName, apiCustomer.lastName].filter(Boolean).join(' ') ?? 'Customer',
-          phone: apiCustomer.primaryPhone ?? '',
-          email: apiCustomer.email ?? '',
-          address: '',
-          serviceType: 'HVAC' as ServiceType,
-          jobCount: 0,
-          openJobs: 0,
-        }),
         id: apiCustomer.id,
-        name: apiCustomer.displayName ?? [apiCustomer.firstName, apiCustomer.lastName].filter(Boolean).join(' ') ?? 'Customer',
-        phone: apiCustomer.primaryPhone ?? mockFound?.phone ?? '',
-        email: apiCustomer.email ?? mockFound?.email ?? '',
-        notes: apiCustomer.communicationNotes ?? mockFound?.notes,
+        name: apiCustomer.displayName || [apiCustomer.firstName, apiCustomer.lastName].filter(Boolean).join(' ') || 'Customer',
+        phone: apiCustomer.primaryPhone ?? '',
+        email: apiCustomer.email ?? '',
+        address: '',
+        serviceType: 'HVAC' as ServiceType,
+        jobCount: 0,
+        openJobs: 0,
+        notes: apiCustomer.communicationNotes,
         locations: apiLocations.length > 0
           ? apiLocations.map(loc => ({
               id: loc.id,
@@ -450,22 +435,14 @@ export function CustomerDetailPage() {
               isPrimary: !!loc.isPrimary,
               jobCount: 0,
             }))
-          : mockFound?.locations ?? [],
+          : [],
         memberSince: apiCustomer.createdAt
           ? new Date(apiCustomer.createdAt).toLocaleDateString([], { month: 'short', year: 'numeric' })
-          : mockFound?.memberSince,
+          : undefined,
       }
-    : mockFound;
+    : undefined;
 
   const customerId = id ?? '';
-
-  const { data: customer, error: customerError } =
-    useDetailQuery<ApiCustomer>('/api/customers', customerId || null);
-
-  const { data: apiLocations } = useListQuery<ApiLocation>('/api/locations', {
-    filters: customerId ? { customerId } : {},
-    enabled: Boolean(customerId),
-  });
 
   // Maintenance contracts / service agreements live on /api/agreements
   // (per-tenant, filterable by customerId). The earlier nested
@@ -482,11 +459,7 @@ export function CustomerDetailPage() {
     { enabled: Boolean(id) }
   );
   const [tab,              setTab]           = useState<Tab>('history');
-  // The AddLocationSheet is currently in-memory only — it doesn't POST to
-  // /api/locations — so we hold the added entries separately and merge them
-  // with what the API returns instead of seeding shared state via an effect
-  // (which would loop on every new array reference from useListQuery).
-  const [localLocations,   setLocalLocations] = useState<ServiceLocation[]>([]);
+  const [locations,        setLocations]     = useState<ServiceLocation[]>([]);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
   const [showAddLoc,       setShowAddLoc]    = useState(false);
   const [newLocIds,        setNewLocIds]     = useState<Set<string>>(new Set());
@@ -499,7 +472,7 @@ export function CustomerDetailPage() {
     if (found?.locations) setLocations(found.locations);
   }, [found?.locations?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (custLoading && !mockFound) return (
+  if (custLoading && !found) return (
     <div className="h-full flex items-center justify-center">
       <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
     </div>
@@ -515,31 +488,13 @@ export function CustomerDetailPage() {
   );
 
   const multiLocation   = locations.length > 1;
-  const initials        = found.name.split(' ').map(n => n[0]).join('');
+  const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
   const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
   const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
 
   const custJobs      = jobs.filter(j => j.customerId === id);
   const custEstimates = estimates.filter(e => e.customerId === id);
   const custInvoices  = invoices.filter(i => i.customerId === id);
-
-  const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
-  const found = {
-    name: customerName(customer),
-    phone: customer.primaryPhone ?? '',
-    email: customer.email ?? '',
-    address: primaryLoc?.address ?? '',
-    notes: customer.communicationNotes,
-    tags: customer.tags,
-    jobCount: custJobs.length,
-    memberSince: undefined as string | undefined,
-    totalRevenue: undefined as number | undefined,
-    lastService: undefined as string | undefined,
-  };
-
-  const multiLocation   = locations.length > 1;
-  const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
-  const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
 
   const tabs: Tab[] = multiLocation
     ? ['overview', 'locations', 'history']
@@ -549,7 +504,7 @@ export function CustomerDetailPage() {
     setExpanded(s => { const n = new Set(s); n.has(locId) ? n.delete(locId) : n.add(locId); return n; });
   }
   function handleAddLocation(loc: ServiceLocation) {
-    setLocalLocations(p => [...p, loc]);
+    setLocations(p => [...p, loc]);
     setNewLocIds(s => new Set([...s, loc.id]));
     setExpanded(s => new Set([...s, loc.id]));
     setTab('locations');

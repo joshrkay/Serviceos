@@ -22,7 +22,7 @@ import {
 import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
-import { LocationRepository } from '../locations/location';
+import { LocationRepository, ServiceLocation } from '../locations/location';
 
 export function createJobRouter(
   jobRepo: JobRepository,

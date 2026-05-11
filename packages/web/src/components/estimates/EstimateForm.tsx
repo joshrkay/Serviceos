@@ -36,6 +36,14 @@ interface ApiJob {
   };
 }
 
+interface ApiAgreement {
+  id: string;
+  customerId: string;
+  name: string;
+  recurrenceRule?: string;
+  status: string;
+}
+
 interface State {
   jobId: string;
   validUntil: string;
@@ -77,20 +85,32 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [selectedJob, setSelectedJob] = useState<ApiJob | null>(null);
+  const [activeContract, setActiveContract] = useState<ApiAgreement | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiUsed, setAiUsed] = useState(false);
 
   const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
 
-  // When job ID is entered, look up active agreements for the associated customer.
-  // `cancelled` guards against state updates after unmount or a newer jobId.
+  // When the user picks a job, fetch the enriched job detail (customer + location)
+  // and look up any active maintenance agreement for that customer.
   useEffect(() => {
-    if (!form.jobId) { setSelectedJob(null); return; }
-    // Always fetch the enriched job detail (includes customer + location)
+    if (!form.jobId) { setSelectedJob(null); setActiveContract(null); return; }
+    let cancelled = false;
     apiFetch(`/api/jobs/${form.jobId}`)
       .then(r => r.ok ? r.json() : null)
-      .then((j: ApiJob | null) => j ? setSelectedJob(j) : null)
-      .catch(() => null);
+      .then(async (j: ApiJob | null) => {
+        if (cancelled) return;
+        setSelectedJob(j);
+        const customerId = j?.customerId ?? j?.customer?.id;
+        if (!customerId) { setActiveContract(null); return; }
+        const r = await apiFetch(`/api/agreements?customerId=${encodeURIComponent(customerId)}&status=active`);
+        if (!r.ok) { if (!cancelled) setActiveContract(null); return; }
+        const body = await r.json().catch(() => null) as ApiAgreement[] | { data?: ApiAgreement[] } | null;
+        const list: ApiAgreement[] = Array.isArray(body) ? body : (body?.data ?? []);
+        if (!cancelled) setActiveContract(list[0] ?? null);
+      })
+      .catch(() => { if (!cancelled) { setSelectedJob(null); setActiveContract(null); } });
+    return () => { cancelled = true; };
   }, [form.jobId]);
 
   const serviceAddress = selectedJob?.location
@@ -208,8 +228,6 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
   const total = totalCents(form.items);
   const totalDisplay = `$${(total / 100).toFixed(2)}`;
-  const customerName = jobInfo?.customerName ?? null;
-  const locationLine = jobInfo?.locationLine ?? null;
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
