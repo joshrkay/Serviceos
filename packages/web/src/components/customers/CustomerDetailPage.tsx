@@ -397,7 +397,7 @@ export function CustomerDetailPage() {
   const navigate = useNavigate();
   const customerId = id ?? '';
 
-  const { data: customer, isLoading: customerLoading, error: customerError } =
+  const { data: customer, error: customerError } =
     useDetailQuery<ApiCustomer>('/api/customers', customerId || null);
 
   const { data: apiLocations } = useListQuery<ApiLocation>('/api/locations', {
@@ -428,19 +428,21 @@ export function CustomerDetailPage() {
     return [...apiAdapted, ...localLocations.filter((l) => !apiIds.has(l.id))];
   }, [apiLocations, localLocations]);
 
-  if (customerLoading && !customer) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
-      </div>
-    );
-  }
-
   if (!customer) {
-    // useDetailQuery surfaces fetch failures as `HTTP <status>` strings;
-    // a 404 is the "customer doesn't exist" case we want to call out
-    // explicitly. Anything else is a real failure.
-    const isNotFound = !customerError || customerError.includes('404');
+    // useDetailQuery starts with data=null, isLoading=false and only flips
+    // to loading inside an effect on the next tick, so "no data, no error
+    // yet" still means a fetch is pending — render the spinner instead of
+    // flashing "Customer not found" for valid IDs on first paint.
+    if (!customerError) {
+      return (
+        <div className="h-full flex items-center justify-center">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        </div>
+      );
+    }
+    // GET /api/customers/:id returns 404 for missing records; useDetailQuery
+    // surfaces that as `HTTP 404`. Anything else is a real failure.
+    const isNotFound = customerError.includes('404');
     return (
       <div className="h-full flex flex-col items-center justify-center gap-4">
         <p className="text-slate-400 text-sm">

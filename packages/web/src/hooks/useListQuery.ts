@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useApiClient } from '../lib/apiClient';
 
 export interface ListQueryOptions {
@@ -44,9 +44,33 @@ export function useListQuery<T>(
   const [pageSize] = useState(initialOptions.pageSize ?? 25);
   const [search, setSearch] = useState(initialOptions.search ?? '');
   const [filters, setFilters] = useState(initialOptions.filters ?? {});
-  const [enabled] = useState(initialOptions.enabled ?? true);
+  const [enabled, setEnabled] = useState(initialOptions.enabled ?? true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Re-sync filters / enabled from props when the caller's initialOptions
+  // change. The hook holds these in state so consumers can drive them via
+  // setFilters/setSearch, but a route change (e.g. /customers/A →
+  // /customers/B reusing the same component instance) needs to rebind the
+  // query — without this, useState would keep the previous customerId and
+  // the next render shows the wrong customer's data. We compare a
+  // serialized key so inline-object filters with the same value don't
+  // trigger a spurious extra fetch on mount.
+  const filtersKey = JSON.stringify(initialOptions.filters ?? {});
+  const lastFiltersKeyRef = useRef(filtersKey);
+  useEffect(() => {
+    if (lastFiltersKeyRef.current === filtersKey) return;
+    lastFiltersKeyRef.current = filtersKey;
+    setFilters(initialOptions.filters ?? {});
+    // The parsed object is read via closure; depending on filtersKey is the
+    // intentional stable comparison.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtersKey]);
+  useEffect(() => {
+    if (typeof initialOptions.enabled === 'boolean') {
+      setEnabled(initialOptions.enabled);
+    }
+  }, [initialOptions.enabled]);
 
   const refetch = useCallback(async () => {
     if (!enabled) {
