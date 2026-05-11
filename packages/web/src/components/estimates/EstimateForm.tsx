@@ -84,8 +84,66 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     }, 600);
     return () => {
       cancelled = true;
-      if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current);
+      if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
     };
+  }, [form.jobId]);
+
+  // Auto-populate customer name and service location when a valid job ID is entered
+  useEffect(() => {
+    const id = form.jobId.trim();
+    if (!id || id.length < 10) {
+      setJobInfo(null);
+      setJobLookupError(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiFetch(`/api/jobs/${id}`);
+        if (!res.ok) {
+          if (!cancelled) { setJobInfo(null); setJobLookupError('Job not found'); }
+          return;
+        }
+        const job = await res.json();
+        if (cancelled) return;
+
+        // Enrich with customer and location details
+        let customerName: string | undefined;
+        let locationLine: string | undefined;
+        let isPrimaryLocation: boolean | undefined;
+
+        const [custRes, locRes] = await Promise.all([
+          job.customerId ? apiFetch(`/api/customers/${job.customerId}`).catch(() => null) : Promise.resolve(null),
+          job.locationId ? apiFetch(`/api/locations/${job.locationId}`).catch(() => null) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+
+        if (custRes?.ok) {
+          const cust = await custRes.json();
+          customerName = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || undefined;
+        }
+
+        if (locRes?.ok) {
+          const loc = await locRes.json();
+          locationLine = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
+          isPrimaryLocation = loc.isPrimary;
+        }
+
+        if (!cancelled) {
+          setJobInfo({ ...job, customerName, locationLine, isPrimaryLocation });
+          setJobLookupError(null);
+        }
+      } catch {
+        if (!cancelled) {
+          // Clear the preview so a thrown lookup (network/CORS/timeout)
+          // can't leave the previous job's customer/location visible
+          // alongside a new, unresolvable id.
+          setJobInfo(null);
+          setJobLookupError('Failed to load job');
+        }
+      }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [form.jobId]);
 
   const handleSubmit = useCallback(
