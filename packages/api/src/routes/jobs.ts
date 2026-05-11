@@ -4,8 +4,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { createJobSchema } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
-import { Customer } from '../customers/customer';
-import { ServiceLocation } from '../locations/location';
+import { Customer, CustomerRepository } from '../customers/customer';
 import {
   createJob,
   getJob,
@@ -23,6 +22,7 @@ import {
 import { AuditRepository } from '../audit/audit';
 import { Queue } from '../queues/queue';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
+import { LocationRepository, ServiceLocation } from '../locations/location';
 
 export function createJobRouter(
   jobRepo: JobRepository,
@@ -31,6 +31,8 @@ export function createJobRouter(
   ownership: TenantOwnership,
   queue: Queue,
   feedbackDispatcher: FeedbackDispatcher,
+  customerRepo?: CustomerRepository,
+  locationRepo?: LocationRepository,
 ): Router {
   const router = Router();
   // Dispatcher is intentionally passed through router wiring so this API
@@ -163,30 +165,31 @@ export function createJobRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
           return;
         }
-        const [customer, location] = await Promise.all([
-          ownership.requireExistsAndLoad(req.auth!.tenantId, 'customer', result.customerId) as Promise<Customer | undefined>,
-          ownership.requireExistsAndLoad(req.auth!.tenantId, 'location', result.locationId) as Promise<ServiceLocation | undefined>,
-        ]);
-        if (!customer || !location) {
-          res.json(result);
-          return;
+
+        // Enrich with customer and location data when repos are available
+        let customer: Customer | null = null;
+        let locations: Array<Record<string, unknown>> = [];
+        if (result.customerId) {
+          const [cust, locs] = await Promise.all([
+            customerRepo ? customerRepo.findById(req.auth!.tenantId, result.customerId) : Promise.resolve(null),
+            locationRepo ? locationRepo.findByCustomer(req.auth!.tenantId, result.customerId) : Promise.resolve([]),
+          ]);
+          customer = cust;
+          locations = locs.map(loc => ({
+            id: loc.id,
+            street1: loc.street1,
+            street2: loc.street2,
+            city: loc.city,
+            state: loc.state,
+            postalCode: loc.postalCode,
+            isPrimary: loc.isPrimary,
+            label: loc.label,
+          }));
         }
-        const customerLocations = location.customerId === result.customerId
-          ? [
-              {
-                id: location.id,
-                label: location.label,
-                street1: location.street1,
-                city: location.city,
-                state: location.state,
-                postalCode: location.postalCode,
-                isPrimary: location.isPrimary,
-              },
-            ]
-          : [];
-        res.json({
+
+        const response = {
           ...result,
-          customer: {
+          customer: customer ? {
             id: customer.id,
             displayName: customer.displayName,
             firstName: customer.firstName,
@@ -194,9 +197,12 @@ export function createJobRouter(
             primaryPhone: customer.primaryPhone,
             email: customer.email,
             communicationNotes: customer.communicationNotes,
-            locations: customerLocations,
-          },
-        });
+            locations,
+          } : undefined,
+          location: locations.find(l => l.id === result.locationId),
+        };
+
+        res.json(response);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

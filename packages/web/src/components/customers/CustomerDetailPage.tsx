@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, Mail, MessageSquare, Plus, MapPin,
@@ -8,11 +8,12 @@ import {
 } from 'lucide-react';
 import {
   jobs, estimates, invoices,
-  ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
+  Customer, ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiContract {
   id: string;
@@ -21,8 +22,7 @@ interface ApiContract {
   status?: string;
 }
 
-// ─── constants ────────────────────────────────────────────────────────────────────
-interface ApiCustomer {
+interface ApiCustomerDetail {
   id: string;
   displayName?: string;
   firstName?: string;
@@ -30,7 +30,8 @@ interface ApiCustomer {
   primaryPhone?: string;
   email?: string;
   communicationNotes?: string;
-  tags?: string[];
+  isArchived?: boolean;
+  createdAt?: string;
 }
 
 interface ApiLocation {
@@ -43,14 +44,6 @@ interface ApiLocation {
   state: string;
   postalCode: string;
   isPrimary: boolean;
-}
-
-function customerName(c: ApiCustomer): string {
-  return (
-    c.displayName?.trim() ||
-    [c.firstName, c.lastName].filter(Boolean).join(' ').trim() ||
-    'Customer'
-  );
 }
 
 function formatAddress(loc: ApiLocation): string {
@@ -405,15 +398,51 @@ type HistoryFilter = 'all' | 'invoices' | 'jobs' | 'estimates';
 export function CustomerDetailPage() {
   const { id }   = useParams<{ id: string }>();
   const navigate = useNavigate();
+
+  // Fetch customer from API — the mock data only has seed entries
+  const { data: apiCustomer, isLoading: custLoading } = useDetailQuery<ApiCustomerDetail>(
+    '/api/customers',
+    id ?? ''
+  );
+  const [apiLocations, setApiLocations] = useState<ApiLocation[]>([]);
+
+  useEffect(() => {
+    if (!id) return;
+    apiFetch(`/api/locations?customerId=${id}`)
+      .then(r => r.ok ? r.json() as Promise<ApiLocation[]> : [])
+      .then(locs => setApiLocations(locs))
+      .catch(() => []);
+  }, [id]);
+
+  // Build a compatible Customer object from API data.
+  const found: Customer | undefined = apiCustomer
+    ? {
+        id: apiCustomer.id,
+        name: apiCustomer.displayName || [apiCustomer.firstName, apiCustomer.lastName].filter(Boolean).join(' ') || 'Customer',
+        phone: apiCustomer.primaryPhone ?? '',
+        email: apiCustomer.email ?? '',
+        address: '',
+        serviceType: 'HVAC' as ServiceType,
+        jobCount: 0,
+        openJobs: 0,
+        notes: apiCustomer.communicationNotes,
+        locations: apiLocations.length > 0
+          ? apiLocations.map(loc => ({
+              id: loc.id,
+              nickname: loc.label ?? (loc.isPrimary ? 'Primary' : 'Location'),
+              address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+              serviceTypes: ['HVAC' as ServiceType],
+              isPrimary: !!loc.isPrimary,
+              jobCount: 0,
+            }))
+          : [],
+        memberSince: apiCustomer.createdAt
+          ? new Date(apiCustomer.createdAt).toLocaleDateString([], { month: 'short', year: 'numeric' })
+          : undefined,
+      }
+    : undefined;
+
   const customerId = id ?? '';
-
-  const { data: customer, error: customerError } =
-    useDetailQuery<ApiCustomer>('/api/customers', customerId || null);
-
-  const { data: apiLocations } = useListQuery<ApiLocation>('/api/locations', {
-    filters: customerId ? { customerId } : {},
-    enabled: Boolean(customerId),
-  });
 
   // Maintenance contracts / service agreements live on /api/agreements
   // (per-tenant, filterable by customerId). The earlier nested
@@ -424,12 +453,13 @@ export function CustomerDetailPage() {
     `/api/customers/${customerId}/maintenance-contracts`,
     { enabled: Boolean(customerId) },
   );
+  // Real jobs from API for this customer (must be called before early returns)
+  const { data: apiRealJobs } = useListQuery<{ id: string; jobNumber: string; summary: string; status: string; createdAt?: string }>(
+    `/api/jobs?customerId=${id ?? ''}`,
+    { enabled: Boolean(id) }
+  );
   const [tab,              setTab]           = useState<Tab>('history');
-  // The AddLocationSheet is currently in-memory only — it doesn't POST to
-  // /api/locations — so we hold the added entries separately and merge them
-  // with what the API returns instead of seeding shared state via an effect
-  // (which would loop on every new array reference from useListQuery).
-  const [localLocations,   setLocalLocations] = useState<ServiceLocation[]>([]);
+  const [locations,        setLocations]     = useState<ServiceLocation[]>([]);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
   const [showAddLoc,       setShowAddLoc]    = useState(false);
   const [newLocIds,        setNewLocIds]     = useState<Set<string>>(new Set());
@@ -437,60 +467,34 @@ export function CustomerDetailPage() {
   const [plusMenuOpen,     setPlusMenuOpen]  = useState(false);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
-  const locations = useMemo(() => {
-    const apiAdapted = (apiLocations ?? []).map(adaptLocation);
-    const apiIds = new Set(apiAdapted.map((l) => l.id));
-    return [...apiAdapted, ...localLocations.filter((l) => !apiIds.has(l.id))];
-  }, [apiLocations, localLocations]);
+  // Update locations state when API data loads
+  useEffect(() => {
+    if (found?.locations) setLocations(found.locations);
+  }, [found?.locations?.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!customer) {
-    // useDetailQuery starts with data=null, isLoading=false and only flips
-    // to loading inside an effect on the next tick, so "no data, no error
-    // yet" still means a fetch is pending — render the spinner instead of
-    // flashing "Customer not found" for valid IDs on first paint.
-    if (!customerError) {
-      return (
-        <div className="h-full flex items-center justify-center">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
-        </div>
-      );
-    }
-    // GET /api/customers/:id returns 404 for missing records; useDetailQuery
-    // surfaces that as `HTTP 404`. Anything else is a real failure.
-    const isNotFound = customerError.includes('404');
-    return (
-      <div className="h-full flex flex-col items-center justify-center gap-4">
-        <p className="text-slate-400 text-sm">
-          {isNotFound ? 'Customer not found' : 'Failed to load customer'}
-        </p>
-        <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
-          ← Back to customers
-        </button>
-      </div>
-    );
-  }
+  if (custLoading && !found) return (
+    <div className="h-full flex items-center justify-center">
+      <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+    </div>
+  );
 
-  const custJobs      = jobs.filter(j => j.customerId === id);
-  const custEstimates = estimates.filter(e => e.customerId === id);
-  const custInvoices  = invoices.filter(i => i.customerId === id);
-
-  const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
-  const found = {
-    name: customerName(customer),
-    phone: customer.primaryPhone ?? '',
-    email: customer.email ?? '',
-    address: primaryLoc?.address ?? '',
-    notes: customer.communicationNotes,
-    tags: customer.tags,
-    jobCount: custJobs.length,
-    memberSince: undefined as string | undefined,
-    totalRevenue: undefined as number | undefined,
-    lastService: undefined as string | undefined,
-  };
+  if (!found) return (
+    <div className="h-full flex flex-col items-center justify-center gap-4">
+      <p className="text-slate-400 text-sm">Customer not found</p>
+      <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
+        ← Back to customers
+      </button>
+    </div>
+  );
 
   const multiLocation   = locations.length > 1;
   const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
   const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
+  const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
+
+  const custJobs      = jobs.filter(j => j.customerId === id);
+  const custEstimates = estimates.filter(e => e.customerId === id);
+  const custInvoices  = invoices.filter(i => i.customerId === id);
 
   const tabs: Tab[] = multiLocation
     ? ['overview', 'locations', 'history']
@@ -500,14 +504,20 @@ export function CustomerDetailPage() {
     setExpanded(s => { const n = new Set(s); n.has(locId) ? n.delete(locId) : n.add(locId); return n; });
   }
   function handleAddLocation(loc: ServiceLocation) {
-    setLocalLocations(p => [...p, loc]);
+    setLocations(p => [...p, loc]);
     setNewLocIds(s => new Set([...s, loc.id]));
     setExpanded(s => new Set([...s, loc.id]));
     setTab('locations');
   }
 
   // counts for filter pills
-  const counts = { all: custJobs.length + custEstimates.length + custInvoices.length, invoices: custInvoices.length, jobs: custJobs.length, estimates: custEstimates.length };
+  const effectiveJobCount = Math.max(custJobs.length, apiRealJobs.length);
+  const counts = {
+    all: effectiveJobCount + custEstimates.length + custInvoices.length,
+    invoices: custInvoices.length,
+    jobs: effectiveJobCount,
+    estimates: custEstimates.length,
+  };
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -824,12 +834,31 @@ export function CustomerDetailPage() {
               )}
 
               {/* ── Jobs section ── */}
-              {(histFilter === 'all' || histFilter === 'jobs') && custJobs.length > 0 && (
+              {(histFilter === 'all' || histFilter === 'jobs') && (custJobs.length > 0 || apiRealJobs.length > 0) && (
                 <div className="flex flex-col gap-2">
                   {histFilter === 'all' && (
                     <p className="text-xs text-slate-400 uppercase tracking-wide px-1 mt-1">Jobs</p>
                   )}
-                  {custJobs.map(j => (
+                  {/* Real API jobs (takes priority over mock data) */}
+                  {apiRealJobs.map(j => (
+                    <Link key={j.id} to={`/jobs/${j.id}`}
+                      className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-3.5 hover:border-slate-300 transition-colors cursor-pointer active:bg-slate-50">
+                      <span className="flex size-8 items-center justify-center rounded-xl bg-blue-50 shrink-0">
+                        <Briefcase size={13} className="text-blue-500" />
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs text-slate-400">Job #{j.jobNumber}</p>
+                          <span className={`text-xs rounded-full px-2 py-0.5 ${JOB_STATUS_STYLE[j.status] ?? 'bg-slate-100 text-slate-500'}`}>
+                            {j.status}
+                          </span>
+                        </div>
+                        <p className="text-sm text-slate-800 mt-0.5 leading-snug">{j.summary}</p>
+                      </div>
+                    </Link>
+                  ))}
+                  {/* Mock jobs (only when no real API jobs) */}
+                  {apiRealJobs.length === 0 && custJobs.map(j => (
                     <div key={j.id}
                       className="flex items-center gap-3 rounded-xl bg-white border border-slate-200 px-4 py-3.5 hover:border-slate-300 transition-colors cursor-pointer active:bg-slate-50">
                       <span className="flex size-8 items-center justify-center rounded-xl bg-blue-50 shrink-0">
