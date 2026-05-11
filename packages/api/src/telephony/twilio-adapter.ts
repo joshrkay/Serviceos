@@ -2135,6 +2135,13 @@ export class TwilioGatherAdapter {
         state: session.machine.currentState,
         channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
         ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
+        // can surface the full conversation without relying on the
+        // process-scoped VoiceSessionStore.
+        transcript: session.transcript.length > 0 ? [...session.transcript] : undefined,
+        // Stamp the customer FK so the interactions list can join to
+        // the customers table and surface the linked customer.
+        ...(session.customerId !== undefined ? { customerId: session.customerId } : {}),
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
