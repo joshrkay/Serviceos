@@ -1,0 +1,74 @@
+# VQ2-016 — Voice Quality v1 Layer 2 pre-deploy gate.
+#
+# Runs the Layer 2 corpus suite (AudioModeDriver + 2-of-3 voting +
+# caller-experience graders) against the InMemory repo bundle on every
+# push to a `release/*` branch. This is the spend-bearing pre-deploy
+# check that must pass before the release branch is shipped.
+#
+# Cost shape: each Layer 2 run hits real Anthropic + OpenAI APIs.
+# `VOICE_QUALITY_COST_CAP_CENTS=1000` ($10) is the per-suite ceiling
+# enforced by the runner (see runner-layer2.ts SUITE_COST_CAP_CENTS_DEFAULT).
+# The concurrency group + `cancel-in-progress: false` ensures two
+# back-to-back release/* pushes don't double-spend.
+#
+# This is a GATE — the Layer 2 step does NOT use `continue-on-error`.
+# If the corpus regresses below threshold the release does not ship.
+# Override procedure: docs/superpowers/runbooks/voice-quality-launch-gate.md
+# (Layer 2 section added in VQ2-019).
+name: Voice Quality Layer 2 (pre-deploy)
+
+on:
+  push:
+    branches: ["release/*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  layer2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      # Per-ref group so different release branches can run in parallel,
+      # but two pushes to the same release branch serialize.
+      group: voice-quality-layer2-${{ github.ref }}
+      cancel-in-progress: false   # don't cancel; cost already incurred
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      VOICE_QUALITY_LAYER2: 'true'
+      VOICE_QUALITY_REPO: memory
+      VOICE_QUALITY_COST_CAP_CENTS: '1000'  # $10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - name: Run voice quality Layer 2 suite
+        id: layer2
+        run: npm run voice-quality:layer2 --workspace=packages/api
+      - name: Upload Layer 2 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-quality-layer2-report
+          path: |
+            packages/api/voice-quality-layer2-report.json
+            packages/api/voice-quality-layer2-failures/*.json
+      # Cosmetic post-step: best-effort PR comment when the release
+      # branch happens to be associated with an open PR. Failures here
+      # MUST NOT fail the gate (the gate verdict is the Layer 2 step
+      # itself), so this step explicitly opts into continue-on-error.
+      - name: Post Layer 2 summary to PR (if release/* branch is in a PR)
+        if: always() && github.event_name == 'push'
+        run: npx ts-node .github/scripts/post-voice-quality-pr-comment.ts
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_PATH: packages/api/voice-quality-layer2-report.json

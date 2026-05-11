@@ -207,6 +207,8 @@ When a call fails, the report shows: bucket → script id → failed criteria �
 
 ## 6. Layer 2 design — caller-experience suite (sketch; full design in separate plan)
 
+> See: [`docs/superpowers/runbooks/voice-quality-layer2.md`](../runbooks/voice-quality-layer2.md) for the operational runbook.
+
 **Out of scope for the Layer 1 plan.** Captured here so the Layer 1 architecture doesn't paint Layer 2 into a corner.
 
 **Core characteristics (to be detailed in a separate spec):**
@@ -257,7 +259,7 @@ Launch gate = all four sub-thresholds met simultaneously, AND no regression vs p
 ### 7.4 Pilot launch decision flow
 
 1. Voice quality report green at all four sub-thresholds for 7 consecutive nightly runs on main.
-2. Layer 2 shows ≥85% pass and TTFA P95 <800ms for 1 consecutive week.
+2. Layer 2 shows ≥85% pass, TTFA P95 median ≤ 800ms, perceived-completion ≥ 90%, no flakes on happy-path scripts, total cost <$10/run for 1 consecutive week (4 consecutive weekly runs). See the [Layer 2 launch gate section](../runbooks/voice-quality-launch-gate.md#layer-2-launch-gate) of the launch-gate runbook for the full procedure.
 3. Manual sign-off by engineering lead + product on the report.
 4. Pilot tenant onboarded; live traffic routed with human CSR shadow (escalation-first mode) for 1 week.
 5. Pilot tenant + ServiceOS together review live traffic vs rubric (sample N=20 real calls, human-graded). Real-world pass rate ≥85% → expand to full handling.

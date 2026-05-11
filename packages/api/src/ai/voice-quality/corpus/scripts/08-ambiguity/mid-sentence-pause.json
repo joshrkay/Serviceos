@@ -1,0 +1,53 @@
+{
+  "id": "mid-sentence-pause",
+  "bucket": "08-ambiguity",
+  "callerId": "+15555550806",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_08_mid_pause",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_08_pause_diego",
+        "tenantId": "t_08_mid_pause",
+        "firstName": "Diego",
+        "lastName": "Alvarez",
+        "displayName": "Diego Alvarez",
+        "companyName": null,
+        "primaryPhone": "+15555550806",
+        "secondaryPhone": null,
+        "email": "diego.alvarez@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [],
+    "invoices": []
+  },
+  "turns": [
+    {
+      "caller": "I'd like to schedule for, next Tuesday at 2pm",
+      "expected": {
+        "intent": "create_appointment",
+        "proposalType": "create_appointment",
+        "escalates": false,
+        "spokenAnswerMatches": "agent waits through the mid-sentence pause (700ms silence rendered by the TTS layer between 'for' and 'next Tuesday at 2pm'), does not panic-reprompt, and drafts a create_appointment proposal once the full utterance lands"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true,
+  "layer2Only": true
+}
