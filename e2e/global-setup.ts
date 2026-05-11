@@ -9,29 +9,30 @@
  *      (warn-only) when missing.
  *
  *   2. Ephemeral test DB (DB-fixtures-agent block, below):
- *      Active when E2E_USE_TEST_DB=true. Runs the setup + seed scripts in
- *      e2e/fixtures/, then loads the generated env file so each spec can
- *      read process.env.E2E_TENANT_A_ID, etc. Teardown lives in
- *      e2e/global-teardown.ts.
+ *      Active when E2E_USE_TEST_DB=true. Runs setupTestDb + seed
+ *      IN-PROCESS so the testcontainer's lifetime is anchored to this
+ *      long-lived Playwright process. Teardown lives in
+ *      e2e/global-teardown.ts and calls stopHeldContainer() on the
+ *      same module — so Ryuk doesn't reap the container mid-run.
  *
  * Each block is independent. Smoke runs with neither env set just no-op.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { clerkSetup } from '@clerk/testing/playwright';
+import { setupTestDb, writeStateFile } from './fixtures/setup-test-db';
+import { seedJourneyFixtures } from './fixtures/seed-journey-fixtures';
 
 export default async function globalSetup(): Promise<void> {
-  // --- BEGIN: ephemeral-DB block (owned by DB-fixtures agent) ---
-  // Activated by E2E_USE_TEST_DB=true. Edits here should not touch the Clerk
-  // block below. Coordinate via comments — see qa/reports/2026-05-11/.
+  // --- BEGIN: ephemeral-DB block ---
+  // Activated by E2E_USE_TEST_DB=true. setupTestDb runs in this process
+  // (no spawnSync), so the testcontainer it starts survives until
+  // global-teardown.ts calls stopHeldContainer() at the end of the run.
   if (process.env.E2E_USE_TEST_DB === 'true') {
     await bootstrapEphemeralDb();
   }
   // --- END: ephemeral-DB block ---
 
-  // --- BEGIN: Clerk testing-tokens block (owned by Clerk agent) ---
+  // --- BEGIN: Clerk testing-tokens block ---
   // Normalize the env vars we expose in CI to the names @clerk/testing expects.
   // We accept E2E_CLERK_* (preferred for CI, to keep them distinct from any
   // production CLERK_* vars on the same runner) and fall back to the raw names.
@@ -60,57 +61,24 @@ export default async function globalSetup(): Promise<void> {
   // --- END: Clerk testing-tokens block ---
 }
 
-// --- BEGIN: ephemeral-DB helpers (owned by DB-fixtures agent) ---
-
 async function bootstrapEphemeralDb(): Promise<void> {
   console.log('[e2e globalSetup] E2E_USE_TEST_DB=true — bootstrapping ephemeral DB…');
 
-  // 1. Run setup-test-db.ts. It either starts a testcontainer or uses an
-  //    existing DATABASE_URL. On success it writes .test-db-state.json and
-  //    prints `export DATABASE_URL=...` to stdout (we parse that here).
-  const setup = spawnSync('npx', ['tsx', 'e2e/fixtures/setup-test-db.ts'], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  if (setup.status !== 0) {
-    throw new Error(`[e2e globalSetup] setup-test-db.ts failed (exit ${setup.status})`);
-  }
-  // Capture exported DATABASE_URL into our own env so child processes
-  // (api dev server via webServer) inherit it.
-  const exportMatch = setup.stdout.match(/^export DATABASE_URL=(.+)$/m);
-  if (exportMatch) {
-    process.env.DATABASE_URL = exportMatch[1].trim();
-    console.log('[e2e globalSetup] DATABASE_URL set from setup-test-db output');
-  }
+  // 1. Start (or adopt) the test DB IN THIS PROCESS. If we own a
+  //    container, setupTestDb() stores the ref in module state so
+  //    global-teardown.ts can stop it cleanly later.
+  const state = await setupTestDb();
+  process.env.DATABASE_URL = state.connectionString;
+  // Persist the state for CLI-side teardown tools that may run after
+  // this process exits in unusual scenarios (e.g. crash-and-recover).
+  writeStateFile(state);
+  console.log('[e2e globalSetup] DATABASE_URL set from in-process setupTestDb()');
 
-  // 2. Run the seed. Writes .journey-fixtures.env which we load next.
-  const seed = spawnSync('npx', ['tsx', 'e2e/fixtures/seed-journey-fixtures.ts'], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    stdio: 'inherit',
-  });
-  if (seed.status !== 0) {
-    throw new Error(`[e2e globalSetup] seed-journey-fixtures.ts failed (exit ${seed.status})`);
+  // 2. Seed the fixtures and apply the IDs directly to process.env so
+  //    every spec sees them. The env file is also written for human use.
+  const fixtures = await seedJourneyFixtures();
+  for (const [k, v] of Object.entries(fixtures.envVars)) {
+    process.env[k] = v;
   }
-
-  // 3. Load the seeded IDs into process.env.
-  const envFile = join(process.cwd(), 'e2e', 'fixtures', '.journey-fixtures.env');
-  if (existsSync(envFile)) {
-    const content = readFileSync(envFile, 'utf8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eq = trimmed.indexOf('=');
-      if (eq === -1) continue;
-      const key = trimmed.slice(0, eq);
-      const value = trimmed.slice(eq + 1);
-      process.env[key] = value;
-    }
-    console.log('[e2e globalSetup] loaded seeded tenant/customer/job/estimate/appointment IDs');
-  } else {
-    console.warn(`[e2e globalSetup] expected env file not found: ${envFile}`);
-  }
+  console.log('[e2e globalSetup] loaded seeded tenant/customer/job/estimate/appointment IDs');
 }
-
-// --- END: ephemeral-DB helpers ---

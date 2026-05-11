@@ -6,12 +6,20 @@
  *   1. If DATABASE_URL is set AND looks like a test DB → just migrate it.
  *      (CI mode — caller provisioned a clean Postgres service / branch.)
  *   2. Else → spin up a pgvector/pgvector:pg16 testcontainer locally,
- *      apply migrations, and print its connection string. The caller is
- *      expected to capture E2E_DB_URL from stdout (or read it from the
- *      pidfile this script writes).
+ *      apply migrations, and print its connection string.
  *
  * Idempotent: re-running against an already-migrated DB is a no-op because
  * every migration uses IF NOT EXISTS / DROP POLICY IF EXISTS.
+ *
+ * Two entry points:
+ *   - `setupTestDb()` — async function imported by Playwright globalSetup
+ *     so the testcontainer lives for the lifetime of the Playwright
+ *     process. Returns the held container ref so globalTeardown can stop
+ *     it cleanly in the same process. This avoids Ryuk killing the
+ *     container the moment a child process exits.
+ *   - `main()` — CLI wrapper for stand-alone use
+ *     (`npx tsx e2e/fixtures/setup-test-db.ts`). Writes the state file
+ *     so a separate teardown invocation can find the container.
  *
  * Usage (local, with testcontainer):
  *   npx tsx e2e/fixtures/setup-test-db.ts
@@ -20,59 +28,58 @@
  *   DATABASE_URL=postgres://...test... npx tsx e2e/fixtures/setup-test-db.ts
  *
  * Output: writes JSON state to e2e/fixtures/.test-db-state.json containing
- * { connectionString, containerId? } for teardown to pick up. Also prints
- * `export DATABASE_URL=...` so callers can `eval $(npx tsx ...)`.
+ * { connectionString, containerId? } for the CLI teardown to pick up.
  *
  * Flags:
  *   --dry-run    print what it would do without connecting / starting containers
  */
-import { writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readdirSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Client } from 'pg';
 import { checkDatabaseUrlSafety, exitIfUnsafe, redact } from './safety';
 
-// We resolve paths relative to the script's expected location (e2e/fixtures/).
-// Scripts are invoked via `npm run e2e:db:*` from the repo root, so process.cwd()
-// is the repo root and this layout holds.
 const FIXTURES_DIR = resolve(process.cwd(), 'e2e', 'fixtures');
 const STATE_FILE = join(FIXTURES_DIR, '.test-db-state.json');
 const SCHEMA_TS_PATH = resolve(process.cwd(), 'packages', 'api', 'src', 'db', 'schema.ts');
 const LOOSE_MIGRATIONS_DIR = resolve(process.cwd(), 'packages', 'api', 'src', 'db', 'migrations');
 
-interface TestDbState {
+export interface TestDbState {
   connectionString: string;
   // Container ID only present when WE started the container.
-  // Teardown uses this to stop it. Absent in CI mode.
+  // The CLI teardown reads this; the in-process teardown uses the held
+  // container ref directly.
   containerId?: string;
   // True when we own the container and teardown should stop it.
   ownsContainer: boolean;
 }
 
-const isDryRun = process.argv.includes('--dry-run');
+// Minimal shape of the testcontainers PostgreSqlContainer we care about.
+// Typed locally so the module compiles without @testcontainers/postgresql
+// being a peer dep — the dep is dynamically imported on demand.
+interface StartedPgContainer {
+  getConnectionUri(): string;
+  getId(): string;
+  stop(opts?: { timeout?: number; remove?: boolean }): Promise<unknown>;
+}
 
-async function main(): Promise<void> {
+// Module-level reference to the running testcontainer when we own it.
+// globalSetup populates this; globalTeardown reads it in the same Node
+// process. Without this, Ryuk would tear the container down the instant
+// a child process exited.
+let _heldContainer: StartedPgContainer | undefined;
+
+export function getHeldContainer(): StartedPgContainer | undefined {
+  return _heldContainer;
+}
+
+/**
+ * In-process setup. Used by Playwright globalSetup so the container
+ * lifecycle is anchored to the same long-lived Node process.
+ */
+export async function setupTestDb(): Promise<TestDbState> {
   const userProvidedUrl = process.env.DATABASE_URL;
 
-  if (isDryRun) {
-    console.log('[setup-test-db] --dry-run mode — no connections, no containers.');
-    if (userProvidedUrl) {
-      const decision = checkDatabaseUrlSafety(userProvidedUrl);
-      console.log(`[setup-test-db] would check safety on: ${decision.url}`);
-      console.log(`[setup-test-db] decision: ${decision.allowed ? 'ALLOW' : 'REFUSE'} — ${decision.reason}`);
-      if (decision.allowed) {
-        console.log('[setup-test-db] would apply MIGRATIONS object + loose .sql files to this DB.');
-      }
-    } else {
-      console.log('[setup-test-db] DATABASE_URL not set — would start a pgvector/pgvector:pg16 testcontainer.');
-      console.log('[setup-test-db] would apply MIGRATIONS object + loose .sql files to it.');
-    }
-    console.log(`[setup-test-db] would write state to ${STATE_FILE}`);
-    console.log('[setup-test-db] dry-run OK');
-    return;
-  }
-
   let state: TestDbState;
-
   if (userProvidedUrl) {
     const decision = checkDatabaseUrlSafety(userProvidedUrl);
     exitIfUnsafe(decision);
@@ -82,26 +89,38 @@ async function main(): Promise<void> {
   }
 
   await applyMigrations(state.connectionString);
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  return state;
+}
 
-  // Emit a shell-eval-able line so callers can pick up the URL.
-  console.log('[setup-test-db] ready');
-  console.log(`export DATABASE_URL=${state.connectionString}`);
+/**
+ * In-process teardown. Stops the held testcontainer if we started one
+ * during setupTestDb(). No-op otherwise (BYO mode owns its own
+ * lifecycle — call truncateAllTables from teardown-test-db.ts).
+ */
+export async function stopHeldContainer(): Promise<void> {
+  if (!_heldContainer) return;
+  const c = _heldContainer;
+  _heldContainer = undefined;
+  try {
+    await c.stop({ timeout: 5_000, remove: true });
+  } catch (err) {
+    console.warn('[setup-test-db] failed to stop held container; you may need to docker rm -f manually.');
+    console.warn(err);
+  }
 }
 
 async function startTestcontainer(): Promise<TestDbState> {
   console.log('[setup-test-db] starting pgvector/pgvector:pg16 testcontainer (~10s)…');
-  // Dynamic import so the heavy testcontainers dep isn't required when
-  // the caller is passing their own DATABASE_URL.
   const tc = await import('@testcontainers/postgresql').catch((err) => {
     console.error('[setup-test-db] @testcontainers/postgresql is not installed.');
     console.error('[setup-test-db] Either install it as a devDependency or set DATABASE_URL to a pre-provisioned test DB.');
     throw err;
   });
   const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
-  const container = await new tc.PostgreSqlContainer(image)
+  const container = (await new tc.PostgreSqlContainer(image)
     .withDatabase('serviceos_e2e_test')
-    .start();
+    .start()) as unknown as StartedPgContainer;
+  _heldContainer = container;
   const connectionString = container.getConnectionUri();
   console.log(`[setup-test-db] container up: ${redact(connectionString)}`);
   return {
@@ -135,8 +154,6 @@ async function applyMigrations(connectionString: string): Promise<void> {
           await client.query(sql);
           console.log(`[setup-test-db]   applied ${f}`);
         } catch (err) {
-          // Loose migrations may already be folded into MIGRATIONS — surface
-          // but don't fail on idempotency-friendly errors.
           const code = (err as { code?: string }).code;
           if (code === '42701' /* duplicate_column */ || code === '42710' /* duplicate_object */) {
             console.log(`[setup-test-db]   skipped ${f} (already applied: ${code})`);
@@ -153,11 +170,60 @@ async function applyMigrations(connectionString: string): Promise<void> {
 }
 
 function shouldUseSsl(connectionString: string): boolean {
-  // testcontainers ⇒ no SSL. Anything matching *.railway / *.rlwy / supabase ⇒ SSL.
   return /railway|rlwy|supabase|amazonaws|heroku/i.test(connectionString);
 }
 
-main().catch((err) => {
-  console.error('[setup-test-db] failed:', err);
-  process.exit(1);
-});
+function writeStateFile(state: TestDbState): void {
+  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+function clearStateFile(): void {
+  try { unlinkSync(STATE_FILE); } catch { /* no-op */ }
+}
+
+export { writeStateFile, clearStateFile, STATE_FILE };
+
+const isDryRun = process.argv.includes('--dry-run');
+
+async function main(): Promise<void> {
+  if (isDryRun) {
+    console.log('[setup-test-db] --dry-run mode — no connections, no containers.');
+    const userProvidedUrl = process.env.DATABASE_URL;
+    if (userProvidedUrl) {
+      const decision = checkDatabaseUrlSafety(userProvidedUrl);
+      console.log(`[setup-test-db] would check safety on: ${decision.url}`);
+      console.log(`[setup-test-db] decision: ${decision.allowed ? 'ALLOW' : 'REFUSE'} — ${decision.reason}`);
+      if (decision.allowed) {
+        console.log('[setup-test-db] would apply MIGRATIONS object + loose .sql files to this DB.');
+      }
+    } else {
+      console.log('[setup-test-db] DATABASE_URL not set — would start a pgvector/pgvector:pg16 testcontainer.');
+      console.log('[setup-test-db] would apply MIGRATIONS object + loose .sql files to it.');
+    }
+    console.log(`[setup-test-db] would write state to ${STATE_FILE}`);
+    console.log('[setup-test-db] dry-run OK');
+    return;
+  }
+
+  const state = await setupTestDb();
+  writeStateFile(state);
+
+  // Emit a shell-eval-able line so callers can pick up the URL.
+  // NOTE for in-process callers (globalSetup): use setupTestDb() instead —
+  // this CLI path will exit() at the end of main(), which triggers Ryuk
+  // and tears down the container even if you parsed this output.
+  console.log('[setup-test-db] ready');
+  console.log(`export DATABASE_URL=${state.connectionString}`);
+}
+
+// CLI entry — only when invoked directly via `tsx setup-test-db.ts`.
+// When imported (e.g. by global-setup.ts) this block does not run, so
+// setupTestDb() may be called without side effects.
+const isMainModule =
+  typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module;
+if (isMainModule || import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error('[setup-test-db] failed:', err);
+    process.exit(1);
+  });
+}
