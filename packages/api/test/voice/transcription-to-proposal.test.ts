@@ -66,10 +66,10 @@ describe('integration — voice transcription → proposal', () => {
       id: recordingId,
       tenantId,
       status: 'pending',
-      audioUrl: 'https://example.com/audio.webm',
       durationSeconds: 4,
       createdBy: userId,
       createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
     // Mock LLM responds:
@@ -195,10 +195,10 @@ describe('integration — voice transcription → proposal', () => {
       id: recordingId,
       tenantId,
       status: 'pending',
-      audioUrl: 'https://example.com/mumbling.webm',
       durationSeconds: 2,
       createdBy: userId,
       createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
     const { gateway } = createMockLLMGateway(

@@ -66,7 +66,7 @@ describe('P12-006 — mode-switch / no-bleed integration', () => {
       const u = await modeService.getUser(tenantId, USER_OPERATOR);
       return u?.current_mode === 'supervisor' || u?.current_mode === 'both';
     });
-    await modeService.setMode(TENANT_A, USER_OPERATOR, 'supervisor', USER_OPERATOR);
+    await modeService.setMode(TENANT_A, USER_OPERATOR, 'supervisor');
   });
 
   // ──────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ describe('P12-006 — mode-switch / no-bleed integration', () => {
 
     // Operator flips to tech. The previously-decided proposal is unchanged
     // because it's been recorded already; new proposals see new mode.
-    await modeService.setMode(TENANT_A, USER_OPERATOR, 'tech', USER_OPERATOR);
+    await modeService.setMode(TENANT_A, USER_OPERATOR, 'tech');
     expect(status1).toBe('approved');
 
     // A new proposal from a NEW session that started under tech mode
@@ -157,7 +157,7 @@ describe('P12-006 — mode-switch / no-bleed integration', () => {
 
     for (let i = 0; i < FLIPS; i++) {
       const mode = modeCycle[i % modeCycle.length];
-      await modeService.setMode(TENANT_A, USER_OPERATOR, mode, USER_OPERATOR);
+      await modeService.setMode(TENANT_A, USER_OPERATOR, mode);
       _resetSupervisorPresenceCache();
       const supervisorPresent = await isSupervisorPresent(TENANT_A);
 
@@ -209,7 +209,7 @@ describe('P12-006 — mode-switch / no-bleed integration', () => {
   // ──────────────────────────────────────────────────────────
 
   it('unsupervised tenant: would-have-approved proposals land in ready_for_review (not approved)', async () => {
-    await modeService.setMode(TENANT_A, USER_OPERATOR, 'tech', USER_OPERATOR);
+    await modeService.setMode(TENANT_A, USER_OPERATOR, 'tech');
     _resetSupervisorPresenceCache();
 
     expect(await isSupervisorPresent(TENANT_A)).toBe(false);
@@ -233,7 +233,7 @@ describe('P12-006 — mode-switch / no-bleed integration', () => {
   // ──────────────────────────────────────────────────────────
 
   it('both-mode user counts as supervisor-present (unblocks auto-approve)', async () => {
-    await modeService.setMode(TENANT_A, USER_OPERATOR, 'both', USER_OPERATOR);
+    await modeService.setMode(TENANT_A, USER_OPERATOR, 'both');
     _resetSupervisorPresenceCache();
 
     expect(await isSupervisorPresent(TENANT_A)).toBe(true);

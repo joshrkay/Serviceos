@@ -6,21 +6,11 @@ import { CreateContractSheet } from './CreateContractSheet';
 
 export interface ApiContract {
   id: string;
-  name: string;
+  title: string;
   status?: string;
-  customerId?: string;
-  recurrenceRule?: string;
-  priceCents?: number;
-  startsOn?: string;
-  endsOn?: string;
-}
-
-function recurrenceLabel(rule?: string): string {
-  if (!rule) return 'No cadence';
-  if (rule.includes('FREQ=MONTHLY')) return 'Monthly';
-  if (rule.includes('FREQ=QUARTERLY')) return 'Quarterly';
-  if (rule.includes('FREQ=YEARLY')) return 'Yearly';
-  return rule;
+  cadence?: string;
+  startDate?: string;
+  endDate?: string;
 }
 
 function normalizeStatus(status?: string): 'Active' | 'Paused' | 'Cancelled' {
@@ -33,7 +23,7 @@ function normalizeStatus(status?: string): 'Active' | 'Paused' | 'Cancelled' {
 export function MaintenanceContractsPage() {
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
-  const { data, total, isLoading, error, refetch } = useListQuery<ApiContract>('/api/agreements');
+  const { data, total, isLoading, error, refetch } = useListQuery<ApiContract>('/api/maintenance-contracts');
 
   const normalized = useMemo(() => data.map(c => ({ ...c, uiStatus: normalizeStatus(c.status) })), [data]);
   const active = normalized.filter(c => c.uiStatus === 'Active').length;
@@ -87,15 +77,12 @@ export function MaintenanceContractsPage() {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="text-sm text-slate-900 truncate">{contract.name || 'Untitled contract'}</p>
-                      {contract.priceCents !== undefined && (
-                        <p className="text-xs text-slate-500 mt-0.5">${(contract.priceCents / 100).toFixed(2)}/period</p>
-                      )}
+                      <p className="text-sm text-slate-900 truncate">{contract.title || 'Untitled contract'}</p>
                     </div>
                     <span className="text-xs rounded-full px-2 py-0.5 bg-slate-100 text-slate-600">{contract.uiStatus}</span>
                   </div>
                   <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-                    <span>{recurrenceLabel(contract.recurrenceRule)}{contract.startsOn ? ` · starts ${contract.startsOn}` : ''}</span>
+                    <span>{contract.cadence ?? 'No cadence'}{contract.startDate ? ` · starts ${contract.startDate}` : ''}</span>
                     <span className="inline-flex items-center gap-1 text-slate-400">View <ChevronRight size={14} /></span>
                   </div>
                 </button>
