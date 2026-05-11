@@ -45,23 +45,17 @@
  *      mid-suite cost-cap or runtime error halted execution — partial
  *      data is more useful than no data for the launch gate.
  *
- * # Production agent path stub
+ * # Production agent path
  *
  * The production media-streams `speechTurn` handler delegates to
- * `TwilioGatherAdapter#processCallerUtterance`, which depends on the
- * full Express app + every agent dep (FSM, classifier, repos, audit,
- * proposals…). Wiring that up in the test would balloon to many
- * hundreds of lines and re-implement most of `app.ts`. For this
- * follow-up we ship a no-op `speechTurn` (returns []) so the
- * mediastream-server upgrade + audio-frame plumbing is real, but the
- * agent never speaks back. That means agent-audio is empty for now,
- * Whisper transcripts are empty strings, and graders produce
- * fail-everything verdicts. The test runs end-to-end — it just doesn't
- * yet exercise the production agent.
- *
- * The full agent wiring is tracked as a follow-up; the value here is
- * "every other piece of Layer 2 wiring is exercised when keys are
- * present" so the next follow-up can focus on the agent harness alone.
+ * `TwilioGatherAdapter#processCallerUtterance`. That body (plus its
+ * helpers — cost tracking, audit + proposal side effects, FSM dispatch,
+ * end-of-call summary) has been extracted into a reusable
+ * `createVoiceTurnProcessor` factory at
+ * `packages/api/src/ai/voice-turn/`. This suite wires the factory with
+ * in-memory repos + a real Layer-2 LLM gateway so the mediastream
+ * server now exercises the real agent loop end-to-end. Whisper
+ * transcripts and the graders therefore see actual agent replies.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -100,6 +94,15 @@ import type { StreamingTranscriptionProvider } from '../../src/voice/transcripti
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
+import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 
 const REPORT_PATH = path.resolve(
   __dirname,
@@ -197,12 +200,64 @@ describe('Voice Quality Layer 2 — corpus', () => {
       },
     };
 
+    // Build a Layer-2 LLM gateway for the agent loop. The same factory the
+    // graders use for judge calls, but with no event bus / no shared cost
+    // tracker — agent calls don't need to count toward suite cost in this
+    // wiring (Layer 2 cost accounting tracks Whisper + TTS + judge LLM).
+    const agentGateway = createRealLayerTwoGateway({
+      apiKey: process.env.ANTHROPIC_API_KEY!,
+      bus: new AgentEventBus(),
+      costTracker: suiteState.suiteCostTracker,
+    });
+
+    // Real agent processor — replaces the no-op stub. Wires the in-memory
+    // repos the corpus exercises (audit + proposal + the read-only
+    // lookup family). Optional deps (pool, callControl, voicePersonaResolver,
+    // etc.) are left undefined; the processor's helpers degrade
+    // gracefully ("not wired" log + skip).
+    // Mutable holder so the onSessionTerminated hook (constructed below
+    // BEFORE the processor reference exists) can call back into the
+    // processor's `runSummary`. We can't reference `processor` directly
+    // inside the literal because the literal is the constructor arg.
+    const processorRef: { current: ReturnType<typeof createVoiceTurnProcessor> | null } = {
+      current: null,
+    };
+    const processor = createVoiceTurnProcessor({
+      store: suiteState.voiceSessionStore,
+      gateway: agentGateway,
+      auditRepo: new InMemoryAuditRepository(),
+      proposalRepo: new InMemoryProposalRepository(),
+      customerRepo: new InMemoryCustomerRepository(),
+      appointmentRepo: new InMemoryAppointmentRepository(),
+      jobRepo: new InMemoryJobRepository(),
+      invoiceRepo: new InMemoryInvoiceRepository(),
+      estimateRepo: new InMemoryEstimateRepository(),
+      leadRepo: new InMemoryLeadRepository(),
+      businessName: 'Test Tenant',
+      systemActorId: 'voice-quality-layer2',
+      // Codex P1 round 5 — `await` the summary so its agent gateway
+      // spend lands in `suiteState.suiteCostTracker` BEFORE speechTurn
+      // returns. The runner snapshots the tracker immediately after
+      // each speechTurn iteration to compute per-run `agentCents`; if
+      // the summary were fire-and-forget (production behavior in
+      // twilio-adapter), its cents would either miss the snapshot
+      // entirely or contaminate the next run's delta.
+      onSessionTerminated: async (session) => {
+        if (processorRef.current) {
+          await processorRef.current.runSummary(session);
+        }
+      },
+    });
+    processorRef.current = processor;
+
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,
       streamingProvider,
-      // No-op speechTurn for now — see file header "Production agent
-      // path stub" for why and what's tracked as follow-up.
-      speechTurn: async () => [],
+      // VQ2-FOLLOWUP — replaces the no-op stub with the real agent loop
+      // extracted from TwilioGatherAdapter#processCallerUtterance. The
+      // factory closure-captures all helpers (cost, audit, proposal,
+      // FSM dispatch) so the harness exercises the production code path.
+      speechTurn: processor.speechTurn,
       authTokenGetter: () => 'test-token-unused',
       authTestMode: true,
     });
@@ -275,6 +330,13 @@ describe('Voice Quality Layer 2 — corpus', () => {
             process.env.VOICE_QUALITY_COST_CAP_CENTS ?? '1000',
             10,
           ),
+          // `driverDeps.gateway` is built via `createRealLayerTwoGateway`,
+          // which already wraps the gateway to add per-call cost into
+          // `suiteState.suiteCostTracker`. Tell the runner so it skips
+          // its own redundant `suiteCostTracker.addCents(runCents)` —
+          // otherwise grader spend would be counted twice and the
+          // suite cap would trip at half the real spend (Codex P1).
+          gatewayReportsToSuiteTracker: true,
         });
       } catch (err) {
         if (err instanceof CostCapExceededError) {
@@ -307,6 +369,39 @@ describe('Voice Quality Layer 2 — corpus', () => {
       ).toBe(true);
     },
   );
+
+  // Codex P1 fix — launchGate.pass enforcement.
+  //
+  // The pre-deploy CI workflow gates release on the exit status of
+  // `npm run voice-quality:layer2`. Before this assertion existed,
+  // the suite could exit 0 even when `buildLayer2Report(...).launchGate.pass`
+  // was false: regressions in TTFA P95, perceived-completion rate,
+  // overall pass rate, or cost-capped scripts all slipped through
+  // because the per-script `it.each` block only checked the floor.
+  //
+  // This final `it` runs after the `it.each` block (vitest preserves
+  // source-order test enqueue), rebuilds the launch-gate verdict from
+  // the same `suiteState.perScriptResults` the `afterAll` will write
+  // to disk, and asserts `pass === true`. When false, the assertion
+  // message names every blocker so the CI consumer can act without
+  // opening the report file.
+  it('VQ2-LAYER2 — launch gate verdict', () => {
+    // Empty-corpus / no-keys skip paths are handled by the early
+    // returns above (the surrounding `describe` returns before
+    // reaching this block). If we somehow arrive here with no
+    // recorded results, treat that as "no data" and skip rather than
+    // fail — the launch gate consumer interprets an empty report the
+    // same way.
+    if (suiteState.perScriptResults.length === 0) return;
+
+    const report = buildLayer2Report(suiteState.perScriptResults);
+    expect(
+      report.launchGate.pass,
+      `Layer 2 launch gate failed:\n${report.launchGate.blockers.join(
+        '\n',
+      )}\nMeasured: ${JSON.stringify(report.launchGate.measured, null, 2)}`,
+    ).toBe(true);
+  });
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

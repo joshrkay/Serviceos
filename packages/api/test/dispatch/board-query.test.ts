@@ -171,13 +171,25 @@ describe('P6-006 — Day-scoped dispatch board query', () => {
     }, assignmentRepo);
 
     deps.getAppointmentLateness = async (appointment, technicianId) => ({
-      progressState: technicianId ? 'at_site' : 'unknown',
-      latenessState: appointment.id === appt.id ? 'late_prompt_required' : 'on_track',
+      progressState: technicianId ? ('at_site' as const) : ('unknown' as const),
+      latenessState: appointment.id === appt.id ? ('late_prompt_required' as const) : ('on_track' as const),
       expectedDurationMinutes: 60,
       elapsedOnSiteMinutes: 70,
       elapsedActiveServiceMinutes: 70,
       promptRequired: true,
       promptSuppressedByCooldown: false,
+      escalatedToDispatcher: false,
+      autoNotifyCustomer: false,
+      confidenceScore: 0.9,
+      confidenceBreakdown: { recency: 0.9, accuracy: 0.9, movementConsistency: 0.9 },
+      promptAudit: {
+        filteredPingCount: 0,
+        totalPingCount: 0,
+        thresholdMinutes: 15,
+        elapsedOnSiteMinutes: 70,
+        confidenceScore: 0.9,
+        reason: 'test',
+      },
     });
 
     const result = await getDispatchBoardData(tenantId, '2026-03-14', deps);

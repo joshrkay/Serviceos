@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
   Plus, Send, ArrowLeft, DollarSign, CheckCircle, CheckCircle2,
@@ -837,6 +838,7 @@ const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
 const INVOICE_LIST_REFRESH_MS = 30_000;
 
 export function InvoicesPage() {
+  const navigate = useNavigate();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -892,7 +894,10 @@ export function InvoicesPage() {
       <div className="px-4 md:px-6 py-4 md:py-6 max-w-3xl mx-auto">
         <div className="flex items-center justify-between mb-5">
           <h1 className="text-slate-900">Invoices</h1>
-          <button className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors">
+          <button
+            onClick={() => navigate('/invoices/new')}
+            className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+          >
             <Plus size={14} /> New invoice
           </button>
         </div>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, Mail, MessageSquare, Plus, MapPin,
@@ -7,17 +7,69 @@ import {
   AlertTriangle, Home, CheckCircle2, AlertCircle, ChevronRight,
 } from 'lucide-react';
 import {
-  customers, jobs, estimates, invoices,
+  jobs, estimates, invoices,
   ServiceLocation, ServiceType, calcEstimateTotal, calcInvoiceTotal,
 } from '../../data/mock-data';
 import { NewEstimateFlow } from '../estimates/NewEstimateFlow';
 import { useListQuery } from '../../hooks/useListQuery';
+import { useDetailQuery } from '../../hooks/useDetailQuery';
 
 interface ApiContract {
   id: string;
-  title: string;
-  cadence?: string;
+  name: string;
+  recurrenceRule?: string;
   status?: string;
+}
+
+// ─── constants ────────────────────────────────────────────────────────────────────
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  communicationNotes?: string;
+  tags?: string[];
+}
+
+interface ApiLocation {
+  id: string;
+  customerId: string;
+  label?: string;
+  street1: string;
+  street2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  isPrimary: boolean;
+}
+
+function customerName(c: ApiCustomer): string {
+  return (
+    c.displayName?.trim() ||
+    [c.firstName, c.lastName].filter(Boolean).join(' ').trim() ||
+    'Customer'
+  );
+}
+
+function formatAddress(loc: ApiLocation): string {
+  const stateZip = [loc.state, loc.postalCode].filter(Boolean).join(' ');
+  return [loc.street1, loc.street2, loc.city, stateZip]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+function adaptLocation(loc: ApiLocation): ServiceLocation {
+  return {
+    id: loc.id,
+    nickname: loc.label?.trim() || (loc.isPrimary ? 'Home' : 'Service location'),
+    address: formatAddress(loc),
+    serviceTypes: [],
+    isPrimary: loc.isPrimary,
+    jobCount: 0,
+  };
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -53,7 +105,7 @@ const INV_STATUS_STYLE: Record<string, string> = {
   Overdue: 'bg-red-100 text-red-600',
 };
 
-// ─── Add Location Sheet ───────────────────────────────────────────────────────
+// ─── Add Location Sheet ─────────────────────────────────────────────────────────────────
 function AddLocationSheet({ onClose, onSave }: {
   onClose: () => void;
   onSave: (loc: ServiceLocation) => void;
@@ -173,7 +225,7 @@ function AddLocationSheet({ onClose, onSave }: {
   );
 }
 
-// ─── Location Card ────────────────────────────────────────────────────────────
+// ─── Location Card ──────────────────────────────────────────────────────────────────────────
 function LocationCard({ loc, isExpanded, onToggle, isNew }: {
   loc: ServiceLocation; isExpanded: boolean; onToggle: () => void; isNew?: boolean;
 }) {
@@ -256,7 +308,7 @@ function LocationCard({ loc, isExpanded, onToggle, isNew }: {
   );
 }
 
-// ─── Invoice status footer ────────────────────────────────────────────────────
+// ─── Invoice status footer ──────────────────────────────────────────────────────────────────
 function InvoiceStatusBar({ status, dueDate, paidDate, sentDate }: {
   status: string; dueDate?: string; paidDate?: string; sentDate?: string;
 }) {
@@ -320,8 +372,14 @@ function MaintenanceContractsSidebar({ customerId, contracts }: {
                   to={`/contracts/${contract.id}`}
                   className="inline-flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs text-blue-700 hover:bg-blue-100 transition-colors"
                 >
-                  {contract.title}
-                  {contract.cadence ? <span className="text-blue-500">· {contract.cadence}</span> : null}
+                  {contract.name}
+                  {contract.recurrenceRule && (
+                    <span className="text-blue-500">
+                      · {contract.recurrenceRule.includes('MONTHLY') ? 'Monthly' :
+                         contract.recurrenceRule.includes('QUARTERLY') ? 'Quarterly' :
+                         contract.recurrenceRule.includes('YEARLY') ? 'Yearly' : ''}
+                    </span>
+                  )}
                 </Link>
               ))}
             </div>
@@ -340,22 +398,38 @@ function MaintenanceContractsSidebar({ customerId, contracts }: {
   );
 }
 
-// ─── Main page ────────────────────────────────────────────────────────────────
+// ─── Main page ──────────────────────────────────────────────────────────────────────────
 type Tab = 'overview' | 'locations' | 'history';
 type HistoryFilter = 'all' | 'invoices' | 'jobs' | 'estimates';
 
 export function CustomerDetailPage() {
   const { id }   = useParams<{ id: string }>();
   const navigate = useNavigate();
-
-  const found = customers.find(c => c.id === id);
   const customerId = id ?? '';
+
+  const { data: customer, error: customerError } =
+    useDetailQuery<ApiCustomer>('/api/customers', customerId || null);
+
+  const { data: apiLocations } = useListQuery<ApiLocation>('/api/locations', {
+    filters: customerId ? { customerId } : {},
+    enabled: Boolean(customerId),
+  });
+
+  // Maintenance contracts / service agreements live on /api/agreements
+  // (per-tenant, filterable by customerId). The earlier nested
+  // /api/customers/:id/maintenance-contracts path was never mounted on
+  // the API and would 404 for every customer. useListQuery now resyncs
+  // its filters on prop change, so route navigation rebinds correctly.
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
-    customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
-    { enabled: Boolean(customerId) && Boolean(found) },
+    `/api/customers/${customerId}/maintenance-contracts`,
+    { enabled: Boolean(customerId) },
   );
   const [tab,              setTab]           = useState<Tab>('history');
-  const [locations,        setLocations]     = useState<ServiceLocation[]>(found?.locations ?? []);
+  // The AddLocationSheet is currently in-memory only — it doesn't POST to
+  // /api/locations — so we hold the added entries separately and merge them
+  // with what the API returns instead of seeding shared state via an effect
+  // (which would loop on every new array reference from useListQuery).
+  const [localLocations,   setLocalLocations] = useState<ServiceLocation[]>([]);
   const [expanded,         setExpanded]      = useState<Set<string>>(new Set());
   const [showAddLoc,       setShowAddLoc]    = useState(false);
   const [newLocIds,        setNewLocIds]     = useState<Set<string>>(new Set());
@@ -363,23 +437,60 @@ export function CustomerDetailPage() {
   const [plusMenuOpen,     setPlusMenuOpen]  = useState(false);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
-  if (!found) return (
-    <div className="h-full flex flex-col items-center justify-center gap-4">
-      <p className="text-slate-400 text-sm">Customer not found</p>
-      <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
-        ← Back to customers
-      </button>
-    </div>
-  );
+  const locations = useMemo(() => {
+    const apiAdapted = (apiLocations ?? []).map(adaptLocation);
+    const apiIds = new Set(apiAdapted.map((l) => l.id));
+    return [...apiAdapted, ...localLocations.filter((l) => !apiIds.has(l.id))];
+  }, [apiLocations, localLocations]);
 
-  const multiLocation   = locations.length > 1;
-  const initials        = found.name.split(' ').map(n => n[0]).join('');
-  const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
-  const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
+  if (!customer) {
+    // useDetailQuery starts with data=null, isLoading=false and only flips
+    // to loading inside an effect on the next tick, so "no data, no error
+    // yet" still means a fetch is pending — render the spinner instead of
+    // flashing "Customer not found" for valid IDs on first paint.
+    if (!customerError) {
+      return (
+        <div className="h-full flex items-center justify-center">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
+        </div>
+      );
+    }
+    // GET /api/customers/:id returns 404 for missing records; useDetailQuery
+    // surfaces that as `HTTP 404`. Anything else is a real failure.
+    const isNotFound = customerError.includes('404');
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-4">
+        <p className="text-slate-400 text-sm">
+          {isNotFound ? 'Customer not found' : 'Failed to load customer'}
+        </p>
+        <button onClick={() => navigate('/customers')} className="text-sm text-blue-600 hover:underline">
+          ← Back to customers
+        </button>
+      </div>
+    );
+  }
 
   const custJobs      = jobs.filter(j => j.customerId === id);
   const custEstimates = estimates.filter(e => e.customerId === id);
   const custInvoices  = invoices.filter(i => i.customerId === id);
+
+  const primaryLoc      = locations.find(l => l.isPrimary) ?? locations[0];
+  const found = {
+    name: customerName(customer),
+    phone: customer.primaryPhone ?? '',
+    email: customer.email ?? '',
+    address: primaryLoc?.address ?? '',
+    notes: customer.communicationNotes,
+    tags: customer.tags,
+    jobCount: custJobs.length,
+    memberSince: undefined as string | undefined,
+    totalRevenue: undefined as number | undefined,
+    lastService: undefined as string | undefined,
+  };
+
+  const multiLocation   = locations.length > 1;
+  const initials        = found.name.split(' ').map(n => n[0]).filter(Boolean).join('') || '?';
+  const allServiceTypes = [...new Set(locations.flatMap(l => l.serviceTypes))] as ServiceType[];
 
   const tabs: Tab[] = multiLocation
     ? ['overview', 'locations', 'history']
@@ -389,7 +500,7 @@ export function CustomerDetailPage() {
     setExpanded(s => { const n = new Set(s); n.has(locId) ? n.delete(locId) : n.add(locId); return n; });
   }
   function handleAddLocation(loc: ServiceLocation) {
-    setLocations(p => [...p, loc]);
+    setLocalLocations(p => [...p, loc]);
     setNewLocIds(s => new Set([...s, loc.id]));
     setExpanded(s => new Set([...s, loc.id]));
     setTab('locations');

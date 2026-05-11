@@ -5,7 +5,7 @@ import { AssistantPage } from './components/assistant/AssistantPage';
 import { JobsPage } from './components/jobs/JobsPage';
 import { SchedulePage } from './components/schedule/SchedulePage';
 import { CustomersPage } from './components/customers/CustomersPage';
-import { CustomerDetailPage } from './components/customers/CustomerDetailPage';
+import { CustomerDetail } from './pages/customers/CustomerDetail';
 import { EstimatesPage } from './components/estimates/EstimatesPage';
 import { InvoicesPage } from './components/invoices/InvoicesPage';
 import { SettingsPage } from './components/settings/SettingsPage';
@@ -19,7 +19,9 @@ import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
 import { IntakeFormPage } from './components/customer/IntakeFormPage';
 import { FeedbackPage } from './components/customer/FeedbackPage';
 import { InteractionsPage } from './components/interactions/InteractionsPage';
-import { LeadsPage } from './components/leads/LeadsPage';
+import { LeadList } from './pages/leads/LeadList';
+import { LeadDetail } from './pages/leads/LeadDetail';
+import { LeadCreate } from './pages/leads/LeadCreate';
 import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
@@ -49,6 +51,45 @@ function CustomerEditRoute() {
   });
 }
 
+function CustomerDetailRoute() {
+  const params = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  if (!params.id) return null;
+  return React.createElement(CustomerDetail, {
+    customerId: params.id,
+    onBack: () => navigate('/customers'),
+    onEdit: () => navigate(`/customers/${params.id}/edit`),
+    onArchived: () => navigate('/customers'),
+  });
+}
+
+function LeadListRoute() {
+  const navigate = useNavigate();
+  return React.createElement(LeadList, {
+    onSelectLead: (id: string) => navigate(`/leads/${id}`),
+    onNewLead: () => navigate('/leads/new'),
+  });
+}
+
+function LeadDetailRoute() {
+  const params = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  if (!params.id) return null;
+  return React.createElement(LeadDetail, {
+    leadId: params.id,
+    onBack: () => navigate('/leads'),
+    onConverted: (customerId: string) => navigate(`/customers/${customerId}`),
+  });
+}
+
+function LeadCreateRoute() {
+  const navigate = useNavigate();
+  return React.createElement(LeadCreate, {
+    onCreated: (id: string) => navigate(`/leads/${id}`),
+    onCancel: () => navigate('/leads'),
+  });
+}
+
 function AppointmentEditRoute() {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -60,11 +101,11 @@ function AppointmentEditRoute() {
 }
 
 export const router = createBrowserRouter([
-  // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
+  // ── Auth (fullscreen, no Shell) ───────────────────────────────────────────
   { path: '/login',  Component: LoginPage  },
   { path: '/signup', Component: SignupPage },
 
-  // ── Fullscreen flows (no Shell chrome) ──────────────────────────────────
+  // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
   { path: '/onboarding', Component: OnboardingPage },
   { path: '/e/:id',      Component: EstimateApprovalPage },
   { path: '/pay/:id',    Component: InvoicePaymentPage },
@@ -72,7 +113,7 @@ export const router = createBrowserRouter([
   { path: '/public/feedback/:token', Component: FeedbackPage },
   { path: '/portal/:token',          Component: PortalShell },
 
-  // ── App (with Shell nav, auth-gated) ────────────────────────────────────
+  // ── App (with Shell nav, auth-gated) ───────────────────────────────────
   {
     path: '/',
     Component: ProtectedRoute,
@@ -87,11 +128,12 @@ export const router = createBrowserRouter([
       { path: 'jobs/:id',       Component: JobsPage        },
       { path: 'schedule',       Component: SchedulePage    },
       { path: 'customers',      Component: CustomersPage   },
-      { path: 'customers/:id',  Component: CustomerDetailPage },
+      { path: 'customers/:id',  Component: CustomerDetailRoute },
       { path: 'customers/:id/edit', Component: CustomerEditRoute },
       { path: 'appointments/:id/edit', Component: AppointmentEditRoute },
-      { path: 'contracts/:id',  Component: ContractDetailPage },
-      { path: 'leads',          Component: LeadsPage       },
+      { path: 'leads',          Component: LeadListRoute       },
+      { path: 'leads/new',      Component: LeadCreateRoute     },
+      { path: 'leads/:id',      Component: LeadDetailRoute     },
       { path: 'estimates',      Component: EstimatesPage   },
       { path: 'estimates/new',  Component: EstimateCreate  },
       { path: 'invoices',       Component: InvoicesPage    },

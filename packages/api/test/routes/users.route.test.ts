@@ -184,13 +184,13 @@ describe('POST/GET /api/users/invitations — Tier 4 Team members (PR 3)', () =>
   });
 
   it('POST calls the Clerk API when configured and persists the returned id', async () => {
-    const clerkFetch = vi.fn(async () =>
+    const clerkFetch = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'inv_clerk_xyz', status: 'pending' }),
     );
     const app = buildApp(userRepo, 'owner', {
       pendingInvitationRepo: inviteRepo,
       clerkSecretKey: 'sk_test_xxx',
-      clerkFetch,
+      clerkFetch: clerkFetch as unknown as typeof fetch,
       appBaseUrl: 'https://app.example.com',
     });
 

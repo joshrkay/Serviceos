@@ -2,20 +2,27 @@ import { useState, type FormEvent } from 'react';
 import { X } from 'lucide-react';
 import { useMutation } from '../../hooks/useMutation';
 
-interface ApiContract {
+interface ApiMaintenanceContract {
   id: string;
 }
 
-interface CreateContractRequest {
-  customer: string;
-  location: string;
+interface CreateMaintenanceContractRequest {
   title: string;
   cadence: string;
-  serviceWindow: string;
-  duration: string;
-  defaultSummary: string;
-  startDate: string;
+  startDate?: string;
 }
+
+const CADENCE_OPTIONS = [
+  { label: 'Monthly', value: 'Monthly' },
+  { label: 'Quarterly', value: 'Quarterly' },
+  { label: 'Yearly', value: 'Yearly' },
+];
+
+const EMPTY_FORM = {
+  title: '',
+  cadence: 'Monthly',
+  startDate: '',
+};
 
 export function CreateContractSheet({
   open,
@@ -24,44 +31,42 @@ export function CreateContractSheet({
 }: {
   open: boolean;
   onClose: () => void;
-  onCreated?: (contract: ApiContract) => void;
+  onCreated?: (contract: ApiMaintenanceContract) => void;
 }) {
-  const { mutate: createContract, isLoading, error } = useMutation<CreateContractRequest, ApiContract>(
+  const { mutate: createContract, isLoading, error } = useMutation<CreateMaintenanceContractRequest, ApiMaintenanceContract>(
     'POST',
     '/api/maintenance-contracts'
   );
 
-  const [form, setForm] = useState<CreateContractRequest>({
-    customer: '',
-    location: '',
-    title: '',
-    cadence: 'Monthly',
-    serviceWindow: '',
-    duration: '12 months',
-    defaultSummary: '',
-    startDate: '',
-  });
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   if (!open) return null;
 
+  function setField(key: keyof typeof EMPTY_FORM, value: string | boolean) {
+    setForm(prev => ({ ...prev, [key]: value }));
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    setValidationError(null);
+
+    if (!form.title.trim()) {
+      setValidationError('Contract title is required.');
+      return;
+    }
+
     try {
-      const contract = await createContract(form);
+      const contract = await createContract({
+        title: form.title.trim(),
+        cadence: form.cadence,
+        startDate: form.startDate || undefined,
+      });
       onCreated?.(contract);
       onClose();
-      setForm({
-        customer: '',
-        location: '',
-        title: '',
-        cadence: 'Monthly',
-        serviceWindow: '',
-        duration: '12 months',
-        defaultSummary: '',
-        startDate: '',
-      });
+      setForm(EMPTY_FORM);
     } catch {
-      // Hook-managed error state is shown in the sheet; keep it open for correction/retry.
+      // Hook-managed error state shown in the sheet; keep open for correction/retry.
     }
   }
 
@@ -81,38 +86,45 @@ export function CreateContractSheet({
           </div>
 
           <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-            {[
-              ['Customer', 'customer', 'Customer name'],
-              ['Location', 'location', 'Service address'],
-              ['Title', 'title', 'e.g., Premium HVAC Plan'],
-              ['Cadence', 'cadence', 'Monthly'],
-              ['Service Window', 'serviceWindow', 'Mon-Fri, 8am-12pm'],
-              ['Duration', 'duration', '12 months'],
-              ['Default Summary', 'defaultSummary', 'Include tune-up + filter change'],
-              ['Start Date', 'startDate', ''],
-            ].map(([label, key, placeholder]) => (
-              <label key={key} className="block">
-                <span className="block text-xs text-slate-500 mb-1.5">{label}</span>
-                {key === 'defaultSummary' ? (
-                  <textarea
-                    value={form[key as keyof CreateContractRequest]}
-                    onChange={e => setForm(prev => ({ ...prev, [key]: e.target.value }))}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
-                    rows={4}
-                    placeholder={placeholder}
-                  />
-                ) : (
-                  <input
-                    type={key === 'startDate' ? 'date' : 'text'}
-                    value={form[key as keyof CreateContractRequest]}
-                    onChange={e => setForm(prev => ({ ...prev, [key]: e.target.value }))}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
-                    placeholder={placeholder}
-                    required={key === 'customer' || key === 'location' || key === 'title' || key === 'startDate'}
-                  />
-                )}
-              </label>
-            ))}
+            {/* Contract title */}
+            <label className="block">
+              <span className="block text-xs text-slate-500 mb-1.5">Contract title *</span>
+              <input
+                type="text"
+                required
+                value={form.title}
+                onChange={e => setField('title', e.target.value)}
+                placeholder="e.g., Premium HVAC Plan"
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+              />
+            </label>
+
+            {/* Cadence */}
+            <label className="block">
+              <span className="block text-xs text-slate-500 mb-1.5">Cadence *</span>
+              <select
+                value={form.cadence}
+                onChange={e => setField('cadence', e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400 bg-white"
+              >
+                {CADENCE_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </label>
+
+            {/* Start date */}
+            <label className="block">
+              <span className="block text-xs text-slate-500 mb-1.5">Start date</span>
+              <input
+                type="date"
+                value={form.startDate}
+                onChange={e => setField('startDate', e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400"
+              />
+            </label>
+
+            {validationError && <p className="text-sm text-red-500">{validationError}</p>}
             {error && <p className="text-sm text-red-500">Failed to create contract: {error}</p>}
           </div>
 

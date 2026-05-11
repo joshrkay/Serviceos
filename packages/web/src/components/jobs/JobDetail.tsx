@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, MessageSquare, Navigation,
@@ -12,6 +12,8 @@ import { calcMaterialsTotal, calcEstimateTotal, estimates } from '../../data/moc
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { useApiClient } from '../../lib/apiClient';
+import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
 
 interface ApiJobDetail {
@@ -33,6 +35,8 @@ interface ApiJobDetail {
     lastName?: string;
     primaryPhone?: string;
     email?: string;
+    communicationNotes?: string;
+    notes?: string;
     locations?: Array<{ street1?: string; city?: string; state?: string; postalCode?: string }>;
   };
   technician?: {
@@ -83,6 +87,7 @@ function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefine
     email: api.email ?? '',
     address: api.locations?.[0]?.street1 ?? '',
     serviceType: 'HVAC',
+    notes: api.communicationNotes ?? api.notes,
     locations: [],
     jobCount: 0,
     openJobs: 0,
@@ -330,8 +335,8 @@ function CustomerCard({ customer, job, onCall, onText, onViewCustomer }: {
 }
 
 // ─── Schedule + Tech Card ──────────────────────────────────────────────────
-function ScheduleTechCard({ job, tech, onCallTech }: {
-  job: Job; tech: Technician | undefined; onCallTech: () => void;
+function ScheduleTechCard({ job, tech, onCallTech, workerTerm }: {
+  job: Job; tech: Technician | undefined; onCallTech: () => void; workerTerm: string;
 }) {
   const techStatusLabel =
     job.status === 'Active' || job.status === 'In Progress' ? 'On site now' :
@@ -365,7 +370,7 @@ function ScheduleTechCard({ job, tech, onCallTech }: {
         <div className="px-4 py-4">
           <div className="flex items-center gap-1.5 mb-3">
             <User size={13} className="text-slate-400" />
-            <p className="text-xs text-slate-400">Technician</p>
+            <p className="text-xs text-slate-400">{workerTerm}</p>
           </div>
           {tech ? (
             <>
@@ -390,7 +395,7 @@ function ScheduleTechCard({ job, tech, onCallTech }: {
             </>
           ) : (
             <button className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 transition-colors">
-              <Plus size={13} /> Assign technician
+              <Plus size={13} /> Assign {workerTerm.toLowerCase()}
             </button>
           )}
         </div>
@@ -929,6 +934,8 @@ function MediaLightbox({ media, index, onIndexChange, onDelete, onClose }: {
 // ─── Main Component ───────────────────────────────────────────────────────
 export function JobDetailView({ id }: { id: string }) {
   const navigate = useNavigate();
+  const apiFetch = useApiClient();
+  const workerTerm = useWorkerTerm();
 
   const { data: apiJob, isLoading, error } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
   const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
@@ -951,6 +958,38 @@ export function JobDetailView({ id }: { id: string }) {
   const [activities,    setActivities]    = useState<JobActivity[]>([]);
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
+
+  // Load persisted notes from /api/notes and show in the activity log
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/notes?entityType=job&entityId=${id}`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json() as { data?: Array<{ id: string; content: string; createdAt: string }> };
+        const noteActivities: JobActivity[] = (data.data ?? []).map(n => ({
+          id: n.id,
+          type: 'note',
+          content: n.content,
+          time: new Date(n.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+          author: 'Technician',
+          authorInitials: 'TC',
+          authorColor: '#475569',
+        }));
+        if (noteActivities.length > 0 && !cancelled) {
+          setActivities(prev => {
+            const existingIds = new Set(prev.map(a => a.id));
+            const fresh = noteActivities.filter(a => !existingIds.has(a.id));
+            return [...fresh, ...prev];
+          });
+        }
+      } catch {
+        // notes load failure is non-critical
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [id, apiFetch]);
 
   if (isLoading) {
     return (
@@ -1011,7 +1050,7 @@ export function JobDetailView({ id }: { id: string }) {
         />
       )}
       <StatusStepper job={job} />
-      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} />
+      <ScheduleTechCard job={job} tech={tech} onCallTech={() => setModal('call')} workerTerm={workerTerm} />
       <DescriptionCard job={job} />
       {job.estimateId && (
         <EstimateScopeCard
