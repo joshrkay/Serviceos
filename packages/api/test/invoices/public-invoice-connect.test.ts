@@ -135,7 +135,7 @@ async function setup(opts: { resolver?: ConnectAccountResolver; stripeFetch?: ty
 
 describe('PublicInvoiceService.getOrCreateCheckoutUrl — Connect routing (PR 2)', () => {
   it('adds the Stripe-Account header when resolver returns an active connected account', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'plink_x', url: 'https://checkout.stripe.com/c/plink_x' }),
     );
     const { service } = await setup({
@@ -152,7 +152,7 @@ describe('PublicInvoiceService.getOrCreateCheckoutUrl — Connect routing (PR 2)
   });
 
   it('falls back to platform charge when resolver returns null (tenant not onboarded)', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'plink_y', url: 'https://checkout.stripe.com/c/plink_y' }),
     );
     const { service } = await setup({
@@ -167,7 +167,7 @@ describe('PublicInvoiceService.getOrCreateCheckoutUrl — Connect routing (PR 2)
   });
 
   it('falls back when Connect account exists but charges are not enabled (KYC incomplete)', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'plink_z', url: 'https://checkout.stripe.com/c/plink_z' }),
     );
     const { service } = await setup({
@@ -182,7 +182,7 @@ describe('PublicInvoiceService.getOrCreateCheckoutUrl — Connect routing (PR 2)
   });
 
   it('falls back when no resolver is wired (legacy harness)', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'plink_w', url: 'https://checkout.stripe.com/c/plink_w' }),
     );
     const { service } = await setup({
@@ -196,7 +196,7 @@ describe('PublicInvoiceService.getOrCreateCheckoutUrl — Connect routing (PR 2)
   });
 
   it('treats resolver errors as fallback (does not throw)', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonOk({ id: 'plink_v', url: 'https://checkout.stripe.com/c/plink_v' }),
     );
     const { service } = await setup({

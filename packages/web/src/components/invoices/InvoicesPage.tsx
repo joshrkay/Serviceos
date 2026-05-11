@@ -939,8 +939,16 @@ const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
 const INVOICE_LIST_REFRESH_MS = 30_000;
 
 export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
+  const navigate = useNavigate();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
+
+  // Keep `selected` in sync with the route param so deep-links and in-place
+  // route changes (/invoices/:id → /invoices/:other) reopen the right
+  // detail view instead of holding onto the previous selection.
+  useEffect(() => {
+    setSelected(defaultSelectedId ?? null);
+  }, [defaultSelectedId]);
 
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiInvoice>('/api/invoices');
 
@@ -973,7 +981,10 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
   }, [data]);
 
   if (selected) {
-    return <InvoiceDetail invoiceId={selected} onBack={() => setSelected(null)} />;
+    return <InvoiceDetail invoiceId={selected} onBack={() => {
+      setSelected(null);
+      if (defaultSelectedId) navigate('/invoices');
+    }} />;
   }
 
   const normalizedData = data.map(i => ({

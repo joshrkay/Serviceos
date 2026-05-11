@@ -69,7 +69,18 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       try {
         const res = await apiFetch(`/api/estimates/${id}`);
         if (!res.ok) {
-          if (!cancelled) setEstimateLookupStatus('error');
+          if (cancelled) return;
+          setEstimateLookupStatus('error');
+          setEstimateInfo(null);
+          const prior = autofilledFromEstimateRef.current;
+          if (prior) {
+            setForm((prev) => ({
+              ...prev,
+              jobId: prior.jobIdFromEstimate ? '' : prev.jobId,
+              items: prev.items.length === prior.itemCount ? [emptyDraft()] : prev.items,
+            }));
+            autofilledFromEstimateRef.current = null;
+          }
           return;
         }
         const data = await res.json();
@@ -81,11 +92,17 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
           unitPriceDollars: (li.unitPriceCents / 100).toFixed(2),
           taxable: li.taxable ?? false,
         }));
-        setForm((prev) => ({
-          ...prev,
-          jobId: prev.jobId || data.jobId || '',
-          items: items.length > 0 ? items : prev.items,
-        }));
+        let jobIdFromEstimate = false;
+        setForm((prev) => {
+          const nextJobId = prev.jobId || data.jobId || '';
+          jobIdFromEstimate = !prev.jobId && !!data.jobId;
+          return {
+            ...prev,
+            jobId: nextJobId,
+            items: items.length > 0 ? items : prev.items,
+          };
+        });
+        autofilledFromEstimateRef.current = { jobIdFromEstimate, itemCount: items.length };
         setEstimateInfo({
           estimateNumber: data.estimateNumber,
           totalCents: data.totals?.totalCents ?? data.totalCents ?? 0,

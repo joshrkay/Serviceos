@@ -8,6 +8,7 @@ import {
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
+import { apiFetch } from '../../utils/api-fetch';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -1084,10 +1085,20 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
+  // Keep `selected` in sync with the route param so deep-links and in-place
+  // route changes (/estimates/:id → /estimates/:other) reopen the right
+  // detail view instead of holding onto the previous selection.
+  useEffect(() => {
+    setSelected(defaultSelectedId ?? null);
+  }, [defaultSelectedId]);
+
   const { data, total, isLoading, error, setFilters, refetch } = useListQuery<ApiEstimate>('/api/estimates');
 
   if (selected) {
-    return <EstimateDetail estimateId={selected} onBack={() => setSelected(null)} />;
+    return <EstimateDetail estimateId={selected} onBack={() => {
+      setSelected(null);
+      if (defaultSelectedId) navigate('/estimates');
+    }} />;
   }
 
   const normalizedData = data.map(e => ({

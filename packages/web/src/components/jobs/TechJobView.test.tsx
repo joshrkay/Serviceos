@@ -1,9 +1,46 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
+
+const mockFetcher = vi.fn();
+
+vi.mock('../../lib/apiClient', () => ({
+  useApiClient: () => mockFetcher,
+}));
+
+vi.mock('@clerk/clerk-react', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@clerk/clerk-react')>();
+  return {
+    ...actual,
+    useAuth: () => ({
+      isLoaded: true,
+      isSignedIn: true,
+      getToken: async () => 'tok',
+    }),
+  };
+});
+
 import { TechJobView } from './TechJobView';
 
+const mockJob = {
+  id: 'j1',
+  jobNumber: '1001',
+  summary: 'Fix HVAC',
+  status: 'scheduled',
+};
+
 describe('TechJobView delay acknowledgement prompt', () => {
+  beforeEach(() => {
+    mockFetcher.mockReset();
+    // /api/jobs/j1 → job detail; /api/notes → empty list
+    mockFetcher.mockImplementation((path: string) => {
+      if (path.startsWith('/api/jobs/')) {
+        return Promise.resolve(new Response(JSON.stringify(mockJob), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    });
+  });
+
   it('renders fixed delay options and toggles with Yes/No', async () => {
     render(
       <MemoryRouter>
@@ -11,7 +48,8 @@ describe('TechJobView delay acknowledgement prompt', () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByText('Running behind?')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Running behind?')).toBeInTheDocument());
+
     const yesButton = screen.getByRole('button', { name: 'Yes' });
     const noButton = screen.getByRole('button', { name: 'No' });
 

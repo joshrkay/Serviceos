@@ -6,7 +6,6 @@ import {
 import { technicians } from '../../data/mock-data';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
-import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -150,7 +149,14 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
     let cancelled = false;
     const t = setTimeout(async () => {
       const res = await apiFetch(`/api/jobs/${jobId}`).catch(() => null);
-      if (res?.ok && !cancelled) setJobInfo(await res.json());
+      if (cancelled) return;
+      if (res?.ok) {
+        setJobInfo(await res.json());
+      } else {
+        // Clear stale preview when the new job id can't be resolved so
+        // dispatchers don't schedule against an unrelated prior job.
+        setJobInfo(null);
+      }
     }, 400);
     return () => { cancelled = true; clearTimeout(t); };
   }, [jobId]);
@@ -306,9 +312,18 @@ export function SchedulePage() {
         ),
       }));
 
+      if (!isLatest()) return;
       setEnriched(withConflicts);
+    } catch {
+      // Network/CORS rejections need the same clear-stale-data treatment
+      // as a non-OK HTTP response — otherwise a failed day-switch leaves
+      // the previous day's appointments visible against the new date.
+      if (isLatest()) {
+        setAppointments([]);
+        setEnriched([]);
+      }
     } finally {
-      setLoading(false);
+      if (isLatest()) setLoading(false);
     }
   }, [selectedIso]);
 
