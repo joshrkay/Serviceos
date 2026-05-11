@@ -39,27 +39,32 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [activeContract, setActiveContract] = useState<{ id: string; name: string; recurrenceRule?: string } | null>(null);
   const jobIdLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // When job ID is entered, look up active agreements for the associated customer
+  // When job ID is entered, look up active agreements for the associated customer.
+  // `cancelled` guards against state updates after unmount or a newer jobId.
   useEffect(() => {
     if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current);
     const jobId = form.jobId.trim();
     if (!jobId) { setActiveContract(null); return; }
+    let cancelled = false;
     jobIdLookupTimer.current = setTimeout(async () => {
       try {
         const jobRes = await apiFetch(`/api/jobs/${jobId}`);
-        if (!jobRes.ok) return;
+        if (cancelled || !jobRes.ok) return;
         const job = await jobRes.json() as { customerId?: string };
-        if (!job.customerId) return;
+        if (cancelled || !job.customerId) return;
         const agRes = await apiFetch(`/api/agreements?customerId=${job.customerId}&status=active`);
-        if (!agRes.ok) return;
+        if (cancelled || !agRes.ok) return;
         const data = await agRes.json() as { data?: Array<{ id: string; name: string; recurrenceRule?: string }> };
         const contracts = data.data ?? [];
-        setActiveContract(contracts.length > 0 ? contracts[0] : null);
+        if (!cancelled) setActiveContract(contracts.length > 0 ? contracts[0] : null);
       } catch {
-        setActiveContract(null);
+        if (!cancelled) setActiveContract(null);
       }
     }, 600);
-    return () => { if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current); };
+    return () => {
+      cancelled = true;
+      if (jobIdLookupTimer.current) clearTimeout(jobIdLookupTimer.current);
+    };
   }, [form.jobId]);
 
   const handleSubmit = useCallback(

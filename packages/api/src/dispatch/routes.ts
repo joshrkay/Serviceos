@@ -91,21 +91,19 @@ export function createDispatchRoutes(deps: {
             const job = await deps.jobRepo.findById(tenantId, appt.jobId);
             if (job) {
               jobSummary = job.summary;
-              if (deps.customerRepo) {
-                const customer = await deps.customerRepo.findById(tenantId, job.customerId);
-                if (customer) {
-                  customerName = customer.displayName ||
-                    [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
-                    'Customer';
-                }
+              const [customer, loc] = await Promise.all([
+                deps.customerRepo ? deps.customerRepo.findById(tenantId, job.customerId) : Promise.resolve(null),
+                deps.locationRepo && job.locationId ? deps.locationRepo.findById(tenantId, job.locationId) : Promise.resolve(null),
+              ]);
+              if (customer) {
+                customerName = customer.displayName ||
+                  [customer.firstName, customer.lastName].filter(Boolean).join(' ') ||
+                  'Customer';
               }
-              if (deps.locationRepo && job.locationId) {
-                const loc = await deps.locationRepo.findById(tenantId, job.locationId);
-                if (loc) {
-                  locationAddress = [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', ');
-                  locationLatitude  = loc.latitude;
-                  locationLongitude = loc.longitude;
-                }
+              if (loc) {
+                locationAddress = [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', ');
+                locationLatitude  = loc.latitude;
+                locationLongitude = loc.longitude;
               }
             }
           }
