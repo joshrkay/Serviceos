@@ -264,8 +264,10 @@ export function SchedulePage() {
   const loadAppointments = useCallback(async () => {
     setLoading(true);
     try {
-      const from = `${selectedIso}T00:00:00.000Z`;
-      const to   = `${selectedIso}T23:59:59.999Z`;
+      const start = new Date(selectedIso + 'T00:00:00');
+      const end   = new Date(selectedIso + 'T23:59:59.999');
+      const from  = start.toISOString();
+      const to    = end.toISOString();
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
       if (!res.ok) { setLoading(false); return; }
       const body = await res.json();
