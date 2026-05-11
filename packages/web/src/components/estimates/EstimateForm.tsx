@@ -65,11 +65,14 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     contractLookupTimer.current = setTimeout(async () => {
       try {
         const jobRes = await apiFetch(`/api/jobs/${jobId}`);
-        if (cancelled || !jobRes.ok) return;
+        if (cancelled) return;
+        if (!jobRes.ok) { setActiveContract(null); return; }
         const job = await jobRes.json() as { customerId?: string };
-        if (cancelled || !job.customerId) return;
+        if (cancelled) return;
+        if (!job.customerId) { setActiveContract(null); return; }
         const agRes = await apiFetch(`/api/agreements?customerId=${job.customerId}&status=active`);
-        if (cancelled || !agRes.ok) return;
+        if (cancelled) return;
+        if (!agRes.ok) { setActiveContract(null); return; }
         const data = await agRes.json() as { data?: Array<{ id: string; name: string; recurrenceRule?: string }> };
         const contracts = data.data ?? [];
         if (!cancelled) setActiveContract(contracts.length > 0 ? contracts[0] : null);
