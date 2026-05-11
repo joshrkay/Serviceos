@@ -978,4 +978,264 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     // scriptCostCents = 0 + 0 = 0 (cap miss).
     expect(harness.runScriptCalls).toBe(1);
   });
+
+  // ─── Codex P2 round 4 — agent gateway spend visibility ────────────────────
+  //
+  // The Layer 2 entry test wires `agentGateway = createRealLayerTwoGateway({
+  // costTracker: suiteState.suiteCostTracker })`, so every classifier/
+  // confirm/summary LLM call the media-stream agent makes during a script
+  // run goes through wrap-#1 → increments the suite tracker. The suite cap
+  // correctly counted these cents, but `RunScriptLayer2Result.totalCostCents`
+  // (= runCents + graderCents) didn't see them — reports under-counted and
+  // launch-gate verdicts could show cost-cap-trip without explaining the
+  // spend source.
+  //
+  // Round 4 adds a third accounting bucket, `agentCents`, computed via a
+  // suite-tracker delta minus the locally-tracked `graderCents`. The
+  // remainder represents agent gateway spend that wrap-#1 wrote during the
+  // run (agent + grader share the same wrapped gateway in real-mode). In
+  // mock-mode, no wrap-#1 exists and agentCents stays 0.
+  //
+  // These tests are fixture-light: they simulate wrap-#1 by having a
+  // grader mock OR a fake driverFactory write to the suite tracker
+  // directly — the runner can't tell the difference between wrap-#1
+  // writes from the agent vs from the grader; it just sees the delta.
+
+  // Reset grader mocks that earlier VQ2-fix-3a/3b/3 tests have
+  // re-implemented to call `gateway.complete()`. vitest module mocks
+  // persist across tests within a file; without these resets,
+  // `gradeRepromptAndRecovery` would still call `gateway.complete()` in
+  // VQ2-fix-4a/4b and double the grader-call count we're trying to pin.
+  // The default behaviors (just incrementing harness.graderCalls) are
+  // re-installed via `mockImplementation`.
+  function resetGraderMocksForRound4(): Promise<void> {
+    return Promise.all([
+      import('../../src/ai/voice-quality/graders/disposition-llm'),
+      import('../../src/ai/voice-quality/graders/caller-experience'),
+      import('../../src/ai/voice-quality/graders/perceived-completion'),
+    ]).then(([dispLlmMod, callerExpMod, perceivedMod]) => {
+      (dispLlmMod.gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          harness.graderCalls.dispLlm++;
+          return harness.dispLlmReturn ?? { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+        },
+      );
+      (callerExpMod.gradeRepromptAndRecovery as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          harness.graderCalls.reprompt++;
+          return (
+            harness.repromptReturn ?? {
+              totalTurns: 1,
+              repromptCount: 0,
+              repromptRatio: 0,
+              recoveryTurns: 0,
+              perTurnReprompts: [false],
+              passes: { repromptRatio: true, recovery: true },
+            }
+          );
+        },
+      );
+      (perceivedMod.gradePerceivedCompletion as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          harness.graderCalls.perceived++;
+          return (
+            harness.perceivedReturn ?? {
+              passed: true,
+              verdict: { perceivedSatisfaction: 'good', rationale: 'ok', abandonmentRisk: 0 },
+            }
+          );
+        },
+      );
+    });
+  }
+
+  it('VQ2-fix-4a — real-mode: agent gateway spend (suite-tracker delta minus graderCents) lands in totalCostCents and is not double-counted in suite tracker', async () => {
+    await resetGraderMocksForRound4();
+    // Real-mode setup mirroring the entry test wiring:
+    //   - gatewayReportsToSuiteTracker: true
+    //   - The grader gateway and the agent gateway both write to the
+    //     suite tracker via wrap-#1 (we simulate wrap-#1 by having the
+    //     mocked grader call the real wrap-#2-wrapped gateway, AND by
+    //     having the runScript stub simulate the agent's wrap-#1 writes
+    //     by adding to the suite tracker directly during the run).
+    //   - graderCents (wrap-#2-tracked): 1 dispLlm call/run × 45¢ = 135¢
+    //   - agentCents (suite-delta-detected): 3 simulated agent calls/run
+    //     × 30¢ = 90¢/run × 3 runs = 270¢
+    //   - runCents: 50¢/run × 3 = 150¢
+    //   Expected:
+    //     suite total = 135 (wrap-1 grader, simulated by the simulated-
+    //                  wrap-1 logic in the mock dispLlm) + 270 (wrap-1
+    //                  agent, simulated by runScript stub) + 150 (runner
+    //                  runCents forward) = 555¢
+    //     totalCostCents = 150 (runCents) + 135 (graderCents)
+    //                       + 270 (agentCents) = 555¢
+    //   No double-count: agent + grader cents already in suite via
+    //   wrap-#1 simulation; runner does not re-add them.
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    // Override the runScript mock to ALSO simulate the agent's wrap-#1
+    // writes to the suite tracker — three agent classifier/confirm/
+    // summary calls per run, each 30¢. (The default mock only records
+    // runCents into ctxForRun.costTracker; we add the agent simulation
+    // on top.)
+    const { runScript } = await import('../../src/ai/voice-quality/runner');
+    (runScript as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_script: VoiceQualityScript, ctx: { costTracker?: { addCents: (n: number) => void } }) => {
+        harness.runScriptCalls++;
+        const idx = harness.runScriptCalls;
+        const costToAdd = harness.runScriptCostsCents[idx - 1] ?? 0;
+        ctx.costTracker?.addCents(costToAdd);
+        // Simulate the agent's wrap-#1 writes during this run. In
+        // production the agent calls gateway.complete() N times and
+        // wrap-#1 of the createRealLayerTwoGateway-built agentGateway
+        // adds each call's cents to suiteState.suiteCostTracker.
+        suiteTracker.addCents(30);
+        suiteTracker.addCents(30);
+        suiteTracker.addCents(30);
+        const observation: Observation = {
+          callId: `stub-call-${idx}`,
+          scriptId: 'stub-script',
+          tenantId: 'stub-tenant',
+          events: [],
+          proposals: [],
+          customerCountDelta: 0,
+          appointmentCountDelta: 0,
+          audit: [],
+          totalCostCents: 0,
+          totalDurationMs: 0,
+          perTurnLatencyMs: [],
+          sessionEndedAs: 'completed',
+          hangupOccurred: false,
+          errors: [],
+        };
+        return { observation, passed: false, errors: [], durationMs: 1 };
+      },
+    );
+
+    // Grader gateway: wrap-#2 reports 45¢/call into graderTracker via
+    // the runner's own wrapping; we ALSO simulate wrap-#1 by writing
+    // directly to the suite tracker on each call (mirroring how
+    // wrap-#1 of createRealLayerTwoGateway accumulates per-call cost).
+    const fakeGateway = {
+      complete: vi.fn(async () => {
+        // Wrap-#1 simulation: per-call write to suite tracker (the
+        // shared cost tracker passed to createRealLayerTwoGateway).
+        suiteTracker.addCents(45);
+        return {
+          content: 'noop',
+          model: 'haiku',
+          provider: 'fake',
+          latencyMs: 1,
+          // tokenUsage shape that the runner's wrap-#2 translates to
+          // 45¢ (input=100k → 30¢, output=10k → 15¢).
+          tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+        };
+      }),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+
+    const script = eligibleScript();
+    const result = await runScriptLayer2(
+      script,
+      makeCtx({
+        gateway: fakeGateway,
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        gatewayReportsToSuiteTracker: true,
+      }),
+    );
+
+    // Suite total breakdown (3 runs):
+    //   wrap-#1 agent writes:   3 × (3 × 30¢) = 270¢
+    //   wrap-#1 grader writes:  3 × 45¢       = 135¢
+    //   runner runCents forward: 3 × 50¢      = 150¢
+    //   Total                                  = 555¢
+    expect(suiteTracker.totalCents()).toBe(555);
+
+    // totalCostCents = runCents (150) + graderCents (135) + agentCents (270) = 555¢.
+    // Pre-fix (round 3) would have been 150 + 135 = 285¢ — the agent's
+    // wrap-#1 writes were invisible to per-script accounting.
+    expect(result.totalCostCents).toBe(555);
+  });
+
+  it('VQ2-fix-4b — mock-mode: agentCents stays 0; totalCostCents = runCents + graderCents', async () => {
+    await resetGraderMocksForRound4();
+    // Mock-mode (`gatewayReportsToSuiteTracker` omitted/false): no
+    // wrap-#1 exists, so the suite-tracker delta is 0 by definition and
+    // agentCents must stay 0. Suite total reflects ONLY the runner's
+    // forwards (runCents + graderCents); totalCostCents matches.
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    // Fake gateway with wrap-#2-tracked tokenUsage but NO wrap-#1
+    // suite-tracker writes (mock-mode: the gateway is not built via
+    // createRealLayerTwoGateway).
+    const fakeGateway = {
+      complete: vi.fn(async () => ({
+        content: 'noop',
+        model: 'haiku',
+        provider: 'fake',
+        latencyMs: 1,
+        tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+      })),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+
+    const script = eligibleScript();
+    const result = await runScriptLayer2(
+      script,
+      makeCtx({
+        gateway: fakeGateway,
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        // gatewayReportsToSuiteTracker omitted → mock-mode
+      }),
+    );
+
+    // Suite total = 150¢ runCents (runner forward) + 135¢ graderCents
+    //   (3 × 45¢ via runner forward) = 285¢. agentCents = 0 — no
+    //   wrap-#1 path exists in mock-mode, so the delta stays 0.
+    expect(suiteTracker.totalCents()).toBe(285);
+    // totalCostCents matches: runCents + graderCents + 0.
+    expect(result.totalCostCents).toBe(285);
+  });
 });
