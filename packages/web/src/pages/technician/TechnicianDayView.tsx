@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 
 export interface TechnicianAppointment {
@@ -167,6 +168,7 @@ function answerScheduleQuestion(question: string, appointments: TechnicianAppoin
 }
 
 export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
+  const navigate = useNavigate();
   const [appointments, setAppointments] = useState<TechnicianAppointment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -585,6 +587,17 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
                   <div className="technician-day-view__status" data-testid="technician-day-status">
                     {getStatusLabel(appt.status)}
                   </div>
+
+                  {appt.jobId && (
+                    <button
+                      type="button"
+                      data-testid="technician-day-view-job"
+                      onClick={() => navigate(`/jobs/${appt.jobId}?view=tech`)}
+                      className="mt-1 text-xs text-blue-600 hover:underline"
+                    >
+                      View job →
+                    </button>
+                  )}
 
                   {!isEditing ? (
                     <button
