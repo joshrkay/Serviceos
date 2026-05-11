@@ -292,7 +292,6 @@ import {
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
-import { createInteractionsRouter } from './routes/interactions';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -2025,12 +2024,6 @@ export function createApp(): express.Express {
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
   app.use('/api/conversations', createConversationRouter(conversationRepo));
 
-  // 15.8/15.9 — Call log. Requires Postgres; falls back to 503 when pool
-  // is unavailable (dev without DATABASE_URL). Pool-guard matches pattern
-  // used by other pool-dependent routes above.
-  if (pool) {
-    app.use('/api/interactions', createInteractionsRouter({ pool }));
-  }
   app.use(
     '/api/settings',
     createSettingsRouter(settingsRepo, {
@@ -2065,12 +2058,9 @@ export function createApp(): express.Express {
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
-  app.use('/api/interactions', createInteractionsRouter({
-    dispatchRepo,
-    jobRepo,
-    estimateRepo,
-    invoiceRepo,
-  }));
+  if (pool) {
+    app.use('/api/interactions', createInteractionsRouter({ pool }));
+  }
 
   // ── Service agreements (P9-003) ─────────────────────────────────────────
   // Recurring service contracts auto-generate a job + draft invoice on

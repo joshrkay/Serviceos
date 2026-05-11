@@ -7,6 +7,7 @@ import { CustomerRepository } from '../customers/customer';
 import { LocationRepository } from '../locations/location';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
+import { toErrorResponse } from '../shared/errors';
 
 export function createDispatchRoutes(deps: {
   appointmentRepo: AppointmentRepository;

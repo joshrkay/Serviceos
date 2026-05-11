@@ -2467,6 +2467,8 @@ export const MIGRATIONS = {
         CHECK (entity_type IN ('estimate', 'invoice', 'appointment_confirmation', 'delay_notice'));
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_sent_at
       ON message_dispatches (tenant_id, sent_at DESC);
+  `,
+
   // 15.8/15.9 — Persist the in-memory FSM transcript onto the voice_sessions
   // row so the /api/interactions endpoint can surface full call transcripts
   // without relying on the in-memory store (which is process-scoped and lost
