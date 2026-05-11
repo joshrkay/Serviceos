@@ -2,9 +2,10 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createJobSchema } from '../shared/contracts';
-import { toErrorResponse } from '../shared/errors';
+import { toErrorResponse, ValidationError } from '../shared/errors';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import { Customer } from '../customers/customer';
+import { ServiceLocation } from '../locations/location';
 import {
   createJob,
   getJob,
@@ -51,7 +52,14 @@ export function createJobRouter(
           'customer',
           parsed.customerId
         )) as Customer | undefined;
-        await ownership.requireExists(req.auth!.tenantId, 'location', parsed.locationId);
+        const location = (await ownership.requireExistsAndLoad(
+          req.auth!.tenantId,
+          'location',
+          parsed.locationId
+        )) as ServiceLocation | undefined;
+        if (location && location.customerId !== parsed.customerId) {
+          throw new ValidationError('Service location does not belong to customer');
+        }
 
         // Resolve source attribution: explicit body override wins;
         // otherwise inherit from the customer.
@@ -155,7 +163,40 @@ export function createJobRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
           return;
         }
-        res.json(result);
+        const [customer, location] = await Promise.all([
+          ownership.requireExistsAndLoad(req.auth!.tenantId, 'customer', result.customerId) as Promise<Customer | undefined>,
+          ownership.requireExistsAndLoad(req.auth!.tenantId, 'location', result.locationId) as Promise<ServiceLocation | undefined>,
+        ]);
+        if (!customer || !location) {
+          res.json(result);
+          return;
+        }
+        const customerLocations = location.customerId === result.customerId
+          ? [
+              {
+                id: location.id,
+                label: location.label,
+                street1: location.street1,
+                city: location.city,
+                state: location.state,
+                postalCode: location.postalCode,
+                isPrimary: location.isPrimary,
+              },
+            ]
+          : [];
+        res.json({
+          ...result,
+          customer: {
+            id: customer.id,
+            displayName: customer.displayName,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            primaryPhone: customer.primaryPhone,
+            email: customer.email,
+            communicationNotes: customer.communicationNotes,
+            locations: customerLocations,
+          },
+        });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
