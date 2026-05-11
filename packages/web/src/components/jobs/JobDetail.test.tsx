@@ -43,6 +43,7 @@ const mockApiJob = {
     lastName: 'Smith',
     primaryPhone: '5125550001',
     email: 'alice@example.com',
+    communicationNotes: 'Prefers afternoon appointments. Gate code is 1234. Dog in backyard.',
     locations: [{ street1: '123 Main St', city: 'Austin', state: 'TX', postalCode: '78701' }],
   },
   technician: {
@@ -77,6 +78,11 @@ describe('JobDetailView', () => {
   it('renders customer name', () => {
     renderPage();
     expect(screen.getAllByText('Alice Smith').length).toBeGreaterThan(0);
+  });
+
+  it('surfaces customer notes on the job page', () => {
+    renderPage();
+    expect(screen.getAllByText('Prefers afternoon appointments. Gate code is 1234. Dog in backyard.').length).toBeGreaterThan(0);
   });
 
   it('renders job number', () => {

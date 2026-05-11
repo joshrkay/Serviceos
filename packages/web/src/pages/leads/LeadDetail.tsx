@@ -41,6 +41,8 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
   const [converting, setConverting] = useState(false);
   const [loseReason, setLoseReason] = useState('');
   const [showLose, setShowLose] = useState(false);
+  const [noteText, setNoteText] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -48,7 +50,9 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
     try {
       const res = await apiFetch(`/api/leads/${leadId}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setLead(await res.json());
+      const json = await res.json();
+      setLead(json);
+      setNoteText(json.notes ?? '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load lead');
     } finally {
@@ -95,6 +99,25 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
       setError(err instanceof Error ? err.message : 'Failed to mark lost');
     }
   }, [leadId, loseReason, refetch]);
+
+  const handleSaveNote = useCallback(async () => {
+    setSavingNote(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/leads/${leadId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ notes: noteText.trim() || '' }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const updated = await res.json();
+      setLead(updated);
+      setNoteText(updated.notes ?? '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save note');
+    } finally {
+      setSavingNote(false);
+    }
+  }, [leadId, noteText]);
 
   if (isLoading && !lead) return <p className="p-6 text-sm text-slate-500">Loading...</p>;
   if (!lead && error) return (
@@ -159,14 +182,42 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         )}
       </section>
 
-      {lead.notes && (
-        <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-xs text-slate-500 mb-2">Notes</p>
-          <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.notes}</p>
-        </section>
-      )}
+      <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+        <p className="text-xs text-slate-500 mb-2">Notes</p>
+        {lead.notes ? (
+          <p className="mb-3 text-sm text-slate-700 whitespace-pre-wrap">{lead.notes}</p>
+        ) : (
+          <p className="mb-3 text-sm text-slate-500">No notes yet.</p>
+        )}
+        <label className="block text-xs text-slate-500">
+          Lead notes
+          <textarea
+            aria-label="Lead notes"
+            value={noteText}
+            onChange={(event) => setNoteText(event.target.value)}
+            rows={3}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={savingNote}
+          onClick={handleSaveNote}
+          className="mt-2 rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
+        >
+          {savingNote ? 'Saving...' : 'Save note'}
+        </button>
+      </section>
 
       <div className="mt-5 flex flex-wrap gap-2">
+        {alreadyConverted && lead.convertedCustomerId && (
+          <a
+            href={`/customers/${lead.convertedCustomerId}`}
+            className="rounded-lg border border-blue-200 text-blue-600 text-sm px-4 py-2 hover:bg-blue-50"
+          >
+            View customer
+          </a>
+        )}
         <button
           type="button"
           disabled={alreadyConverted}
@@ -216,6 +267,7 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
         <div role="dialog" aria-label="Mark lead lost" className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-xs text-slate-500 mb-2">Reason (required)</p>
           <textarea
+            aria-label="Lost reason"
             value={loseReason}
             onChange={(e) => setLoseReason(e.target.value)}
             rows={3}
