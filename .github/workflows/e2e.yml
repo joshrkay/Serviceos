@@ -28,10 +28,31 @@ jobs:
         run: npm run e2e
         env:
           CI: '1'
-          # UI smoke tests skip when VITE_CLERK_PUBLISHABLE_KEY is unset,
-          # so CI currently runs only the api health check. Add a
-          # pk_test_* secret and expose it here to unlock UI smoke tests:
-          # VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          # --- BEGIN: Clerk testing-tokens block (owned by Clerk agent) ---
+          # Clerk testing tokens — used by e2e/global-setup.ts to prime the
+          # bot-bypass token, and by journey specs to skip cleanly if absent.
+          # Add these as GitHub repo secrets to unlock UI smoke + journey
+          # tests. See qa/reports/2026-05-11/clerk-testing-tokens-runbook.md.
+          E2E_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          # The Vite dev server needs the same pk_test_ value at boot
+          # (main.tsx throws without it). Reuse the same secret.
+          VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          # --- END: Clerk testing-tokens block ---
+
+          # --- BEGIN: Ephemeral test DB block (owned by DB-fixtures agent) ---
+          # Activates e2e/fixtures/{setup,seed,teardown}-test-db.ts via
+          # e2e/global-setup.ts. When E2E_USE_TEST_DB=true and DATABASE_URL is
+          # NOT provided, the setup script spins up a pgvector/pgvector:pg16
+          # testcontainer on this runner — Docker is preinstalled on
+          # ubuntu-latest. To use a pre-provisioned Postgres service instead,
+          # set the DATABASE_URL secret to a connection string whose database
+          # name contains 'test' / 'e2e' / 'ephemeral' / 'ci'. The safety
+          # heuristic refuses anything that looks like production. See
+          # qa/reports/2026-05-11/ephemeral-test-db-runbook.md.
+          E2E_USE_TEST_DB: 'true'
+          DATABASE_URL: ${{ secrets.E2E_DATABASE_URL }}
+          # --- END: Ephemeral test DB block ---
 
       - name: Upload Playwright report
         if: always()

@@ -19,6 +19,10 @@ const includeQaMatrix = process.env.QA_MATRIX === '1';
 export default defineConfig({
   testDir: './e2e',
   testIgnore: ['**/qa-matrix/**'],
+  // globalSetup runs once before any test. It primes the Clerk testing-token
+  // flow when E2E_CLERK_* env vars are present, and is a no-op otherwise so
+  // smoke tests still run on a bare runner. See e2e/global-setup.ts.
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   forbidOnly: isCI,
   retries: isCI ? 2 : 1,
@@ -62,9 +66,10 @@ export default defineConfig({
       : []),
   ],
 
-  globalTeardown: process.env.QA_MATRIX === '1'
-    ? './e2e/qa-matrix/helpers/report-builder.ts'
-    : undefined,
+  // globalTeardown is the mirror of globalSetup — handles both the ephemeral
+  // DB cleanup (when E2E_USE_TEST_DB=true) and the QA matrix report builder
+  // (when QA_MATRIX=1). Each branch is no-op when its env flag is absent.
+  globalTeardown: './e2e/global-teardown.ts',
 
   webServer: skipWebServer
     ? undefined
