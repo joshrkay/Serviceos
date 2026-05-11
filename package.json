@@ -27,6 +27,7 @@
     "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report"
   },
   "devDependencies": {
+    "@clerk/testing": "^2.0.27",
     "@playwright/test": "^1.59.1",
     "@types/pg": "^8.18.0",
     "pg": "^8.20.0",
