@@ -18,7 +18,6 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { getHeldContainer, stopHeldContainer, clearStateFile, STATE_FILE } from './fixtures/setup-test-db';
 
 export default async function globalTeardown(): Promise<void> {
   // --- BEGIN: ephemeral-DB block ---
@@ -49,6 +48,11 @@ export default async function globalTeardown(): Promise<void> {
 
 async function teardownEphemeralDb(): Promise<void> {
   console.log('[e2e globalTeardown] E2E_USE_TEST_DB=true — tearing down ephemeral DB…');
+
+  // Lazy-import: matches global-setup.ts and keeps the DB-fixtures dep
+  // graph out of the bare smoke path.
+  const { getHeldContainer, stopHeldContainer, clearStateFile, STATE_FILE } =
+    await import('./fixtures/setup-test-db');
 
   // Fast path: we started a container in this process, so we have the
   // reference and can stop it cleanly without re-discovering by ID.
