@@ -218,10 +218,12 @@ async function main(): Promise<void> {
 
 // CLI entry — only when invoked directly via `tsx setup-test-db.ts`.
 // When imported (e.g. by global-setup.ts) this block does not run, so
-// setupTestDb() may be called without side effects.
+// setupTestDb() may be called without side effects. The CommonJS check
+// is sufficient here; mixing in `import.meta.url` previously forced
+// Playwright's TypeScript transform into ESM mode and broke `exports`.
 const isMainModule =
   typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module;
-if (isMainModule || import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule) {
   main().catch((err) => {
     console.error('[setup-test-db] failed:', err);
     process.exit(1);
