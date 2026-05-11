@@ -19,6 +19,7 @@ import { DepositRulesSheet } from './DepositRulesSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
+import { VerticalPacksSheet } from './VerticalPacksSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -120,6 +121,7 @@ export function SettingsPage() {
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
+  const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
@@ -235,6 +237,7 @@ export function SettingsPage() {
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
+        { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
       ],
     },
     {
@@ -672,6 +675,11 @@ export function SettingsPage() {
       {/* Payment methods sheet — Stripe Connect onboarding (PR 1). */}
       {paymentMethodsOpen && (
         <PaymentMethodsSheet onClose={() => setPaymentMethodsOpen(false)} />
+      )}
+
+      {/* Vertical packs sheet — activate HVAC / Plumbing / other service verticals. */}
+      {verticalPacksOpen && (
+        <VerticalPacksSheet onClose={() => setVerticalPacksOpen(false)} />
       )}
     </div>
   );
