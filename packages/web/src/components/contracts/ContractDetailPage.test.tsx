@@ -4,24 +4,33 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
+vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 
 import { useDetailQuery } from '../../hooks/useDetailQuery';
+import { useListQuery } from '../../hooks/useListQuery';
 import { ContractDetailPage } from './ContractDetailPage';
 
 beforeEach(() => {
   vi.mocked(useDetailQuery).mockReturnValue({
     data: {
       id: 'mc-1',
-      name: 'Quarterly HVAC Tune-Up',
-      recurrenceRule: 'FREQ=QUARTERLY',
+      title: 'Quarterly HVAC Tune-Up',
       status: 'active',
-      startsOn: '2026-01-01',
-      endsOn: '2026-12-31',
+      cadence: 'Quarterly',
+      startDate: '2026-01-01',
+      endDate: '2026-12-31',
     },
     isLoading: false,
     error: null,
     refetch: vi.fn(),
   });
+  vi.mocked(useListQuery).mockReturnValue({
+    data: [],
+    total: 0,
+    isLoading: false,
+    error: null,
+    refetch: vi.fn(),
+  } as any);
 });
 
 describe('ContractDetailPage', () => {
@@ -35,6 +44,6 @@ describe('ContractDetailPage', () => {
     );
 
     expect(screen.getByText('Quarterly HVAC Tune-Up')).toBeInTheDocument();
-    expect(vi.mocked(useDetailQuery)).toHaveBeenCalledWith('/api/agreements', 'mc-1');
+    expect(vi.mocked(useDetailQuery)).toHaveBeenCalledWith('/api/maintenance-contracts', 'mc-1');
   });
 });

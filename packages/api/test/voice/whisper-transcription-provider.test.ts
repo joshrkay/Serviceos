@@ -104,13 +104,6 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
 
   describe('error handling', () => {
     it('throws WhisperTimeoutError when the upstream hangs past the timeout', async () => {
-      // First fetch (audio bytes) resolves immediately.
-      // Second fetch (Whisper) hangs until the AbortController signal fires.
-      // We attach `.catch` immediately to the inner promise so that the
-      // synthetic AbortError (which is also re-thrown as WhisperTimeoutError
-      // up the stack) never leaks as an unhandled rejection — vitest treats
-      // unhandled rejections as test failures even when the awaited promise
-      // is also caught.
       const fetchMock = vi
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
@@ -128,9 +121,6 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
 
       const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock, 100);
       const pending = provider.transcribe('https://cdn.example/audio.webm');
-      // Capture the rejection synchronously so node never sees an
-      // unhandledRejection while our fake-timer dance plays out below
-      // (vitest treats unhandled rejections as run-level errors).
       let captured: unknown;
       const settled = pending.then(
         (v) => {
@@ -141,8 +131,6 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         }
       );
 
-      // Drain microtasks so the second fetch starts and registers its signal,
-      // then advance fake time past the timeout to trigger AbortController.
       await Promise.resolve();
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(101);
@@ -181,10 +169,11 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(new Response('slow down', { status: 429 }));
       const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
 
-      const err = await provider
+      const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
         .catch((e) => e as WhisperRateLimitError);
-      expect(err).toBeInstanceOf(WhisperRateLimitError);
+      expect(errRaw).toBeInstanceOf(WhisperRateLimitError);
+      const err = errRaw as WhisperRateLimitError;
       expect(err.retryAfterSeconds).toBeNull();
     });
 
@@ -195,10 +184,11 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(new Response('boom', { status: 503 }));
       const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
 
-      const err = await provider
+      const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
         .catch((e) => e as WhisperServerError);
-      expect(err).toBeInstanceOf(WhisperServerError);
+      expect(errRaw).toBeInstanceOf(WhisperServerError);
+      const err = errRaw as WhisperServerError;
       expect(err.status).toBe(503);
       expect(err.retriable).toBe(true);
     });
@@ -210,10 +200,11 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(new Response('Invalid file format', { status: 400 }));
       const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
 
-      const err = await provider
+      const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
         .catch((e) => e as WhisperClientError);
-      expect(err).toBeInstanceOf(WhisperClientError);
+      expect(errRaw).toBeInstanceOf(WhisperClientError);
+      const err = errRaw as WhisperClientError;
       expect(err.status).toBe(400);
       expect(err.retriable).toBe(false);
       expect(err.message).toContain('Invalid file format');
@@ -226,10 +217,11 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(new Response('invalid key', { status: 401 }));
       const provider = new WhisperTranscriptionProvider('bad', 'whisper-1', fetchMock);
 
-      const err = await provider
+      const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
         .catch((e) => e as WhisperClientError);
-      expect(err).toBeInstanceOf(WhisperClientError);
+      expect(errRaw).toBeInstanceOf(WhisperClientError);
+      const err = errRaw as WhisperClientError;
       expect(err.status).toBe(401);
     });
 
@@ -254,10 +246,11 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(audioOk(WHISPER_MAX_BYTES + 1));
       const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
 
-      const err = await provider
+      const errRaw = await provider
         .transcribe('https://cdn.example/huge.webm')
         .catch((e) => e as WhisperFileTooLargeError);
-      expect(err).toBeInstanceOf(WhisperFileTooLargeError);
+      expect(errRaw).toBeInstanceOf(WhisperFileTooLargeError);
+      const err = errRaw as WhisperFileTooLargeError;
       expect(err.retriable).toBe(false);
       expect(err.message).toMatch(/25 MB|25165824/);
       // Confirm no upload attempt was made.

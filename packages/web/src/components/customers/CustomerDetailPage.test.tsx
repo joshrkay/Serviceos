@@ -70,8 +70,8 @@ describe('CustomerDetailPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Overview' }));
     expect(screen.getByText('Maintenance Contracts')).toBeInTheDocument();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
-      '/api/agreements',
-      { filters: { customerId: 'c1' }, enabled: true },
+      '/api/customers/c1/maintenance-contracts',
+      { enabled: true },
     );
   });
 });

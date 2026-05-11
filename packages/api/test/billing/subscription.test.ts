@@ -21,7 +21,7 @@ function makePool(rows: Record<string, unknown> = {}) {
     ['UPDATE tenants', { rows: [] }],
   ]);
 
-  const queryMock = vi.fn(async (sql: string) => {
+  const queryMock = vi.fn(async (sql: string, _params?: unknown[]) => {
     for (const [needle, response] of responses) {
       if (sql.includes(needle)) return response;
     }
@@ -47,7 +47,8 @@ function jsonErr(status: number, body: unknown): Response {
 
 describe('BillingService', () => {
   let pool: ReturnType<typeof makePool>;
-  let fetchFn: ReturnType<typeof vi.fn>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fetchFn: any;
 
   beforeEach(() => {
     pool = makePool({});
@@ -66,7 +67,7 @@ describe('BillingService', () => {
   });
 
   it('getSubscription throws NotFoundError when tenant row missing', async () => {
-    pool.query = vi.fn(async () => ({ rows: [] }));
+    pool.query = vi.fn(async (sql: string, _params?: unknown[]) => ({ rows: [] as Record<string, unknown>[] }));
     const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
     await expect(svc.getSubscription(TENANT)).rejects.toThrow(/Tenant/);
   });

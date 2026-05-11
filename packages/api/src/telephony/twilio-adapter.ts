@@ -53,6 +53,12 @@ import {
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+// Aliased to avoid name collision with the private `deriveCallOutcome` method
+// on this class — see line 1828. The imported function takes the typed
+// options object (DeriveOutcomeInput); the instance method takes a
+// VoiceSession. They are NOT interchangeable. Pre-existing fix from cf76752
+// that got reverted in a subsequent merge to main.
+import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import type { VoiceSessionRepository } from '../voice/voice-session';
 import type { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { createProposal as buildProposal } from '../proposals/proposal';
@@ -1672,6 +1678,54 @@ export class TwilioGatherAdapter {
     // was the source of the dropped transcript+customerId bug (the
     // adapter copy included those fields; the processor copy did not).
     this.processor.finalizeTerminatedSession(session, sideEffects, fallbackReason);
+    if (session.terminalOutcome) return;
+    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
+    const reason =
+      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
+        ? endSessionEffect.payload.reason
+        : undefined) ?? fallbackReason;
+    const outcome = deriveCallOutcomeFromState({
+      finalState: session.machine.currentState,
+      endedReason: reason,
+      context: session.machine.currentContext,
+      transcript: session.transcript,
+      proposalIds: session.proposalIds,
+    });
+    session.terminalOutcome = outcome;
+    session.terminalReason = reason;
+    void this.persistSessionEnded(session, reason, outcome);
+  }
+
+  /**
+   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
+   * fire-and-forget; errors are swallowed (outcome stamping is
+   * best-effort, never breaks a call flow).
+   */
+  private async persistSessionEnded(
+    session: VoiceSession,
+    endedReason: string,
+    outcome: CallOutcome,
+  ): Promise<void> {
+    if (!this.deps.voiceSessionRepo) return;
+    try {
+      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
+        endedAt: new Date(),
+        endedReason,
+        outcome,
+        state: session.machine.currentState,
+        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
+        // can surface the full conversation without relying on the
+        // process-scoped VoiceSessionStore.
+        transcript: session.transcript.length > 0 ? [...session.transcript] : undefined,
+        // Stamp the customer FK so the interactions list can join to
+        // the customers table and surface the linked customer.
+        ...(session.customerId !== undefined ? { customerId: session.customerId } : {}),
+      });
+    } catch {
+      /* swallow — outcome stamping is best-effort */
+    }
   }
 
   private async runSummary(session: VoiceSession): Promise<void> {

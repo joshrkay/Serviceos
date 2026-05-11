@@ -202,7 +202,7 @@ describe('POST /api/telephony/gather', () => {
   });
 });
 
-// ─── P8-013 — POST /api/telephony/dial-result ────────────────────────────────
+// ─── P8-013 — POST /api/telephony/dial-result ────────────────────────────────────────────────────────────────────────────────────────
 
 interface DialHarness {
   app: express.Application;
@@ -257,17 +257,7 @@ function buildDialHarness(opts: {
       businessName: 'Acme Plumbing',
     }),
   );
-  return {
-    app,
-    store,
-    adapter,
-    callControl,
-    onCallRepo,
-    auditRepo,
-    proposalRepo,
-    voiceSessionRepo,
-    resolver,
-  };
+  return { app, store, adapter, callControl, onCallRepo, auditRepo, proposalRepo, voiceSessionRepo, resolver };
 }
 
 function signDialResult(
@@ -325,7 +315,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       phones: { u1: '+15125550101', u2: '+15125550102' },
     });
     const session = store.create(TENANT_ID, 'telephony', { callSid: 'CA-cascade' });
-    // Drive FSM into escalating so any dispatched proposal_queued lands cleanly.
     session.machine.dispatch({
       type: 'incoming_call',
       callSid: 'CA-cascade',
@@ -334,10 +323,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
-    // Simulate "u1 was already chosen and dialed by the prior
-    // notify_oncall pass" — in production handleNotifyOncall calls
-    // setCursorAfter when picking. The test bypasses handleNotifyOncall
-    // by driving the FSM directly, so stamp the cursor explicitly.
     callControl.setCursorAfter(session.id, 0);
 
     const res = await signDialResult(app, session.id, {
@@ -350,9 +335,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/xml/);
     expect(res.text).toContain('<Dial');
-    // Next entry's phone (u2) should appear; first entry's must NOT be the only one.
     expect(res.text).toContain('+15125550102');
-    // The resolver must have been queried for u2 specifically.
     const calledUsers = resolver.mock.calls.map((c) => c[1]);
     expect(calledUsers).toContain('u2');
   });
@@ -371,7 +354,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
-    // Simulate u1 already-attempted via notify_oncall path.
     callControl.setCursorAfter(session.id, 0);
 
     const res = await signDialResult(app, session.id, {
@@ -386,7 +368,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(res.text).toMatch(/call you back/i);
     expect(res.text).toContain('<Hangup');
 
-    // Proposal queued.
     const proposals = await proposalRepo.findByTenant(TENANT_ID);
     const callback = proposals.find((p) =>
       typeof (p.payload as Record<string, unknown>).intent === 'string' &&
@@ -395,7 +376,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(callback).toBeDefined();
     expect(callback?.proposalType).toBe('voice_clarification');
 
-    // Audit event for the callback.
     const audits = auditRepo.getAll();
     expect(audits.some((e) => e.eventType === 'customer_callback_required')).toBe(true);
   });
@@ -448,10 +428,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
-    // Simulate u1 already-attempted via notify_oncall path.
     callControl.setCursorAfter(session.id, 0);
 
-    // First no-answer → cascade to u2.
     const res1 = await signDialResult(app, session.id, {
       CallSid: 'CA-full',
       DialCallStatus: 'no-answer',
@@ -461,7 +439,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(res1.text).toContain('<Dial');
     expect(res1.text).toContain('+15125550102');
 
-    // Second no-answer (u2) → exhausted; queue callback.
     const res2 = await signDialResult(app, session.id, {
       CallSid: 'CA-full',
       DialCallStatus: 'no-answer',
@@ -483,8 +460,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       true,
     );
   });
-
-  // ─── B2: voice_sessions outcome stamping at dial-result terminals ─────────
 
   it('B2: dial completed → stamps voice_sessions.outcome=completed', async () => {
     const { app, store, voiceSessionRepo } = buildDialHarness({
@@ -514,7 +489,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       From: '+15125550100',
       To: '+15125550999',
     });
-    // Wait for the fire-and-forget markEnded to complete.
     await new Promise((resolve) => setImmediate(resolve));
 
     const row = await voiceSessionRepo.findById(TENANT_ID, session.id);
@@ -544,8 +518,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
-    // Simulate u1 already attempted via notify_oncall, so cascade lookup
-    // walks past r1 and falls through to queueCallbackProposal.
     callControl.setCursorAfter(session.id, 0);
 
     const res = await signDialResult(app, session.id, {
@@ -555,7 +527,6 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       To: '+15125550999',
     });
     expect(res.text).toMatch(/call you back/i);
-    // Wait for the fire-and-forget markEnded to complete.
     await new Promise((resolve) => setImmediate(resolve));
 
     const row = await voiceSessionRepo.findById(TENANT_ID, session.id);
@@ -565,7 +536,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
   });
 });
 
-// ─── P8-014: POST /api/telephony/recording wiring ────────────────────────────
+// ─── P8-014: POST /api/telephony/recording wiring ────────────────────────────────────────────────────────────────────────────────────────
 
 describe('POST /api/telephony/recording (P8-014 record_call)', () => {
   // recordInboundCall calls setTenantContext, which validates UUID format,
@@ -655,15 +626,11 @@ describe('POST /api/telephony/recording (P8-014 record_call)', () => {
       .send(params);
 
     expect(res.status).toBe(200);
-    // The route reached the storage layer with a tenant-scoped key.
     expect(uploadedKey).toBe(`${TENANT_UUID}/CA-route-rec.mp3`);
   });
 
   it('returns 403 for an unsigned recording webhook delivery', async () => {
     const { app } = buildHarness();
-    // No `recording` deps wired in buildHarness — but the parent router
-    // still applies the signature middleware. An unsigned request
-    // should be rejected before reaching any handler.
     const res = await request(app)
       .post('/api/telephony/recording')
       .type('form')

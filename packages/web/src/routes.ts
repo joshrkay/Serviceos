@@ -115,11 +115,11 @@ function InvoiceDetailRoute() {
 }
 
 export const router = createBrowserRouter([
-  // ── Auth (fullscreen, no Shell) ──────────────────────────────────────────
+  // ── Auth (fullscreen, no Shell) ───────────────────────────────────────────
   { path: '/login',  Component: LoginPage  },
   { path: '/signup', Component: SignupPage },
 
-  // ── Fullscreen flows (no Shell chrome) ──────────────────────────────────
+  // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
   { path: '/onboarding', Component: OnboardingPage },
   { path: '/e/:id',      Component: EstimateApprovalPage },
   { path: '/pay/:id',    Component: InvoicePaymentPage },
@@ -127,7 +127,7 @@ export const router = createBrowserRouter([
   { path: '/public/feedback/:token', Component: FeedbackPage },
   { path: '/portal/:token',          Component: PortalShell },
 
-  // ── App (with Shell nav, auth-gated) ────────────────────────────────────
+  // ── App (with Shell nav, auth-gated) ───────────────────────────────────
   {
     path: '/',
     Component: ProtectedRoute,
