@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
   Bell, CheckCircle, X, MapPin, Briefcase,
@@ -151,7 +151,14 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
     let cancelled = false;
     const t = setTimeout(async () => {
       const res = await apiFetch(`/api/jobs/${jobId}`).catch(() => null);
-      if (res?.ok && !cancelled) setJobInfo(await res.json());
+      if (cancelled) return;
+      if (res?.ok) {
+        setJobInfo(await res.json());
+      } else {
+        // Clear stale preview when the new job id can't be resolved so
+        // dispatchers don't schedule against an unrelated prior job.
+        setJobInfo(null);
+      }
     }, 400);
     return () => { cancelled = true; clearTimeout(t); };
   }, [jobId]);
@@ -255,13 +262,20 @@ export function SchedulePage() {
   const [loading,     setLoading]     = useState(false);
   const [delayApptId, setDelayApptId] = useState<string | null>(null);
   const [detailAppt,  setDetailAppt]  = useState<EnrichedAppointment | null>(null);
+  // Monotonic request id; we only apply results from the latest in-flight
+  // load. Without this, switching dates while a slower earlier fetch is
+  // still resolving can overwrite the current day's schedule with stale data.
+  const loadRequestIdRef = useRef(0);
 
   const loadAppointments = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
+    const isLatest = () => loadRequestIdRef.current === requestId;
     setLoading(true);
     try {
       const from = `${selectedIso}T00:00:00.000Z`;
       const to   = `${selectedIso}T23:59:59.999Z`;
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
+      if (!isLatest()) return;
       if (!res.ok) {
         // Clear stale state on failure so the user doesn't keep seeing the
         // previous day's schedule after switching dates with a failed fetch.
@@ -271,6 +285,7 @@ export function SchedulePage() {
         return;
       }
       const body = await res.json();
+      if (!isLatest()) return;
       const list: ApiAppointment[] = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
       setAppointments(list);
 
@@ -314,9 +329,10 @@ export function SchedulePage() {
         ),
       }));
 
+      if (!isLatest()) return;
       setEnriched(withConflicts);
     } finally {
-      setLoading(false);
+      if (isLatest()) setLoading(false);
     }
   }, [selectedIso]);
 
