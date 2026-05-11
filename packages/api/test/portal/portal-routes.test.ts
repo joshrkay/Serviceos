@@ -246,7 +246,7 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
       totals: {
         subtotalCents: 10000,
         discountCents: 0,
-        taxableCents: 10000,
+        taxableSubtotalCents: 10000,
         taxCents: 0,
         totalCents: 10000,
         taxRateBps: 0,
@@ -266,7 +266,7 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
       totals: {
         subtotalCents: 10000,
         discountCents: 0,
-        taxableCents: 10000,
+        taxableSubtotalCents: 10000,
         taxCents: 0,
         totalCents: 10000,
         taxRateBps: 0,
@@ -304,8 +304,6 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
   });
 
   it('rolls back the Stripe link when persisting the URL to the invoice fails', async () => {
-    // Codex P2 — without rollback, persist failures cause every refresh to
-    // mint a fresh Stripe link; the prior ones orphan as live charge URLs.
     const generated: string[] = [];
     const deactivated: string[] = [];
     const provider = {
@@ -323,7 +321,6 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
       },
     };
 
-    // Force update() to throw so the persist branch fails.
     const failingInvoiceRepo = new InMemoryInvoiceRepository();
     failingInvoiceRepo.update = async () => {
       throw new Error('simulated DB outage');
@@ -335,17 +332,12 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
 
     expect(res.status).toBe(200);
-    // No payNowUrl served — caller must not see an unrecoverable URL.
     expect(res.body.invoices[0].payNowUrl).toBeNull();
-    // The just-minted link was deactivated to avoid orphan live charge URLs.
     expect(generated).toHaveLength(1);
     expect(deactivated).toEqual(generated);
   });
 
   it('does NOT deactivate when update throws but the invoice actually has the URL persisted (commit-but-response-timeout)', async () => {
-    // Codex P2 follow-up — DB commit succeeds, response throws. If we
-    // blindly deactivate, the next read sees the URL on the invoice
-    // and serves a permanently dead pay-now link.
     const generated: string[] = [];
     const deactivated: string[] = [];
     const provider = {
@@ -363,15 +355,11 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
       },
     };
 
-    // Force update() to throw, BUT first patch the in-memory store
-    // so the invoice already has the URL persisted (simulates DB
-    // commit succeeding before the response threw).
     const repo = new InMemoryInvoiceRepository();
     let updateCalls = 0;
     const originalUpdate = repo.update.bind(repo);
     repo.update = async (tenantId, id, updates) => {
       updateCalls += 1;
-      // Apply the update to underlying state, then throw.
       await originalUpdate(tenantId, id, updates);
       throw new Error('response timed out after commit');
     };
@@ -383,15 +371,11 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
 
     expect(res.status).toBe(200);
     expect(updateCalls).toBe(1);
-    // Re-read found the persisted URL → resolver used it instead of deactivating.
     expect(res.body.invoices[0].payNowUrl).toContain('plink_committed_then_threw');
     expect(deactivated).toEqual([]);
   });
 
   it('does NOT deactivate when both update and the re-read throw (DB genuinely degraded)', async () => {
-    // Codex P2 follow-up — when we can't tell whether persist succeeded,
-    // the safer choice is to skip deactivation (avoid dead-linking a
-    // successful persist) and serve no URL.
     const generated: string[] = [];
     const deactivated: string[] = [];
     const provider = {
@@ -420,28 +404,14 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: repo });
     const token = await mintToken(h);
     await seedJobAndDocs(h);
-    // findById is also called when listing invoices for the portal;
-    // patch only the post-update re-read to fail. In practice the
-    // listing query is a different call site so this test is
-    // pragmatic — it asserts the rollback's deactivate is NOT
-    // attempted under uncertainty.
-    // (If the listing itself can't load, the route will already 5xx
-    // upstream of this branch.)
-    // To make the test exercise just the rollback branch, swap back
-    // the read for the listing path — only the post-update re-read
-    // matters for the deactivate decision. Re-derive by counting:
     let findByIdCalls = 0;
     repo.findById = async () => {
       findByIdCalls += 1;
-      // Listing reads succeed; the rollback re-read (call #2+) fails.
       if (findByIdCalls === 1) {
-        return null; // first call shouldn't matter for this test
+        return null;
       }
       throw new Error('DB read failed during rollback');
     };
-    // The portal listing path uses findByJob, not findById, so the
-    // rollback's findById is the only call we need to fail. Reset
-    // counter and make it always throw.
     repo.findById = async () => {
       throw new Error('DB read failed during rollback');
     };
@@ -449,7 +419,6 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
     expect(res.status).toBe(200);
     expect(res.body.invoices[0].payNowUrl).toBeNull();
-    // Crucially, NO deactivation attempt — uncertain state.
     expect(deactivated).toEqual([]);
   });
 
@@ -465,7 +434,6 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
   it('does not leak documents from a different customer', async () => {
     const h = await build();
     const token = await mintToken(h);
-    // Seed an unrelated customer + invoice in the same tenant.
     const otherCustomer = await h.customerRepo.create({
       id: uuidv4(),
       tenantId: TENANT,
@@ -503,7 +471,7 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
       totals: {
         subtotalCents: 5000,
         discountCents: 0,
-        taxableCents: 5000,
+        taxableSubtotalCents: 5000,
         taxCents: 0,
         totalCents: 5000,
         taxRateBps: 0,
@@ -643,9 +611,6 @@ describe('P10-001 POST /api/public/portal/:token/request-service', () => {
       .post(`/api/public/portal/${token}/request-service`)
       .send({
         summary: 'evil request',
-        // These fields are not in the schema — Zod strips them. We
-        // explicitly assert the persisted lead is scoped to the
-        // resolved tenant from req.portal.
         tenantId: evilTenant,
         customerId: uuidv4(),
       });
@@ -658,7 +623,6 @@ describe('P10-001 POST /api/public/portal/:token/request-service', () => {
 
 describe('P10-001 portal token middleware: rate limiting', () => {
   it('returns 429 after the per-token limit is exhausted', async () => {
-    // Build a fresh harness with tighter limits via direct router wiring.
     const portalRepo = new InMemoryPortalSessionRepository();
     const customerRepo = new InMemoryCustomerRepository();
     const customer = await customerRepo.create({

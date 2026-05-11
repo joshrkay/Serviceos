@@ -125,7 +125,16 @@ describe('lead-to-cash source attribution', () => {
         jobId: job.id,
         invoiceNumber: 'INV-0001',
         lineItems: [
-          { description: 'AC unit', quantity: 1, unitPriceCents: 250000, category: 'equipment' },
+          {
+            id: crypto.randomUUID(),
+            description: 'AC unit',
+            quantity: 1,
+            unitPriceCents: 250000,
+            totalCents: 250000,
+            category: 'equipment',
+            sortOrder: 0,
+            taxable: false,
+          },
         ],
         originatingLeadId: job.originatingLeadId,
         createdBy: 'user-1',

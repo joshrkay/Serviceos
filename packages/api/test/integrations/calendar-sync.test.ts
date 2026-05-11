@@ -107,7 +107,7 @@ describe('CalendarSyncService — Tier 4 Calendar sync (PR 2)', () => {
 
   it("pushes a Google Calendar event and persists external_event_id on success", async () => {
     await seedConnected();
-    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = String(input);
       if (url.includes('/calendars/primary/events') && !url.includes('list')) {
         return jsonRes({ id: 'evt-google-123', htmlLink: 'https://...' }, 200);
