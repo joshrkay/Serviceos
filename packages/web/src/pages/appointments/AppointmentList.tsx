@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ListPage, Column } from '../../components/ListPage';
 import { useListQuery } from '../../hooks/useListQuery';
 import { FilterConfig } from '../../components/FilterBar';
+import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 
 interface Appointment {
   id: string;
@@ -41,11 +42,12 @@ export function AppointmentList() {
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({});
   const { data, total, page, pageSize, isLoading, error, refetch, setPage, setSearch, setFilters } =
     useListQuery<Appointment>('/api/appointments');
+  const workerTerm = useWorkerTerm();
 
   const columns: Column<Appointment>[] = [
     { key: 'date', header: 'Scheduled', render: (a) => formatDateTime(a.scheduledStart) },
     { key: 'job', header: 'Job', render: (a) => a.jobId },
-    { key: 'technician', header: 'Technician', render: (a) => a.technicianName || '-' },
+    { key: 'technician', header: workerTerm, render: (a) => a.technicianName || '-' },
     { key: 'status', header: 'Status', render: (a) => a.status },
     { key: 'arrival', header: 'Arrival Window', render: (a) => formatArrivalWindow(a.arrivalWindowStart, a.arrivalWindowEnd) },
   ];

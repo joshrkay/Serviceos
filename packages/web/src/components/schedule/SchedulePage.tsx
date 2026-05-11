@@ -6,6 +6,7 @@ import {
 import { technicians } from '../../data/mock-data';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
