@@ -23,6 +23,11 @@ serviceos_training/.pytest_cache/
 /test-results/
 /playwright/.cache/
 
+# Ephemeral test-DB state files (written by e2e/fixtures/setup-test-db.ts and
+# seed-journey-fixtures.ts; consumed by teardown-test-db.ts). Never commit.
+e2e/fixtures/.test-db-state.json
+e2e/fixtures/.journey-fixtures.env
+
 # QA matrix run artifacts (reports folders are kept; transient outputs ignored)
 /qa/artifacts/*
 !/qa/artifacts/.gitkeep
