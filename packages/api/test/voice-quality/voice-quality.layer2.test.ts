@@ -215,6 +215,13 @@ describe('Voice Quality Layer 2 — corpus', () => {
     // lookup family). Optional deps (pool, callControl, voicePersonaResolver,
     // etc.) are left undefined; the processor's helpers degrade
     // gracefully ("not wired" log + skip).
+    // Mutable holder so the onSessionTerminated hook (constructed below
+    // BEFORE the processor reference exists) can call back into the
+    // processor's `runSummary`. We can't reference `processor` directly
+    // inside the literal because the literal is the constructor arg.
+    const processorRef: { current: ReturnType<typeof createVoiceTurnProcessor> | null } = {
+      current: null,
+    };
     const processor = createVoiceTurnProcessor({
       store: suiteState.voiceSessionStore,
       gateway: agentGateway,
@@ -228,7 +235,20 @@ describe('Voice Quality Layer 2 — corpus', () => {
       leadRepo: new InMemoryLeadRepository(),
       businessName: 'Test Tenant',
       systemActorId: 'voice-quality-layer2',
+      // Codex P1 round 5 — `await` the summary so its agent gateway
+      // spend lands in `suiteState.suiteCostTracker` BEFORE speechTurn
+      // returns. The runner snapshots the tracker immediately after
+      // each speechTurn iteration to compute per-run `agentCents`; if
+      // the summary were fire-and-forget (production behavior in
+      // twilio-adapter), its cents would either miss the snapshot
+      // entirely or contaminate the next run's delta.
+      onSessionTerminated: async (session) => {
+        if (processorRef.current) {
+          await processorRef.current.runSummary(session);
+        }
+      },
     });
+    processorRef.current = processor;
 
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,

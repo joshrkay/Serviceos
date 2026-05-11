@@ -411,3 +411,123 @@ describe('createVoiceTurnProcessor.runSummary', () => {
     expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 });
+
+// ─── Codex P1 round 5 — onSessionTerminated awaitable + persist fields ──────
+
+describe('createVoiceTurnProcessor — terminal hook + persist (Codex P1 r5)', () => {
+  // VQ2-fix-5a — speechTurn awaits onSessionTerminated. Pre-fix the
+  // callback was invoked sync (fire-and-forget); the Layer 2 entry
+  // test's runSummary spend then either missed the runner's per-run
+  // suite-tracker snapshot or contaminated the next run. We drive the
+  // FSM to `terminated` BEFORE invoking speechTurn so the terminal
+  // branch fires inside speechTurn.
+  it('awaits onSessionTerminated before speechTurn returns', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-x' });
+    // Pre-seat the FSM in `terminated` via the global caller_hangup
+    // guard so the speechTurn dispatch (which from the terminated
+    // state will be ignored) leaves currentState === 'terminated' and
+    // the terminal branch fires.
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-x',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    session.machine.dispatch({ type: 'caller_hangup' });
+    expect(session.machine.currentState).toBe('terminated');
+
+    let callbackResolvedAt = 0;
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme',
+      voiceSessionRepo: new InMemoryVoiceSessionRepository(),
+      // Resolve only after a tick. If speechTurn is fire-and-forget,
+      // it returns BEFORE this resolves and our timestamp ordering
+      // assertion below fails.
+      onSessionTerminated: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        callbackResolvedAt = Date.now();
+      },
+    });
+
+    const beforeReturn = Date.now();
+    await processor.speechTurn({
+      session,
+      speechResult: 'hello',
+      callSid: 'CA-x',
+      tenantId: 'tenant-abc',
+    });
+    const afterReturn = Date.now();
+
+    // Callback must have resolved by the time speechTurn returned.
+    expect(callbackResolvedAt).toBeGreaterThan(0);
+    expect(callbackResolvedAt).toBeGreaterThanOrEqual(beforeReturn);
+    expect(callbackResolvedAt).toBeLessThanOrEqual(afterReturn);
+  });
+
+  // VQ2-fix-5c — markEnded receives transcript + customerId. Pre-fix
+  // the processor's persistSessionEnded omitted both fields (the
+  // adapter's legacy persistSessionEnded passed them, but the legacy
+  // path is bypassed because the processor sets terminalOutcome
+  // first), so they were silently dropped from voice_sessions for
+  // every session terminating via the extracted speechTurn.
+  it('passes transcript and customerId to voiceSessionRepo.markEnded on terminate', async () => {
+    type MarkEndedCall = Parameters<InMemoryVoiceSessionRepository['markEnded']>;
+    const captured: MarkEndedCall[] = [];
+    const fakeRepo: InMemoryVoiceSessionRepository = Object.assign(
+      new InMemoryVoiceSessionRepository(),
+      {
+        markEnded: vi.fn(async (...args: MarkEndedCall) => {
+          captured.push(args);
+          return null;
+        }),
+      },
+    );
+
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-y' });
+    session.customerId = 'cust-zzz';
+    store.appendTranscript(session.id, {
+      speaker: 'caller',
+      text: 'hello world',
+      ts: Date.now(),
+    });
+    session.machine.dispatch({
+      type: 'incoming_call',
+      callSid: 'CA-y',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    session.machine.dispatch({ type: 'caller_hangup' });
+    expect(session.machine.currentState).toBe('terminated');
+
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme',
+      voiceSessionRepo: fakeRepo,
+    });
+
+    await processor.speechTurn({
+      session,
+      speechResult: 'whatever',
+      callSid: 'CA-y',
+      tenantId: 'tenant-abc',
+    });
+
+    // Wait one microtask so the fire-and-forget persist completes.
+    await new Promise((r) => setImmediate(r));
+
+    expect(captured.length).toBe(1);
+    const [, , input] = captured[0]!;
+    expect(input.customerId).toBe('cust-zzz');
+    expect(input.transcript).toBeDefined();
+    expect(input.transcript!.some((line) => line.includes('hello world'))).toBe(
+      true,
+    );
+  });
+});

@@ -1238,4 +1238,116 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     // totalCostCents matches: runCents + graderCents + 0.
     expect(result.totalCostCents).toBe(285);
   });
+
+  // ─── Codex P1 round 5 — onSessionTerminated awaitable ─────────────────────
+  //
+  // The Layer 2 entry test wires onSessionTerminated to AWAIT
+  // processor.runSummary so the summary's wrap-#1 spend lands in the
+  // suite tracker BEFORE speechTurn returns — within the per-run
+  // snapshot window the runner uses to compute agentCents. Pre-fix
+  // (fire-and-forget) the summary cents would land asynchronously,
+  // either after the snapshot (lost from this run's agentCents) or
+  // contaminating the NEXT run's delta.
+  //
+  // The runner-layer2 unit suite stubs runScript, so we simulate the
+  // two wirings by adding suite-tracker cents either inside the stubbed
+  // runScript (await-pattern: lands inside the snapshot) or
+  // asynchronously after the runScript promise resolves (fire-and-
+  // forget: lands outside the snapshot, contaminates next run).
+
+  it('VQ2-fix-5b — await-wired onSessionTerminated: summary cents land inside the per-run snapshot window (no leak)', async () => {
+    await resetGraderMocksForRound4();
+    harness.runScriptCostsCents = [50, 50, 50];
+
+    let suiteTotal = 0;
+    const suiteTracker = {
+      addCents(n: number) {
+        suiteTotal += n;
+      },
+      totalCents() {
+        return suiteTotal;
+      },
+    };
+
+    // Each run: simulate 90¢ of summary spend that lands BEFORE
+    // runScript resolves (mirrors the Layer 2 wiring where speechTurn
+    // awaits onSessionTerminated → awaits runSummary → wrap-#1 writes
+    // 90¢/run to the shared suite tracker). 3 runs × 90¢ = 270¢.
+    const { runScript } = await import('../../src/ai/voice-quality/runner');
+    (runScript as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        _script: VoiceQualityScript,
+        ctx: { costTracker?: { addCents: (n: number) => void } },
+      ) => {
+        harness.runScriptCalls++;
+        const idx = harness.runScriptCalls;
+        const costToAdd = harness.runScriptCostsCents[idx - 1] ?? 0;
+        ctx.costTracker?.addCents(costToAdd);
+        // Simulate awaited summary wrap-#1 writes inside this run.
+        suiteTracker.addCents(90);
+        const observation: Observation = {
+          callId: `stub-call-${idx}`,
+          scriptId: 'stub-script',
+          tenantId: 'stub-tenant',
+          events: [],
+          proposals: [],
+          customerCountDelta: 0,
+          appointmentCountDelta: 0,
+          audit: [],
+          totalCostCents: 0,
+          totalDurationMs: 0,
+          perTurnLatencyMs: [],
+          sessionEndedAs: 'completed',
+          hangupOccurred: false,
+          errors: [],
+        };
+        return { observation, passed: false, errors: [], durationMs: 1 };
+      },
+    );
+
+    const fakeGateway = {
+      complete: vi.fn(async () => {
+        suiteTracker.addCents(45); // wrap-#1 grader simulation
+        return {
+          content: 'noop',
+          model: 'haiku',
+          provider: 'fake',
+          latencyMs: 1,
+          tokenUsage: { input: 100_000, output: 10_000, total: 110_000 },
+        };
+      }),
+    } as never;
+
+    const { gradeDispositionLlm } = await import(
+      '../../src/ai/voice-quality/graders/disposition-llm'
+    );
+    (gradeDispositionLlm as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ gateway }: { gateway: { complete: (req: unknown) => Promise<unknown> } }) => {
+        await gateway.complete({ messages: [], model: 'haiku' });
+        return { passed: true, failedCriteria: [], reasons: {}, perTurnDetail: [] };
+      },
+    );
+
+    const script = eligibleScript();
+    const result = await runScriptLayer2(
+      script,
+      makeCtx({
+        gateway: fakeGateway,
+        perRunCostCapCents: 10_000,
+        suiteCostCapCents: 10_000,
+        suiteCostTracker: suiteTracker,
+        gatewayReportsToSuiteTracker: true,
+      }),
+    );
+
+    // Suite total: runCents (3×50=150) + grader wrap-1 (3×45=135) +
+    // summary wrap-1 (3×90=270) = 555¢.
+    expect(suiteTracker.totalCents()).toBe(555);
+    // agentCents (= per-run suite-tracker delta minus graderCents)
+    // captures the 270¢ of summary spend for this script. With the
+    // pre-fix fire-and-forget wiring, the summary cents would have
+    // landed AFTER the runner's per-run snapshot, so totalCostCents
+    // would have been 285 (runCents + graderCents only).
+    expect(result.totalCostCents).toBe(555);
+  });
 });

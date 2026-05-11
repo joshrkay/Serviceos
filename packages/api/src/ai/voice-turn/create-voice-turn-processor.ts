@@ -201,9 +201,18 @@ export interface VoiceTurnProcessorDeps {
    * Optional callback fired when a session terminates so the host can
    * trigger any post-terminate work. The adapter wires this so its
    * existing `runSummary` path still kicks off after a terminal turn.
-   * When omitted, no post-terminate hook fires.
+   *
+   * `speechTurn` `await`s this callback (wrapped in try/catch). The
+   * callback may return immediately by spawning its own background work
+   * (production keeps fire-and-forget summary inside the adapter's
+   * wiring to preserve Twilio webhook latency), OR it may await its
+   * own work (Layer 2 awaits `runSummary` so the runner's per-run
+   * suite-cost-tracker snapshot includes the summary's gateway spend).
+   *
+   * When omitted, the processor falls back to a fire-and-forget
+   * `runSummary` for parity with the adapter's legacy behavior.
    */
-  onSessionTerminated?: (session: VoiceSession) => void;
+  onSessionTerminated?: (session: VoiceSession) => void | Promise<void>;
 }
 
 export interface VoiceTurnProcessor {
@@ -620,6 +629,22 @@ export function createVoiceTurnProcessor(
         channel:
           session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
         ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
+        // can surface the full conversation without relying on the
+        // process-scoped VoiceSessionStore. (Mirrors the adapter's
+        // legacy persistSessionEnded; that path is now bypassed because
+        // the processor sets terminalOutcome first, so without these
+        // fields transcript+customerId were silently dropped from
+        // voice_sessions for any session ending via the extracted
+        // speechTurn.)
+        ...(session.transcript.length > 0
+          ? { transcript: [...session.transcript] }
+          : {}),
+        // Stamp the customer FK so the interactions list can join to
+        // the customers table and surface the linked customer.
+        ...(session.customerId !== undefined
+          ? { customerId: session.customerId }
+          : {}),
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
@@ -921,12 +946,16 @@ export function createVoiceTurnProcessor(
       session.ended = true;
       finalizeTerminatedSession(session, sideEffectsAll, 'caller_hangup');
       // Defer summary kick-off to the host so it can decide on retry /
-      // background semantics. When no host hook is wired we run summary
-      // inline (still fire-and-forget) for parity with the adapter's
-      // legacy behavior.
+      // background semantics. We `await` the callback so hosts that
+      // need summary spend to land within a snapshot window (Layer 2
+      // entry test) can do so deterministically; production keeps the
+      // fire-and-forget tradeoff inside its callback wiring to preserve
+      // Twilio webhook latency. When no host hook is wired we run
+      // summary inline (still fire-and-forget) for parity with the
+      // adapter's legacy behavior.
       if (deps.onSessionTerminated) {
         try {
-          deps.onSessionTerminated(session);
+          await deps.onSessionTerminated(session);
         } catch (err) {
           logger.warn('onSessionTerminated callback threw', {
             error: err instanceof Error ? err.message : String(err),

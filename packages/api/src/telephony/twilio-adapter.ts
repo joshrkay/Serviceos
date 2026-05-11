@@ -46,7 +46,6 @@ import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import { confirmIntent } from '../ai/skills/confirm-intent';
 import { summarizeSession } from '../ai/skills/summarize-session';
-import { deriveCallOutcome as deriveCallOutcomeFromState } from '../ai/agents/customer-calling/outcome-mapper';
 import {
   intentClassifiedEvent,
   lookupExecutedEvent,
@@ -432,8 +431,14 @@ export class TwilioGatherAdapter {
       pendingTransferTwiml: this.pendingTransferTwiml,
       // Wire the existing fire-and-forget summary path. Preserves the
       // legacy behavior where a terminated turn kicks off the
-      // end-of-call summary in the background.
-      onSessionTerminated: (session) => {
+      // end-of-call summary in the background. The `async` wrapper is
+      // intentional: the processor `await`s this callback (so the
+      // Layer 2 entry test can await summary spend before the snapshot
+      // window closes), but the inner `runSummary` is fire-and-forget
+      // here, so the callback resolves immediately and Twilio webhook
+      // latency stays bounded by the speechTurn body — the summary
+      // (which can take seconds) continues in the background.
+      onSessionTerminated: async (session) => {
         void this.processor.runSummary(session).catch(() => {
           /* swallow — summary is best-effort */
         });
@@ -1658,55 +1663,15 @@ export class TwilioGatherAdapter {
     sideEffects: ReadonlyArray<SideEffect>,
     fallbackReason: string,
   ): void {
+    // The processor handles derive-outcome + persist-session-ended in a
+    // single delegate. The redundant adapter-side body (legacy
+    // deriveCallOutcomeFromState + persistSessionEnded private method)
+    // was deleted in Codex P1 round 5: `finalizeTerminatedSession`'s
+    // early-return-on-terminalOutcome means the processor's path
+    // shadows it for every code path, so the adapter copy was dead and
+    // was the source of the dropped transcript+customerId bug (the
+    // adapter copy included those fields; the processor copy did not).
     this.processor.finalizeTerminatedSession(session, sideEffects, fallbackReason);
-    if (session.terminalOutcome) return;
-    const endSessionEffect = [...sideEffects].reverse().find((e) => e.type === 'end_session');
-    const reason =
-      (endSessionEffect && typeof endSessionEffect.payload.reason === 'string'
-        ? endSessionEffect.payload.reason
-        : undefined) ?? fallbackReason;
-    const outcome = deriveCallOutcomeFromState({
-      finalState: session.machine.currentState,
-      endedReason: reason,
-      context: session.machine.currentContext,
-      transcript: session.transcript,
-      proposalIds: session.proposalIds,
-    });
-    session.terminalOutcome = outcome;
-    session.terminalReason = reason;
-    void this.persistSessionEnded(session, reason, outcome);
-  }
-
-  /**
-   * B2 — async DB-write half of `finalizeTerminatedSession`. Always
-   * fire-and-forget; errors are swallowed (outcome stamping is
-   * best-effort, never breaks a call flow).
-   */
-  private async persistSessionEnded(
-    session: VoiceSession,
-    endedReason: string,
-    outcome: CallOutcome,
-  ): Promise<void> {
-    if (!this.deps.voiceSessionRepo) return;
-    try {
-      await this.deps.voiceSessionRepo.markEnded(session.tenantId, session.id, {
-        endedAt: new Date(),
-        endedReason,
-        outcome,
-        state: session.machine.currentState,
-        channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
-        ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
-        // 15.8/15.9 — persist the in-memory transcript so /api/interactions
-        // can surface the full conversation without relying on the
-        // process-scoped VoiceSessionStore.
-        transcript: session.transcript.length > 0 ? [...session.transcript] : undefined,
-        // Stamp the customer FK so the interactions list can join to
-        // the customers table and surface the linked customer.
-        ...(session.customerId !== undefined ? { customerId: session.customerId } : {}),
-      });
-    } catch {
-      /* swallow — outcome stamping is best-effort */
-    }
   }
 
   private async runSummary(session: VoiceSession): Promise<void> {
