@@ -76,21 +76,21 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
         let locationLine: string | undefined;
         let isPrimaryLocation: boolean | undefined;
 
-        if (job.customerId) {
-          const custRes = await apiFetch(`/api/customers/${job.customerId}`).catch(() => null);
-          if (custRes?.ok && !cancelled) {
-            const cust = await custRes.json();
-            customerName = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || undefined;
-          }
+        const [custRes, locRes] = await Promise.all([
+          job.customerId ? apiFetch(`/api/customers/${job.customerId}`).catch(() => null) : Promise.resolve(null),
+          job.locationId ? apiFetch(`/api/locations/${job.locationId}`).catch(() => null) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+
+        if (custRes?.ok) {
+          const cust = await custRes.json();
+          customerName = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || undefined;
         }
 
-        if (job.locationId) {
-          const locRes = await apiFetch(`/api/locations/${job.locationId}`).catch(() => null);
-          if (locRes?.ok && !cancelled) {
-            const loc = await locRes.json();
-            locationLine = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
-            isPrimaryLocation = loc.isPrimary;
-          }
+        if (locRes?.ok) {
+          const loc = await locRes.json();
+          locationLine = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
+          isPrimaryLocation = loc.isPrimary;
         }
 
         if (!cancelled) {

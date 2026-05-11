@@ -47,8 +47,10 @@ function buildWeekDays(today: Date) {
   });
 }
 
+const TIME_FORMATTER = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
+
 function toTimeLabel(iso: string) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return TIME_FORMATTER.format(new Date(iso));
 }
 
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
@@ -260,9 +262,16 @@ export function SchedulePage() {
       const from = `${selectedIso}T00:00:00.000Z`;
       const to   = `${selectedIso}T23:59:59.999Z`;
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
-      if (!res.ok) { setLoading(false); return; }
+      if (!res.ok) {
+        // Clear stale state on failure so the user doesn't keep seeing the
+        // previous day's schedule after switching dates with a failed fetch.
+        setAppointments([]);
+        setEnriched([]);
+        setLoading(false);
+        return;
+      }
       const body = await res.json();
-      const list: ApiAppointment[] = body.data ?? body ?? [];
+      const list: ApiAppointment[] = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
       setAppointments(list);
 
       // Enrich each appointment with job/customer data

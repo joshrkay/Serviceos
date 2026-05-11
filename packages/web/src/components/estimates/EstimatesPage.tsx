@@ -249,6 +249,9 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
     if (!hint.lineItem) return;
     setAccepting(hint.id);
     try {
+      // estimate_line_items.id is a UUID; the pg repo wipes-and-reinserts on
+      // update, so generating fresh UUIDs (instead of synthetic "li-..." ids)
+      // keeps the PATCH payload valid against the Postgres schema.
       const newItem = {
         description: hint.lineItem.description,
         quantity: hint.lineItem.qty,
@@ -256,7 +259,7 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
         totalCents: Math.round(hint.lineItem.qty * hint.lineItem.rate * 100),
         sortOrder: items.length,
         taxable: false,
-        id: `li-${Date.now()}`,
+        id: crypto.randomUUID(),
       };
       const res = await apiFetch(`/api/estimates/${estimateId}`, {
         method: 'PATCH',
@@ -268,7 +271,7 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
             totalCents: Math.round(item.qty * item.rate * 100),
             sortOrder: i,
             taxable: false,
-            id: `li-existing-${i}`,
+            id: crypto.randomUUID(),
           })),
           newItem,
         ]}),
@@ -742,20 +745,19 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
       .then(r => r.ok ? r.json() : null)
       .then(async (job) => {
         if (!job || cancelled) return;
-        if (job.customerId) {
-          const custRes = await apiFetch(`/api/customers/${job.customerId}`).catch(() => null);
-          if (custRes?.ok && !cancelled) {
-            const cust = await custRes.json();
-            const name = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || 'Customer';
-            setEnrichedCustomer({ name, id: job.customerId, phone: cust.primaryPhone, email: cust.email });
-          }
+        const [custRes, locRes] = await Promise.all([
+          job.customerId ? apiFetch(`/api/customers/${job.customerId}`).catch(() => null) : Promise.resolve(null),
+          job.locationId ? apiFetch(`/api/locations/${job.locationId}`).catch(() => null) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        if (custRes?.ok) {
+          const cust = await custRes.json();
+          const name = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || 'Customer';
+          setEnrichedCustomer({ name, id: job.customerId, phone: cust.primaryPhone, email: cust.email });
         }
-        if (job.locationId) {
-          const locRes = await apiFetch(`/api/locations/${job.locationId}`).catch(() => null);
-          if (locRes?.ok && !cancelled) {
-            const loc = await locRes.json();
-            setEnrichedLocation([loc.street1, loc.city, loc.state].filter(Boolean).join(', '));
-          }
+        if (locRes?.ok) {
+          const loc = await locRes.json();
+          setEnrichedLocation([loc.street1, loc.city, loc.state].filter(Boolean).join(', '));
         }
       })
       .catch(() => null);

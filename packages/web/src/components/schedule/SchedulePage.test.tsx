@@ -62,12 +62,13 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 function mockSchedule(opts: { appointments?: unknown[]; appointmentsOk?: boolean } = {}) {
   const { appointments = [apptCarlos, apptMarcus], appointmentsOk = true } = opts;
-  vi.mocked(apiFetch).mockImplementation(async (input: string) => {
-    if (input.startsWith('/api/appointments')) {
+  vi.mocked(apiFetch).mockImplementation(async (input) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.startsWith('/api/appointments')) {
       return appointmentsOk ? jsonResponse({ data: appointments }) : jsonResponse({}, 500);
     }
-    if (input.startsWith('/api/jobs/j1')) return jsonResponse(jobCarlos);
-    if (input.startsWith('/api/jobs/j2')) return jsonResponse(jobMarcus);
+    if (url.startsWith('/api/jobs/j1')) return jsonResponse(jobCarlos);
+    if (url.startsWith('/api/jobs/j2')) return jsonResponse(jobMarcus);
     return jsonResponse({});
   });
 }
