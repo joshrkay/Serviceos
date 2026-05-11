@@ -42,7 +42,7 @@ beforeEach(() => {
     }
     return {
       data: [
-        { id: 'mc-1', title: 'Quarterly HVAC', cadence: 'Quarterly', status: 'active' },
+        { id: 'mc-1', name: 'Quarterly HVAC', recurrenceRule: 'FREQ=QUARTERLY', status: 'active' },
       ],
       total: 1,
       page: 1,
@@ -70,8 +70,8 @@ describe('CustomerDetailPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Overview' }));
     expect(screen.getByText('Maintenance Contracts')).toBeInTheDocument();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
-      '/api/customers/c1/maintenance-contracts',
-      { enabled: true },
+      '/api/agreements',
+      { filters: { customerId: 'c1' }, enabled: true },
     );
   });
 });

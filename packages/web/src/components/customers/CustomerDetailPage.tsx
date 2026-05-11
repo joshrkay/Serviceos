@@ -414,9 +414,12 @@ export function CustomerDetailPage() {
     enabled: Boolean(customerId),
   });
 
+  // Maintenance contracts / service agreements live on /api/agreements
+  // (per-tenant, filterable by customerId). The earlier nested
+  // /api/customers/:id/maintenance-contracts path was never mounted on
+  // the API and would 404 for every customer. useListQuery now resyncs
+  // its filters on prop change, so route navigation rebinds correctly.
   const { data: maintenanceContracts } = useListQuery<ApiContract>(
-    customerId ? `/api/customers/${customerId}/maintenance-contracts` : '/api/customers/unknown/maintenance-contracts',
-    { enabled: Boolean(customerId) },
     '/api/agreements',
     { filters: customerId ? { customerId } : {}, enabled: Boolean(customerId) },
   );
