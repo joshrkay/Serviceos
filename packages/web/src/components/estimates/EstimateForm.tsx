@@ -82,6 +82,8 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
 
   const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
 
+  // When job ID is entered, look up active agreements for the associated customer.
+  // `cancelled` guards against state updates after unmount or a newer jobId.
   useEffect(() => {
     if (!form.jobId) { setSelectedJob(null); return; }
     // Always fetch the enriched job detail (includes customer + location)
