@@ -1,17 +1,27 @@
-# Beta Verification Runbook — Manual Checklist
+# Beta Verification Run — 2026-05-09
 
-> **Purpose:** Prove that every shipped feature works end-to-end in a live environment before
-> a beta customer is onboarded. This is not a code review — it is a human running through
-> real actions against a deployed staging or production instance and confirming each result.
+> **Run owner:** ___________________________
+> **Branch under test:** `claude/setup-qa-testing-LAAJw`
+> **Deploy SHA:** ___________________________
+> **Environment:** ☐ Staging (Railway dev) &nbsp; ☐ Production
 >
-> **When to run:** Before each new beta customer onboard, and after any deploy touching
-> more than one package.
+> **How this run was produced:** This file is the dated copy of
+> `docs/beta-verification-runbook.md`. The bulk of Sections 1–7, 9, 10, 13, 14, 16,
+> and 17 are populated from the automated `qa-runner` harness
+> (`qa-runner/reports/test_results.json` + `qa-runner/reports/summary.md`). The
+> "Residual human-only checklist" at the bottom captures everything automation
+> cannot verify (LLM chat quality, voice agent, dispatch board UI, vertical pack
+> visual rendering, real SMS receipt) — those still need a human pass.
 >
-> **How to record:** Copy this file, rename it `beta-verification-YYYY-MM-DD.md`, fill in
-> every checkbox, and commit to `docs/verification-runs/`.
->
-> **Sequence matters:** Sections 1–6 build on each other. Create the test data in order and
-> reference it throughout. Do not skip ahead.
+> **Procedure to fill this file:**
+> 1. Set env: `BASE_URL`, `API_URL`, `AUTH_BEARER_TOKEN`, `TENANT_B_TOKEN`, `TENANT_ID`.
+> 2. Run `npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report`.
+> 3. Run `E2E_BASE_URL=… E2E_API_URL=… npm run e2e:smoke`.
+> 4. Update each section's checkboxes using the merged signal from
+>    `qa-runner/reports/test_results.json` (per-test rows) and `playwright-report/`.
+> 5. Fill the Sign-Off Summary table at the bottom and the prioritized bug list.
+> 6. Walk the residual human-only checklist by hand and mark results.
+> 7. Commit on branch `claude/setup-qa-testing-LAAJw`.
 
 ---
 
@@ -648,4 +658,104 @@ Run as Tenant C (Technician role, same tenant as A).
 
 ---
 
-*Automated counterpart: `docs/beta-verify-script.md` (upcoming — maps Sections 1, 5, 6, 9, 16, and 17 to API-driven assertions).*
+## Prioritized Bug List
+
+Populated from `qa-runner/reports/test_results.json` (rows where
+`final_status === "fail"`) plus any human-observed issues from the residual
+checklist below.
+
+### Blocking — must fix before any beta onboard
+
+Failures in Section 1 (auth/bootstrap), Section 16 (provisioning), Section 17
+(tenant isolation), or any cross-tenant read/write that returned 200 instead
+of 403/404.
+
+| ID | Section | Test | Symptom | Evidence | Owner |
+|----|---------|------|---------|----------|-------|
+|  | | | | | |
+|  | | | | | |
+
+### High — core lead-to-cash regression
+
+Failures in Sections 2 (customers), 3 (leads), 4 (jobs), 5 (estimates),
+6 (invoices), 7 (appointments), 10 (portal).
+
+| ID | Section | Test | Symptom | Evidence | Owner |
+|----|---------|------|---------|----------|-------|
+|  | | | | | |
+|  | | | | | |
+
+### Non-blocking — log for next sprint
+
+Failures in Sections 11 (assistant), 13 (contracts), 14 (vertical packs),
+15 (calling agent), or anything degraded but not regressed.
+
+| ID | Section | Test | Symptom | Evidence | Owner |
+|----|---------|------|---------|----------|-------|
+|  | | | | | |
+|  | | | | | |
+
+---
+
+## Residual Human-Only Checklist
+
+The automated harness cannot verify the items below. A tester must walk these
+by hand against the same deploy SHA and record results here.
+
+### §8 — Dispatch Board UI
+- [ ] **8-H1** `/schedule` page renders with technician lanes for today.
+- [ ] **8-H2** Drag-and-drop a job between technicians produces a visible
+  proposal banner (no auto-execute).
+- [ ] **8-H3** Conflict detection: schedule two appointments at the same time
+  on the same tech — the conflict warning surfaces.
+- [ ] **8-H4** _Note: per `beta-verification-runbook.md` line 8, dispatch UI
+  is partially aspirational — confirm this is still true and mark "Skipped — UI
+  not implemented yet" if so._
+
+### §9 — Real SMS / Email receipt
+- [ ] **9-H1** Send an estimate to the test customer. SMS arrives at the real
+  test number within 60 seconds. _(Skipped this run — Twilio not configured.)_
+- [ ] **9-H2** Send an invoice. Email arrives at the real test inbox.
+- [ ] **9-H3** STOP keyword on a received SMS halts further sends to that
+  number.
+
+### §11 — AI Assistant chat quality
+- [ ] **11-H1** Open the assistant. Ask "How many open estimates do I have?".
+  Response cites real numbers, not a hallucinated figure.
+- [ ] **11-H2** Ask the assistant to draft an estimate. The proposal banner
+  surfaces — nothing executes without a click.
+- [ ] **11-H3** Voice transcription on a 10-second clip produces correct text.
+- [ ] **11-H4** Chat history persists across reloads.
+
+### §12 — Technician voice updates (browser microphone)
+- [ ] **12-H1** Open `/technician/day` on a phone or simulated mobile.
+  Today's assigned jobs render.
+- [ ] **12-H2** Tap a job → record a voice update → transcript shows up on
+  the job timeline within 30 seconds.
+- [ ] **12-H3** Status transition via voice ("mark complete") updates the
+  job status correctly.
+
+### §14 — Vertical pack visual switching
+- [ ] **14-H1** Switch the active vertical pack in `/settings`. UI
+  terminology updates everywhere (e.g., "Job" → "Service Visit") without a
+  hard reload.
+- [ ] **14-H2** Estimate templates from the new pack appear.
+- [ ] **14-H3** Language switching updates labels in the same session.
+
+### §15 — Calling Agent (real inbound phone)
+- [ ] **15-H1** Call the tenant's Twilio number. Greeting plays in tenant's
+  business voice. _(Skipped this run — Twilio not configured.)_
+- [ ] **15-H2** Speak "I want to book service" — agent recognizes intent.
+- [ ] **15-H3** Provide an existing customer phone — agent looks up profile.
+- [ ] **15-H4** Escalation path ("speak to a person") routes correctly.
+- [ ] **15-H5** Call transcript appears under the customer in `/conversations`.
+
+---
+
+## Run Artifacts
+
+- Automated test rows: `qa-runner/reports/test_results.json`
+- Automated summary: `qa-runner/reports/summary.md`
+- API/UI/DB evidence: `qa-runner/artifacts/{api,ui,db}/`
+- Playwright HTML report: `playwright-report/`
+- Playwright failure traces: `test-results/`
