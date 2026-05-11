@@ -1843,7 +1843,7 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     })
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo }));
+  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use(
     '/api/estimates',
     createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService, {
@@ -1851,8 +1851,6 @@ export function createApp(): express.Express {
       proposalRepo,
     }),
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService));
   app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
