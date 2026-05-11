@@ -4,6 +4,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { TechnicianDayView } from './TechnicianDayView';
 
+// TechnicianDayView calls useNavigate() internally (per the merge that
+// added job-detail navigation), so it requires a Router ancestor.
+function renderWithRouter(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
+
 describe('P6-019 — Technician day-of assigned-work view', () => {
   let onPositionSuccess: ((position: GeolocationPosition) => void) | null = null;
 

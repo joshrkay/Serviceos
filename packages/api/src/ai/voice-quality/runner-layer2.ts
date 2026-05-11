@@ -58,6 +58,8 @@ import { gradePerceivedCompletion } from './graders/perceived-completion';
 import { aggregate } from './voting/majority-vote';
 import type { AggregatedResult, PerRunResult } from './voting/majority-vote';
 import type { LLMGateway } from '../gateway/gateway';
+import { wrapWithCostTracking } from './audio/real-llm-gateway-factory';
+import { AgentEventBus } from './event-bus';
 
 /**
  * ~$3.50 per script across 3 runs (i.e. the script's worst-case ceiling).
@@ -117,6 +119,22 @@ export interface RunScriptLayer2Context extends Omit<RunScriptContext, 'costTrac
   suiteCostTracker?: SuiteCostTracker;
   /** Cap on cumulative suite cost. Only consulted with `suiteCostTracker`. */
   suiteCostCapCents?: number;
+  /**
+   * When true, the LLM gateway supplied to the runner (via `gateway` or
+   * `gatewayFactory`) is already wired to accumulate per-call cost into
+   * `suiteCostTracker` — for example, anything built via
+   * `createRealLayerTwoGateway`, which wraps the gateway with the
+   * suite-level cost tracker at construction time. In that wiring the
+   * grader gateway call increments the suite tracker once already, so
+   * the runner's own `suiteCostTracker.addCents(runCents)` would
+   * double-count grader spend (and trip the suite cost cap at half the
+   * real spend).
+   *
+   * Default `false` for mock-gateway suites whose gateways do NOT
+   * report to the suite tracker — those still need the runner to
+   * forward `runCents` so the suite tracker reflects per-script spend.
+   */
+  gatewayReportsToSuiteTracker?: boolean;
   /**
    * LLM gateway shared across the three runs. Used by the LLM-judge
    * graders. If absent and `gatewayFactory` is set, one is synthesized
@@ -211,9 +229,36 @@ function resolveGateway(ctx: RunScriptLayer2Context, scriptId: string): LLMGatew
 async function gradeOneRun(
   observation: import('./observation').Observation,
   script: VoiceQualityScript,
-  gateway: LLMGateway,
+  baseGateway: LLMGateway,
   perceivedCompletionCache: Map<string, import('./graders/perceived-completion').PerceivedCompletionVerdict>,
+  bus: AgentEventBus,
+  graderTracker: CostTracker,
 ): Promise<PerRunResult> {
+  // Codex P1 round 3 — `graderTracker` is now OWNED by the caller
+  // (`runScriptLayer2`) and passed in. Previously it was allocated
+  // inside this function and the accumulated cents returned alongside
+  // the result on the success path. If a grader threw mid-run (e.g.,
+  // malformed LLM output from a real gateway), the destructuring in
+  // the caller never ran and the catch handler reset `graderCents` to
+  // 0, silently dropping any cents that had already been burned (and
+  // already reported via wrap-1 to the suite tracker in real-mode).
+  // That let per-script and suite caps fail to trip even after real
+  // spend exceeded them.
+  //
+  // Lifting tracker ownership to the loop means the cents accumulated
+  // before the throw survive the catch — the loop reads
+  // `graderTracker.totalCents()` after the try/catch regardless of
+  // outcome. Wrap-#1/wrap-#2/gatewayReportsToSuiteTracker semantics
+  // are preserved because the inner wrap below still feeds the same
+  // tracker; the only change is who allocates it.
+  //
+  // For mock gateways with no `tokenUsage` on responses, the wrapper
+  // is a no-op (graderTracker stays 0) — which is the correct behavior
+  // in tests.
+  const gateway = wrapWithCostTracking(baseGateway, {
+    bus,
+    costTracker: graderTracker,
+  });
   const floor = gradeFloor(observation, script);
   const dispStruct = gradeDispositionStructured(observation, script);
   const dispLlm = await gradeDispositionLlm({ observation, script, gateway });
@@ -250,6 +295,32 @@ async function gradeOneRun(
   };
 }
 
+/**
+ * Cost accounting (per run):
+ *   - runCents      → non-gateway costs from ctxForRun.costTracker (driver/STT/TTS).
+ *                     Forwarded to suiteCostTracker by the runner (always).
+ *   - graderCents   → grader LLM calls via wrap-#2 (this runner's own wrapping).
+ *                     Goes to suiteCostTracker via wrap-#1 in real-mode
+ *                     (gatewayReportsToSuiteTracker=true), OR via runner forward
+ *                     in mock-mode (flag false/undefined).
+ *   - agentCents    → ONLY in real-mode: the speechTurn agent's classifier/
+ *                     confirm/summary LLM calls via the same wrap-#1 gateway
+ *                     used by graders. Detected via suiteCostTracker delta
+ *                     minus graderCents. The Layer 2 entry test constructs
+ *                     `agentGateway = createRealLayerTwoGateway({ costTracker:
+ *                     suiteState.suiteCostTracker, ... })`, so every classifier/
+ *                     confirm/summary call made by the media-stream agent during
+ *                     a run increments the suite tracker via wrap-#1. Without
+ *                     this delta accounting, those cents were captured by the
+ *                     suite cap but invisible to RunScriptLayer2Result.totalCostCents,
+ *                     so per-script reports under-counted and launch-gate
+ *                     verdicts could show cost-cap-trip without explaining the
+ *                     spend source. In mock-mode (gatewayReportsToSuiteTracker
+ *                     false/undefined), agentCents stays 0 — the gateway doesn't
+ *                     touch the suite tracker directly there.
+ *   Sum (scriptCostCents = runCents + graderCents + agentCents) feeds the
+ *   per-script cap and RunScriptLayer2Result.totalCostCents.
+ */
 export async function runScriptLayer2(
   script: VoiceQualityScript,
   ctx: RunScriptLayer2Context,
@@ -295,22 +366,127 @@ export async function runScriptLayer2(
       costTracker: runCostTracker,
     };
 
+    // Codex P1 round 3 — hoist graderTracker ownership to the loop so
+    // the cents accumulated by grader gateway calls survive a mid-run
+    // throw. Before, gradeOneRun allocated this tracker internally and
+    // returned its total via the success path; a throw mid-grader-chain
+    // meant the cents were silently dropped, defeating per-script and
+    // suite-cap accounting in error-heavy real-gateway runs.
+    let graderCents = 0;
+    const graderTracker: CostTracker = {
+      addCents(n: number) {
+        graderCents += n;
+      },
+      totalCents() {
+        return graderCents;
+      },
+    };
+
+    // Codex P2 round 4 — snapshot the suite tracker BEFORE the run so we
+    // can isolate agent gateway spend after the run completes. Only
+    // meaningful in real-mode (`gatewayReportsToSuiteTracker: true`),
+    // where wrap-#1 of the shared gateway writes both agent and grader
+    // gateway cents into the suite tracker. Subtracting the locally-
+    // tracked `graderCents` from the total wrap-#1 delta isolates the
+    // agent's classifier/confirm/summary spend, which would otherwise be
+    // invisible to per-script accounting. Layer 2 runs are sequential
+    // (the script loop awaits each run; the runner is the only path
+    // mutating the suite tracker during a run), so the delta cleanly
+    // attributes to this run alone.
+    const suiteBefore =
+      ctx.suiteCostTracker && ctx.gatewayReportsToSuiteTracker
+        ? ctx.suiteCostTracker.totalCents()
+        : 0;
+
     let runResult: PerRunResult;
     try {
       const { observation } = await runScript(script, ctxForRun);
       const gateway = resolveGateway(ctx, script.id);
-      runResult = await gradeOneRun(observation, script, gateway, perceivedCompletionCache);
+      // Reuse the ctx bus when present so cost_incurred events emitted
+      // by the wrapper land on the same bus the run is observing.
+      // Fall back to a throwaway bus when no bus is wired in (unit
+      // tests with mock gateways) — the wrapper still needs a bus
+      // reference but no consumer is listening.
+      const runBus = ctx.bus ?? new AgentEventBus();
+      runResult = await gradeOneRun(
+        observation,
+        script,
+        gateway,
+        perceivedCompletionCache,
+        runBus,
+        graderTracker,
+      );
     } catch (err) {
       // Cost-cap errors propagate (suite-cap may bubble through here in
       // edge cases); everything else degrades to a fail-everything run
-      // so 2/3 voting can still produce signal.
+      // so 2/3 voting can still produce signal. graderCents already
+      // reflects any partial spend the failed run incurred before the
+      // throw — the caller-owned tracker survives the catch.
       if (err instanceof CostCapExceededError) throw err;
       runResult = failEverythingRun();
     }
 
+    // Codex P2 round 4 — compute agent gateway spend from the suite
+    // tracker delta. In real-mode, wrap-#1 of the shared gateway has
+    // already written `agent + grader` gateway cents into the suite
+    // tracker during this run; subtracting the locally-tracked
+    // `graderCents` isolates the agent's spend. The Math.max(0, ...) is
+    // defensive — concurrent writes to the suite tracker shouldn't
+    // happen in the sequential script runner, but it guards against
+    // future regressions (e.g., parallel script execution). In mock-mode
+    // (gatewayReportsToSuiteTracker false/undefined), agentCents stays 0;
+    // mock gateways don't write to the suite tracker directly so there's
+    // nothing to delta-detect.
+    let agentCents = 0;
+    if (ctx.suiteCostTracker && ctx.gatewayReportsToSuiteTracker) {
+      const suiteAfter = ctx.suiteCostTracker.totalCents();
+      const totalWrap1Delta = suiteAfter - suiteBefore;
+      agentCents = Math.max(0, totalWrap1Delta - graderCents);
+    }
+
     perRunResults.push(runResult);
-    scriptCostCents += runCents;
-    if (ctx.suiteCostTracker) ctx.suiteCostTracker.addCents(runCents);
+    // Per-script cost cap covers non-gateway run cost (driver/STT/TTS/
+    // orchestration captured by `runCostTracker` inside `runScript`),
+    // grader gateway cost (captured by the local graderTracker inside
+    // `gradeOneRun`), AND agent gateway cost (Codex P2 round 4 — the
+    // speechTurn agent's classifier/confirm/summary calls that share
+    // wrap-#1 with the graders in real-mode). The cap is meant to model
+    // total per-script spend.
+    scriptCostCents += runCents + graderCents + agentCents;
+
+    // Codex P1 round 2 fix — forward to the suite tracker without
+    // dropping non-gateway costs. Two distinct paths feed suite-level
+    // accounting:
+    //
+    //   (1) Non-gateway run costs (driver/STT/TTS/orchestration that
+    //       `runScript` writes into `runCostTracker`). These NEVER pass
+    //       through the gateway wrap, so the runner is the only path
+    //       that can forward them to the suite tracker. ALWAYS forward.
+    //
+    //   (2) Grader gateway costs. When the caller built the gateway via
+    //       `createRealLayerTwoGateway` (or otherwise pre-wrapped it
+    //       with the suite cost tracker), each `gateway.complete()`
+    //       already increments the suite tracker once — so adding
+    //       `graderCents` here would double-count. The
+    //       `gatewayReportsToSuiteTracker` flag tells the runner to
+    //       skip the explicit add in that wiring. For mock-gateway
+    //       suites where the gateway does NOT touch the suite tracker,
+    //       the runner is the only suite-side accounting path for
+    //       grader spend, so we DO add `graderCents`.
+    //
+    //   (3) Agent gateway costs (Codex P2 round 4). In real-mode,
+    //       wrap-#1 has ALREADY added agent cents to the suite tracker
+    //       (the agent shares the same pre-wrapped gateway) — that's
+    //       how we measured `agentCents` via the delta in the first
+    //       place. So no runner-side forward is needed: agent cents are
+    //       already in `ctx.suiteCostTracker` and `agentCents` is 0 in
+    //       mock-mode where there's nothing to forward.
+    if (ctx.suiteCostTracker) {
+      ctx.suiteCostTracker.addCents(runCents);
+      if (!ctx.gatewayReportsToSuiteTracker) {
+        ctx.suiteCostTracker.addCents(graderCents);
+      }
+    }
 
     // Per-script cap.
     if (scriptCostCents > perRunCostCap) {
