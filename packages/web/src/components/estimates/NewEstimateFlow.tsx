@@ -22,6 +22,11 @@ interface AIResult {
   description: string;
   items: AILineItem[];
   explanation: string;
+  // proposalId of the persisted draft_estimate proposal when the items
+  // came from /api/estimates/suggest. Captured here so the save flow
+  // can link the resulting Estimate back to its source proposal once
+  // the createEstimate API accepts a proposalId (follow-up).
+  proposalId?: string;
 }
 
 interface ManualItem {
@@ -93,6 +98,7 @@ async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<AI
     });
     if (!res.ok) return generateEstimate(input, svcHint);
     const data = (await res.json()) as {
+      proposalId?: string;
       lineItems?: Array<{ description: string; quantity: number; unitPrice: number; category?: string }>;
       notes?: string;
     };
@@ -107,6 +113,7 @@ async function suggestEstimate(input: string, svcHint?: ServiceType): Promise<AI
       description: input.length > 60 ? input.slice(0, 60) + '…' : input || 'Service',
       explanation: data.notes ?? '',
       items,
+      ...(data.proposalId ? { proposalId: data.proposalId } : {}),
     };
   } catch {
     return generateEstimate(input, svcHint);

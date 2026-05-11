@@ -283,7 +283,13 @@ export function createEstimateRouter(
           existingEntities: Object.keys(existingEntities).length > 0 ? existingEntities : undefined,
         });
 
-        const persisted = await aiDeps.proposalRepo.create(result.proposal);
+        // EstimateTaskHandler hardcodes sourceTrustTier='autonomous' for the
+        // voice-agent flow, which can auto-approve at ≥0.9 confidence and
+        // gets picked up by runExecutionSweep. For UI suggestions the user
+        // must explicitly commit — force draft so previewing a suggestion
+        // never writes a real estimate to the database.
+        const draftProposal = { ...result.proposal, status: 'draft' as const, approvedAt: undefined };
+        const persisted = await aiDeps.proposalRepo.create(draftProposal);
         const payload = persisted.payload as {
           lineItems?: Array<{ description: string; quantity: number; unitPrice: number; category?: string }>;
           notes?: string;

@@ -182,6 +182,10 @@ function AIPricingSuggestions({
   const seeded = PRICING_HINTS[estimateId];
   const [hints, setHints] = useState<Hint[]>(seeded ?? []);
   const [loading, setLoading] = useState(false);
+  // Stable signature: useEffect deps would otherwise re-fire on every parent
+  // render because existingLineItems is recomputed via .map() upstream. The
+  // string form changes only when the line items' content changes.
+  const lineItemsKey = existingLineItems ? JSON.stringify(existingLineItems) : '';
 
   useEffect(() => {
     if (seeded) return;
@@ -224,7 +228,8 @@ function AIPricingSuggestions({
     return () => {
       cancelled = true;
     };
-  }, [estimateId, description, existingLineItems, seeded]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estimateId, description, lineItemsKey, seeded]);
 
   if (loading && !hints.length) return null;
   if (!hints.length) return null;
