@@ -149,8 +149,18 @@ export function createRealLayerTwoGateway(
  * Implementation note: we subclass `LLMGateway` so the returned
  * value satisfies `instanceof LLMGateway`. Cassette + driver code
  * elsewhere relies on the type, not just the structural shape.
+ *
+ * Exported (rather than private) so the Layer 2 runner can layer a
+ * per-run cost tracker on top of the suite-level gateway. The wrapper
+ * is a pure decorator over `inner.complete()` — it does not depend on
+ * any specific provider implementation; it only consumes the
+ * `tokenUsage` shape on the response. For inner gateways that do not
+ * populate `tokenUsage` (e.g., mock gateways used in unit tests), the
+ * wrapper degrades to a no-op (adds 0 cents) rather than throwing.
+ * This makes it safe to drop into the runner regardless of whether the
+ * inner gateway is real or mocked.
  */
-function wrapWithCostTracking(
+export function wrapWithCostTracking(
   inner: LLMGateway,
   deps: Pick<RealLayerTwoGatewayDeps, 'bus' | 'costTracker'>,
 ): LLMGateway {
