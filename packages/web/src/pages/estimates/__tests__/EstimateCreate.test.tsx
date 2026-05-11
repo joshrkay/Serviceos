@@ -47,7 +47,10 @@ describe('EstimateCreate (P11-006)', () => {
         <EstimateCreate />
       </MemoryRouter>
     );
-    // Use fireEvent.submit to bypass HTML5 native validation (required select)
+    // The submit button is wired through the form, but jsdom enforces the
+    // <select required> HTML5 check on click-driven submits, which blocks
+    // the JS handler. Dispatch a submit event directly so the JS-level
+    // validation runs and renders the alert we assert on.
     const form = container.querySelector('form') as HTMLFormElement;
     fireEvent.submit(form);
     await waitFor(() => {
@@ -95,8 +98,7 @@ describe('EstimateCreate (P11-006)', () => {
       target: { value: '49.99' },
     });
 
-    const form = container.querySelector('form') as HTMLFormElement;
-    fireEvent.submit(form);
+    fireEvent.click(screen.getByRole('button', { name: /create estimate/i }));
 
     await waitFor(() => {
       const postCall = vi

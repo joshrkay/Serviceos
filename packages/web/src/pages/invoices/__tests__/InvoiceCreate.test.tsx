@@ -48,6 +48,10 @@ describe('InvoiceCreate (P11-006)', () => {
         <InvoiceCreate />
       </MemoryRouter>
     );
+    // The submit button is wired through the form, but jsdom enforces the
+    // <select required> HTML5 check on click-driven submits, which blocks
+    // the JS handler. Dispatch a submit event directly so the JS-level
+    // validation runs and renders the alert we assert on.
     const form = container.querySelector('form') as HTMLFormElement;
     fireEvent.submit(form);
     await waitFor(() => {
@@ -95,8 +99,7 @@ describe('InvoiceCreate (P11-006)', () => {
       target: { value: '125.00' },
     });
 
-    const form = container.querySelector('form') as HTMLFormElement;
-    fireEvent.submit(form);
+    fireEvent.click(screen.getByRole('button', { name: /create invoice/i }));
 
     await waitFor(() => {
       const postCall = vi
