@@ -81,8 +81,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   }));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [estimateLookupStatus, setEstimateLookupStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
-  const [estimateInfo, setEstimateInfo] = useState<{ estimateNumber: string; totalCents: number } | null>(null);
+  const [selectedJob, setSelectedJob] = useState<ApiJob | null>(null);
 
   const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
   const { data: estimates } = useListQuery<ApiEstimate>('/api/estimates');
@@ -94,11 +93,22 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
 
   // When a job is selected, fetch enriched job data (customer + location)
   useEffect(() => {
-    const id = form.estimateId.trim();
-    if (!id || id.length < 10) {
-      setEstimateLookupStatus('idle');
-      setEstimateInfo(null);
-      return;
+    if (!form.jobId) { setSelectedJob(null); return; }
+    apiFetch(`/api/jobs/${form.jobId}`)
+      .then(r => r.ok ? r.json() as Promise<ApiJob> : null)
+      .then((j: ApiJob | null) => j ? setSelectedJob(j) : null)
+      .catch(() => null);
+  }, [form.jobId]);
+
+  // When an estimate is selected, auto-populate job and line items
+  const handleEstimateChange = async (estimateId: string) => {
+    setForm(p => ({ ...p, estimateId }));
+    if (!estimateId) return;
+
+    // Find estimate in list first (has basic data)
+    const est = estimates.find(e => e.id === estimateId);
+    if (est?.jobId) {
+      setForm(p => ({ ...p, jobId: est.jobId }));
     }
 
     // Fetch full estimate details for line items
