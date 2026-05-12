@@ -1,6 +1,15 @@
 # Production-Readiness Blockers Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Status (2026-05-04):** Ground-truth code audit confirms every Phase 1 / Phase 3 task in this plan is **still open on `origin/main`**. Specifically: `CreateCustomerExecutionHandler`, `UpdateCustomerExecutionHandler`, `CreateJobExecutionHandler`, and `DraftEstimateExecutionHandler` (`packages/api/src/proposals/execution/handlers.ts`) all still return synthetic UUIDs without persisting. `IdempotencyGuard` is defined but `app.ts:768` constructs `new ProposalExecutor(...)` without passing it (zero `IdempotencyGuard` references in `app.ts`). MockPaymentLinkProvider IS guarded (Phase 4 partially shipped via P5-017); `NoopInvoiceDeliveryProvider` fallback in `app.ts:713` remains conditional on `sendService` presence rather than NODE_ENV.
+>
+> **Verification gates (2026-05-04 dispatch trust gap fix):** Each task in this plan should be verified through:
+> - **Layer 1 (Wiring grep gate)** — `docs/superpowers/plans/2026-05-04-dispatch-trust-layer-1-3.md`. Each task adds a `Wiring claim:` to its addendum; verify.sh greps `app.ts` for the claimed symbol before allowing the gate to pass.
+> - **Layer 2 (Integration smoke gate)** — `docs/superpowers/plans/2026-05-04-dispatch-trust-layer-2.md`. Each task adds a `Smoke test:` to its addendum (path under `packages/api/test/integration/smoke/`); verify.sh runs the smoke against a real testcontainers Postgres + booted app and asserts the persisted entity exists.
+> - **Layer 3 (Reviewer checklist)** — `docs/superpowers/contracts/shipped-checklist.md`. Reviewer ticks each invariant in the PR body before merge.
+>
+> Roll-out sequence (Option C — interleaved): ship Layer 1+3 first (~1.5 hr), then dispatch the readiness tasks below through the new gates, then build Layer 2 with the readiness tasks as smoke-test material.
 
 **Goal:** Close the four production-blocking gaps surfaced by the 2026-04-23 readiness audit so a real contractor can use ServiceOS without losing writes, double-executing proposals, or silently dropping customer communications. Specifically: (1) make voice "create customer / update customer / create job / draft estimate" actually persist; (2) move the two repositories that still default to `InMemory` even in production onto Postgres; (3) wire the existing `IdempotencyGuard` into `ProposalExecutor` so queue redelivery and operator re-approval can't double-fire mutations; (4) stop `NoopInvoiceDeliveryProvider` from silently swallowing "send invoice" in prod.
 
