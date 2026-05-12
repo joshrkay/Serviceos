@@ -6,31 +6,56 @@ import {
   LineItemDraft,
   emptyDraft,
   toLineItemPayload,
+  totalCents,
 } from '../forms/LineItemEditor';
+import { useListQuery } from '../../hooks/useListQuery';
 
 export interface InvoiceFormProps {
   onCreated?: (invoiceId: string) => void;
   onCancel?: () => void;
 }
 
-interface ApiEstimateLineItem {
-  id?: string;
-  description: string;
-  quantity: number;
-  unitPriceCents: number;
-  totalCents: number;
-  taxable?: boolean;
-  sortOrder?: number;
+interface ApiJob {
+  id: string;
+  jobNumber: string;
+  summary: string;
+  customerId?: string;
+  customer?: {
+    id: string;
+    displayName?: string;
+    firstName?: string;
+    lastName?: string;
+  };
+  location?: {
+    street1?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    isPrimary?: boolean;
+    label?: string;
+  };
+}
+
+interface ApiEstimate {
+  id: string;
+  estimateNumber: string;
+  status: string;
+  jobId: string;
+  lineItems?: Array<{
+    id: string;
+    description: string;
+    quantity: number;
+    unitPriceCents: number;
+    totalCents: number;
+    taxable: boolean;
+    category?: string;
+  }>;
+  totals?: { totalCents: number };
 }
 
 interface State {
   jobId: string;
   estimateId: string;
-  /**
-   * Picker UI is shown for due-date even though `createInvoiceSchema`
-   * does not accept it (P11-006 spec). The field is sent in the payload
-   * regardless; server zod will strip unknown keys.
-   */
   dueDate: string;
   customerMessage: string;
   discountDollars: string;
@@ -39,6 +64,10 @@ interface State {
 }
 
 const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
+
+function makeId() {
+  return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+}
 
 export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   const [form, setForm] = useState<State>(() => ({
@@ -55,7 +84,15 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
   const [estimateLookupStatus, setEstimateLookupStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [estimateInfo, setEstimateInfo] = useState<{ estimateNumber: string; totalCents: number } | null>(null);
 
-  // Auto-populate line items when a valid estimate ID is entered
+  const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
+  const { data: estimates } = useListQuery<ApiEstimate>('/api/estimates');
+
+  // Estimates that can be used for invoicing (any status)
+  const eligibleEstimates = estimates.filter(
+    e => ['draft', 'sent', 'accepted', 'approved'].includes(e.status)
+  );
+
+  // When a job is selected, fetch enriched job data (customer + location)
   useEffect(() => {
     const id = form.estimateId.trim();
     if (!id || id.length < 10) {
@@ -63,57 +100,37 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       setEstimateInfo(null);
       return;
     }
-    let cancelled = false;
-    setEstimateLookupStatus('loading');
-    const timer = setTimeout(async () => {
-      try {
-        const res = await apiFetch(`/api/estimates/${id}`);
-        if (!res.ok) {
-          if (cancelled) return;
-          setEstimateLookupStatus('error');
-          setEstimateInfo(null);
-          const prior = autofilledFromEstimateRef.current;
-          if (prior) {
-            setForm((prev) => ({
-              ...prev,
-              jobId: prior.jobIdFromEstimate ? '' : prev.jobId,
-              items: prev.items.length === prior.itemCount ? [emptyDraft()] : prev.items,
-            }));
-            autofilledFromEstimateRef.current = null;
-          }
-          return;
-        }
-        const data = await res.json();
-        if (cancelled) return;
-        const items: LineItemDraft[] = (data.lineItems ?? []).map((li: ApiEstimateLineItem) => ({
-          id: li.id,
+
+    // Fetch full estimate details for line items
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}`);
+      if (!res.ok) return;
+      const full: ApiEstimate = await res.json();
+      if (full.lineItems && full.lineItems.length > 0) {
+        const mapped: LineItemDraft[] = full.lineItems.map(li => ({
+          id: makeId(),
           description: li.description,
           quantity: String(li.quantity),
           unitPriceDollars: (li.unitPriceCents / 100).toFixed(2),
-          taxable: li.taxable ?? false,
+          taxable: li.taxable,
+          category: li.category as LineItemDraft['category'],
         }));
-        let jobIdFromEstimate = false;
-        setForm((prev) => {
-          const nextJobId = prev.jobId || data.jobId || '';
-          jobIdFromEstimate = !prev.jobId && !!data.jobId;
-          return {
-            ...prev,
-            jobId: nextJobId,
-            items: items.length > 0 ? items : prev.items,
-          };
-        });
-        autofilledFromEstimateRef.current = { jobIdFromEstimate, itemCount: items.length };
-        setEstimateInfo({
-          estimateNumber: data.estimateNumber,
-          totalCents: data.totals?.totalCents ?? data.totalCents ?? 0,
-        });
-        setEstimateLookupStatus('loaded');
-      } catch {
-        if (!cancelled) setEstimateLookupStatus('error');
+        setForm(p => ({ ...p, items: mapped }));
       }
-    }, 500);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [form.estimateId]);
+      if (full.jobId) {
+        setForm(p => ({ ...p, jobId: full.jobId }));
+      }
+    } catch { /* non-fatal */ }
+  };
+
+  const serviceAddress = selectedJob?.location
+    ? [selectedJob.location.street1, selectedJob.location.city, selectedJob.location.state, selectedJob.location.postalCode]
+        .filter(Boolean).join(', ')
+    : '';
+
+  const customerName = selectedJob?.customer
+    ? (selectedJob.customer.displayName || [selectedJob.customer.firstName, selectedJob.customer.lastName].filter(Boolean).join(' '))
+    : '';
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -121,7 +138,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       setError(null);
 
       if (!form.jobId.trim()) {
-        setError('Job ID is required.');
+        setError('Job is required.');
         return;
       }
       if (form.items.length === 0) {
@@ -154,8 +171,6 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
         taxRateBps = Math.round(num * 100);
       }
 
-      // dueDate sent even though createInvoiceSchema doesn't accept it;
-      // zod will strip. Tracked in commit message.
       const body = {
         jobId: form.jobId.trim(),
         estimateId: form.estimateId.trim() || undefined,
@@ -163,7 +178,6 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
         discountCents,
         taxRateBps,
         customerMessage: form.customerMessage.trim() || undefined,
-        dueDate: form.dueDate || undefined,
       };
 
       setSubmitting(true);
@@ -174,9 +188,9 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
         });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
-          throw new Error(json?.message ?? `HTTP ${res.status}`);
+          throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
         }
-        const created = await res.json();
+        const created = await res.json() as { id: string };
         onCreated?.(created.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to create invoice');
@@ -186,6 +200,9 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
     },
     [form, onCreated]
   );
+
+  const total = totalCents(form.items);
+  const totalDisplay = `$${(total / 100).toFixed(2)}`;
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
@@ -200,39 +217,55 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500">
-          Job ID *
-          <input
-            value={form.jobId}
-            onChange={(e) => setForm((p) => ({ ...p, jobId: e.target.value }))}
+        {/* Estimate picker (optional — auto-populates job and line items) */}
+        <div className="md:col-span-2">
+          <label className="text-xs text-slate-500">
+            From estimate (optional — auto-populates job &amp; line items)
+          </label>
+          <select
+            value={form.estimateId}
+            onChange={(e) => handleEstimateChange(e.target.value)}
             className={inputCls}
-          />
-        </label>
-        <label className="text-xs text-slate-500">
-          Estimate ID
-          <div className="relative">
-            <input
-              value={form.estimateId}
-              onChange={(e) =>
-                setForm((p) => ({ ...p, estimateId: e.target.value }))
-              }
-              className={inputCls}
-              placeholder="estimate-uuid (auto-fills line items)"
-            />
-            {estimateLookupStatus === 'loading' && (
-              <Loader size={13} className="absolute right-2.5 top-2.5 animate-spin text-slate-400" />
+          >
+            <option value="">— create from scratch —</option>
+            {eligibleEstimates.map(e => (
+              <option key={e.id} value={e.id}>
+                {e.estimateNumber} (${e.totals ? (e.totals.totalCents / 100).toFixed(2) : '—'}) — {e.status}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Job picker */}
+        <div className="md:col-span-2">
+          <label className="text-xs text-slate-500">Job *</label>
+          <select
+            value={form.jobId}
+            onChange={(e) => setForm(p => ({ ...p, jobId: e.target.value }))}
+            className={inputCls}
+            required
+          >
+            <option value="">— select a job —</option>
+            {jobs.map(j => (
+              <option key={j.id} value={j.id}>
+                {j.jobNumber} — {j.summary}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Customer & service location (auto-populated) */}
+        {selectedJob && (
+          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 text-sm text-slate-700 space-y-0.5">
+            {customerName && (
+              <p><span className="text-xs text-slate-500">Customer:</span> {customerName}</p>
+            )}
+            {serviceAddress && (
+              <p><span className="text-xs text-slate-500">Service address:</span> {serviceAddress}</p>
             )}
           </div>
-          {estimateLookupStatus === 'loaded' && estimateInfo && (
-            <div className="mt-1 flex items-center gap-1.5 text-xs text-green-700 bg-green-50 border border-green-200 rounded-md px-2 py-1">
-              <FileText size={11} />
-              {estimateInfo.estimateNumber} — ${(estimateInfo.totalCents / 100).toFixed(2)} loaded
-            </div>
-          )}
-          {estimateLookupStatus === 'error' && (
-            <span className="text-xs text-red-500 mt-0.5 block">Estimate not found</span>
-          )}
-        </label>
+        )}
+
         <label className="text-xs text-slate-500">
           Due date
           <input
@@ -246,9 +279,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
           Tax rate (%)
           <input
             value={form.taxRatePercent}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, taxRatePercent: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
             placeholder="0"
             className={inputCls}
@@ -258,9 +289,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
           Discount ($)
           <input
             value={form.discountDollars}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, discountDollars: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, discountDollars: e.target.value }))}
             inputMode="decimal"
             placeholder="0.00"
             className={inputCls}
@@ -269,10 +298,18 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
       </div>
 
       <div className="mt-4">
+        <p className="text-xs text-slate-500 font-medium mb-2">Line items</p>
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
         />
+        {total > 0 && (
+          <div className="mt-3 flex justify-end">
+            <p className="text-sm font-medium text-slate-900">
+              Total: <span className="text-lg">{totalDisplay}</span>
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-3 mt-4">
@@ -280,9 +317,7 @@ export function InvoiceForm({ onCreated, onCancel }: InvoiceFormProps) {
           Customer message
           <textarea
             value={form.customerMessage}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, customerMessage: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, customerMessage: e.target.value }))}
             rows={3}
             className={inputCls}
           />

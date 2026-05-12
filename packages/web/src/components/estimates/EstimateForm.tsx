@@ -6,23 +6,42 @@ import {
   LineItemDraft,
   emptyDraft,
   toLineItemPayload,
+  totalCents,
 } from '../forms/LineItemEditor';
+import { useListQuery } from '../../hooks/useListQuery';
 
 export interface EstimateFormProps {
   onCreated?: (estimateId: string) => void;
   onCancel?: () => void;
 }
 
-interface JobInfo {
+interface ApiJob {
   id: string;
   jobNumber: string;
   summary: string;
   customerId?: string;
-  locationId?: string;
-  // Enriched after secondary API calls:
-  customerName?: string;
-  locationLine?: string;
-  isPrimaryLocation?: boolean;
+  customer?: {
+    id: string;
+    displayName?: string;
+    firstName?: string;
+    lastName?: string;
+  };
+  location?: {
+    street1?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    label?: string;
+    isPrimary?: boolean;
+  };
+}
+
+interface ApiAgreement {
+  id: string;
+  customerId: string;
+  name: string;
+  recurrenceRule?: string;
+  status: string;
 }
 
 interface State {
@@ -37,6 +56,22 @@ interface State {
 
 const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
 
+const AI_SUGGESTIONS: Record<string, { description: string; qty: string; price: string }[]> = {
+  HVAC: [
+    { description: 'Labor – 2 hrs at $95/hr', qty: '2', price: '95.00' },
+    { description: 'Service call fee', qty: '1', price: '85.00' },
+    { description: 'R-410A refrigerant (1 lb)', qty: '1', price: '85.00' },
+  ],
+  default: [
+    { description: 'Labor – 2 hrs', qty: '2', price: '95.00' },
+    { description: 'Service call fee', qty: '1', price: '85.00' },
+  ],
+};
+
+function makeId() {
+  return `li-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+}
+
 export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   const [form, setForm] = useState<State>(() => ({
     jobId: '',
@@ -49,68 +84,39 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
   }));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [jobInfo, setJobInfo] = useState<JobInfo | null>(null);
-  const [jobLookupError, setJobLookupError] = useState<string | null>(null);
-  // Active maintenance contract banner — surfaced when the entered job's
-  // customer has an active agreement so the estimator can adjust pricing
-  // (carried in from main during the b3f91c9 merge).
-  const [activeContract, setActiveContract] = useState<{ id: string; name: string; recurrenceRule?: string } | null>(null);
-  const contractLookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [selectedJob, setSelectedJob] = useState<ApiJob | null>(null);
+  const [activeContract, setActiveContract] = useState<ApiAgreement | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiUsed, setAiUsed] = useState(false);
 
-  // When job ID is entered, look up active agreements for the associated customer.
-  // `cancelled` guards against state updates after unmount or a newer jobId.
+  const { data: jobs } = useListQuery<ApiJob>('/api/jobs');
+
+  // When the user picks a job, fetch the enriched job detail (customer + location)
+  // and look up any active maintenance agreement for that customer.
   useEffect(() => {
-    if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
-    const jobId = form.jobId.trim();
-    if (!jobId) { setActiveContract(null); return; }
+    if (!form.jobId) { setSelectedJob(null); setActiveContract(null); return; }
     let cancelled = false;
-    contractLookupTimer.current = setTimeout(async () => {
-      try {
-        const jobRes = await apiFetch(`/api/jobs/${jobId}`);
+    apiFetch(`/api/jobs/${form.jobId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(async (j: ApiJob | null) => {
         if (cancelled) return;
-        if (!jobRes.ok) { setActiveContract(null); return; }
-        const job = await jobRes.json() as { customerId?: string };
-        if (cancelled) return;
-        if (!job.customerId) { setActiveContract(null); return; }
-        const agRes = await apiFetch(`/api/agreements?customerId=${job.customerId}&status=active`);
-        if (cancelled) return;
-        if (!agRes.ok) { setActiveContract(null); return; }
-        const data = await agRes.json() as { data?: Array<{ id: string; name: string; recurrenceRule?: string }> };
-        const contracts = data.data ?? [];
-        if (!cancelled) setActiveContract(contracts.length > 0 ? contracts[0] : null);
-      } catch {
-        if (!cancelled) setActiveContract(null);
-      }
-    }, 600);
-    return () => {
-      cancelled = true;
-      if (contractLookupTimer.current) clearTimeout(contractLookupTimer.current);
-    };
+        setSelectedJob(j);
+        const customerId = j?.customerId ?? j?.customer?.id;
+        if (!customerId) { setActiveContract(null); return; }
+        const r = await apiFetch(`/api/agreements?customerId=${encodeURIComponent(customerId)}&status=active`);
+        if (!r.ok) { if (!cancelled) setActiveContract(null); return; }
+        const body = await r.json().catch(() => null) as ApiAgreement[] | { data?: ApiAgreement[] } | null;
+        const list: ApiAgreement[] = Array.isArray(body) ? body : (body?.data ?? []);
+        if (!cancelled) setActiveContract(list[0] ?? null);
+      })
+      .catch(() => { if (!cancelled) { setSelectedJob(null); setActiveContract(null); } });
+    return () => { cancelled = true; };
   }, [form.jobId]);
 
-  // Auto-populate customer name and service location when a valid job ID is entered
-  useEffect(() => {
-    const id = form.jobId.trim();
-    if (!id || id.length < 10) {
-      setJobInfo(null);
-      setJobLookupError(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        const res = await apiFetch(`/api/jobs/${id}`);
-        if (!res.ok) {
-          if (!cancelled) { setJobInfo(null); setJobLookupError('Job not found'); }
-          return;
-        }
-        const job = await res.json();
-        if (cancelled) return;
-
-        // Enrich with customer and location details
-        let customerName: string | undefined;
-        let locationLine: string | undefined;
-        let isPrimaryLocation: boolean | undefined;
+  const serviceAddress = selectedJob?.location
+    ? [selectedJob.location.street1, selectedJob.location.city, selectedJob.location.state, selectedJob.location.postalCode]
+        .filter(Boolean).join(', ')
+    : '';
 
         if (job.customerId) {
           const custRes = await apiFetch(`/api/customers/${job.customerId}`).catch(() => null);
@@ -146,7 +152,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       setError(null);
 
       if (!form.jobId.trim()) {
-        setError('Job ID is required.');
+        setError('Job is required.');
         return;
       }
       if (form.items.length === 0) {
@@ -208,9 +214,9 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
         });
         if (!res.ok) {
           const json = await res.json().catch(() => ({}));
-          throw new Error(json?.message ?? `HTTP ${res.status}`);
+          throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
         }
-        const created = await res.json();
+        const created = await res.json() as { id: string };
         onCreated?.(created.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to create estimate');
@@ -221,8 +227,8 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
     [form, onCreated]
   );
 
-  const customerName = jobInfo?.customerName ?? null;
-  const locationLine = jobInfo?.locationLine ?? null;
+  const total = totalCents(form.items);
+  const totalDisplay = `$${(total / 100).toFixed(2)}`;
 
   return (
     <form onSubmit={handleSubmit} className="p-4 md:p-6 max-w-3xl mx-auto">
@@ -254,47 +260,45 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-slate-500 md:col-span-2">
-          Job ID *
-          <input
+        {/* Job picker */}
+        <div className="md:col-span-2">
+          <label className="text-xs text-slate-500">Job *</label>
+          <select
             value={form.jobId}
-            onChange={(e) => setForm((p) => ({ ...p, jobId: e.target.value }))}
+            onChange={(e) => handleJobChange(e.target.value)}
             className={inputCls}
-            placeholder="job-id-uuid"
-          />
-          {jobLookupError && (
-            <span className="text-xs text-red-500 mt-0.5 block">{jobLookupError}</span>
-          )}
-        </label>
+            required
+          >
+            <option value="">— select a job —</option>
+            {jobs.map(j => (
+              <option key={j.id} value={j.id}>
+                {j.jobNumber} — {j.summary}
+              </option>
+            ))}
+          </select>
+        </div>
 
-        {jobInfo && (
-          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 flex flex-col gap-1">
+        {/* Customer & service location (auto-populated) */}
+        {selectedJob && (
+          <div className="md:col-span-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5 text-sm text-slate-700 space-y-0.5">
             {customerName && (
-              <p className="text-xs text-slate-700 flex items-center gap-1.5">
-                <User size={11} className="text-slate-400" />
-                <span className="font-medium">{customerName}</span>
-              </p>
+              <p><span className="text-xs text-slate-500">Customer:</span> {customerName}</p>
             )}
-            {locationLine && (
-              <p className="text-xs text-slate-500 flex items-center gap-1.5">
-                <MapPin size={11} className="text-slate-400" />
-                {locationLine}
-                {jobInfo.isPrimaryLocation && (
-                  <span className="text-xs text-green-600 ml-1">(primary)</span>
-                )}
-              </p>
+            {serviceAddress && (
+              <p><span className="text-xs text-slate-500">Service address:</span> {serviceAddress}</p>
             )}
-            <p className="text-xs text-slate-400">{jobInfo.jobNumber} — {jobInfo.summary}</p>
+            {!serviceAddress && (
+              <p className="text-xs text-amber-600">⚠ No service location linked to this job</p>
+            )}
           </div>
         )}
+
         <label className="text-xs text-slate-500">
           Valid until
           <input
             type="date"
             value={form.validUntil}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, validUntil: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, validUntil: e.target.value }))}
             className={inputCls}
           />
         </label>
@@ -302,9 +306,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Tax rate (%)
           <input
             value={form.taxRatePercent}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, taxRatePercent: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, taxRatePercent: e.target.value }))}
             inputMode="decimal"
             placeholder="0"
             className={inputCls}
@@ -314,9 +316,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Discount ($)
           <input
             value={form.discountDollars}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, discountDollars: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, discountDollars: e.target.value }))}
             inputMode="decimal"
             placeholder="0.00"
             className={inputCls}
@@ -325,10 +325,29 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
       </div>
 
       <div className="mt-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-slate-500 font-medium">Line items</span>
+          <button
+            type="button"
+            onClick={handleAiSuggest}
+            disabled={aiLoading || aiUsed}
+            className="flex items-center gap-1.5 text-xs bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-lg px-3 py-1.5 transition-colors"
+          >
+            <Sparkles size={12} />
+            {aiLoading ? 'Generating...' : aiUsed ? 'Suggestions added' : 'AI Suggestions'}
+          </button>
+        </div>
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
         />
+        {total > 0 && (
+          <div className="mt-3 flex justify-end">
+            <p className="text-sm font-medium text-slate-900">
+              Total: <span className="text-lg">{totalDisplay}</span>
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-3 mt-4">
@@ -336,9 +355,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Customer message
           <textarea
             value={form.customerMessage}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, customerMessage: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, customerMessage: e.target.value }))}
             rows={3}
             className={inputCls}
           />
@@ -347,9 +364,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
           Internal notes
           <textarea
             value={form.internalNotes}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, internalNotes: e.target.value }))
-            }
+            onChange={(e) => setForm((p) => ({ ...p, internalNotes: e.target.value }))}
             rows={3}
             className={inputCls}
           />

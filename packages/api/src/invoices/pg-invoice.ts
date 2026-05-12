@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { v4 as uuidv4 } from 'uuid';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   Invoice,
@@ -294,12 +295,10 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
 
   async findByViewToken(token: string): Promise<Invoice | null> {
     const headerRow = await this.withClient(async (client) => {
+      // Use a SECURITY DEFINER function to bypass RLS for the initial token
+      // lookup — the token itself is the authentication mechanism.
       const { rows } = await client.query(
-        `SELECT * FROM invoices
-         WHERE view_token = $1
-           AND (view_token_expires_at IS NULL OR view_token_expires_at > NOW())
-         ORDER BY created_at DESC
-         LIMIT 1`,
+        `SELECT id, tenant_id FROM find_invoice_by_view_token($1)`,
         [token],
       );
       return rows[0] ?? null;
@@ -328,13 +327,18 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     lineItems: LineItem[],
   ): Promise<void> {
     for (const item of lineItems) {
+      // Use a proper UUID for the DB row — client-provided IDs are ephemeral
+      // form-field tracking keys and may not be valid UUIDs.
+      const rowId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.id)
+        ? item.id
+        : uuidv4();
       await client.query(
         `INSERT INTO invoice_line_items (
           id, tenant_id, invoice_id, description, category,
           quantity, unit_price_cents, total_cents, sort_order, taxable
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
-          item.id,
+          rowId,
           tenantId,
           invoiceId,
           item.description,

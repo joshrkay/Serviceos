@@ -438,13 +438,12 @@ export function createApp(): express.Express {
     credentials: true,
   }));
 
-  // Rate limiting — applied before auth to protect all routes.
-  // In dev/test environments the limit is raised to avoid blocking
-  // the UI's concurrent requests during development.
-  const isDev = !config.NODE_ENV || config.NODE_ENV === 'dev' || config.NODE_ENV === 'test';
+  // Rate limiting — applied before auth to protect all routes
+  // In dev mode, use a much higher limit to allow QA testing
+  const isDev = process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
   app.use('/api', rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: isDev ? 5000 : 100,   // per IP (generous in dev)
+    max: isDev ? 10000 : 100, // per IP — relaxed in dev for QA testing
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev && process.env.DEV_AUTH_BYPASS === 'true',
@@ -1247,6 +1246,7 @@ export function createApp(): express.Express {
     estimateRepo,
     jobRepo,
     customerRepo,
+    locationRepo,
     settingsRepo,
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
@@ -1821,7 +1821,7 @@ export function createApp(): express.Express {
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership));
-  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher));
+  app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
   app.use(
     '/api/jobs',
     createJobFilesRouter({

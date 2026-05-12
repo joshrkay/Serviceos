@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import {
   ArrowLeft, Phone, MessageSquare, Navigation,
@@ -15,6 +15,7 @@ import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
 import { useWorkerTerm } from '../../hooks/useWorkerTerm';
 import { normalizeJobStatus } from '../../utils/statusNormalize';
+import { apiFetch } from '../../utils/api-fetch';
 
 interface ApiJobDetail {
   id: string;
@@ -24,6 +25,7 @@ interface ApiJobDetail {
   status: string;
   priority?: string;
   customerId?: string;
+  locationId?: string;
   assignedTechnicianId?: string;
   scheduledStart?: string;
   createdAt?: string;
@@ -36,8 +38,16 @@ interface ApiJobDetail {
     primaryPhone?: string;
     email?: string;
     communicationNotes?: string;
-    notes?: string;
-    locations?: Array<{ street1?: string; city?: string; state?: string; postalCode?: string }>;
+    locations?: Array<{ id?: string; street1?: string; street2?: string; city?: string; state?: string; postalCode?: string; isPrimary?: boolean; label?: string }>;
+  };
+  location?: {
+    id?: string;
+    street1?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    isPrimary?: boolean;
+    label?: string;
   };
   technician?: {
     id: string;
@@ -55,9 +65,11 @@ function buildJobCompat(api: ApiJobDetail): Job {
   const customerName = api.customer
     ? (api.customer.displayName || [api.customer.firstName, api.customer.lastName].filter(Boolean).join(' ') || 'Customer')
     : 'Customer';
-  const primaryLocation = api.customer?.locations?.[0];
-  const address = primaryLocation
-    ? [primaryLocation.street1, primaryLocation.city, primaryLocation.state, primaryLocation.postalCode].filter(Boolean).join(', ')
+
+  // Use the job's specific location (most accurate), falling back to customer's primary location
+  const jobLocation = api.location ?? api.customer?.locations?.find(l => l.isPrimary) ?? api.customer?.locations?.[0];
+  const address = jobLocation
+    ? [jobLocation.street1, jobLocation.city, jobLocation.state, jobLocation.postalCode].filter(Boolean).join(', ')
     : '';
 
   return {
@@ -80,14 +92,17 @@ function buildJobCompat(api: ApiJobDetail): Job {
 function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefined {
   if (!api) return undefined;
   const name = api.displayName || [api.firstName, api.lastName].filter(Boolean).join(' ') || 'Customer';
+  const primaryLocation = api.locations?.find(l => l.isPrimary) ?? api.locations?.[0];
   return {
     id: api.id,
     name,
     phone: api.primaryPhone ?? '',
     email: api.email ?? '',
-    address: api.locations?.[0]?.street1 ?? '',
+    address: primaryLocation
+      ? [primaryLocation.street1, primaryLocation.city, primaryLocation.state, primaryLocation.postalCode].filter(Boolean).join(', ')
+      : (api.locations?.[0]?.street1 ?? ''),
+    notes: api.communicationNotes,
     serviceType: 'HVAC',
-    notes: api.communicationNotes ?? api.notes,
     locations: [],
     jobCount: 0,
     openJobs: 0,
@@ -937,7 +952,7 @@ export function JobDetailView({ id }: { id: string }) {
   const apiFetch = useApiClient();
   const workerTerm = useWorkerTerm();
 
-  const { data: apiJob, isLoading, error } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
+  const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<ApiJobDetail>('/api/jobs', id);
   const { mutate: transitionJob } = useMutation<{ status: string }, ApiJobDetail>('POST', `/api/jobs/${id}/transition`);
 
   const job      = apiJob ? buildJobCompat(apiJob) : null;
@@ -959,37 +974,75 @@ export function JobDetailView({ id }: { id: string }) {
   const [materials,     setMaterials]     = useState<MaterialItem[]>([]);
   const [showDuplicate, setShowDuplicate] = useState(false);
 
-  // Load persisted notes from /api/notes and show in the activity log
-  useEffect(() => {
+  // Time entries state
+  const [timeEntries, setTimeEntries] = useState<Array<{
+    id: string; entryType: string; clockedInAt: string;
+    clockedOutAt?: string; durationMinutes?: number; notes?: string;
+  }>>([]);
+  const [showTimeForm, setShowTimeForm] = useState(false);
+  const [timeFormStart, setTimeFormStart] = useState('09:00');
+  const [timeFormEnd, setTimeFormEnd] = useState('11:30');
+  const [timeFormType, setTimeFormType] = useState<'job' | 'drive'>('job');
+  const [timeFormSaving, setTimeFormSaving] = useState(false);
+
+  const loadTimeEntries = useCallback(async () => {
     if (!id) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiFetch(`/api/notes?entityType=job&entityId=${id}`);
-        if (cancelled || !res.ok) return;
-        const data = await res.json() as { data?: Array<{ id: string; content: string; createdAt: string }> };
-        const noteActivities: JobActivity[] = (data.data ?? []).map(n => ({
-          id: n.id,
-          type: 'note',
-          content: n.content,
-          time: new Date(n.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-          author: 'Technician',
-          authorInitials: 'TC',
-          authorColor: '#475569',
-        }));
-        if (noteActivities.length > 0 && !cancelled) {
-          setActivities(prev => {
-            const existingIds = new Set(prev.map(a => a.id));
-            const fresh = noteActivities.filter(a => !existingIds.has(a.id));
-            return [...fresh, ...prev];
-          });
-        }
-      } catch {
-        // notes load failure is non-critical
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [id, apiFetch]);
+    try {
+      const res = await apiFetch(`/api/time-entries?jobId=${id}`);
+      if (!res.ok) return;
+      const entries = await res.json();
+      setTimeEntries(Array.isArray(entries) ? entries : []);
+    } catch { /* non-fatal */ }
+  }, [id]);
+
+  useEffect(() => { loadTimeEntries(); }, [loadTimeEntries]);
+
+  async function saveTimeEntry() {
+    if (!timeFormStart || !timeFormEnd) return;
+    const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in local time
+    const startISO = new Date(today + 'T' + timeFormStart).toISOString();
+    const endISO   = new Date(today + 'T' + timeFormEnd).toISOString();
+    setTimeFormSaving(true);
+    try {
+      const clockInRes = await apiFetch('/api/time-entries/clock-in', {
+        method: 'POST',
+        body: JSON.stringify({ jobId: id, entryType: timeFormType, clockedInAt: startISO }),
+      });
+      if (!clockInRes.ok) return;
+      await apiFetch('/api/time-entries/clock-out', {
+        method: 'POST',
+        body: JSON.stringify({ clockedOutAt: endISO }),
+      });
+      setShowTimeForm(false);
+      await loadTimeEntries();
+    } catch { /* non-fatal */ } finally {
+      setTimeFormSaving(false);
+    }
+  }
+
+  // Load persisted notes from API on mount / job change
+  const loadNotes = useCallback(async () => {
+    if (!id) return;
+    try {
+      const res = await apiFetch(`/api/notes?entityType=job&entityId=${id}`);
+      if (!res.ok) return;
+      const notes: Array<{ id: string; content: string; authorRole: string; createdAt: string }> = await res.json();
+      const mapped: JobActivity[] = notes.map(n => ({
+        id: n.id,
+        type: 'note' as const,
+        content: n.content,
+        time: new Date(n.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+        author: n.authorRole,
+        authorInitials: n.authorRole[0]?.toUpperCase() ?? 'U',
+        authorColor: '#475569',
+      }));
+      setActivities(mapped);
+    } catch {
+      // non-fatal
+    }
+  }, [id]);
+
+  useEffect(() => { loadNotes(); }, [loadNotes]);
 
   if (isLoading) {
     return (
@@ -1014,10 +1067,30 @@ export function JobDetailView({ id }: { id: string }) {
   const mapsUrl       = `https://maps.google.com/?q=${encodeURIComponent(job.address)}`;
   const hints         = getAIHints(job, materials, customer);
 
-  function addActivity(entry: Partial<JobActivity>) {
-    setActivities(prev => [...prev, {
+  async function addActivity(entry: Partial<JobActivity>) {
+    // Optimistically add to local state
+    const localActivity: JobActivity = {
       id: `new-${Date.now()}`, type: 'note', content: '', time: 'Just now', ...entry,
-    }]);
+    };
+    setActivities(prev => [...prev, localActivity]);
+
+    // Persist note entries to the API
+    if (entry.type === 'note' && entry.content && id) {
+      try {
+        await apiFetch('/api/notes', {
+          method: 'POST',
+          body: JSON.stringify({
+            entityType: 'job',
+            entityId: id,
+            content: entry.content,
+          }),
+        });
+        // Reload from API to get the server-assigned ID and timestamp
+        await loadNotes();
+      } catch {
+        // non-fatal: note remains in local state even if persist fails
+      }
+    }
   }
 
   const secondaryActions = [
@@ -1059,6 +1132,87 @@ export function JobDetailView({ id }: { id: string }) {
         />
       )}
       <MaterialsTable materials={materials} onEdit={() => setModal('materials')} onSuppliers={() => setModal('suppliers')} />
+
+      {/* ── Time Entries ── */}
+      <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <Clock size={14} className="text-slate-500" />
+            <h4 className="text-slate-700">Time Tracking</h4>
+          </div>
+          <div className="flex items-center gap-2">
+            {timeEntries.length > 0 && (
+              <span className="text-xs text-slate-400">
+                Total: {Math.floor(timeEntries.reduce((s, e) => s + (e.durationMinutes ?? 0), 0) / 60)}h{' '}
+                {timeEntries.reduce((s, e) => s + (e.durationMinutes ?? 0), 0) % 60}m
+              </span>
+            )}
+            <button
+              onClick={() => setShowTimeForm(p => !p)}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
+            >
+              <Plus size={12} /> Add entry
+            </button>
+          </div>
+        </div>
+        {showTimeForm && (
+          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              Start time
+              <input type="time" value={timeFormStart} onChange={e => setTimeFormStart(e.target.value)}
+                className="rounded border border-slate-200 px-2 py-1 text-sm" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              End time
+              <input type="time" value={timeFormEnd} onChange={e => setTimeFormEnd(e.target.value)}
+                className="rounded border border-slate-200 px-2 py-1 text-sm" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500">
+              Type
+              <select value={timeFormType} onChange={e => setTimeFormType(e.target.value as 'job' | 'drive')}
+                className="rounded border border-slate-200 px-2 py-1 text-sm">
+                <option value="job">Job work</option>
+                <option value="drive">Travel / Drive</option>
+              </select>
+            </label>
+            <button onClick={saveTimeEntry} disabled={timeFormSaving}
+              className="rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 disabled:opacity-50">
+              {timeFormSaving ? 'Saving...' : 'Save'}
+            </button>
+            <button onClick={() => setShowTimeForm(false)} className="text-xs text-slate-400 hover:text-slate-600">
+              Cancel
+            </button>
+          </div>
+        )}
+        <div className="divide-y divide-slate-100">
+          {timeEntries.length === 0 && !showTimeForm && (
+            <p className="px-4 py-3 text-xs text-slate-400 italic">No time entries yet</p>
+          )}
+          {timeEntries.map(entry => {
+            const start = new Date(entry.clockedInAt);
+            const end = entry.clockedOutAt ? new Date(entry.clockedOutAt) : null;
+            const mins = entry.durationMinutes ?? 0;
+            const label = entry.entryType === 'drive' ? 'Travel' : 'Job work';
+            return (
+              <div key={entry.id} className="flex items-center justify-between px-4 py-2.5">
+                <div>
+                  <p className="text-sm text-slate-700">{label}</p>
+                  <p className="text-xs text-slate-400">
+                    {start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                    {end ? ` – ${end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ' (in progress)'}
+                  </p>
+                </div>
+                {mins > 0 && (
+                  <span className="text-sm text-slate-600 font-medium">
+                    {Math.floor(mins / 60)}h {mins % 60}m
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <SiteMedia
         media={jobMedia}
         onAdd={() => setCameraOpen(true)}
@@ -1136,6 +1290,36 @@ export function JobDetailView({ id }: { id: string }) {
             <div className="flex items-center gap-2 shrink-0">
               {job.priority === 'Urgent' && <StatusBadge status="Urgent" />}
               <StatusBadge status={job.status} />
+              {/* Status transition control */}
+              {job.status !== 'Completed' && job.status !== 'Canceled' && (
+                <select
+                  className="text-xs rounded-lg border border-slate-200 px-2 py-1 text-slate-600 bg-white cursor-pointer hover:border-slate-300"
+                  value=""
+                  onChange={async (e) => {
+                    const newStatus = e.target.value;
+                    if (!newStatus) return;
+                    try {
+                      await transitionJob({ status: newStatus });
+                      // Reload job data to reflect new status in UI
+                      await refetchJob();
+                    } catch {
+                      // non-fatal: reload will reflect actual state
+                    }
+                  }}
+                  title="Change job status"
+                >
+                  <option value="" disabled>Change status…</option>
+                  {/* Only show valid transitions from the current API status */}
+                  {apiJob?.status === 'new' && <option value="scheduled">→ Scheduled</option>}
+                  {apiJob?.status === 'scheduled' && <option value="in_progress">→ In Progress</option>}
+                  {apiJob?.status === 'in_progress' && (
+                    <>
+                      <option value="completed">→ Completed</option>
+                      <option value="scheduled">← Scheduled (reschedule)</option>
+                    </>
+                  )}
+                </select>
+              )}
             </div>
           </div>
 
@@ -1267,7 +1451,7 @@ export function JobDetailView({ id }: { id: string }) {
           authorInitials={tech?.initials ?? 'MO'}
           authorColor={tech?.color ?? '#475569'}
           onClose={() => setModal(null)}
-          onSubmit={entry => { addActivity(entry); setModal(null); }}
+          onSubmit={entry => { void addActivity(entry); setModal(null); }}
         />
       )}
       {modal === 'materials' && (
