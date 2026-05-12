@@ -34,10 +34,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
       - run: npm ci
       - name: Apply migrations
@@ -53,7 +53,7 @@ jobs:
         continue-on-error: true # TODO(VQ-024-followup): remove once pg mode + cassettes are ready
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: voice-quality-nightly-report
           path: packages/api/voice-quality-report.json
