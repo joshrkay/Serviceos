@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { MapPin, User } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   LineItemEditor,
@@ -118,33 +118,32 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
         .filter(Boolean).join(', ')
     : '';
 
-        if (job.customerId) {
-          const custRes = await apiFetch(`/api/customers/${job.customerId}`).catch(() => null);
-          if (custRes?.ok && !cancelled) {
-            const cust = await custRes.json();
-            customerName = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || undefined;
-          }
-        }
+  const customerName = selectedJob?.customer
+    ? (selectedJob.customer.displayName || [selectedJob.customer.firstName, selectedJob.customer.lastName].filter(Boolean).join(' '))
+    : '';
 
-        if (job.locationId) {
-          const locRes = await apiFetch(`/api/locations/${job.locationId}`).catch(() => null);
-          if (locRes?.ok && !cancelled) {
-            const loc = await locRes.json();
-            locationLine = [loc.street1, loc.city, loc.state].filter(Boolean).join(', ');
-            isPrimaryLocation = loc.isPrimary;
-          }
-        }
+  function handleJobChange(jobId: string) {
+    setForm(p => ({ ...p, jobId }));
+    setAiUsed(false);
+  }
 
-        if (!cancelled) {
-          setJobInfo({ ...job, customerName, locationLine, isPrimaryLocation });
-          setJobLookupError(null);
-        }
-      } catch {
-        if (!cancelled) setJobLookupError('Failed to load job');
-      }
-    }, 400);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [form.jobId]);
+  function handleAiSuggest() {
+    setAiLoading(true);
+    setTimeout(() => {
+      const suggestions = AI_SUGGESTIONS.HVAC;
+      const newItems = suggestions.map(s => ({
+        id: makeId(),
+        description: s.description,
+        quantity: s.qty,
+        unitPriceDollars: s.price,
+        taxable: false,
+        category: 'labor' as const,
+      }));
+      setForm(p => ({ ...p, items: [...p.items, ...newItems] }));
+      setAiLoading(false);
+      setAiUsed(true);
+    }, 1200);
+  }
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {

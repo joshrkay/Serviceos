@@ -14,7 +14,6 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { customers } from '../../data/mock-data';
-import { apiFetch } from '../../utils/api-fetch';
 import { useNavigate } from 'react-router';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
@@ -250,6 +249,9 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
     if (!hint.lineItem) return;
     setAccepting(hint.id);
     try {
+      // estimate_line_items.id is a UUID; the pg repo wipes-and-reinserts on
+      // update, so generating fresh UUIDs (instead of synthetic "li-..." ids)
+      // keeps the PATCH payload valid against the Postgres schema.
       const newItem = {
         description: hint.lineItem.description,
         quantity: hint.lineItem.qty,
@@ -257,7 +259,7 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
         totalCents: Math.round(hint.lineItem.qty * hint.lineItem.rate * 100),
         sortOrder: items.length,
         taxable: false,
-        id: `li-${Date.now()}`,
+        id: crypto.randomUUID(),
       };
       const res = await apiFetch(`/api/estimates/${estimateId}`, {
         method: 'PATCH',
@@ -269,7 +271,7 @@ function AIPricingSuggestions({ estimateId, items, onLineItemAccepted }: {
             totalCents: Math.round(item.qty * item.rate * 100),
             sortOrder: i,
             taxable: false,
-            id: `li-existing-${i}`,
+            id: crypto.randomUUID(),
           })),
           newItem,
         ]}),
@@ -1075,6 +1077,7 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
 ];
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
+  const navigate = useNavigate();
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
