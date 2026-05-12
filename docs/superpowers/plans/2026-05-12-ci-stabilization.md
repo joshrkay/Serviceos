@@ -254,7 +254,7 @@ the bump and watching for `node --env-file-if-exists` / `ts-node` /
 - [ ] **C1.4** — Add `curl -sf` pre-flight smoke step in `e2e.yml`.
 - [ ] **C1.5** — `grep` audit of top-level imports in `e2e/`.
 - [ ] **C1.6** — Re-run on throwaway PR; confirm smoke green in 4–8 min.
-- [ ] **C4.1** — Bump actions to @v5, node to 22 across all six workflows.
+- [x] **C4.1** — Bump actions to @v5, node to 22 across all six workflows.
 - [ ] **C4.2** — Validate full suite on `main`; do this before 2026-06-02.
 
 ---
