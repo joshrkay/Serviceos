@@ -743,20 +743,15 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
     let cancelled = false;
     apiFetch(`/api/jobs/${est.jobId}`)
       .then(r => r.ok ? r.json() : null)
-      .then(async (job) => {
+      .then((job) => {
         if (!job || cancelled) return;
-        const [custRes, locRes] = await Promise.all([
-          job.customerId ? apiFetch(`/api/customers/${job.customerId}`).catch(() => null) : Promise.resolve(null),
-          job.locationId ? apiFetch(`/api/locations/${job.locationId}`).catch(() => null) : Promise.resolve(null),
-        ]);
-        if (cancelled) return;
-        if (custRes?.ok) {
-          const cust = await custRes.json();
+        const cust = job.customer;
+        if (cust && job.customerId) {
           const name = cust.displayName || [cust.firstName, cust.lastName].filter(Boolean).join(' ') || 'Customer';
           setEnrichedCustomer({ name, id: job.customerId, phone: cust.primaryPhone, email: cust.email });
         }
-        if (locRes?.ok) {
-          const loc = await locRes.json();
+        const loc = cust?.locations?.find((l: { id: string }) => l.id === job.locationId);
+        if (loc) {
           setEnrichedLocation([loc.street1, loc.city, loc.state].filter(Boolean).join(', '));
         }
       })

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
   Bell, CheckCircle, X, MapPin, Briefcase,
@@ -47,10 +47,8 @@ function buildWeekDays(today: Date) {
   });
 }
 
-const TIME_FORMATTER = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' });
-
 function toTimeLabel(iso: string) {
-  return TIME_FORMATTER.format(new Date(iso));
+  return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
 function overlap(a: ApiAppointment, b: ApiAppointment): boolean {
@@ -262,31 +260,18 @@ export function SchedulePage() {
   const [loading,     setLoading]     = useState(false);
   const [delayApptId, setDelayApptId] = useState<string | null>(null);
   const [detailAppt,  setDetailAppt]  = useState<EnrichedAppointment | null>(null);
-  // Monotonic request id; we only apply results from the latest in-flight
-  // load. Without this, switching dates while a slower earlier fetch is
-  // still resolving can overwrite the current day's schedule with stale data.
-  const loadRequestIdRef = useRef(0);
 
   const loadAppointments = useCallback(async () => {
-    const requestId = ++loadRequestIdRef.current;
-    const isLatest = () => loadRequestIdRef.current === requestId;
     setLoading(true);
     try {
-      const from = `${selectedIso}T00:00:00.000Z`;
-      const to   = `${selectedIso}T23:59:59.999Z`;
+      const start = new Date(selectedIso + 'T00:00:00');
+      const end   = new Date(selectedIso + 'T23:59:59.999');
+      const from  = start.toISOString();
+      const to    = end.toISOString();
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
-      if (!isLatest()) return;
-      if (!res.ok) {
-        // Clear stale state on failure so the user doesn't keep seeing the
-        // previous day's schedule after switching dates with a failed fetch.
-        setAppointments([]);
-        setEnriched([]);
-        setLoading(false);
-        return;
-      }
+      if (!res.ok) { setLoading(false); return; }
       const body = await res.json();
-      if (!isLatest()) return;
-      const list: ApiAppointment[] = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+      const list: ApiAppointment[] = body.data ?? body ?? [];
       setAppointments(list);
 
       // Enrich each appointment with job/customer data
@@ -329,18 +314,12 @@ export function SchedulePage() {
         ),
       }));
 
-      if (!isLatest()) return;
       setEnriched(withConflicts);
     } catch {
-      // Network/CORS rejections need the same clear-stale-data treatment
-      // as a non-OK HTTP response — otherwise a failed day-switch leaves
-      // the previous day's appointments visible against the new date.
-      if (isLatest()) {
-        setAppointments([]);
-        setEnriched([]);
-      }
+      setAppointments([]);
+      setEnriched([]);
     } finally {
-      if (isLatest()) setLoading(false);
+      setLoading(false);
     }
   }, [selectedIso]);
 
@@ -462,7 +441,7 @@ export function SchedulePage() {
       {!loading && (
         <div className="flex flex-col gap-3">
           {displayed
-            .sort((a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime())
+            .sort((a, b) => a.scheduledStart.localeCompare(b.scheduledStart))
             .map(appt => {
               const tech = technicians.find(t => t.name === appt.technicianName);
               const techColor = tech?.color ?? '#94a3b8';
