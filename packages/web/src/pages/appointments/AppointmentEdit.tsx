@@ -4,6 +4,94 @@ import { RescheduleDialog } from '../../components/appointments/RescheduleDialog
 import { CancelDialog } from '../../components/appointments/CancelDialog';
 import { ReassignDialog } from '../../components/appointments/ReassignDialog';
 
+const DELAY_OPTIONS = [5, 10, 15, 20, 30, 45, 60] as const;
+type DelayMinutes = typeof DELAY_OPTIONS[number];
+
+function NotifyDelayDialog({
+  appointmentId,
+  onDone,
+  onCancel,
+}: {
+  appointmentId: string;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [minutes, setMinutes] = useState<DelayMinutes>(20);
+  const [status, setStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  async function send() {
+    setStatus('sending');
+    setErrorMsg(null);
+    try {
+      const res = await apiFetch(`/api/appointments/${appointmentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'running_late', delayMinutes: minutes }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { message?: string }).message ?? `HTTP ${res.status}`);
+      }
+      setStatus('done');
+      setTimeout(onDone, 1200);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to send delay notice');
+      setStatus('error');
+    }
+  }
+
+  if (status === 'done') {
+    return (
+      <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+        Delay notice queued — next customer will receive an SMS.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+      <p className="text-sm font-medium text-amber-900">Notify next customer of delay</p>
+      <div className="flex flex-wrap gap-2">
+        {DELAY_OPTIONS.map((opt) => (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => setMinutes(opt)}
+            className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${
+              minutes === opt
+                ? 'border-amber-500 bg-amber-500 text-white'
+                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            {opt} min
+          </button>
+        ))}
+      </div>
+      {errorMsg && (
+        <p className="text-xs text-red-600">{errorMsg}</p>
+      )}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={status === 'sending'}
+          onClick={send}
+          className="rounded-lg bg-amber-600 text-white text-sm px-4 py-2 hover:bg-amber-700 disabled:opacity-60"
+        >
+          {status === 'sending' ? 'Sending…' : 'Confirm delay'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface Appointment {
   id: string;
   jobId: string;
@@ -13,7 +101,7 @@ interface Appointment {
   assignedUserId?: string;
 }
 
-type DialogMode = 'reschedule' | 'cancel' | 'reassign' | null;
+type DialogMode = 'reschedule' | 'cancel' | 'reassign' | 'delay' | null;
 
 export interface AppointmentEditProps {
   appointmentId: string;
@@ -113,6 +201,13 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
           </button>
           <button
             type="button"
+            onClick={() => setMode('delay')}
+            className="rounded-lg border border-amber-400 bg-amber-50 text-amber-800 text-sm px-4 py-2 hover:bg-amber-100"
+          >
+            Notify delay
+          </button>
+          <button
+            type="button"
             onClick={() => setMode('cancel')}
             className="rounded-lg bg-red-600 text-white text-sm px-4 py-2 hover:bg-red-700"
           >
@@ -151,6 +246,14 @@ export function AppointmentEdit({ appointmentId, onSaved, onBack }: AppointmentE
           appointmentId={appointmentId}
           initialAssignedUserId={data.assignedUserId}
           onSaved={handleSaved}
+          onCancel={() => setMode(null)}
+        />
+      )}
+
+      {mode === 'delay' && (
+        <NotifyDelayDialog
+          appointmentId={appointmentId}
+          onDone={handleSaved}
           onCancel={() => setMode(null)}
         />
       )}

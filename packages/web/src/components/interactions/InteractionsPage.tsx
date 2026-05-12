@@ -1,13 +1,6 @@
-/**
- * /interactions — Call log page.
- *
- * Shows completed AI voice sessions for the tenant with the linked
- * customer name, outcome badge, call duration, and a transcript
- * drilldown drawer. Satisfies QA checklist 15.8 and 15.9.
- */
-
 import { useState, useEffect, useCallback } from 'react';
 import { Phone, User, Clock, ChevronRight, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
+import { apiFetch } from '../../utils/api-fetch';
 import {
   listInteractions,
   getInteraction,
@@ -349,6 +342,126 @@ export function InteractionsPage() {
           onClose={() => setSelectedId(null)}
         />
       )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DISPATCH LOG TAB — backed by /api/interactions (message_dispatches)
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface MessageDispatch {
+  id: string;
+  entityType: string;
+  entityId: string;
+  channel: 'sms' | 'email';
+  recipient: string;
+  provider: string;
+  providerMessageId?: string;
+  status: string;
+  errorMessage?: string;
+  sentAt: string;
+  deliveredAt?: string;
+}
+
+const CHANNEL_BADGE: Record<string, string> = {
+  sms:   'bg-blue-100 text-blue-700',
+  email: 'bg-violet-100 text-violet-700',
+};
+const STATUS_BADGE: Record<string, string> = {
+  sent:      'bg-green-100 text-green-700',
+  delivered: 'bg-emerald-100 text-emerald-700',
+  failed:    'bg-red-100 text-red-700',
+  bounced:   'bg-amber-100 text-amber-700',
+};
+const ENTITY_LABEL: Record<string, string> = {
+  estimate:                 'Estimate',
+  invoice:                  'Invoice',
+  appointment_confirmation: 'Appt Confirmation',
+  delay_notice:             'Delay Notice',
+};
+
+function DispatchLogTab() {
+  const [dispatches, setDispatches] = useState<MessageDispatch[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    apiFetch('/api/interactions?limit=50')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled) {
+          setDispatches(data.dispatches ?? []);
+          setTotal(data.total ?? 0);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-slate-400 py-8">
+        <RefreshCw size={14} className="animate-spin" />
+        <span className="text-sm">Loading dispatch log…</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <strong>Error loading dispatch log:</strong> {error}
+      </div>
+    );
+  }
+
+  if (dispatches.length === 0) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+        No outbound messages recorded yet. Send an estimate or invoice to see dispatch records here.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-slate-400">{total} total dispatch{total !== 1 ? 'es' : ''}</p>
+      {dispatches.map((d) => (
+        <div key={d.id} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-100">
+            <div className="flex items-center gap-2">
+              <span className={`rounded-full px-2 py-0.5 text-xs ${CHANNEL_BADGE[d.channel] ?? 'bg-slate-100 text-slate-600'}`}>
+                {d.channel.toUpperCase()}
+              </span>
+              <span className="text-xs text-slate-500">{ENTITY_LABEL[d.entityType] ?? d.entityType}</span>
+            </div>
+            <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[d.status] ?? 'bg-slate-100 text-slate-500'}`}>
+              {d.status}
+            </span>
+          </div>
+          <div className="px-4 py-3 flex flex-col gap-1">
+            <p className="text-sm font-medium text-slate-800 truncate">{d.recipient}</p>
+            {d.providerMessageId && (
+              <p className="text-xs text-slate-400 font-mono truncate">{d.providerMessageId}</p>
+            )}
+            <p className="text-xs text-slate-400">
+              {new Date(d.sentAt).toLocaleString()} · {d.provider}
+            </p>
+            {d.errorMessage && (
+              <p className="text-xs text-red-600 mt-1">{d.errorMessage}</p>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

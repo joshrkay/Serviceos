@@ -10,7 +10,7 @@ import { normalizeDispatchProvider } from './provider-names';
  * ("did the customer receive their estimate?").
  */
 
-export type DispatchEntityType = 'estimate' | 'invoice';
+export type DispatchEntityType = 'estimate' | 'invoice' | 'appointment_confirmation' | 'delay_notice';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 
@@ -43,6 +43,17 @@ export interface CreateDispatchInput {
   idempotencyKey?: string;
 }
 
+export interface DispatchListOptions {
+  limit?: number;
+  offset?: number;
+  entityType?: DispatchEntityType;
+}
+
+export interface DispatchListResult {
+  dispatches: MessageDispatch[];
+  total: number;
+}
+
 export interface DispatchRepository {
   create(input: CreateDispatchInput): Promise<MessageDispatch>;
   findById(tenantId: string, id: string): Promise<MessageDispatch | null>;
@@ -58,6 +69,7 @@ export interface DispatchRepository {
     deliveredAt?: Date,
     errorMessage?: string
   ): Promise<MessageDispatch | null>;
+  listByTenant(tenantId: string, options?: DispatchListOptions): Promise<DispatchListResult>;
 }
 
 export class InMemoryDispatchRepository implements DispatchRepository {
@@ -121,6 +133,19 @@ export class InMemoryDispatchRepository implements DispatchRepository {
     };
     this.rows.set(id, updated);
     return { ...updated };
+  }
+
+  async listByTenant(tenantId: string, options?: DispatchListOptions): Promise<DispatchListResult> {
+    let rows = Array.from(this.rows.values())
+      .filter((r) => r.tenantId === tenantId);
+    if (options?.entityType) {
+      rows = rows.filter((r) => r.entityType === options.entityType);
+    }
+    rows.sort((a, b) => b.sentAt.getTime() - a.sentAt.getTime());
+    const total = rows.length;
+    const offset = options?.offset ?? 0;
+    const limit = options?.limit ?? 50;
+    return { dispatches: rows.slice(offset, offset + limit).map((r) => ({ ...r })), total };
   }
 }
 
@@ -201,6 +226,39 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
         [id, tenantId, status, deliveredAt ?? null, errorMessage ?? null]
       );
       return rows.length ? mapRow(rows[0]) : null;
+    });
+  }
+
+  async listByTenant(tenantId: string, options?: DispatchListOptions): Promise<DispatchListResult> {
+    return this.withTenant(tenantId, async (client) => {
+      const limit = options?.limit ?? 50;
+      const offset = options?.offset ?? 0;
+      const entityTypeFilter = options?.entityType;
+
+      const countParams: unknown[] = [tenantId];
+      const dataParams: unknown[] = [tenantId];
+      let whereClause = 'WHERE tenant_id = $1';
+
+      if (entityTypeFilter) {
+        countParams.push(entityTypeFilter);
+        dataParams.push(entityTypeFilter);
+        whereClause += ` AND entity_type = $${countParams.length}`;
+      }
+
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS total FROM message_dispatches ${whereClause}`,
+        countParams,
+      );
+      const total: number = countResult.rows[0]?.total ?? 0;
+
+      dataParams.push(limit, offset);
+      const { rows } = await client.query(
+        `SELECT * FROM message_dispatches ${whereClause}
+         ORDER BY sent_at DESC
+         LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+        dataParams,
+      );
+      return { dispatches: rows.map(mapRow), total };
     });
   }
 }
