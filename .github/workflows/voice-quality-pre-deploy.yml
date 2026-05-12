@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '20'
           cache: 'npm'
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -55,7 +55,7 @@ jobs:
         run: npm run voice-quality:layer2 --workspace=packages/api
       - name: Upload Layer 2 report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: voice-quality-layer2-report
           path: |
