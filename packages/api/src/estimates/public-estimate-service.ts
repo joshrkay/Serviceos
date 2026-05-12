@@ -290,7 +290,6 @@ export class PublicEstimateService {
 
   private async toView(estimate: Estimate): Promise<PublicEstimateView> {
     const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
-    const customer = job
     const [customer, settings, locs] = await Promise.all([
       job ? this.deps.customerRepo.findById(estimate.tenantId, job.customerId) : Promise.resolve(null),
       this.deps.settingsRepo.findByTenant(estimate.tenantId),

@@ -103,7 +103,6 @@ function buildCustomerCompat(api: ApiJobDetail['customer']): Customer | undefine
       : (api.locations?.[0]?.street1 ?? ''),
     notes: api.communicationNotes,
     serviceType: 'HVAC',
-    notes: api.communicationNotes ?? api.notes,
     locations: [],
     jobCount: 0,
     openJobs: 0,
