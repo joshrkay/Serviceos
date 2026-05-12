@@ -1,0 +1,72 @@
+import { DelayNotificationService } from './delay-notifications';
+import { MessageDeliveryProvider } from './delivery-provider';
+import { DispatchRepository } from './dispatch-repository';
+
+/**
+ * Real implementation of DelayNotificationService that routes delay notices
+ * through the shared MessageDeliveryProvider (Twilio SMS / SendGrid email)
+ * and records a message_dispatches row for audit and the /interactions page.
+ */
+export class TwilioDelayNotificationService implements DelayNotificationService {
+  constructor(
+    private readonly delivery: MessageDeliveryProvider,
+    private readonly dispatchRepo: DispatchRepository,
+  ) {}
+
+  async sendDelayNotice(request: {
+    tenantId: string;
+    customerId: string;
+    channel: 'sms' | 'email';
+    destination: string;
+    message: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ providerMessageId?: string }> {
+    const entityId =
+      typeof request.metadata?.appointmentId === 'string'
+        ? request.metadata.appointmentId
+        : request.customerId;
+
+    if (request.channel === 'sms') {
+      const result = await this.delivery.sendSms({
+        to: request.destination,
+        body: request.message,
+        tenantId: request.tenantId,
+        idempotencyKey: request.idempotencyKey,
+      });
+      await this.dispatchRepo.create({
+        tenantId: request.tenantId,
+        entityType: 'delay_notice',
+        entityId,
+        channel: 'sms',
+        recipient: request.destination,
+        provider: result.provider,
+        providerMessageId: result.providerMessageId,
+        status: 'sent',
+        idempotencyKey: request.idempotencyKey,
+      });
+      return { providerMessageId: result.providerMessageId };
+    }
+
+    const result = await this.delivery.sendEmail({
+      to: request.destination,
+      subject: 'Update about your upcoming appointment',
+      text: request.message,
+      html: `<p>${request.message.replace(/\n/g, '<br>')}</p>`,
+      tenantId: request.tenantId,
+      idempotencyKey: request.idempotencyKey,
+    });
+    await this.dispatchRepo.create({
+      tenantId: request.tenantId,
+      entityType: 'delay_notice',
+      entityId,
+      channel: 'email',
+      recipient: request.destination,
+      provider: result.provider,
+      providerMessageId: result.providerMessageId,
+      status: 'sent',
+      idempotencyKey: request.idempotencyKey,
+    });
+    return { providerMessageId: result.providerMessageId };
+  }
+}

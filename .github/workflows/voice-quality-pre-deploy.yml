@@ -42,8 +42,8 @@ jobs:
       VOICE_QUALITY_REPO: memory
       VOICE_QUALITY_COST_CAP_CENTS: '1000'  # $10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'

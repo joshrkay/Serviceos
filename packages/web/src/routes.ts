@@ -19,6 +19,7 @@ import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
 import { IntakeFormPage } from './components/customer/IntakeFormPage';
 import { FeedbackPage } from './components/customer/FeedbackPage';
 import { InteractionsPage } from './components/interactions/InteractionsPage';
+import { DispatchLogPage } from './components/interactions/DispatchLogPage';
 import { LeadList } from './pages/leads/LeadList';
 import { LeadDetail } from './pages/leads/LeadDetail';
 import { LeadCreate } from './pages/leads/LeadCreate';
@@ -157,6 +158,7 @@ export const router = createBrowserRouter([
       { path: 'contracts',      Component: MaintenanceContractsPage },
       { path: 'contracts/:id',  Component: ContractDetailPage },
       { path: 'interactions',   Component: InteractionsPage },
+      { path: 'interactions/dispatch', Component: DispatchLogPage },
       { path: 'settings',       Component: SettingsPage    },
       { path: 'settings/templates', Component: TemplatesPage   },
       { path: 'settings/price-book', Component: PriceBookPage },

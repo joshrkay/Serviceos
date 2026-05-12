@@ -189,6 +189,42 @@ export function createAppointmentRouter(
     requirePermission('appointments:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
+        // `running_late` is a virtual status emitted by the technician GPS
+        // engine. It is not a persisted AppointmentStatus — instead it
+        // triggers the delay notification coordinator so the next customer
+        // receives an SMS and a timeline entry is written.
+        if (req.body?.status === 'running_late') {
+          const appointment = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
+          if (!appointment) {
+            res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+            return;
+          }
+          const delayMinutes: number =
+            typeof req.body.delayMinutes === 'number' && req.body.delayMinutes > 0
+              ? req.body.delayMinutes
+              : 20;
+          const history = await timelineRepo.findByJob(req.auth!.tenantId, appointment.jobId);
+          const delayVersion = history.filter(
+            (e) => e.eventType === JOB_TIMELINE_EVENT_TYPES.DELAY_ACKNOWLEDGED && e.metadata?.isRunningBehind === true,
+          ).length;
+          try {
+            await options?.delayNotificationCoordinator?.enqueueDelayNotice({
+              tenantId: req.auth!.tenantId,
+              currentAppointmentId: appointment.id,
+              delayVersion,
+              delayMinutes,
+            });
+          } catch (notificationErr) {
+            // eslint-disable-next-line no-console
+            console.warn('Failed to enqueue delay notification from PUT', {
+              appointmentId: appointment.id,
+              error: notificationErr instanceof Error ? notificationErr.message : String(notificationErr),
+            });
+          }
+          res.json({ appointmentId: appointment.id, delayMinutes, queued: true });
+          return;
+        }
+
         const updates = { ...req.body };
         if (updates.scheduledStart) updates.scheduledStart = new Date(updates.scheduledStart);
         if (updates.scheduledEnd) updates.scheduledEnd = new Date(updates.scheduledEnd);
