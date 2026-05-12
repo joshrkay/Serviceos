@@ -12,6 +12,7 @@ import {
 } from '@stripe/react-stripe-js';
 import { loadStripe, Stripe } from '@stripe/stripe-js';
 import { useInvoiceStatus } from '../../hooks/useInvoiceStatus';
+import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
 
 // ─── API types ──────────────────────────────────────────────────────────────
 
@@ -69,23 +70,7 @@ function formatDate(iso?: string) {
 // resolves to null and we fall back to a "Stripe not configured" message.
 
 function getPublishableKey(): string | undefined {
-  // import.meta.env is replaced by Vite at build time. Guard the access so
-  // the test environment (where import.meta.env may not be defined) does
-  // not crash on first import.
-  try {
-    const fromImport = (import.meta as { env?: Record<string, string | undefined> })
-      .env?.VITE_STRIPE_PUBLISHABLE_KEY;
-    if (fromImport) return fromImport;
-  } catch {
-    /* import.meta unavailable (Node test) — fall through */
-  }
-  // Test fallback: vitest's `vi.stubEnv` writes to process.env. Vite
-  // strips this branch in production builds via dead-code elimination
-  // (process.env is undefined on the client there).
-  if (typeof process !== 'undefined' && process.env) {
-    return process.env.VITE_STRIPE_PUBLISHABLE_KEY;
-  }
-  return undefined;
+  return getRuntimeConfigValue('VITE_STRIPE_PUBLISHABLE_KEY');
 }
 
 // Stripe's docs recommend calling `loadStripe` once at module level,

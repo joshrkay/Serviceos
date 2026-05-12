@@ -4,9 +4,12 @@ import { ClerkProvider } from '@clerk/clerk-react';
 import { RouterProvider } from 'react-router';
 import { router } from './routes';
 import { AuthTokenBridge } from './components/auth/AuthTokenBridge';
+import { getRuntimeConfigValue } from './lib/runtimeConfig';
 import './index.css';
 
-const CLERK_PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string;
+const CLERK_PUBLISHABLE_KEY = getRuntimeConfigValue(
+  'VITE_CLERK_PUBLISHABLE_KEY'
+) as string | undefined;
 
 if (!CLERK_PUBLISHABLE_KEY) {
   throw new Error('VITE_CLERK_PUBLISHABLE_KEY is required — add it to your .env file');

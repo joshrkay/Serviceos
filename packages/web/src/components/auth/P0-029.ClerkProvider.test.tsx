@@ -179,10 +179,10 @@ describe('P0-029 ClerkProvider integration — sign-out', () => {
 });
 
 describe('P0-029 ClerkProvider integration — env requirement', () => {
-  it('main.tsx requires VITE_CLERK_PUBLISHABLE_KEY at build time', async () => {
-    // Source-level assertion: the entry file must throw when the key is absent.
-    // We read the file rather than executing main.tsx (which would mount the
-    // real router). This protects against accidental removal of the guard.
+  it('main.tsx requires VITE_CLERK_PUBLISHABLE_KEY when no runtime or build config is present', async () => {
+    // Source-level assertion: the entry file must still hard-fail when the key
+    // is absent. We read the file rather than executing main.tsx (which would
+    // mount the real router).
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
     const entry = await fs.readFile(
@@ -190,6 +190,7 @@ describe('P0-029 ClerkProvider integration — env requirement', () => {
       'utf8'
     );
     expect(entry).toMatch(/VITE_CLERK_PUBLISHABLE_KEY/);
+    expect(entry).toMatch(/getRuntimeConfigValue/);
     expect(entry).toMatch(/throw new Error/);
     expect(entry).toMatch(/ClerkProvider/);
   });
