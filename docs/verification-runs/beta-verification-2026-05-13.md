@@ -317,7 +317,7 @@ sandbox. Re-run from a workstation with:
 
 | ID | Section | Test | Symptom | Evidence | Owner |
 |----|---------|------|---------|----------|-------|
-| BUG-SEED-01 | Settings/Vertical | startup seed | `vertical_packs_type_key` unique violation logged for `hvac-v1` and `plumbing-v1` on every cold start | API container logs at 2026-05-12 ~20:05 PT | API team |
+| BUG-SEED-01 | Settings/Vertical | startup seed | `vertical_packs_type_key` unique violation logged for `hvac-v1` and `plumbing-v1` on every cold start | API container logs at 2026-05-12 ~20:05 PT | **Fixed in this PR** — `PgVerticalPackRegistry.register()` now uses `ON CONFLICT (type) DO NOTHING` + SELECT fallback, preserving the existing row (and any tenant customization) on re-seed |
 | BUG-PAY-01 | Invoices | `/api/invoices/:id/send` | `STRIPE_SECRET_KEY` missing → MockPaymentLinkProvider returns `https://pay.mock.com/...` URLs that route nowhere | API startup log line | Ops (env var) |
 
 ---

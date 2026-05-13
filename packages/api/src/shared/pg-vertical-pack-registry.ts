@@ -84,11 +84,18 @@ export class PgVerticalPackRegistry
 
   async register(pack: VerticalPack): Promise<VerticalPack> {
     return this.withClient(async (client) => {
-      const result = await client.query(
+      // Idempotent seed: on the unique `type` constraint, leave the existing
+      // row untouched (preserves any subsequent tenant customization) and
+      // return it. Callers like seedCanonicalVerticalPacks() invoke this on
+      // every API startup, so plain INSERT would log a unique-key violation
+      // every cold start (see BUG-SEED-01 in
+      // docs/verification-runs/beta-verification-2026-05-13.md).
+      const inserted = await client.query(
         `INSERT INTO vertical_packs (
           id, type, name, version, description, is_active,
           categories, terminology, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (type) DO NOTHING
         RETURNING *`,
         [
           pack.id,
@@ -103,7 +110,14 @@ export class PgVerticalPackRegistry
           pack.updatedAt,
         ]
       );
-      return rowToPackV2(result.rows[0]);
+      if (inserted.rows.length > 0) {
+        return rowToPackV2(inserted.rows[0]);
+      }
+      const existing = await client.query(
+        `SELECT * FROM vertical_packs WHERE type = $1`,
+        [pack.packId]
+      );
+      return rowToPackV2(existing.rows[0]);
     });
   }
 
