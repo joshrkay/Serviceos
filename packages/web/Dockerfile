@@ -1,4 +1,3 @@
-cat > packages/web/Dockerfile << 'EOF'
 FROM node:20-alpine AS builder
 WORKDIR /app
 
@@ -31,4 +30,3 @@ COPY packages/web/render-runtime-config.sh /docker-entrypoint.d/40-render-runtim
 RUN chmod +x /docker-entrypoint.d/40-render-runtime-config.sh
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
-EOF
