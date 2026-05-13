@@ -11,4 +11,4 @@ restartPolicyMaxRetries = 10
 # @serviceos/web service has PORT=8080 as a service-level variable;
 # nginx.conf.template uses `listen ${PORT};` so nginx listens on 8080.
 # This line must match the service-level PORT.
-port = 8080
+port = 80
