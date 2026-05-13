@@ -59,15 +59,21 @@ via a direct push, not via PR. Of those five:
 | `df8a097` | "Fix: Add port=3000 and explicit PORT/NODE_ENV" | **Re-introduces a known regression** that `ff351f7` (already on main) explicitly reverted with stated reason. See `BUG-INFRA-02` below. |
 | `e896212` | "Use deploy.environment section for PORT and NODE_ENV variables" | Compounds `df8a097`; hardcodes `NODE_ENV=development` for the staging container. |
 | `2dc358d` | "Set NODE_ENV to development to avoid DATABASE_URL requirement" | Sets `NODE_ENV=development` on staging. Risk: production-mode safety checks (`DATABASE_URL` presence, `STRIPE_SECRET_KEY` enforcement) are bypassed in staging. |
-| `2f28b06` | "Web Dockerfile - include root npm ci for devDependencies" | Modifies a Dockerfile (`packages/web/Dockerfile`) that **is not used by Railway** — `railway.toml` builds the root `Dockerfile` with target `api`, and the web service points at the same root Dockerfile's `web` stage. The change is dead code on Railway's pipeline. |
-| `6bece55` | "Correct Dockerfile content (remove malformed syntax)" | Re-writes the same dead-code Dockerfile. |
+| `2f28b06` | "Web Dockerfile - include root npm ci for devDependencies" | Modifies `packages/web/Dockerfile`. **Correction (added 2026-05-13 follow-up):** this file IS live — `packages/web/railway.toml` (a per-service Railway config I missed in the first pass) builds the `@serviceos/web` service from it. The change appears net-positive (PR preview deploys succeed). The earlier "dead code" claim under `BUG-DEAD-DOCKERFILE` is retracted. |
+| `6bece55` | "Correct Dockerfile content (remove malformed syntax)" | Same file as above — modifies the live web service Dockerfile. PR preview still deploys, so the change is functional. |
 
-**Net impact on the Railway deploy:** the `port = 3000` line in `railway.toml`
-is once again present (see `BUG-INFRA-02`). Whether the deployment is
-currently broken in production depends on which env var wins at runtime
-(Railway service variables vs. `[deploy.environment]` block in railway.toml).
-**This cannot be confirmed from the sandbox** — re-run from a host that can
-reach `serviceosapi-development.up.railway.app` to verify.
+**Net impact on the Railway deploy (updated after follow-up commit `1c10a23`):**
+`BUG-INFRA-02` is now reverted on this branch — `railway.toml` is restored to
+the `ff351f7` shape (no hardcoded `port = 3000`, no `[deploy.environment]`
+block). Railway's service-level env vars (container `PORT`, `NODE_ENV`,
+`DATABASE_URL`, etc.) govern again, which is what the API code already
+expects. The PR preview redeploy after `1c10a23` will be the live confirmation.
+
+For the `packages/web/Dockerfile` changes (`2f28b06`, `6bece55`): retracted
+the prior "dead code" finding. The file IS live — `packages/web/railway.toml`
+builds the `@serviceos/web` service from it. Changes appear functional based
+on the PR preview having deployed successfully under the prior state. Leaving
+them in place.
 
 ---
 
@@ -173,7 +179,7 @@ lines 278–299) — the recipe is unchanged.
 
 | ID | Section | Test | Symptom | Evidence | Owner |
 |----|---------|------|---------|----------|-------|
-| `BUG-INFRA-02` | Infra | `railway.toml` | `port = 3000` plus `[deploy.environment]` `PORT="3000"`/`NODE_ENV="development"` were re-introduced on this branch via `df8a097`/`e896212`/`2dc358d` and merged to main. The prior session's `ff351f7` (also on main) had explicitly reverted these and documented WHY — Railway's container env sets `PORT=8080`, the app reads `process.env.PORT`, so hard-coding the edge port to 3000 splits traffic from the app's actual listener. Whether the live deploy is currently broken depends on which env wins; the prior session's deploy logs showed the app on 8080 after this branch's changes. | `git log -p df8a097..6bece55 -- railway.toml`; `docs/verification-runs/beta-verification-2026-05-13.md` lines 31–37 | **Recommend reverting** `df8a097`, `e896212`, `2dc358d` (railway.toml-only commits) once a live test from a non-sandbox host confirms the regression bites. Hold the revert until that test is performed — the prior run showed Railway-side logs of 200s, so the regression may have been benign in practice. |
+| `BUG-INFRA-02` | Infra | `railway.toml` | `port = 3000` plus `[deploy.environment]` `PORT="3000"`/`NODE_ENV="development"` were re-introduced on this branch via `df8a097`/`e896212`/`2dc358d` and merged to main. The prior session's `ff351f7` (also on main) had explicitly reverted these and documented WHY — Railway's container env sets `PORT=8080`, the app reads `process.env.PORT`, so hard-coding the edge port to 3000 splits traffic from the app's actual listener. | `git log -p df8a097..6bece55 -- railway.toml`; `docs/verification-runs/beta-verification-2026-05-13.md` lines 31–37 | **Reverted on this branch in commit `1c10a23` (PR #366).** Restores railway.toml to the ff351f7 shape: no hardcoded `port`, no `[deploy.environment]` block. Railway's service-level env vars again govern container PORT + NODE_ENV. PR preview deploy result on the merged PR will confirm the revert is safe. |
 
 ### High — core lead-to-cash regression
 
@@ -185,7 +191,7 @@ lines 278–299) — the recipe is unchanged.
 
 | ID | Section | Test | Symptom | Evidence | Owner |
 |----|---------|------|---------|----------|-------|
-| `BUG-DEAD-DOCKERFILE` | Infra | `packages/web/Dockerfile` | Modified by `2f28b06` and `6bece55`. This file is NOT referenced by `railway.toml` (which targets the root `Dockerfile` `api` stage; the web service uses the same root Dockerfile's `web` stage). The edits don't affect deployed behavior either way. Delete the file or wire it into the deploy. | `cat railway.toml`; `git log packages/web/Dockerfile` | Infra |
+| ~~`BUG-DEAD-DOCKERFILE`~~ | ~~Infra~~ | ~~`packages/web/Dockerfile`~~ | **Retracted (follow-up 2026-05-13).** Original claim was that `packages/web/Dockerfile` is unused. That's wrong — `packages/web/railway.toml` (a per-service config that the first pass missed) explicitly builds the `@serviceos/web` Railway service from this file. The recent edits (`2f28b06`, `6bece55`) modify the live web build path; PR #366's preview deploy succeeds with them in place, so they're functional. No action needed. | n/a | Closed (false positive) |
 | `BUG-PAY-01` (carried) | Invoices | startup | `STRIPE_SECRET_KEY missing — using MockPaymentLinkProvider` in staging. Fine for QA, blocker before any paying customer. | API startup log | Ops env-var |
 | `BUG-SEED-01` (RESOLVED) | Settings | startup seed | `vertical_packs_type_key` unique violation logged for `hvac-v1`/`plumbing-v1`. **Fixed in `1a719af`** (on main). | — | Resolved |
 | `RLS-PORTAL-SESSIONS` (carried) | §17G | RLS | `portal_sessions` RLS permits reads when GUC unset (system-level token lookup intentionally). Tighten before non-beta tenant onboard. | `packages/api/src/db/schema.ts` migration `065_create_portal_sessions` | Sec/DB |
