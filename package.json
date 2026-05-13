@@ -28,6 +28,8 @@
     "qa:doctor": "tsx scripts/qa-matrix-doctor.ts",
     "qa:smoke-tools": "tsx scripts/qa-smoke-tools.ts",
     "qa:matrix:run": "bash scripts/qa-matrix-run.sh",
+    "qa:mint-tokens": "tsx scripts/qa-mint-tokens.ts",
+    "qa:runbook": "bash scripts/qa-runbook-run.sh",
     "qa:run": "node qa-runner/src/orchestrator.mjs run",
     "qa:report": "node qa-runner/src/orchestrator.mjs summary",
     "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report"

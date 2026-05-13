@@ -270,9 +270,33 @@ sandbox. Re-run from a workstation with:
 
 - public network egress to `*.up.railway.app`
 - a real browser (or Playwright in headed/headless mode against the real URLs)
-- `AUTH_BEARER_TOKEN` + `TENANT_B_TOKEN` from two seeded Clerk users
-- `E2E_DB_URL_READONLY` + `E2E_DB_URL_READWRITE` for §17 RLS checks
+- `E2E_DB_URL_READWRITE` (and optionally `E2E_DB_URL_READONLY`) from Railway → Postgres → Connect
+- `E2E_CLERK_HMAC_SECRET` = the API's `CLERK_SECRET_KEY` (Railway → serviceosapi-development → Variables)
+- `CLERK_DEV_HMAC_TOKENS=true` set on the deployed API service (one-time, in Railway → Variables)
 - Stripe CLI for §6 webhook rows
+
+### Single-command orchestration
+
+This branch adds `npm run qa:runbook` which does the rest:
+
+1. Seeds Tenant A + Tenant B against staging Postgres (idempotent — see
+   `e2e/fixtures/seed-journey-fixtures.ts`)
+2. Mints HMAC JWTs for both tenants from `E2E_CLERK_HMAC_SECRET` (see
+   `scripts/qa-mint-tokens.ts`)
+3. Exports the qa-runner's var names (`AUTH_BEARER_TOKEN`, `TENANT_B_TOKEN`,
+   `TENANT_ID`, `TENANT_A_*_ID`) plus the matrix's (`E2E_TENANT_*`)
+4. Runs `npm run qa:run:now` (qa-runner stages — §1–§17 coverage where
+   automated)
+5. Runs `npm run e2e:qa-matrix` (the always-blocking §17 matrix)
+6. Prints paths to both reports
+
+```bash
+E2E_DB_URL_READWRITE='postgres://…' \
+E2E_CLERK_HMAC_SECRET='sk_test_…' \
+  npm run qa:runbook
+```
+
+A 401 probe at startup detects HMAC-flag drift before the run wastes time.
 
 **Blocking issues (must be resolved before customer onboard):**
 
