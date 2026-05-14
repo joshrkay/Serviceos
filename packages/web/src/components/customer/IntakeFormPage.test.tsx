@@ -14,7 +14,7 @@ const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 
 const TENANT_INFO = {
   businessName: 'Ortega HVAC & Services',
-  businessPhone: '(512) 555-0100',
+  businessPhone: '(737) 999-0042',
   serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
 };
 
@@ -185,7 +185,7 @@ describe('IntakeFormPage', () => {
       expect(screen.getByText('Request submitted!')).toBeInTheDocument();
     });
     // Real tenant data, not the hardcoded mock.
-    expect(screen.getByText('(512) 555-0100')).toBeInTheDocument();
+    expect(screen.getByText('(737) 999-0042')).toBeInTheDocument();
     expect(screen.getAllByText('Ortega HVAC & Services').length).toBeGreaterThan(0);
     expect(screen.queryByText(/4\.9 on Google/i)).not.toBeInTheDocument();
   });
