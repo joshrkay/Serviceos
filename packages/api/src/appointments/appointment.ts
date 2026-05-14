@@ -29,7 +29,7 @@ export interface Appointment {
    * confirmed. Cleared to false on approval; the appointment is
    * canceled on rejection.
    */
-  holdPendingApproval?: boolean;
+  holdPendingApproval: boolean;
   /** When the tentative hold auto-releases if not approved (set when holdPendingApproval is true). */
   holdExpiryAt?: Date;
   notes?: string;
