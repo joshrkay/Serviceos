@@ -24,7 +24,7 @@
  * existing `apiFetch` wrapper, which no-ops when there is no token)
  * directly with their view-token-gated endpoints.
  */
-import { useAuth } from '@clerk/clerk-react';
+import { useAuth } from '@clerk/clerk-react'
 import { useCallback } from 'react';
 
 /**
@@ -117,7 +117,7 @@ export function useApiClient(): ApiFetch {
       const needsAuth = shouldInjectAuth(path);
 
       if (needsAuth) {
-        const token = await getToken();
+        const token = await getToken({ template: 'serviceos' });
         if (!token) {
           // Sign-out transition or no active session. Cancel the request
           // by throwing an AbortError — we MUST NOT send unauthenticated.
@@ -131,7 +131,7 @@ export function useApiClient(): ApiFetch {
       if (response.status === 401 && needsAuth) {
         // Try once with a forcibly refreshed token before giving up. This
         // covers the normal token-expiry case without bouncing the user.
-        const fresh = await getToken({ skipCache: true });
+        const fresh = await getToken({ template: 'serviceos', skipCache: true });
         if (fresh) {
           const retryHeaders: Record<string, string> = {
             ...headers,

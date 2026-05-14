@@ -10,7 +10,7 @@ export function AuthTokenBridge() {
   const { getToken } = useAuth();
 
   useEffect(() => {
-    setTokenGetter(() => getToken());
+    setTokenGetter(() => getToken({ template: 'serviceos' }));
   }, [getToken]);
 
   return null;
