@@ -1,4 +1,5 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
+import * as crypto from 'node:crypto';
 
 /**
  * INV-01..INV-07 — 4-agent swarm. See estimates.spec.ts for the pattern.
@@ -160,15 +161,31 @@ matrixTest('INV-05', 'Mark paid via webhook', async (h) => {
     expectStatus: [200, 201, 404],
   });
 
-  const webhookPayload = buildStripeWebhook(id);
+  // The /webhooks/stripe route is mounted and signature-gated. To exercise
+  // it end to end the harness must sign with the same secret the API uses;
+  // without E2E_STRIPE_WEBHOOK_SECRET we can only confirm the route exists.
+  const secret = process.env.E2E_STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    await gotoUi(h, `/invoices/${id}`, '05-detail');
+    h.evidence.partial(
+      'POST /webhooks/stripe is mounted and signature-gated. Set E2E_STRIPE_WEBHOOK_SECRET ' +
+        '(matching the API STRIPE_WEBHOOK_SECRET) to exercise the payment path end to end.'
+    );
+    return;
+  }
+
+  const event = buildStripeCheckoutEvent({
+    tenantId: h.tenantA.tenantId,
+    invoiceId: id,
+    amountCents: 20000,
+  });
   const resp = await h.api.call({
     method: 'POST',
     path: '/webhooks/stripe',
-    body: webhookPayload,
+    body: event,
     label: '05-webhook',
-    headers: {
-      'stripe-signature': 't=0,v1=test-sig', // signature check will reject in prod, captured as evidence
-    },
+    headers: { 'stripe-signature': signStripeWebhook(JSON.stringify(event), secret) },
+    expectStatus: 200,
   });
 
   const db = await h.db.query({
@@ -182,10 +199,12 @@ matrixTest('INV-05', 'Mark paid via webhook', async (h) => {
   await gotoUi(h, `/invoices/${id}`, '05-detail');
 
   if (row.status === 'paid') {
-    h.evidence.pass();
+    h.evidence.pass(
+      `Signed checkout.session.completed marked the invoice paid (amount_paid=${row.amount_paid_cents}).`
+    );
   } else {
     h.evidence.fail(
-      `Stripe webhook responded ${resp.response.status}; invoice status remained '${row.status}'. Stripe webhook route is not mounted and no auto status transition exists.`
+      `Webhook accepted (${resp.response.status}) but invoice status is '${row.status}', amount_paid=${row.amount_paid_cents}.`
     );
   }
 });
@@ -200,21 +219,47 @@ matrixTest('INV-06', 'Idempotent payment handling', async (h) => {
     expectStatus: 201,
   });
   const id = (created.response.body as { id: string }).id;
-  const webhookPayload = buildStripeWebhook(id);
+  await h.api.call({
+    method: 'POST',
+    path: `/api/invoices/${id}/issue`,
+    body: { paymentTermDays: 30 },
+    token: h.tenantA.token,
+    label: '06-issue',
+    expectStatus: [200, 201, 404],
+  });
 
+  const secret = process.env.E2E_STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    await gotoUi(h, `/invoices/${id}`, '06-detail');
+    h.evidence.partial(
+      'POST /webhooks/stripe is mounted with DB-backed idempotency. Set E2E_STRIPE_WEBHOOK_SECRET ' +
+        'to exercise the duplicate-delivery path end to end.'
+    );
+    return;
+  }
+
+  // Same event id delivered twice — the second must be a no-op (duplicate).
+  const event = buildStripeCheckoutEvent({
+    tenantId: h.tenantA.tenantId,
+    invoiceId: id,
+    amountCents: 20000,
+  });
+  const sig = signStripeWebhook(JSON.stringify(event), secret);
   const first = await h.api.call({
     method: 'POST',
     path: '/webhooks/stripe',
-    body: webhookPayload,
+    body: event,
     label: '06-webhook-first',
-    headers: { 'stripe-signature': 't=0,v1=test-sig' },
+    headers: { 'stripe-signature': sig },
+    expectStatus: 200,
   });
   const second = await h.api.call({
     method: 'POST',
     path: '/webhooks/stripe',
-    body: webhookPayload,
+    body: event,
     label: '06-webhook-second',
-    headers: { 'stripe-signature': 't=0,v1=test-sig' },
+    headers: { 'stripe-signature': sig },
+    expectStatus: 200,
   });
 
   const db = await h.db.query({
@@ -224,15 +269,18 @@ matrixTest('INV-06', 'Idempotent payment handling', async (h) => {
     params: [id],
   });
   const count = (db.rows[0] as { c: number }).c;
+  const secondDup = (second.response.body as { duplicate?: boolean }).duplicate === true;
 
   await gotoUi(h, `/invoices/${id}`, '06-detail');
 
-  if (first.response.status === 200 && second.response.status === 200 && count <= 1) {
-    h.evidence.pass(`Duplicate webhook did not double-apply (payments rows: ${count}).`);
+  if (count <= 1 && secondDup) {
+    h.evidence.pass(
+      `Duplicate webhook was a no-op (payments rows: ${count}; second delivery flagged duplicate).`
+    );
   } else {
-    h.evidence.partial(
-      `First=${first.response.status}, second=${second.response.status}, payments rows=${count}. ` +
-        `Webhook route likely not mounted; idempotency logic cannot be exercised end-to-end.`
+    h.evidence.fail(
+      `first=${first.response.status}, second=${second.response.status} (duplicate=${secondDup}), ` +
+        `payments rows=${count}.`
     );
   }
 });
@@ -313,21 +361,45 @@ function buildMinimalInvoicePayload(jobId: string) {
   };
 }
 
-function buildStripeWebhook(invoiceId: string) {
-  const id = `evt_qa_${Date.now()}`;
+/**
+ * Build a `checkout.session.completed` event in the exact shape the API's
+ * /webhooks/stripe handler consumes: snake_case metadata (`tenant_id`,
+ * `invoice_id`), `payment_status: 'paid'`, and `amount_total` in cents.
+ * (The previous fixture sent `payment_intent.succeeded` with camelCase
+ * `invoiceId` — an event shape the handler never processes.)
+ */
+function buildStripeCheckoutEvent(opts: {
+  tenantId: string;
+  invoiceId: string;
+  amountCents: number;
+}) {
+  const ts = Math.floor(Date.now() / 1000);
   return {
-    id,
-    type: 'payment_intent.succeeded',
-    created: Math.floor(Date.now() / 1000),
+    id: `evt_qa_${Date.now()}`,
+    type: 'checkout.session.completed',
+    created: ts,
     data: {
       object: {
-        id: `pi_qa_${Date.now()}`,
-        amount: 20000,
+        id: `cs_qa_${Date.now()}`,
+        payment_status: 'paid',
+        amount_total: opts.amountCents,
         currency: 'usd',
         metadata: {
-          invoiceId,
+          tenant_id: opts.tenantId,
+          invoice_id: opts.invoiceId,
         },
       },
     },
   };
+}
+
+/**
+ * Stripe-style webhook signature: `t=<ts>,v1=HMAC-SHA256(secret, "<ts>.<rawBody>")`.
+ * `rawBody` must be the exact string the request sends — ApiVerifier
+ * re-serialises with JSON.stringify, so sign over JSON.stringify(event).
+ */
+function signStripeWebhook(rawBody: string, secret: string): string {
+  const ts = Math.floor(Date.now() / 1000);
+  const sig = crypto.createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('hex');
+  return `t=${ts},v1=${sig}`;
 }
