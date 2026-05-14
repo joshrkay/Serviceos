@@ -2492,6 +2492,14 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_users_deleted ON users(tenant_id, deleted_at)
       WHERE deleted_at IS NOT NULL;
   `,
+  '094_add_held_appointment_fields': `
+    ALTER TABLE appointments
+      ADD COLUMN IF NOT EXISTS hold_pending_approval BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS hold_expiry_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_appointments_hold_expiry
+      ON appointments(tenant_id, hold_expiry_at)
+      WHERE hold_pending_approval = true;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
