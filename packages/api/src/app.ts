@@ -2058,7 +2058,7 @@ export function createApp(): express.Express {
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo));
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }

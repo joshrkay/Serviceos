@@ -5,6 +5,7 @@ import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
 import { ProposalRepository } from '../proposals/proposal';
+import { AppointmentRepository } from '../appointments/appointment';
 import { ProposalFilter } from '../proposals/proposal-contracts';
 import { listProposals, getProposalDetail } from '../proposals/routes';
 import {
@@ -19,7 +20,10 @@ import {
   editProposalBodySchema,
 } from '../proposals/proposal-contracts';
 
-export function createProposalsRouter(proposalRepo: ProposalRepository): Router {
+export function createProposalsRouter(
+  proposalRepo: ProposalRepository,
+  appointmentRepo?: AppointmentRepository,
+): Router {
   const router = Router();
 
   router.get(
@@ -102,7 +106,8 @@ export function createProposalsRouter(proposalRepo: ProposalRepository): Router 
           req.auth!.userId,
           req.auth!.role as Role,
           parsed.reason,
-          parsed.details
+          parsed.details,
+          appointmentRepo
         );
         res.json(result);
       } catch (err) {

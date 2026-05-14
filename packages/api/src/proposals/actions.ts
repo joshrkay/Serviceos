@@ -3,6 +3,7 @@ import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle'
 import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
+import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
 
 export async function approveProposal(
   proposalRepo: ProposalRepository,
@@ -93,7 +94,8 @@ export async function rejectProposal(
   actorId: string,
   actorRole: Role,
   reason: string,
-  details?: string
+  details?: string,
+  appointmentRepo?: AppointmentRepository
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -112,6 +114,32 @@ export async function rejectProposal(
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // Releasing the held slot: a rejected create_booking proposal means
+  // the owner declined the AI's tentative hold — cancel the held
+  // appointment so the calendar slot frees up. Best-effort: a missing
+  // appointmentRepo or a non-string appointmentId is simply skipped.
+  if (
+    appointmentRepo &&
+    updated.proposalType === 'create_booking' &&
+    typeof updated.payload.appointmentId === 'string'
+  ) {
+    const released = await updateAppointment(
+      tenantId,
+      updated.payload.appointmentId,
+      { status: 'canceled', holdPendingApproval: false },
+      appointmentRepo,
+    );
+    if (!released) {
+      // The held appointment could not be found — the proposal is still
+      // rejected, and the hold will auto-release at expiry (Task 3's
+      // read-time release). Surface it so a stuck-looking calendar slot
+      // after a rejection is diagnosable.
+      console.warn(
+        `Held appointment ${updated.payload.appointmentId} not found when releasing hold for rejected proposal ${proposalId}; it will auto-release at expiry.`
+      );
+    }
   }
 
   return updated;
