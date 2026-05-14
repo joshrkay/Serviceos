@@ -44,7 +44,7 @@
     "ai/**"
   ],
   "mergeGuidance": "Port features from Serviceos-1 only after reviewing each onlyInFork path. Prefer git merge or cherry-pick over copying files. Retire Serviceos-1 once parity is confirmed or archive outside the active workspace.",
-  "serviceOsAppNote": "Next.js service-os-app customer routes proxy to packages/api (SERVICE_OS_API_URL). Invoice and agent routes remain on Supabase or external services where Express contracts differ; see route file comments.",
+  "serviceOsAppNote": "REMOVED 2026-05-14 on branch claude/assess-voice-config-a52Li. The Next.js service-os-app was a dead prototype: no deploy config (railway/Docker/Procfile), no CI references, not in the npm workspace, superseded by packages/web. Recoverable from git history if ever needed.",
   "siblingCloneConsolidation": {
     "duplicateFolder": "Serviceos-1",
     "relativeToCanonical": "../Serviceos-1",
