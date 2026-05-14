@@ -14,10 +14,16 @@ healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# Tell Railway's edge which container port to route traffic to. The
-# @serviceos/api service has PORT=3000 set as a service-level variable, so
-# the app (packages/api/src/index.ts) listens on 3000. Without this line,
-# the edge defaulted to a different port and returned "Application not
-# found" after PR #366 removed it. NOTE: this must match the service-level
-# PORT env var on Railway. If PORT is ever changed there, change this too.
+# Tell Railway's edge which container port to route traffic to. The app
+# (packages/api/src/index.ts) listens on ${PORT}, set below.
 port = 3000
+
+# DEV-ONLY: this branch deploys to the `dev` Railway environment. Baking these
+# in keeps the container self-sufficient when dashboard access is limited.
+# NODE_ENV=development lets the API boot even before a Postgres service is
+# linked — it falls back to in-memory instead of crash-looping (app.ts:475).
+# Before this branch merges to main, move NODE_ENV to a per-environment
+# dashboard variable: staging/prod MUST run NODE_ENV=production.
+[deploy.environment]
+PORT = "3000"
+NODE_ENV = "development"

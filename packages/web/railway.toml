@@ -7,7 +7,15 @@ healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
-# Tell Railway's edge which container port to route to. The web service has
-# PORT=8080 as a service-level variable; nginx.conf.template does
-# `listen ${PORT};` so nginx listens on 8080. This MUST match that port.
+# Tell Railway's edge which container port to route to. nginx.conf.template
+# does `listen ${PORT};` (PORT set below) so nginx listens on 8080.
 port = 8080
+
+# DEV-ONLY: this branch deploys to the `dev` Railway environment. Baking these
+# in makes the web container self-sufficient without dashboard config —
+# start.sh's envsubst renders `listen ${PORT}` and proxies /api to ${API_URL}.
+# API_URL is hardcoded to the dev API here; move it to a per-environment
+# dashboard variable before this branch merges to main.
+[deploy.environment]
+PORT = "8080"
+API_URL = "https://serviceosapi-development.up.railway.app"
