@@ -58,16 +58,18 @@ describe('IntakeFormPage', () => {
     window.history.pushState({}, '', '/');
   });
 
-  it('renders step 1 with the service question', () => {
+  it('renders step 1 with the service question', async () => {
     render(<IntakeFormPage />);
     expect(screen.getByText('What can we help you with?')).toBeInTheDocument();
+    await screen.findByText('Ortega HVAC & Services'); // flush the mount effect
   });
 
-  it('keeps the CTA disabled until a service is selected', () => {
+  it('keeps the CTA disabled until a service is selected', async () => {
     render(<IntakeFormPage />);
     expect(screen.getByTestId('intake-cta')).toBeDisabled();
     fireEvent.click(screen.getByTestId('intake-service-HVAC'));
     expect(screen.getByTestId('intake-cta')).not.toBeDisabled();
+    await screen.findByText('Ortega HVAC & Services'); // flush the mount effect
   });
 
   it('submits the lead with a split name, honeypot, and attribution, then shows success', async () => {
