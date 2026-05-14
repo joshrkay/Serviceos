@@ -8,7 +8,9 @@ dockerfileTarget = "api"
 # one-off/release step (CI/CD or Railway pre-deploy command).
 preDeployCommand = "node packages/api/dist/src/db/migrate.js"
 startCommand = "node packages/api/dist/src/index.js"
-healthcheckPath = "/ready"
+# Liveness probe — /health is always 200 when the server is up. Not /ready:
+# /ready 503s on a cold/unreachable DB and would roll back healthy deploys.
+healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
