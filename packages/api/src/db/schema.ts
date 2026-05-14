@@ -2492,6 +2492,28 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_users_deleted ON users(tenant_id, deleted_at)
       WHERE deleted_at IS NOT NULL;
   `,
+  '096_create_expenses': `
+    CREATE TABLE IF NOT EXISTS expenses (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id    UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      job_id       UUID REFERENCES jobs(id) ON DELETE SET NULL,
+      description  TEXT NOT NULL,
+      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      category     TEXT NOT NULL,
+      vendor       TEXT,
+      spent_at     TIMESTAMPTZ NOT NULL,
+      created_by   TEXT NOT NULL,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_expenses_tenant_spent_at
+      ON expenses(tenant_id, spent_at);
+    CREATE INDEX IF NOT EXISTS idx_expenses_job
+      ON expenses(tenant_id, job_id);
+    ALTER TABLE expenses ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_expenses ON expenses
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
