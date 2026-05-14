@@ -73,6 +73,38 @@ describe('buffer-aware availability', () => {
     }
   });
 
+  it('does not offer a slot whose end falls within bufferMs of a busy appointment (start-side padding)', async () => {
+    // Busy 20:00–21:00. With a 30-min buffer the busy interval pads to
+    // 19:30–21:30, so any slot must finish on or before 19:30 — a slot
+    // at 19:00–20:00 must be rejected. This exercises the start-side
+    // (`start - bufferMs`) padding, which the end-side test above does
+    // not reach. Enumerate every slot in the window and assert none
+    // starts after 18:30 (the latest 1h slot that still ends by 19:30).
+    await repo.create(appt({
+      scheduledStart: new Date('2026-06-01T20:00:00Z'),
+      scheduledEnd: new Date('2026-06-01T21:00:00Z'),
+    }));
+
+    const result = await finder.find({
+      tenantId: tenantA,
+      searchFrom: new Date('2026-06-01T18:00:00Z'),
+      searchTo: new Date('2026-06-01T22:00:00Z'),
+      durationMs: HOUR,
+      bufferMs: 30 * 60 * 1000,
+      count: 10,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.slots.length).toBeGreaterThan(0);
+      for (const slot of result.slots) {
+        expect(slot.start.getTime()).toBeLessThanOrEqual(
+          new Date('2026-06-01T18:30:00Z').getTime(),
+        );
+      }
+    }
+  });
+
   it('treats an expired hold as free', async () => {
     // A held appointment 19:00–20:00 whose hold expired yesterday must
     // NOT block the 19:00 slot.
