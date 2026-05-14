@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   clerkState.token = 'tok-default';
   clerkState.freshToken = 'tok-fresh';
-  clerkState.getToken = vi.fn(async (opts?: { skipCache?: boolean }) => {
+  clerkState.getToken = vi.fn(async (opts?: { template?: string; skipCache?: boolean }) => {
     return opts?.skipCache ? clerkState.freshToken : clerkState.token;
   }) as unknown as ReturnType<typeof vi.fn>;
 });
@@ -207,7 +207,7 @@ describe('P0-030 useListQuery — Authorization Bearer header', () => {
 
     await waitFor(() => expect(result.current.data).toEqual([{ id: 'r' }]));
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(clerkState.getToken).toHaveBeenCalledWith({ skipCache: true });
+    expect(clerkState.getToken).toHaveBeenCalledWith({ template: 'serviceos', skipCache: true });
     expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBe('Bearer tok-default');
     expect(getAuthHeader(fetchSpy.mock.calls[1]!)).toBe('Bearer tok-fresh');
   });
