@@ -2492,6 +2492,19 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_users_deleted ON users(tenant_id, deleted_at)
       WHERE deleted_at IS NOT NULL;
   `,
+  // 094 — Reconcile the payments.payment_method CHECK constraint with the
+  // application PaymentMethod type. The constraint allowed only
+  // ('stripe','cash','check','other'), but the app type also includes
+  // 'credit_card' and 'bank_transfer'. recordPayment() with either value —
+  // notably the Stripe webhook, which passed 'credit_card' — violated the
+  // CHECK and 500'd, so no Stripe webhook payment was ever recorded. Widen
+  // the constraint to the full union. (getMigrationSQL's ADD CONSTRAINT
+  // transform prepends a DROP CONSTRAINT IF EXISTS, so this is re-runnable.)
+  '094_widen_payment_method_check': `
+    ALTER TABLE payments
+      ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('stripe', 'cash', 'check', 'credit_card', 'bank_transfer', 'other'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

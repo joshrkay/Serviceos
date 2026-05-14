@@ -3,7 +3,13 @@ import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 
 export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
-export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
+export type PaymentMethod =
+  | 'cash'
+  | 'check'
+  | 'credit_card'
+  | 'bank_transfer'
+  | 'stripe'
+  | 'other';
 
 export interface Payment {
   id: string;
@@ -44,7 +50,10 @@ export function validatePaymentInput(input: RecordPaymentInput): string[] {
   if (!input.amountCents || input.amountCents <= 0) errors.push('amountCents must be positive');
   if (!Number.isInteger(input.amountCents)) errors.push('amountCents must be an integer');
   if (!input.method) errors.push('method is required');
-  if (input.method && !['cash', 'check', 'credit_card', 'bank_transfer', 'other'].includes(input.method)) {
+  if (
+    input.method &&
+    !['cash', 'check', 'credit_card', 'bank_transfer', 'stripe', 'other'].includes(input.method)
+  ) {
     errors.push('Invalid payment method');
   }
   if (!input.processedBy) errors.push('processedBy is required');
