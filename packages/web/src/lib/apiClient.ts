@@ -67,8 +67,11 @@ export function makeUnauthenticatedAbort(): DOMException {
  */
 function redirectToLogin(): void {
   if (typeof window === 'undefined') return;
-  const target =
-    '/login?redirect=' + encodeURIComponent(window.location.pathname);
+  // Preserve the full path — pathname AND query string — so the login page
+  // can return the user exactly where they were, not just to the route root.
+  const { pathname, search } = window.location;
+  const here = `${pathname}${search ?? ''}`;
+  const target = '/login?redirect=' + encodeURIComponent(here);
   window.location.href = target;
 }
 

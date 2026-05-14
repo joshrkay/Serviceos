@@ -7,6 +7,12 @@ import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { classifyIntent } from '../ai/orchestration/intent-classifier';
 import { CreateCustomerTaskHandler } from '../ai/tasks/task-handlers';
+import { createLogger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'routes.assistant',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 const assistantMessageSchema = z.object({
   role: z.enum(['system', 'user', 'assistant']),
@@ -234,7 +240,15 @@ async function generateAssistantReply(
         proposal: parsed.proposal ?? undefined,
       },
     };
-  } catch {
+  } catch (err) {
+    // Log the real failure server-side (BUG-5) — the client only ever sees
+    // the degraded envelope, so without this the root cause (missing/invalid
+    // provider key, JSON parse failure, provider outage) is invisible.
+    logger.error('assistant/chat: LLM completion failed', {
+      taskType,
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return {
       taskType,
       model: 'fallback',

@@ -258,18 +258,29 @@ export function SchedulePage() {
   const [appointments, setAppointments] = useState<ApiAppointment[]>([]);
   const [enriched,    setEnriched]    = useState<EnrichedAppointment[]>([]);
   const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState<string | null>(null);
   const [delayApptId, setDelayApptId] = useState<string | null>(null);
   const [detailAppt,  setDetailAppt]  = useState<EnrichedAppointment | null>(null);
 
   const loadAppointments = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const start = new Date(selectedIso + 'T00:00:00');
       const end   = new Date(selectedIso + 'T23:59:59.999');
       const from  = start.toISOString();
       const to    = end.toISOString();
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
-      if (!res.ok) { setLoading(false); return; }
+      if (!res.ok) {
+        // A 401 means the session token was rejected — surface a clear message
+        // instead of a misleading empty state (BUG-4). Other failures fall
+        // through to the graceful empty state.
+        if (res.status === 401) {
+          setError('Session expired — please reload the page to sign in again.');
+        }
+        setLoading(false);
+        return;
+      }
       const body = await res.json();
       const list: ApiAppointment[] = body.data ?? body ?? [];
       setAppointments(list);
@@ -430,7 +441,20 @@ export function SchedulePage() {
         </div>
       )}
 
-      {!loading && displayed.length === 0 && (
+      {!loading && error && (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <AlertTriangle size={28} className="text-amber-500 mb-3" />
+          <p className="text-sm text-slate-700 mb-2">{error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded-lg bg-slate-900 text-white px-3 py-2 text-sm hover:bg-slate-700 transition-colors"
+          >
+            Reload page
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && displayed.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <span className="text-4xl mb-3">📅</span>
           <p className="text-sm text-slate-500 mb-1">No appointments</p>
@@ -438,7 +462,7 @@ export function SchedulePage() {
         </div>
       )}
 
-      {!loading && (
+      {!loading && !error && (
         <div className="flex flex-col gap-3">
           {displayed
             .sort((a, b) => a.scheduledStart.localeCompare(b.scheduledStart))
