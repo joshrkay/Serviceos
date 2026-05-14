@@ -445,8 +445,15 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS region TEXT,
       ADD COLUMN IF NOT EXISTS locale TEXT;
     ALTER TABLE tenant_settings DROP CONSTRAINT IF EXISTS tenant_settings_us_region_check;
+    -- NOT VALID: do not validate existing rows. This constraint is superseded
+    -- by migration 088 (which drops it for the relaxed
+    -- tenant_settings_region_format_check). Without NOT VALID, re-running
+    -- getMigrationSQL() against a populated DB fails HERE on every
+    -- tenant_settings row with the column default country='US' and region=NULL
+    -- — before 088 can relax it. Railway runs migrate.js on every deploy, so
+    -- that made every deploy after the first fail at preDeployCommand.
     ALTER TABLE tenant_settings ADD CONSTRAINT tenant_settings_us_region_check
-      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$'));
+      CHECK (country <> 'US' OR (region IS NOT NULL AND btrim(region) ~ '^[A-Z]{2}$')) NOT VALID;
 
     CREATE TABLE IF NOT EXISTS tenant_integrations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
