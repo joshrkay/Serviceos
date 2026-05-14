@@ -27,6 +27,11 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
     const { payload } = proposal;
 
     const appointmentId = payload.appointmentId;
+    // Defensive narrowing of the loosely-typed payload. `createBookingPayloadSchema`
+    // (Zod contract in proposals/contracts.ts) validates `appointmentId: z.string().uuid()`
+    // at proposal-creation time, but the execution boundary receives `payload` as
+    // `Record<string, unknown>`, so we must re-narrow here. This is intentional — do NOT
+    // remove this guard assuming the Zod schema makes it redundant.
     if (!appointmentId || typeof appointmentId !== 'string') {
       return { success: false, error: 'Payload must include a valid appointmentId' };
     }
@@ -40,7 +45,13 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
       return { success: false, error: `Appointment ${appointmentId} not found` };
     }
 
-    // Idempotency: a non-held appointment is already confirmed.
+    // Idempotency: a non-held appointment is already confirmed, so we return
+    // success without re-applying the mutation or emitting a second audit event.
+    // This also silently succeeds if the appointment was never held in the first place
+    // (stale or mis-routed `create_booking` proposal) — acceptable because
+    // `create_booking` proposals are only ever issued against genuinely held slots,
+    // so reaching this branch with a non-held appointment means the work is already
+    // effectively done.
     if (!appointment.holdPendingApproval) {
       return { success: true, resultEntityId: appointmentId };
     }

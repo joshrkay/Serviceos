@@ -74,6 +74,12 @@ describe('CreateBookingExecutionHandler', () => {
     await handler.execute(proposal, { tenantId: tenantA, executedBy: 'owner-1' });
     const second = await handler.execute(proposal, { tenantId: tenantA, executedBy: 'owner-1' });
     expect(second.success).toBe(true);
+
+    // The idempotency early-return exits before the audit-emit block, so a second
+    // execution must NOT write a second `appointment.booked` event.
+    const events = await auditRepo.findByEntity(tenantA, 'appointment', appt.id);
+    const bookedEvents = events.filter((e) => e.eventType === 'appointment.booked');
+    expect(bookedEvents).toHaveLength(1);
   });
 
   it('fails when the hold has expired', async () => {
@@ -92,5 +98,15 @@ describe('CreateBookingExecutionHandler', () => {
       { tenantId: tenantA, executedBy: 'owner-1' },
     );
     expect(result.success).toBe(false);
+  });
+
+  it('returns success in passthrough mode when no appointmentRepo is wired', async () => {
+    const noRepoHandler = new CreateBookingExecutionHandler();
+    const result = await noRepoHandler.execute(
+      bookingProposal('00000000-0000-4000-8000-0000000000a1'),
+      { tenantId: tenantA, executedBy: 'owner-1' },
+    );
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBe('00000000-0000-4000-8000-0000000000a1');
   });
 });
