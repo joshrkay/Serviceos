@@ -122,15 +122,13 @@ matrixTest('EST-04', 'Estimate total correctness', async (h) => {
   });
   const apiBody = created.response.body as {
     id: string;
-    subtotalCents: number;
-    taxCents: number;
-    totalCents: number;
+    totals: { subtotalCents: number; taxCents: number; totalCents: number };
   };
 
   const expected = calculateTotals(payload);
-  expect(apiBody.subtotalCents).toBe(expected.subtotalCents);
-  expect(apiBody.taxCents).toBe(expected.taxCents);
-  expect(apiBody.totalCents).toBe(expected.totalCents);
+  expect(apiBody.totals.subtotalCents).toBe(expected.subtotalCents);
+  expect(apiBody.totals.taxCents).toBe(expected.taxCents);
+  expect(apiBody.totals.totalCents).toBe(expected.totalCents);
 
   const db = await h.db.query({
     label: '04-row',
@@ -220,12 +218,19 @@ matrixTest('EST-06', 'Tenant isolation', async (h) => {
   });
   expect([403, 404]).toContain(bRead.response.status);
 
+  // RLS isolation: a connection scoped to a DIFFERENT tenant must not see
+  // this row. (A connection with NO tenant GUC at all can't be asserted
+  // here — this codebase's RLS policy calls current_setting() without the
+  // missing-ok flag, so a context-less query is rejected outright rather
+  // than returning an empty result. Requires E2E_DB_URL_READONLY to be a
+  // non-superuser role, since superusers bypass RLS entirely.)
   const rlsBlocked = await h.db.query({
-    label: '06-rls-no-guc',
+    label: '06-rls-wrong-tenant',
+    tenantId: '00000000-0000-0000-0000-000000000000',
     sql: `SELECT id FROM estimates WHERE id = $1`,
     params: [id],
   });
-  expect(rlsBlocked.rowCount, 'without tenant GUC, RLS must return 0 rows').toBe(0);
+  expect(rlsBlocked.rowCount, 'RLS must hide the row from a non-owning tenant context').toBe(0);
 
   const asA = await h.db.query({
     label: '06-rls-as-a',

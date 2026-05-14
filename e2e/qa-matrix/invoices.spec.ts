@@ -258,12 +258,14 @@ matrixTest('INV-07', 'Overdue lifecycle', async (h) => {
     expectStatus: [200, 400],
   });
 
+  // `invoices.status` is a text column with a CHECK constraint, not a pg
+  // enum — enum_range() does not apply. Just check whether any 'overdue'
+  // invoice actually exists, which is what the verdict logic below needs.
   const db = await h.db.query({
-    label: '07-check-enum',
-    sql: `SELECT unnest(enum_range(NULL::text)) AS status
-          WHERE FALSE
-          UNION ALL
-          SELECT DISTINCT status FROM invoices WHERE status = 'overdue'`,
+    label: '07-check-overdue',
+    tenantId: h.tenantA.tenantId,
+    sql: `SELECT id FROM invoices WHERE tenant_id = $1 AND status = 'overdue' LIMIT 1`,
+    params: [h.tenantA.tenantId],
   });
 
   await gotoUi(h, `/invoices/${id}`, '07-detail');

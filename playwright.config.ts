@@ -19,6 +19,10 @@ const includeQaMatrix = process.env.QA_MATRIX === '1';
 // Opt-in to avoid running it on every PR; it visits every authenticated route
 // and requires a real running stack (or E2E_BASE_URL pointing at one).
 const includeCoverageSweep = process.env.COVERAGE_SWEEP === '1';
+// Escape hatch: point Playwright at a pre-installed Chromium when its CDN is
+// unreachable (sandbox / airgapped runners). Unset in CI → Playwright uses
+// its own managed browser as normal.
+const chromiumExecutable = process.env.PW_CHROMIUM_EXECUTABLE;
 
 export default defineConfig({
   testDir: './e2e',
@@ -44,6 +48,9 @@ export default defineConfig({
     video: 'retain-on-failure',
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
+    ...(chromiumExecutable
+      ? { launchOptions: { executablePath: chromiumExecutable } }
+      : {}),
   },
 
   projects: [

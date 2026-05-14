@@ -46,12 +46,37 @@ export function fingerprint(value: unknown): string {
   return (hash >>> 0).toString(16);
 }
 
+/**
+ * Collects every string leaf of an arbitrary value. Non-string scalars
+ * (numbers, booleans) are skipped: the secrets we care about — bearer
+ * tokens, JWTs, API keys, emails, phone numbers — always appear as strings
+ * in payloads. Scanning JSON.stringify() output instead false-positives on
+ * numeric values (e.g. a 10-digit unix timestamp matches the phone pattern).
+ */
+function collectStringLeaves(value: unknown, out: string[]): void {
+  if (typeof value === 'string') {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) collectStringLeaves(v, out);
+  } else if (value && typeof value === 'object') {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      collectStringLeaves(v, out);
+    }
+  }
+}
+
 export function scanForSecrets(value: unknown): Array<{ name: string; sample: string }> {
-  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  const leaves: string[] = [];
+  collectStringLeaves(value, leaves);
   const findings: Array<{ name: string; sample: string }> = [];
   for (const { name, regex } of HIGH_RISK_PATTERNS) {
-    const m = text.match(regex);
-    if (m?.length) findings.push({ name, sample: m[0].slice(0, 64) });
+    for (const leaf of leaves) {
+      const m = leaf.match(regex);
+      if (m?.length) {
+        findings.push({ name, sample: m[0].slice(0, 64) });
+        break;
+      }
+    }
   }
   return findings;
 }

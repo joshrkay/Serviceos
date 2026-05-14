@@ -31,7 +31,7 @@ matrixTest('AST-01', 'Create customer via assistant intent', async (h) => {
   const db = await h.db.query({
     label: '01-customer-check',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT id, name FROM customers WHERE tenant_id = $1 AND name ILIKE 'John Doe%'`,
+    sql: `SELECT id, display_name FROM customers WHERE tenant_id = $1 AND display_name ILIKE 'John Doe%'`,
     params: [h.tenantA.tenantId],
   });
 
@@ -203,6 +203,17 @@ matrixTest('AST-05', 'Payment status query via assistant', async (h) => {
 });
 
 matrixTest('AST-06', 'Failure handling + recovery', async (h) => {
+  // Baseline estimate count BEFORE the bad request. Earlier AST rows seed
+  // estimates, so an absolute "rows created in the last 30s" check
+  // false-positives — we must measure the delta caused by THIS request.
+  const before = await h.db.query({
+    label: '06-baseline',
+    tenantId: h.tenantA.tenantId,
+    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1`,
+    params: [h.tenantA.tenantId],
+  });
+  const baselineCount = (before.rows[0] as { c: number }).c;
+
   // Force a validation failure — empty content string.
   const resp = await h.api.call({
     method: 'POST',
@@ -214,20 +225,20 @@ matrixTest('AST-06', 'Failure handling + recovery', async (h) => {
   });
   expect([400, 422]).toContain(resp.response.status);
 
-  const db = await h.db.query({
+  const after = await h.db.query({
     label: '06-no-new-rows',
     tenantId: h.tenantA.tenantId,
-    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1 AND created_at > now() - interval '30 seconds'`,
+    sql: `SELECT count(*)::int AS c FROM estimates WHERE tenant_id = $1`,
     params: [h.tenantA.tenantId],
   });
-  const c = (db.rows[0] as { c: number }).c;
+  const created = (after.rows[0] as { c: number }).c - baselineCount;
 
   await gotoUi(h, '/assistant', '06-error');
 
-  if (c === 0) {
+  if (created === 0) {
     h.evidence.pass('Invalid request returned clear error and no downstream rows were created.');
   } else {
-    h.evidence.fail(`Invalid request caused ${c} new estimate rows — validation bypassed.`);
+    h.evidence.fail(`Invalid request caused ${created} new estimate rows — validation bypassed.`);
   }
 });
 
@@ -256,7 +267,7 @@ matrixTest('AST-07', 'Multi-step orchestration (customer → estimate → invoic
           LEFT JOIN invoices i ON i.estimate_id = e.id AND i.tenant_id = c.tenant_id
           WHERE c.tenant_id = $1
             AND c.created_at > now() - interval '2 minutes'
-            AND c.name ILIKE 'Jane Smith%'
+            AND c.display_name ILIKE 'Jane Smith%'
           ORDER BY c.created_at DESC
           LIMIT 1`,
     params: [h.tenantA.tenantId],
