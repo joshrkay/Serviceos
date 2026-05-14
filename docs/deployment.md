@@ -70,6 +70,8 @@ must be set in the Railway dashboard for full functionality:
 - `CLERK_SECRET_KEY` — required for auth.
 - `CLERK_PUBLISHABLE_KEY` — required for the RS256 login path; without it every
   authenticated request 401s (`auth/clerk.ts:383`).
+- `STRIPE_WEBHOOK_SECRET` — required for `/webhooks/stripe`; without it the
+  webhook returns 500 and Stripe payments are never recorded.
 
 **`web` service (dev):**
 - Source branch → `claude/assess-voice-config-a52Li`.
