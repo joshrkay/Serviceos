@@ -1,21 +1,54 @@
 import { SignIn, useAuth } from '@clerk/clerk-react';
-import { Navigate, useLocation } from 'react-router';
+import { Navigate, useLocation, useSearchParams } from 'react-router';
 import { Zap } from 'lucide-react';
 
 export type LocationState = { from?: { pathname?: string; search?: string; hash?: string } } | null;
+
+/** True if `path` is a safe in-app destination — an absolute path that is not
+ *  protocol-relative (`//host`). Guards against open-redirect. */
+function isSafeInternalPath(path: string): boolean {
+  return path.startsWith('/') && !path.startsWith('//');
+}
 
 export function extractFromPath(state: LocationState): string {
   const from = state?.from;
   if (!from?.pathname) return '/';
   // Block external URLs — only accept in-app paths (start with '/' but not '//').
-  if (!from.pathname.startsWith('/') || from.pathname.startsWith('//')) return '/';
+  if (!isSafeInternalPath(from.pathname)) return '/';
   return `${from.pathname}${from.search ?? ''}${from.hash ?? ''}`;
+}
+
+/**
+ * Resolve the post-login destination. The API client's 401 handler does a
+ * full-page redirect to `/login?redirect=<encoded path>`, so the `?redirect=`
+ * query param is authoritative when present; react-router's
+ * `location.state.from` (set by ProtectedRoute) is the fallback.
+ */
+export function resolveRedirectTarget(
+  redirectParam: string | null,
+  state: LocationState,
+): string {
+  if (redirectParam) {
+    let decoded = '';
+    try {
+      decoded = decodeURIComponent(redirectParam);
+    } catch {
+      // Malformed encoding — fall through to the state-based fallback.
+      decoded = '';
+    }
+    if (decoded && isSafeInternalPath(decoded)) return decoded;
+  }
+  return extractFromPath(state);
 }
 
 export function LoginPage() {
   const { isLoaded, isSignedIn } = useAuth();
   const location = useLocation();
-  const redirectTarget = extractFromPath(location.state as LocationState);
+  const [searchParams] = useSearchParams();
+  const redirectTarget = resolveRedirectTarget(
+    searchParams.get('redirect'),
+    location.state as LocationState,
+  );
   if (isLoaded && isSignedIn) return <Navigate to={redirectTarget} replace />;
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
