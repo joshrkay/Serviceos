@@ -1250,7 +1250,7 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry)
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
