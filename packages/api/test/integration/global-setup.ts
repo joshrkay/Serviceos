@@ -18,6 +18,21 @@ import { getMigrationSQL } from '../../src/db/schema';
 let container: StartedPostgreSqlContainer | null = null;
 
 export async function setup(): Promise<void> {
+  // Escape hatch: when TEST_DB_URL is already set (e.g. local dev without
+  // Docker), use that database directly and skip the testcontainer. CI leaves
+  // it unset and gets the pgvector/pgvector:pg16 container below.
+  if (process.env.TEST_DB_URL) {
+    const existing = new Pool({ connectionString: process.env.TEST_DB_URL });
+    try {
+      await existing.query("SET lock_timeout = '5s'");
+      await existing.query("SET statement_timeout = '25s'");
+      await existing.query(getMigrationSQL());
+    } finally {
+      await existing.end();
+    }
+    return;
+  }
+
   const image = process.env.POSTGRES_IMAGE || 'pgvector/pgvector:pg16';
   container = await new PostgreSqlContainer(image)
     .withDatabase('serviceos_test')
