@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../api/public-intake', () => ({
@@ -45,6 +45,10 @@ describe('IntakeFormPage', () => {
     setTenantQueryParam(TENANT_ID);
   });
 
+  afterEach(() => {
+    window.history.pushState({}, '', '/');
+  });
+
   it('renders step 1 with the service question', () => {
     render(<IntakeFormPage />);
     expect(screen.getByText('What can we help you with?')).toBeInTheDocument();
@@ -72,6 +76,11 @@ describe('IntakeFormPage', () => {
     expect(payload.primaryPhone).toBe('(512) 555-0191');
     expect(payload._company_url).toBe('');
     expect(payload.attribution).toBeDefined();
+    expect(payload.serviceType).toBe('HVAC');
+    expect(payload.urgency).toBe('Emergency');
+    expect(payload.description).toBe(
+      'Service: HVAC — Urgency: Emergency — AC stopped blowing cold air yesterday.',
+    );
   });
 
   it('shows an error and stays on the review step when submission fails', async () => {
