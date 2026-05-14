@@ -376,8 +376,23 @@ export function verifyClerkSession(
       let payload: ClerkTokenPayload;
       if (isHmacDevModeEnabled(env)) {
         // Legacy dev path — only active with explicit CLERK_DEV_HMAC_TOKENS=true
-        // and never in production.
-        payload = decodeClerkToken(token, clerkSecretKey);
+        // and never in production (isHmacDevModeEnabled is prod-disabled).
+        // Try the HMAC dev token first; if it isn't one (e.g. it's a real
+        // Clerk RS256 session token from a browser login), fall back to the
+        // RS256 path. This lets a single dev environment serve BOTH the
+        // qa-matrix's HMAC test tokens AND real browser logins without
+        // flipping a config flag between runs. The fallback still performs
+        // full RS256 signature verification — neither path is weakened.
+        try {
+          payload = decodeClerkToken(token, clerkSecretKey);
+        } catch (hmacErr) {
+          const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
+          if (!pubKey) throw hmacErr;
+          payload = await verifyRs256Token(token, {
+            pubKey,
+            resolver: deps.jwksResolver,
+          });
+        }
       } else {
         const pubKey = deps.publishableKey ?? env.CLERK_PUBLISHABLE_KEY;
         if (!pubKey) {
