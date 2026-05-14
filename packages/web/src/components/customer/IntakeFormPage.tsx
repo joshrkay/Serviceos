@@ -3,6 +3,7 @@ import {
   Zap, ChevronRight, Check, AlertCircle, Phone, Mail,
   MapPin, Camera, ArrowLeft, Clock, Star,
 } from 'lucide-react';
+import { submitIntakeLead, fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -44,14 +45,31 @@ function captureAttributionFromUrl(): CapturedAttribution {
 }
 
 type Step = 1 | 2 | 3 | 4 | 'done';
-type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
+type VerticalType = 'hvac' | 'plumbing';
 type Urgency = 'Emergency' | 'ASAP' | 'Flexible';
 
-const SERVICE_OPTIONS: { type: ServiceType; emoji: string; label: string; desc: string }[] = [
-  { type: 'HVAC',     emoji: '❄️', label: 'Heating & Cooling', desc: 'AC, furnace, heat pumps, ventilation' },
-  { type: 'Plumbing', emoji: '🔧', label: 'Plumbing',          desc: 'Leaks, drains, water heaters, pipes' },
-  { type: 'Painting', emoji: '🎨', label: 'Painting',          desc: 'Interior & exterior paint, touch-ups' },
-];
+interface ServicePresentation {
+  emoji: string;
+  desc: string;
+  placeholder: string;
+}
+
+// Presentation only — emoji + copy keyed by the backend's verticalType.
+// The list of services a tenant actually offers comes from the API.
+const SERVICE_PRESENTATION: Record<VerticalType, ServicePresentation> = {
+  hvac: {
+    emoji: '❄️',
+    desc: 'AC, furnace, heat pumps, ventilation',
+    placeholder: `e.g. "My AC stopped blowing cold air yesterday. It's making a clicking noise."`,
+  },
+  plumbing: {
+    emoji: '🔧',
+    desc: 'Leaks, drains, water heaters, pipes',
+    placeholder: `e.g. "Kitchen sink is draining very slowly and there's a bad smell."`,
+  },
+};
+
+const FALLBACK_PLACEHOLDER = 'e.g. "Briefly describe what you need help with."';
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
   { value: 'Emergency', label: '🚨 Emergency',    desc: 'Need someone today',                   color: 'border-red-300    bg-red-50    text-red-700'    },
@@ -67,7 +85,7 @@ const STEPS_LABEL: Record<Exclude<Step, 'done'>, string> = {
 };
 
 interface FormData {
-  serviceType: ServiceType | null;
+  serviceType: VerticalType | null;
   description: string;
   urgency: Urgency | null;
   preferredDates: string;
@@ -91,12 +109,39 @@ export function IntakeFormPage() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
+
+  // Service options shown in step 1 = the tenant's packs (from the API)
+  // joined with local presentation (emoji/copy). Packs with no local
+  // presentation entry are skipped rather than rendered blank.
+  const serviceOptions = (tenantInfo?.serviceTypes ?? [])
+    .filter(
+      (st): st is { verticalType: VerticalType; displayName: string } =>
+        st.verticalType === 'hvac' || st.verticalType === 'plumbing',
+    )
+    .map((st) => ({
+      verticalType: st.verticalType,
+      label: st.displayName,
+      ...SERVICE_PRESENTATION[st.verticalType],
+    }));
 
   // Attribution captured once on mount. Storing in a ref so re-renders
   // don't lose or duplicate it.
   const attributionRef = useRef<CapturedAttribution>({ attribution: {} });
   useEffect(() => {
     attributionRef.current = captureAttributionFromUrl();
+  }, []);
+
+  // Load the tenant's public branding + service types. Non-fatal on
+  // failure — the form still submits; only the header/branding degrades.
+  useEffect(() => {
+    const tenantId = new URLSearchParams(window.location.search).get('t');
+    if (!tenantId) return;
+    fetchIntakeTenantInfo(tenantId)
+      .then(setTenantInfo)
+      .catch(() => {
+        /* branding is best-effort; submit path still reports a hard error */
+      });
   }, []);
 
   function update(partial: Partial<FormData>) {
@@ -117,36 +162,29 @@ export function IntakeFormPage() {
       const [firstName, ...rest] = data.name.trim().split(/\s+/);
       const lastName = rest.join(' ') || undefined;
       const description = [
-        data.serviceType ? `Service: ${data.serviceType}` : null,
+        svc ? `Service: ${svc.label}` : null,
         data.urgency ? `Urgency: ${data.urgency}` : null,
         data.description || null,
       ].filter(Boolean).join(' — ');
 
-      const res = await fetch(`/public/intake/${tenantId}/leads`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          firstName,
-          lastName,
-          primaryPhone: data.phone || undefined,
-          email: data.email || undefined,
-          serviceType: data.serviceType ?? undefined,
-          urgency: data.urgency ?? undefined,
-          description: description || undefined,
-          preferredDates: data.preferredDates || undefined,
-          address: data.address || undefined,
-          utmSource: attributionRef.current.utmSource,
-          utmMedium: attributionRef.current.utmMedium,
-          utmCampaign: attributionRef.current.utmCampaign,
-          attribution: attributionRef.current.attribution,
-          // Honeypot — never set by the form, here so a bot that walks
-          // the DOM and fills every input still trips it.
-          _company_url: '',
-        }),
+      await submitIntakeLead(tenantId, {
+        firstName,
+        lastName,
+        primaryPhone: data.phone || undefined,
+        email: data.email || undefined,
+        serviceType: svc?.label ?? undefined,
+        urgency: data.urgency ?? undefined,
+        description: description || undefined,
+        preferredDates: data.preferredDates || undefined,
+        address: data.address || undefined,
+        utmSource: attributionRef.current.utmSource,
+        utmMedium: attributionRef.current.utmMedium,
+        utmCampaign: attributionRef.current.utmCampaign,
+        attribution: attributionRef.current.attribution,
+        // Honeypot — never set by the form, here so a bot that walks
+        // the DOM and fills every input still trips it.
+        _company_url: '',
       });
-      if (!res.ok) {
-        throw new Error(`Submission failed (${res.status})`);
-      }
       setStep('done');
     } catch (err) {
       setSubmitError(
@@ -177,7 +215,9 @@ export function IntakeFormPage() {
     (step === 3 && !!data.name && !!data.phone) ||
     step === 4;
 
-  const svc = data.serviceType ? SERVICE_OPTIONS.find(o => o.type === data.serviceType) : null;
+  const svc = data.serviceType
+    ? serviceOptions.find((o) => o.verticalType === data.serviceType) ?? null
+    : null;
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
@@ -187,15 +227,8 @@ export function IntakeFormPage() {
           <Zap size={16} className="text-white" />
         </div>
         <div>
-          <p className="text-slate-900">Ortega HVAC &amp; Services</p>
-          <div className="flex items-center gap-2 mt-0.5">
-            <div className="flex items-center gap-0.5">
-              {[...Array(5)].map((_, i) => (
-                <Star key={i} size={10} className="fill-amber-400 text-amber-400" />
-              ))}
-            </div>
-            <p className="text-xs text-slate-400">4.9 · 124 reviews · Austin, TX</p>
-          </div>
+          <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
+          <p className="text-xs text-slate-400 mt-0.5">Request service online</p>
         </div>
       </div>
 
@@ -235,12 +268,21 @@ export function IntakeFormPage() {
               <p className="text-slate-500 mt-1.5">Select the type of service you need</p>
             </div>
             <div className="flex flex-col gap-3">
-              {SERVICE_OPTIONS.map(opt => {
-                const selected = data.serviceType === opt.type;
+              {tenantInfo === null && (
+                <p className="text-sm text-slate-400">Loading services…</p>
+              )}
+              {tenantInfo !== null && serviceOptions.length === 0 && (
+                <p className="text-sm text-slate-400">
+                  This business hasn't set up online intake yet. Please call to book.
+                </p>
+              )}
+              {serviceOptions.map(opt => {
+                const selected = data.serviceType === opt.verticalType;
                 return (
                   <button
-                    key={opt.type}
-                    onClick={() => update({ serviceType: opt.type })}
+                    key={opt.verticalType}
+                    data-testid={`intake-service-${opt.verticalType}`}
+                    onClick={() => update({ serviceType: opt.verticalType })}
                     className={`flex items-center gap-4 rounded-2xl border-2 px-5 py-4 text-left transition-all ${
                       selected
                         ? 'border-slate-900 bg-slate-900 text-white'
@@ -278,12 +320,13 @@ export function IntakeFormPage() {
             <div>
               <label className="text-xs text-slate-500 mb-1.5 block">Describe the problem *</label>
               <textarea
+                data-testid="intake-description"
                 value={data.description}
                 onChange={e => update({ description: e.target.value })}
                 placeholder={
-                  data.serviceType === 'HVAC'     ? `e.g. "My AC stopped blowing cold air yesterday. It's making a clicking noise."` :
-                  data.serviceType === 'Plumbing' ? `e.g. "Kitchen sink is draining very slowly and there's a bad smell."` :
-                  `e.g. "Looking to repaint the living room and hallway. Walls have some scuff marks."`
+                  data.serviceType
+                    ? SERVICE_PRESENTATION[data.serviceType].placeholder
+                    : FALLBACK_PLACEHOLDER
                 }
                 rows={5}
                 className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all resize-none"
@@ -354,6 +397,7 @@ export function IntakeFormPage() {
               <div key={key}>
                 <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
                 <input
+                  data-testid={`intake-field-${key}`}
                   value={data[key as keyof FormData] as string}
                   onChange={e => update({ [key]: e.target.value })}
                   placeholder={placeholder}
@@ -442,9 +486,11 @@ export function IntakeFormPage() {
             </div>
             <div className="w-full flex flex-col gap-3">
               {[
-                { icon: Clock,  label: 'Expect a call or text within 2 hours',       sub: 'Mon–Sat · 7 AM – 6 PM' },
-                { icon: Phone,  label: 'Call us directly',                            sub: '(512) 555-0100' },
-                { icon: Star,   label: 'We look forward to helping you',              sub: 'Ortega HVAC & Services' },
+                { icon: Clock, label: 'Expect a call or text within 2 hours', sub: 'Mon–Sat · 7 AM – 6 PM' },
+                ...(tenantInfo?.businessPhone
+                  ? [{ icon: Phone, label: 'Call us directly', sub: tenantInfo.businessPhone }]
+                  : []),
+                { icon: Star, label: 'We look forward to helping you', sub: tenantInfo?.businessName ?? 'Your service team' },
               ].map(({ icon: Icon, label, sub }) => (
                 <div key={label} className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
@@ -456,13 +502,6 @@ export function IntakeFormPage() {
                   </div>
                 </div>
               ))}
-            </div>
-
-            <div className="flex items-center gap-2 mt-2">
-              {[...Array(5)].map((_, i) => (
-                <Star key={i} size={16} className="fill-amber-400 text-amber-400" />
-              ))}
-              <p className="text-xs text-slate-400 ml-1">4.9 on Google · 124 reviews</p>
             </div>
           </div>
         )}
@@ -479,6 +518,7 @@ export function IntakeFormPage() {
               </div>
             )}
             <button
+              data-testid="intake-cta"
               onClick={next}
               disabled={!canAdvance || submitting}
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"

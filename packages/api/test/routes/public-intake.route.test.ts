@@ -6,18 +6,24 @@ import { createPublicIntakeRouter } from '../../src/routes/public-intake';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { DevInMemoryTenantRepository } from '../../src/auth/dev-auth-bypass';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
 
 describe('public-intake route', () => {
   let app: Express;
   let leadRepo: InMemoryLeadRepository;
   let auditRepo: InMemoryAuditRepository;
   let tenantRepo: DevInMemoryTenantRepository;
+  let settingsRepo: InMemorySettingsRepository;
+  let packRegistry: InMemoryVerticalPackRegistry;
   let tenantId: string;
 
   beforeEach(async () => {
     leadRepo = new InMemoryLeadRepository();
     auditRepo = new InMemoryAuditRepository();
     tenantRepo = new DevInMemoryTenantRepository();
+    settingsRepo = new InMemorySettingsRepository();
+    packRegistry = new InMemoryVerticalPackRegistry();
     const tenant = await tenantRepo.create({
       ownerId: 'owner-1',
       ownerEmail: 'owner@example.com',
@@ -25,8 +31,6 @@ describe('public-intake route', () => {
     });
     tenantId = tenant.id;
 
-    // Mirror the production app.ts wiring: same intake-specific
-    // rate-limit ceiling (10/min/IP) layered on the route.
     app = express();
     app.use(express.json());
     app.use(
@@ -37,7 +41,7 @@ describe('public-intake route', () => {
         standardHeaders: false,
         legacyHeaders: false,
       }),
-      createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo),
+      createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo, settingsRepo, packRegistry),
     );
   });
 
@@ -118,5 +122,69 @@ describe('public-intake route', () => {
     }
     const r11 = await send();
     expect(r11.status).toBe(429);
+  });
+
+  describe('GET /public/intake/:tenantId', () => {
+    it('returns business info and pack-derived service types for a configured tenant', async () => {
+      await settingsRepo.create({
+        id: 'settings-1',
+        tenantId,
+        businessName: 'Ortega HVAC & Services',
+        businessPhone: '(512) 555-0100',
+        timezone: 'America/Chicago',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        activeVerticalPacks: ['hvac-v1'],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await packRegistry.register({
+        id: 'pack-hvac-1',
+        packId: 'hvac-v1',
+        version: '1.0.0',
+        verticalType: 'hvac',
+        status: 'active',
+        displayName: 'HVAC Services',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const res = await request(app).get(`/public/intake/${tenantId}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        businessName: 'Ortega HVAC & Services',
+        businessPhone: '(512) 555-0100',
+        serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
+      });
+    });
+
+    it('falls back to the tenant name and empty service types when settings are absent', async () => {
+      const res = await request(app).get(`/public/intake/${tenantId}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        businessName: 'Test Co',
+        businessPhone: null,
+        serviceTypes: [],
+      });
+    });
+
+    it('returns 404 for an unknown tenant', async () => {
+      const res = await request(app).get(
+        '/public/intake/99999999-9999-4999-8999-999999999999',
+      );
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Intake form not found' });
+    });
+
+    it('returns 400 for a malformed tenant id', async () => {
+      const res = await request(app).get('/public/intake/not-a-uuid');
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
+    });
   });
 });
