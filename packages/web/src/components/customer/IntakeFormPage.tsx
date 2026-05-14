@@ -3,7 +3,7 @@ import {
   Zap, ChevronRight, Check, AlertCircle, Phone, Mail,
   MapPin, Camera, ArrowLeft, Clock, Star,
 } from 'lucide-react';
-import { submitIntakeLead } from '../../api/public-intake';
+import { submitIntakeLead, fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -92,12 +92,25 @@ export function IntakeFormPage() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
 
   // Attribution captured once on mount. Storing in a ref so re-renders
   // don't lose or duplicate it.
   const attributionRef = useRef<CapturedAttribution>({ attribution: {} });
   useEffect(() => {
     attributionRef.current = captureAttributionFromUrl();
+  }, []);
+
+  // Load the tenant's public branding + service types. Non-fatal on
+  // failure — the form still submits; only the header/branding degrades.
+  useEffect(() => {
+    const tenantId = new URLSearchParams(window.location.search).get('t');
+    if (!tenantId) return;
+    fetchIntakeTenantInfo(tenantId)
+      .then(setTenantInfo)
+      .catch(() => {
+        /* branding is best-effort; submit path still reports a hard error */
+      });
   }, []);
 
   function update(partial: Partial<FormData>) {
@@ -181,15 +194,8 @@ export function IntakeFormPage() {
           <Zap size={16} className="text-white" />
         </div>
         <div>
-          <p className="text-slate-900">Ortega HVAC &amp; Services</p>
-          <div className="flex items-center gap-2 mt-0.5">
-            <div className="flex items-center gap-0.5">
-              {[...Array(5)].map((_, i) => (
-                <Star key={i} size={10} className="fill-amber-400 text-amber-400" />
-              ))}
-            </div>
-            <p className="text-xs text-slate-400">4.9 · 124 reviews · Austin, TX</p>
-          </div>
+          <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
+          <p className="text-xs text-slate-400 mt-0.5">Request service online</p>
         </div>
       </div>
 

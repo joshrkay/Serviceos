@@ -4,12 +4,19 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../api/public-intake', () => ({
   submitIntakeLead: vi.fn(),
+  fetchIntakeTenantInfo: vi.fn(),
 }));
 
-import { submitIntakeLead } from '../../api/public-intake';
+import { submitIntakeLead, fetchIntakeTenantInfo } from '../../api/public-intake';
 import { IntakeFormPage } from './IntakeFormPage';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
+
+const TENANT_INFO = {
+  businessName: 'Ortega HVAC & Services',
+  businessPhone: '(512) 555-0100',
+  serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
+};
 
 function setTenantQueryParam(t: string | null): void {
   window.history.pushState({}, '', t ? `/intake?t=${t}` : '/intake');
@@ -42,6 +49,8 @@ describe('IntakeFormPage', () => {
   beforeEach(() => {
     vi.mocked(submitIntakeLead).mockReset();
     vi.mocked(submitIntakeLead).mockResolvedValue({ ok: true, leadId: 'lead-1' });
+    vi.mocked(fetchIntakeTenantInfo).mockReset();
+    vi.mocked(fetchIntakeTenantInfo).mockResolvedValue(TENANT_INFO);
     setTenantQueryParam(TENANT_ID);
   });
 
@@ -105,5 +114,21 @@ describe('IntakeFormPage', () => {
       ).toBeInTheDocument();
     });
     expect(submitIntakeLead).not.toHaveBeenCalled();
+  });
+
+  it('loads and renders the real business name in the header', async () => {
+    render(<IntakeFormPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Ortega HVAC & Services')).toBeInTheDocument();
+    });
+    expect(fetchIntakeTenantInfo).toHaveBeenCalledWith(TENANT_ID);
+  });
+
+  it('does not render the hardcoded mock review rating', async () => {
+    render(<IntakeFormPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Ortega HVAC & Services')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/124 reviews/i)).not.toBeInTheDocument();
   });
 });
