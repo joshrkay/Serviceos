@@ -70,7 +70,12 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['016_create_jobs', 'd13851154b8b98a02c7f73b59d5be99c813b7d04aecef004ace5dc9d39723c31'],
   ['017_create_job_timeline_events', 'b249f4702f2904b120a5b3b6a01d0372e701f768bd2c50e53cea7bedd99f6e47'],
   ['018_create_appointments', '5b9aab1df3fabe35d130752b5af9d7531d7dc92da97a41e7fab601b5cfe6815c'],
-  ['070_tenant_location_and_integrations', '52c828957502021bf5430f1fb19cf3f3608cb99673a9f9439f3e30ab001dca0f'],
+  // Hash updated 2026-05-14: 070's ADD CONSTRAINT gained `NOT VALID` so the
+  // migration is re-runnable against a populated DB. Intentional in-place
+  // edit — there is no "new migration" alternative because the failure
+  // aborts the whole getMigrationSQL() transaction AT 070, before any later
+  // migration could run. Migration 088 drops this constraint anyway.
+  ['070_tenant_location_and_integrations', '8f77a54e946f73e1bd94fff30a4b20f0e45ae640d1a57f9ccd58a71f51e51d68'],
   ['019_create_appointment_assignments', 'e9394cf3cdc8c89bc8b7f12556d397a86bfdd5a980f3b39af70e45815e98c35b'],
   ['020_create_estimates', 'b4b9e04bbe669956419eb7083e1e8b441db7398aaa8e9e4d80f683c68792cc4d'],
   ['021_create_estimate_line_items', '43b3f8ba9491c53f7701961bb28eae9cddd4c7d9a3c1c908a5d50b8c1a65cabc'],
@@ -151,6 +156,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['092_extend_dispatch_entity_types', '151f56d737928f7fc0678c98d5a83bc0b7117bbbd9865cc770c2c46ad2ebbb94'],
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
+  ['094_widen_payment_method_check', 'fecf8ebef5289e7073617320382b82000e450bbe9e1505f0f752bfb1ce246aa9'],
 ];
 
 function hashMigration(value: string): string {
