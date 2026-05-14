@@ -3,6 +3,7 @@ import {
   Zap, ChevronRight, Check, AlertCircle, Phone, Mail,
   MapPin, Camera, ArrowLeft, Clock, Star,
 } from 'lucide-react';
+import { submitIntakeLead } from '../../api/public-intake';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -122,31 +123,24 @@ export function IntakeFormPage() {
         data.description || null,
       ].filter(Boolean).join(' — ');
 
-      const res = await fetch(`/public/intake/${tenantId}/leads`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          firstName,
-          lastName,
-          primaryPhone: data.phone || undefined,
-          email: data.email || undefined,
-          serviceType: data.serviceType ?? undefined,
-          urgency: data.urgency ?? undefined,
-          description: description || undefined,
-          preferredDates: data.preferredDates || undefined,
-          address: data.address || undefined,
-          utmSource: attributionRef.current.utmSource,
-          utmMedium: attributionRef.current.utmMedium,
-          utmCampaign: attributionRef.current.utmCampaign,
-          attribution: attributionRef.current.attribution,
-          // Honeypot — never set by the form, here so a bot that walks
-          // the DOM and fills every input still trips it.
-          _company_url: '',
-        }),
+      await submitIntakeLead(tenantId, {
+        firstName,
+        lastName,
+        primaryPhone: data.phone || undefined,
+        email: data.email || undefined,
+        serviceType: data.serviceType ?? undefined,
+        urgency: data.urgency ?? undefined,
+        description: description || undefined,
+        preferredDates: data.preferredDates || undefined,
+        address: data.address || undefined,
+        utmSource: attributionRef.current.utmSource,
+        utmMedium: attributionRef.current.utmMedium,
+        utmCampaign: attributionRef.current.utmCampaign,
+        attribution: attributionRef.current.attribution,
+        // Honeypot — never set by the form, here so a bot that walks
+        // the DOM and fills every input still trips it.
+        _company_url: '',
       });
-      if (!res.ok) {
-        throw new Error(`Submission failed (${res.status})`);
-      }
       setStep('done');
     } catch (err) {
       setSubmitError(
@@ -240,6 +234,7 @@ export function IntakeFormPage() {
                 return (
                   <button
                     key={opt.type}
+                    data-testid={`intake-service-${opt.type}`}
                     onClick={() => update({ serviceType: opt.type })}
                     className={`flex items-center gap-4 rounded-2xl border-2 px-5 py-4 text-left transition-all ${
                       selected
@@ -278,6 +273,7 @@ export function IntakeFormPage() {
             <div>
               <label className="text-xs text-slate-500 mb-1.5 block">Describe the problem *</label>
               <textarea
+                data-testid="intake-description"
                 value={data.description}
                 onChange={e => update({ description: e.target.value })}
                 placeholder={
@@ -354,6 +350,7 @@ export function IntakeFormPage() {
               <div key={key}>
                 <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
                 <input
+                  data-testid={`intake-field-${key}`}
                   value={data[key as keyof FormData] as string}
                   onChange={e => update({ [key]: e.target.value })}
                   placeholder={placeholder}
@@ -479,6 +476,7 @@ export function IntakeFormPage() {
               </div>
             )}
             <button
+              data-testid="intake-cta"
               onClick={next}
               disabled={!canAdvance || submitting}
               className="w-full flex items-center justify-center gap-2 rounded-xl bg-slate-900 py-4 text-sm text-white hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
