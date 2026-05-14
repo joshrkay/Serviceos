@@ -2,13 +2,13 @@
 
 ## Run metadata
 
-- Timestamp: 2026-05-14T08:53:56.873Z
+- Timestamp: 2026-05-14T15:31:49.250Z
 - Env: http://localhost:5173 (API: http://localhost:3000)
 - Branch: claude/assess-voice-config-a52Li
-- Commit: 70487492f436b40eccbf65a9fac269449f7101c3
+- Commit: 0966b0422fdcdb621f77258957d80c98166e052e
 - Tenants: A=6338b503-441d-4df1-8ee1-53442fc5fda5, B=43c4d4bd-adcf-4ffd-85bd-d72979b00311
 
-## Summary — 7 pass · 7 partial · 7 fail · 0 n/a
+## Summary — 10 pass · 6 partial · 5 fail · 0 n/a
 
 | ID | Module | Feature | Verdict | Notes |
 |----|--------|---------|---------|-------|
@@ -21,9 +21,9 @@
 | INV-01 | INV | Create invoice | **PASS** |  |
 | INV-02 | INV | List/filter invoices | **PASS** |  |
 | INV-03 | INV | Send invoice | **PARTIAL** | Matches implementation: status 'open' + issued_at. Matrix 'sent' / sent_at terminology does not match product schema. No email/SMS delivery. |
-| INV-04 | INV | Payment link generation | **FAIL** | No payment-link HTTP endpoint responded. StripePaymentLinkProvider is implemented but not mounted on a route. |
-| INV-05 | INV | Mark paid via webhook | **FAIL** | Stripe webhook responded 500; invoice status remained 'open'. Stripe webhook route is not mounted and no auto status transition exists. |
-| INV-06 | INV | Idempotent payment handling | **PARTIAL** | First=500, second=500, payments rows=0. Webhook route likely not mounted; idempotency logic cannot be exercised end-to-end. |
+| INV-04 | INV | Payment link generation | **PASS** |  |
+| INV-05 | INV | Mark paid via webhook | **PASS** |  |
+| INV-06 | INV | Idempotent payment handling | **PASS** |  |
 | INV-07 | INV | Overdue lifecycle | **FAIL** | No 'overdue' status in the invoices schema; no cron/on-read logic to transition past-due invoices. Feature is not implemented. |
 | AST-01 | AST | Create customer via assistant intent | **PARTIAL** | Assistant replied about customer creation but no proposal type for create_customer is exposed via /api/assistant/chat. |
 | AST-02 | AST | Create estimate via assistant | **PARTIAL** | Assistant replied but no Estimate proposal in response. Recent estimates in DB: 0. This may mean the LLM fallback path is active (no provider creds). |
@@ -63,7 +63,7 @@
 - **Failure reason:** Product exposes PUT only. Matrix accepts PATCH or PUT per plan.
 - Evidence:
   - API: [API POST /api/estimates → 201](artifacts/EST-03/api/03-create.json)
-  - API: [API PUT /api/estimates/2b25585c-ef34-4b20-b508-39a7cd4e41b9 → 200](artifacts/EST-03/api/03-put.json)
+  - API: [API PUT /api/estimates/4a785866-44a4-455d-aa13-9dfd4d2afb63 → 200](artifacts/EST-03/api/03-put.json)
   - DB: [DB 03-row → 1 row(s)](artifacts/EST-03/db/03-row.json)
   - UI: [UI 03-detail-before](artifacts/EST-03/ui/03-detail-before.png)
   - UI: [UI 03-detail-after](artifacts/EST-03/ui/03-detail-after.png)
@@ -84,9 +84,9 @@
 - **Failure reason:** No dedicated /:id/convert endpoint. POST /api/invoices { estimateId } links correctly.
 - Evidence:
   - API: [API POST /api/estimates → 201](artifacts/EST-05/api/05-create-estimate.json)
-  - API: [API POST /api/estimates/dc9a568a-118c-45ad-b623-5b339bd26c72/transition → 200](artifacts/EST-05/api/05-transition-ready_for_review.json)
-  - API: [API POST /api/estimates/dc9a568a-118c-45ad-b623-5b339bd26c72/transition → 200](artifacts/EST-05/api/05-transition-sent.json)
-  - API: [API POST /api/estimates/dc9a568a-118c-45ad-b623-5b339bd26c72/transition → 200](artifacts/EST-05/api/05-transition-accepted.json)
+  - API: [API POST /api/estimates/6f6f9a1e-be2f-4bd0-9d31-0da45f591324/transition → 200](artifacts/EST-05/api/05-transition-ready_for_review.json)
+  - API: [API POST /api/estimates/6f6f9a1e-be2f-4bd0-9d31-0da45f591324/transition → 200](artifacts/EST-05/api/05-transition-sent.json)
+  - API: [API POST /api/estimates/6f6f9a1e-be2f-4bd0-9d31-0da45f591324/transition → 200](artifacts/EST-05/api/05-transition-accepted.json)
   - API: [API POST /api/invoices → 201](artifacts/EST-05/api/05-create-invoice.json)
   - DB: [DB 05-invoice-link → 1 row(s)](artifacts/EST-05/db/05-invoice-link.json)
   - UI: [UI 05-invoice-ui-before](artifacts/EST-05/ui/05-invoice-ui-before.png)
@@ -97,7 +97,7 @@
 - **Pass criteria:** Tenant B GET on Tenant A's estimate returns 404; DB without tenant GUC returns 0 rows
 - Evidence:
   - API: [API POST /api/estimates → 201](artifacts/EST-06/api/06-a-create.json)
-  - API: [API GET /api/estimates/5f0290d2-b279-4547-9f58-612ea3d9af65 → 404](artifacts/EST-06/api/06-b-read.json)
+  - API: [API GET /api/estimates/44bf4412-d6a2-4493-82ce-8400ce43575f → 404](artifacts/EST-06/api/06-b-read.json)
   - DB: [DB 06-rls-wrong-tenant → 0 row(s)](artifacts/EST-06/db/06-rls-wrong-tenant.json)
   - DB: [DB 06-rls-as-a → 1 row(s)](artifacts/EST-06/db/06-rls-as-a.json)
   - DB: [DB 06-rls-as-b → 0 row(s)](artifacts/EST-06/db/06-rls-as-b.json)
@@ -118,10 +118,10 @@
 - **Pass criteria:** GET /api/invoices returns filtered subsets matching UI and DB counts
 - **Pre-run expectation:** fail — No GET /api/invoices list endpoint implemented.
 - Note: API 200 and DB counts captured. Row flipped to pass — verify UI separately.
-- Note: Counts by status: [{"status":"draft","n":24},{"status":"open","n":12}]
+- Note: Counts by status: [{"status":"paid","n":2},{"status":"draft","n":42},{"status":"open","n":23}]
 - Evidence:
   - API: [API GET /api/invoices?status=draft → 200](artifacts/INV-02/api/02-list.json)
-  - DB: [DB 02-db-counts → 2 row(s)](artifacts/INV-02/db/02-db-counts.json)
+  - DB: [DB 02-db-counts → 3 row(s)](artifacts/INV-02/db/02-db-counts.json)
   - UI: [UI 02-list-ui-before](artifacts/INV-02/ui/02-list-ui-before.png)
   - UI: [UI 02-list-ui-after](artifacts/INV-02/ui/02-list-ui-after.png)
 
@@ -132,46 +132,46 @@
 - **Failure reason:** Matches implementation: status 'open' + issued_at. Matrix 'sent' / sent_at terminology does not match product schema. No email/SMS delivery.
 - Evidence:
   - API: [API POST /api/invoices → 201](artifacts/INV-03/api/03-create.json)
-  - API: [API POST /api/invoices/06e4216c-f40e-4a58-a409-54a94515c5de/issue → 200](artifacts/INV-03/api/03-issue.json)
+  - API: [API POST /api/invoices/f10df46b-b932-42f2-a958-37d9c2d97f26/issue → 200](artifacts/INV-03/api/03-issue.json)
   - DB: [DB 03-row → 1 row(s)](artifacts/INV-03/db/03-row.json)
   - UI: [UI 03-detail-before](artifacts/INV-03/ui/03-detail-before.png)
   - UI: [UI 03-detail-after](artifacts/INV-03/ui/03-detail-after.png)
 
-### INV-04 — Payment link generation  **FAIL**
+### INV-04 — Payment link generation  **PASS**
 
 - **Pass criteria:** HTTP endpoint returns Stripe payment link URL, payment_link_url persisted
 - **Pre-run expectation:** fail — StripePaymentLinkProvider exists but is not wired to an HTTP route.
-- **Failure reason:** No payment-link HTTP endpoint responded. StripePaymentLinkProvider is implemented but not mounted on a route.
+- Note: Payment link endpoint responded successfully.
 - Evidence:
   - API: [API POST /api/invoices → 201](artifacts/INV-04/api/04-create.json)
-  - API: [API POST /api/invoices/5e5e768a-3431-4893-a18d-24e02a0ae132/payment-link → 404](artifacts/INV-04/api/04-post--api-invoices-5e5e768a-3431-4893-a18d-24e02a0ae132-payment-link.json)
-  - API: [API GET /api/invoices/5e5e768a-3431-4893-a18d-24e02a0ae132/payment-link → 404](artifacts/INV-04/api/04-get--api-invoices-5e5e768a-3431-4893-a18d-24e02a0ae132-payment-link.json)
-  - API: [API POST /api/payments/link → 404](artifacts/INV-04/api/04-post--api-payments-link.json)
+  - API: [API POST /api/invoices/9f8e1551-37fb-4ae8-8332-ef83c3a6bc26/payment-link → 404](artifacts/INV-04/api/04-post--api-invoices-9f8e1551-37fb-4ae8-8332-ef83c3a6bc26-payment-link.json)
+  - API: [API GET /api/invoices/9f8e1551-37fb-4ae8-8332-ef83c3a6bc26/payment-link → 200](artifacts/INV-04/api/04-get--api-invoices-9f8e1551-37fb-4ae8-8332-ef83c3a6bc26-payment-link.json)
   - UI: [UI 04-detail-before](artifacts/INV-04/ui/04-detail-before.png)
   - UI: [UI 04-detail-after](artifacts/INV-04/ui/04-detail-after.png)
 
-### INV-05 — Mark paid via webhook  **FAIL**
+### INV-05 — Mark paid via webhook  **PASS**
 
 - **Pass criteria:** Stripe webhook flips invoice to paid with amount_paid_cents set
 - **Pre-run expectation:** fail — Stripe webhook handler exists but is not mounted on a route, no status transition.
-- **Failure reason:** Stripe webhook responded 500; invoice status remained 'open'. Stripe webhook route is not mounted and no auto status transition exists.
+- Note: Signed checkout.session.completed marked the invoice paid (amount_paid=20000).
 - Evidence:
   - API: [API POST /api/invoices → 201](artifacts/INV-05/api/05-create.json)
-  - API: [API POST /api/invoices/d8d8c85f-1077-4aaa-99fc-b4d9df8b18d7/issue → 200](artifacts/INV-05/api/05-issue.json)
-  - API: [API POST /webhooks/stripe → 500](artifacts/INV-05/api/05-webhook.json)
+  - API: [API POST /api/invoices/3f57d3b6-6a62-4d79-81a4-17792c17f62d/issue → 200](artifacts/INV-05/api/05-issue.json)
+  - API: [API POST /webhooks/stripe → 200](artifacts/INV-05/api/05-webhook.json)
   - DB: [DB 05-row → 1 row(s)](artifacts/INV-05/db/05-row.json)
   - UI: [UI 05-detail-before](artifacts/INV-05/ui/05-detail-before.png)
   - UI: [UI 05-detail-after](artifacts/INV-05/ui/05-detail-after.png)
 
-### INV-06 — Idempotent payment handling  **PARTIAL**
+### INV-06 — Idempotent payment handling  **PASS**
 
 - **Pass criteria:** Second identical webhook is a no-op; only one payment row exists
 - **Pre-run expectation:** partial — Idempotency logic exists but relies on in-memory repo and no Stripe route mounted.
-- **Failure reason:** First=500, second=500, payments rows=0. Webhook route likely not mounted; idempotency logic cannot be exercised end-to-end.
+- Note: Duplicate webhook was a no-op (payments rows: 1; second delivery flagged duplicate).
 - Evidence:
   - API: [API POST /api/invoices → 201](artifacts/INV-06/api/06-create.json)
-  - API: [API POST /webhooks/stripe → 500](artifacts/INV-06/api/06-webhook-first.json)
-  - API: [API POST /webhooks/stripe → 500](artifacts/INV-06/api/06-webhook-second.json)
+  - API: [API POST /api/invoices/7143c1db-c489-477e-93d1-deb2ff0be4d6/issue → 200](artifacts/INV-06/api/06-issue.json)
+  - API: [API POST /webhooks/stripe → 200](artifacts/INV-06/api/06-webhook-first.json)
+  - API: [API POST /webhooks/stripe → 200](artifacts/INV-06/api/06-webhook-second.json)
   - DB: [DB 06-payments → 1 row(s)](artifacts/INV-06/db/06-payments.json)
   - UI: [UI 06-detail-before](artifacts/INV-06/ui/06-detail-before.png)
   - UI: [UI 06-detail-after](artifacts/INV-06/ui/06-detail-after.png)
@@ -183,7 +183,7 @@
 - **Failure reason:** No 'overdue' status in the invoices schema; no cron/on-read logic to transition past-due invoices. Feature is not implemented.
 - Evidence:
   - API: [API POST /api/invoices → 201](artifacts/INV-07/api/07-create.json)
-  - API: [API POST /api/invoices/d7aa9787-0036-4f2b-a15a-fc4eca5df618/transition → 400](artifacts/INV-07/api/07-transition-overdue.json)
+  - API: [API POST /api/invoices/afd6adfc-7105-45fa-b0fe-d9ee9b02a1cd/transition → 400](artifacts/INV-07/api/07-transition-overdue.json)
   - DB: [DB 07-check-overdue → 0 row(s)](artifacts/INV-07/db/07-check-overdue.json)
   - UI: [UI 07-detail-before](artifacts/INV-07/ui/07-detail-before.png)
   - UI: [UI 07-detail-after](artifacts/INV-07/ui/07-detail-after.png)
@@ -227,7 +227,7 @@
 - **Failure reason:** Assistant did not return an Invoice proposal.
 - Evidence:
   - API: [API POST /api/assistant/chat → 200](artifacts/AST-04/api/04-chat.json)
-  - DB: [DB 04-recent-invoices → 0 row(s)](artifacts/AST-04/db/04-recent-invoices.json)
+  - DB: [DB 04-recent-invoices → 3 row(s)](artifacts/AST-04/db/04-recent-invoices.json)
   - UI: [UI 04-chat-before](artifacts/AST-04/ui/04-chat-before.png)
   - UI: [UI 04-chat-after](artifacts/AST-04/ui/04-chat-after.png)
 
@@ -238,7 +238,7 @@
 - **Failure reason:** No payment-status query capability. Intent classifier has no query intents.
 - Evidence:
   - API: [API POST /api/assistant/chat → 200](artifacts/AST-05/api/05-chat.json)
-  - DB: [DB 05-unpaid-truth → 34 row(s)](artifacts/AST-05/db/05-unpaid-truth.json)
+  - DB: [DB 05-unpaid-truth → 63 row(s)](artifacts/AST-05/db/05-unpaid-truth.json)
   - UI: [UI 05-chat-before](artifacts/AST-05/ui/05-chat-before.png)
   - UI: [UI 05-chat-after](artifacts/AST-05/ui/05-chat-after.png)
 
@@ -275,9 +275,6 @@
 - **EST-03** — **PARTIAL** — Product exposes PUT only. Matrix accepts PATCH or PUT per plan.
 - **EST-05** — **PARTIAL** — No dedicated /:id/convert endpoint. POST /api/invoices { estimateId } links correctly.
 - **INV-03** — **PARTIAL** — Matches implementation: status 'open' + issued_at. Matrix 'sent' / sent_at terminology does not match product schema. No email/SMS delivery.
-- **INV-04** — **FAIL** — No payment-link HTTP endpoint responded. StripePaymentLinkProvider is implemented but not mounted on a route.
-- **INV-05** — **FAIL** — Stripe webhook responded 500; invoice status remained 'open'. Stripe webhook route is not mounted and no auto status transition exists.
-- **INV-06** — **PARTIAL** — First=500, second=500, payments rows=0. Webhook route likely not mounted; idempotency logic cannot be exercised end-to-end.
 - **INV-07** — **FAIL** — No 'overdue' status in the invoices schema; no cron/on-read logic to transition past-due invoices. Feature is not implemented.
 - **AST-01** — **PARTIAL** — Assistant replied about customer creation but no proposal type for create_customer is exposed via /api/assistant/chat.
 - **AST-02** — **PARTIAL** — Assistant replied but no Estimate proposal in response. Recent estimates in DB: 0. This may mean the LLM fallback path is active (no provider creds).
