@@ -486,9 +486,11 @@ export function IntakeFormPage() {
             </div>
             <div className="w-full flex flex-col gap-3">
               {[
-                { icon: Clock,  label: 'Expect a call or text within 2 hours',       sub: 'Mon–Sat · 7 AM – 6 PM' },
-                { icon: Phone,  label: 'Call us directly',                            sub: '(512) 555-0100' },
-                { icon: Star,   label: 'We look forward to helping you',              sub: 'Ortega HVAC & Services' },
+                { icon: Clock, label: 'Expect a call or text within 2 hours', sub: 'Mon–Sat · 7 AM – 6 PM' },
+                ...(tenantInfo?.businessPhone
+                  ? [{ icon: Phone, label: 'Call us directly', sub: tenantInfo.businessPhone }]
+                  : []),
+                { icon: Star, label: 'We look forward to helping you', sub: tenantInfo?.businessName ?? 'Your service team' },
               ].map(({ icon: Icon, label, sub }) => (
                 <div key={label} className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5">
                   <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
@@ -500,13 +502,6 @@ export function IntakeFormPage() {
                   </div>
                 </div>
               ))}
-            </div>
-
-            <div className="flex items-center gap-2 mt-2">
-              {[...Array(5)].map((_, i) => (
-                <Star key={i} size={16} className="fill-amber-400 text-amber-400" />
-              ))}
-              <p className="text-xs text-slate-400 ml-1">4.9 on Google · 124 reviews</p>
             </div>
           </div>
         )}

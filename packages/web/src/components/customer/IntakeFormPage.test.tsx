@@ -174,4 +174,19 @@ describe('IntakeFormPage', () => {
     });
     expect(screen.queryByText(/124 reviews/i)).not.toBeInTheDocument();
   });
+
+  it('shows the real business name and phone on the success screen', async () => {
+    render(<IntakeFormPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('intake-service-hvac')).toBeInTheDocument();
+    });
+    await completeWizard();
+    await waitFor(() => {
+      expect(screen.getByText('Request submitted!')).toBeInTheDocument();
+    });
+    // Real tenant data, not the hardcoded mock.
+    expect(screen.getByText('(512) 555-0100')).toBeInTheDocument();
+    expect(screen.getAllByText('Ortega HVAC & Services').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/4\.9 on Google/i)).not.toBeInTheDocument();
+  });
 });
