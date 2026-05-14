@@ -70,8 +70,12 @@
 - `packages/api/src/routes/invoices.ts` — `createInvoiceRouter` gains an `estimateRepo?` param; threads refresh deps into `issueInvoice` / `recordPayment` / `transitionInvoiceStatus`.
 - `packages/api/src/routes/estimates.ts` — `createEstimateRouter` gains a `moneyStateDeps?` param; threads deps into `transitionEstimateStatus` and adds an explicit refresh to `/send`.
 - `packages/api/src/webhooks/routes.ts` — `WebhookRouterDeps` gains `estimateRepo?`; the Stripe handler passes refresh deps into `recordPayment`.
-- `packages/api/src/app.ts` — pass the new repos into the two routers + the webhook; construct `webhookEstimateRepo`; schedule the overdue worker.
-- `packages/api/test/routes/test-app.ts` — pass the new repos into the two routers.
+- `packages/api/src/routes/payments.ts` — `createPaymentRouter` gains `jobRepo?` / `estimateRepo?` / `auditRepo?`; threads refresh deps into `recordPayment` (Task 6).
+- `packages/api/src/proposals/handlers/issue-invoice.ts` — `IssueInvoiceExecutionHandler` constructor gains an optional `moneyStateDeps` and passes it to `issueInvoice` (Task 6).
+- `packages/api/src/proposals/execution/voice-extended-handlers.ts` — `RecordPaymentExecutionHandler` constructor gains an optional `moneyStateDeps` and passes it to `recordPayment` (Task 6).
+- `packages/api/src/proposals/execution/handlers.ts` — `createExecutionHandlerRegistry` deps gain `jobRepo?` / `auditRepo?`; builds the refresh deps and supplies them to the two handlers above (Task 6).
+- `packages/api/src/app.ts` — pass the new repos into the two routers + the webhook + the payment router + the proposal-handler registry; construct `webhookEstimateRepo`; schedule the overdue worker.
+- `packages/api/test/routes/test-app.ts` — pass the new repos into the estimate/invoice routers and mount the payment router with refresh deps.
 
 ---
 
@@ -773,6 +777,21 @@ git commit -m "feat(api): add refreshJobMoneyState rollup orchestrator"
 ## Task 4: Thread the refresh through the estimate/invoice domain functions
 
 This task adds an optional `moneyStateDeps?: RefreshJobMoneyStateDeps` parameter to the four money-mutation choke-point functions. When the param is omitted (every existing caller), behavior is byte-for-byte unchanged.
+
+**Every live call site of these four functions must eventually supply the deps** — a focused grep (`grep -rn` for each function name across `src`) found these callers, and the rollup is correct only if all of them are wired:
+
+| Function | Call site | Wired in |
+|---|---|---|
+| `recordPayment` | `routes/invoices.ts` (`/api/invoices/:id/payment`) | Task 5 |
+| `recordPayment` | `webhooks/routes.ts` (Stripe checkout — 2 calls) | Task 5 |
+| `recordPayment` | `routes/payments.ts` (`/api/payments`) | **Task 6** |
+| `recordPayment` | `proposals/execution/voice-extended-handlers.ts` (`record_payment` proposal) | **Task 6** |
+| `issueInvoice` | `routes/invoices.ts` (`/api/invoices/:id/issue`) | Task 5 |
+| `issueInvoice` | `proposals/handlers/issue-invoice.ts` (`issue_invoice` proposal) | **Task 6** |
+| `transitionInvoiceStatus` | `routes/invoices.ts` (`/api/invoices/:id/transition`) — only caller | Task 5 |
+| `transitionEstimateStatus` | `routes/estimates.ts` (`/api/estimates/:id/transition`) — only caller | Task 5 |
+
+Two further `recordPayment` callers are **deliberately skipped** because they are not live code paths: `payments/stripe-invoice-updater.ts` (`processStripePaymentEvent` — has no callers anywhere in `src`; the Stripe webhook calls `recordPayment` directly) and `payments/invoice-payment-reconciler.ts` (`InvoicePaymentReconciler` — not instantiated in `app.ts`). If either is wired into the live app later, it must also pass `moneyStateDeps`.
 
 **Files:**
 - Modify: `packages/api/src/invoices/payment.ts`
@@ -1653,7 +1672,479 @@ git commit -m "feat(api): wire job money-state rollup into invoice/estimate rout
 
 ---
 
-## Task 6: Overdue-invoice detection worker
+## Task 6: Wire the remaining `recordPayment` / `issueInvoice` call sites
+
+Task 5 wired the two routers and the Stripe webhook. Three more **live** call sites still call the widened domain functions without supplying refresh deps — so a payment recorded via `/api/payments`, an AI-approved `record_payment` proposal, or an AI-approved `issue_invoice` proposal would silently leave `job.moneyState` stale. This task wires those three.
+
+**Files:**
+- Modify: `packages/api/src/routes/payments.ts`
+- Modify: `packages/api/src/proposals/handlers/issue-invoice.ts`
+- Modify: `packages/api/src/proposals/execution/voice-extended-handlers.ts`
+- Modify: `packages/api/src/proposals/execution/handlers.ts`
+- Modify: `packages/api/src/app.ts`
+- Modify: `packages/api/test/routes/test-app.ts`
+- Test: `packages/api/test/jobs/job-money-state-callers.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/api/test/jobs/job-money-state-callers.test.ts`:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import request from 'supertest';
+import { v4 as uuidv4 } from 'uuid';
+import { buildTestApp, TestApp, TEST_TENANT_ID, TEST_USER_ID } from '../routes/test-app';
+import { createJob, InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryInvoiceRepository, Invoice, InvoiceStatus } from '../../src/invoices/invoice';
+import { InMemoryPaymentRepository } from '../../src/invoices/payment';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { IssueInvoiceExecutionHandler } from '../../src/proposals/handlers/issue-invoice';
+import { RecordPaymentExecutionHandler } from '../../src/proposals/execution/voice-extended-handlers';
+import type { RefreshJobMoneyStateDeps } from '../../src/jobs/job-money-state';
+import type { Proposal } from '../../src/proposals/proposal';
+import type { ExecutionContext } from '../../src/proposals/execution/handlers';
+import type { DocumentTotals } from '../../src/shared/billing-engine';
+
+const ZERO_TOTALS: DocumentTotals = {
+  subtotalCents: 10000,
+  discountCents: 0,
+  taxRateBps: 0,
+  taxableSubtotalCents: 10000,
+  taxCents: 0,
+  totalCents: 10000,
+};
+
+function makeInvoice(jobId: string, status: InvoiceStatus): Invoice {
+  return {
+    id: uuidv4(),
+    tenantId: 't1',
+    jobId,
+    invoiceNumber: 'INV-0001',
+    status,
+    lineItems: [],
+    totals: ZERO_TOTALS,
+    amountPaidCents: 0,
+    amountDueCents: 10000,
+    createdBy: 'u1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+
+describe('money-state — remaining caller wiring', () => {
+  describe('IssueInvoiceExecutionHandler', () => {
+    it('rolls the job to invoiced when constructed with money-state deps', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      const estimateRepo = new InMemoryEstimateRepository();
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const auditRepo = new InMemoryAuditRepository();
+      const job = await createJob(
+        { tenantId: 't1', customerId: 'c1', locationId: 'l1', summary: 'Job', createdBy: 'u1' },
+        jobRepo,
+      );
+      const invoice = await invoiceRepo.create(makeInvoice(job.id, 'draft'));
+      const deps: RefreshJobMoneyStateDeps = { jobRepo, estimateRepo, invoiceRepo, auditRepo };
+      const handler = new IssueInvoiceExecutionHandler(invoiceRepo, deps);
+
+      const result = await handler.execute(
+        { payload: { invoiceId: invoice.id } } as unknown as Proposal,
+        { tenantId: 't1', executedBy: 'u1' } as ExecutionContext,
+      );
+
+      expect(result.success).toBe(true);
+      expect((await jobRepo.findById('t1', job.id))!.moneyState).toBe('invoiced');
+    });
+  });
+
+  describe('RecordPaymentExecutionHandler', () => {
+    it('rolls the job to paid when constructed with money-state deps', async () => {
+      const jobRepo = new InMemoryJobRepository();
+      const estimateRepo = new InMemoryEstimateRepository();
+      const invoiceRepo = new InMemoryInvoiceRepository();
+      const paymentRepo = new InMemoryPaymentRepository();
+      const auditRepo = new InMemoryAuditRepository();
+      const job = await createJob(
+        { tenantId: 't1', customerId: 'c1', locationId: 'l1', summary: 'Job', createdBy: 'u1' },
+        jobRepo,
+      );
+      const invoice = await invoiceRepo.create(makeInvoice(job.id, 'open'));
+      const deps: RefreshJobMoneyStateDeps = { jobRepo, estimateRepo, invoiceRepo, auditRepo };
+      const handler = new RecordPaymentExecutionHandler(paymentRepo, invoiceRepo, deps);
+
+      const result = await handler.execute(
+        {
+          payload: { invoiceId: invoice.id, amountCents: 10000, paymentMethod: 'cash' },
+        } as unknown as Proposal,
+        { tenantId: 't1', executedBy: 'u1' } as ExecutionContext,
+      );
+
+      expect(result.success).toBe(true);
+      expect((await jobRepo.findById('t1', job.id))!.moneyState).toBe('paid');
+    });
+  });
+
+  describe('POST /api/payments', () => {
+    let ctx: TestApp;
+
+    beforeEach(async () => {
+      ctx = await buildTestApp();
+    });
+
+    it('rolls the job to paid when a payment is recorded via the payments route', async () => {
+      const job = await ctx.jobRepo.create({
+        id: uuidv4(),
+        tenantId: TEST_TENANT_ID,
+        customerId: uuidv4(),
+        locationId: uuidv4(),
+        jobNumber: 'JOB-0001',
+        summary: 'AC repair',
+        status: 'new',
+        priority: 'normal',
+        moneyState: 'no_estimate',
+        createdBy: TEST_USER_ID,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const invoice = await ctx.invoiceRepo.create({
+        ...makeInvoice(job.id, 'open'),
+        tenantId: TEST_TENANT_ID,
+      });
+
+      const res = await request(ctx.app)
+        .post('/api/payments')
+        .send({ invoiceId: invoice.id, amountCents: 10000, method: 'cash' });
+      expect(res.status).toBe(201);
+
+      const reloaded = await ctx.jobRepo.findById(TEST_TENANT_ID, job.id);
+      expect(reloaded!.moneyState).toBe('paid');
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd packages/api && npm test -- test/jobs/job-money-state-callers.test.ts`
+Expected: FAIL — TypeScript errors: `IssueInvoiceExecutionHandler` / `RecordPaymentExecutionHandler` constructors accept fewer arguments than passed; and the `/api/payments` assertion gets `'no_estimate'` because `createPaymentRouter` doesn't supply refresh deps yet.
+
+- [ ] **Step 3: Wire `createPaymentRouter`**
+
+In `packages/api/src/routes/payments.ts`, add these imports below the existing imports at the top of the file:
+
+```typescript
+import { JobRepository } from '../jobs/job';
+import { EstimateRepository } from '../estimates/estimate';
+import { AuditRepository } from '../audit/audit';
+import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+```
+
+Change the `createPaymentRouter` signature and add the `refreshDeps` builder. Change:
+
+```typescript
+export function createPaymentRouter(
+  paymentRepo: PaymentRepository,
+  invoiceRepo: InvoiceRepository
+): Router {
+  const router = Router();
+```
+
+to:
+
+```typescript
+export function createPaymentRouter(
+  paymentRepo: PaymentRepository,
+  invoiceRepo: InvoiceRepository,
+  // §6 Time-to-Cash. Optional so legacy harnesses still build; the
+  // money-state rollup fires only when jobRepo + estimateRepo are wired.
+  jobRepo?: JobRepository,
+  estimateRepo?: EstimateRepository,
+  auditRepo?: AuditRepository,
+): Router {
+  const router = Router();
+
+  // §6 Time-to-Cash. Built once at factory time and passed into
+  // recordPayment so the job money-state rolls forward on every
+  // payment recorded through this route.
+  const refreshDeps: RefreshJobMoneyStateDeps | undefined =
+    jobRepo && estimateRepo
+      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo }
+      : undefined;
+```
+
+In the `POST /` handler, change the `recordPayment(...)` call from:
+
+```typescript
+      const result = await recordPayment(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          processedBy: req.auth!.userId,
+        },
+        invoiceRepo,
+        paymentRepo
+      );
+```
+
+to:
+
+```typescript
+      const result = await recordPayment(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          processedBy: req.auth!.userId,
+        },
+        invoiceRepo,
+        paymentRepo,
+        refreshDeps,
+      );
+```
+
+- [ ] **Step 4: Wire the two proposal execution handlers**
+
+In `packages/api/src/proposals/handlers/issue-invoice.ts`, add this import below the existing imports at the top of the file:
+
+```typescript
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
+```
+
+Change the `IssueInvoiceExecutionHandler` constructor from:
+
+```typescript
+  constructor(private readonly invoiceRepo: InvoiceRepository) {}
+```
+
+to:
+
+```typescript
+  constructor(
+    private readonly invoiceRepo: InvoiceRepository,
+    private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
+  ) {}
+```
+
+and change the `issueInvoice` call inside `execute` from:
+
+```typescript
+    await issueInvoice(context.tenantId, invoice.id, termDays, this.invoiceRepo);
+```
+
+to:
+
+```typescript
+    await issueInvoice(context.tenantId, invoice.id, termDays, this.invoiceRepo, this.moneyStateDeps);
+```
+
+In `packages/api/src/proposals/execution/voice-extended-handlers.ts`, add this import below the existing imports at the top of the file:
+
+```typescript
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
+```
+
+Change the `RecordPaymentExecutionHandler` constructor from:
+
+```typescript
+  constructor(
+    private readonly paymentRepo?: PaymentRepository,
+    private readonly invoiceRepo?: InvoiceRepository
+  ) {}
+```
+
+to:
+
+```typescript
+  constructor(
+    private readonly paymentRepo?: PaymentRepository,
+    private readonly invoiceRepo?: InvoiceRepository,
+    private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
+  ) {}
+```
+
+and change the `recordPayment(...)` call inside `execute` from:
+
+```typescript
+      const { payment } = await recordPayment(
+        {
+          tenantId: context.tenantId,
+          invoiceId: payload.invoiceId,
+          amountCents: payload.amountCents,
+          method,
+          providerReference:
+            typeof payload.paymentReference === 'string' ? payload.paymentReference : undefined,
+          processedBy: context.executedBy,
+        },
+        this.invoiceRepo,
+        this.paymentRepo
+      );
+```
+
+to:
+
+```typescript
+      const { payment } = await recordPayment(
+        {
+          tenantId: context.tenantId,
+          invoiceId: payload.invoiceId,
+          amountCents: payload.amountCents,
+          method,
+          providerReference:
+            typeof payload.paymentReference === 'string' ? payload.paymentReference : undefined,
+          processedBy: context.executedBy,
+        },
+        this.invoiceRepo,
+        this.paymentRepo,
+        this.moneyStateDeps,
+      );
+```
+
+- [ ] **Step 5: Wire `createExecutionHandlerRegistry`**
+
+In `packages/api/src/proposals/execution/handlers.ts`, add these imports alongside the existing repo imports at the top of the file:
+
+```typescript
+import { JobRepository } from '../../jobs/job';
+import { AuditRepository } from '../../audit/audit';
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
+```
+
+In the `createExecutionHandlerRegistry` deps object, add `jobRepo` and `auditRepo`:
+
+```typescript
+export function createExecutionHandlerRegistry(deps?: {
+  appointmentRepo?: AppointmentRepository;
+  assignmentRepo?: AssignmentRepository;
+  invoiceRepo?: InvoiceRepository;
+  estimateRepo?: EstimateRepository;
+  settingsRepo?: SettingsRepository;
+  schedulingNotifier?: SchedulingConfirmationNotifier;
+  noteRepo?: NoteRepository;
+  paymentRepo?: PaymentRepository;
+  invoiceDeliveryProvider?: InvoiceDeliveryProvider;
+  analyticsRepo?: DispatchAnalyticsRepository;
+  // §6 Time-to-Cash. When jobRepo + estimateRepo + invoiceRepo are all
+  // wired, the issue_invoice and record_payment handlers roll the job
+  // money-state forward after their mutation.
+  jobRepo?: JobRepository;
+  auditRepo?: AuditRepository;
+}): Map<ProposalType, ExecutionHandler> {
+```
+
+Immediately before the `const handlers: ExecutionHandler[] = [` line, build the refresh deps:
+
+```typescript
+  // §6 Time-to-Cash. Built once; passed to the handlers that call the
+  // widened money-mutation domain functions (recordPayment, issueInvoice).
+  const moneyStateDeps: RefreshJobMoneyStateDeps | undefined =
+    deps?.jobRepo && deps?.estimateRepo && deps?.invoiceRepo
+      ? {
+          jobRepo: deps.jobRepo,
+          estimateRepo: deps.estimateRepo,
+          invoiceRepo: deps.invoiceRepo,
+          auditRepo: deps.auditRepo,
+        }
+      : undefined;
+```
+
+Change the `RecordPaymentExecutionHandler` construction in the `handlers` array from:
+
+```typescript
+    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo),
+```
+
+to:
+
+```typescript
+    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo, moneyStateDeps),
+```
+
+Change the `IssueInvoiceExecutionHandler` push from:
+
+```typescript
+    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo));
+```
+
+to:
+
+```typescript
+    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
+```
+
+- [ ] **Step 6: Wire `app.ts` and `test-app.ts`**
+
+In `packages/api/src/app.ts`, add `jobRepo` and `auditRepo` to the `createExecutionHandlerRegistry({ ... })` deps object (the call is at ~line 997). Add them after the `analyticsRepo:` / `schedulingNotifier:` lines:
+
+```typescript
+  const executionHandlers = createExecutionHandlerRegistry({
+    appointmentRepo,
+    assignmentRepo,
+    invoiceRepo,
+    estimateRepo,
+    settingsRepo,
+    noteRepo,
+    paymentRepo,
+    invoiceDeliveryProvider,
+    analyticsRepo: dispatchAnalyticsRepo,
+    schedulingNotifier: schedulingConfirmationNotifier,
+    jobRepo,
+    auditRepo,
+  });
+```
+
+> `jobRepo` is hoisted ~line 537 and `auditRepo` is assigned ~line 709 — both are in scope at line 997.
+
+Then update the payment-router mount (`app.ts` ~line 1912). Change:
+
+```typescript
+  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
+```
+
+to:
+
+```typescript
+  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
+```
+
+In `packages/api/test/routes/test-app.ts`, add the payment-router import alongside the other route imports at the top of the file:
+
+```typescript
+import { createPaymentRouter } from '../../src/routes/payments';
+```
+
+and add the mount immediately after the `/api/invoices` mount (the multi-line `createInvoiceRouter(...)` call added in Task 5):
+
+```typescript
+  app.use(
+    '/api/payments',
+    createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo),
+  );
+```
+
+- [ ] **Step 7: Run the test to verify it passes**
+
+Run: `cd packages/api && npm test -- test/jobs/job-money-state-callers.test.ts`
+Expected: PASS — all three describe blocks.
+
+- [ ] **Step 8: Run the proposal-execution + payments suites to confirm no regression**
+
+Run: `cd packages/api && npm test -- test/proposals test/routes/payments.route.test.ts`
+Expected: PASS — the new constructor params and router params are optional, so every pre-existing caller is unaffected. (If `test/routes/payments.route.test.ts` does not exist, run only `test/proposals`.)
+
+- [ ] **Step 9: Run the production typecheck**
+
+Run: `cd packages/api && npx tsc --project tsconfig.build.json --noEmit`
+Expected: PASS — exit code 0.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add packages/api/src/routes/payments.ts packages/api/src/proposals/handlers/issue-invoice.ts packages/api/src/proposals/execution/voice-extended-handlers.ts packages/api/src/proposals/execution/handlers.ts packages/api/src/app.ts packages/api/test/routes/test-app.ts packages/api/test/jobs/job-money-state-callers.test.ts
+git commit -m "feat(api): wire money-state rollup into payments route and proposal handlers"
+```
+
+---
+
+## Task 7: Overdue-invoice detection worker
 
 **Files:**
 - Create: `packages/api/src/workers/overdue-invoice-worker.ts`
@@ -1965,7 +2456,7 @@ git commit -m "feat(api): add overdue-invoice detection worker"
 
 ---
 
-## Task 7: Schedule the worker in `app.ts` and run full verification
+## Task 8: Schedule the worker in `app.ts` and run full verification
 
 **Files:**
 - Modify: `packages/api/src/app.ts`
@@ -2023,7 +2514,7 @@ Expected: PASS — exit code 0. (Confirms `jobRepo`, `estimateRepo`, `invoiceRep
 
 Run:
 ```bash
-cd packages/api && npm test -- test/jobs/job-money-state.test.ts test/jobs/job-money-state-wiring.test.ts test/routes/job-money-state.route.test.ts test/workers/overdue-invoice-worker.test.ts test/routes/estimates.route.test.ts test/routes/invoices.route.test.ts
+cd packages/api && npm test -- test/jobs/job-money-state.test.ts test/jobs/job-money-state-wiring.test.ts test/jobs/job-money-state-callers.test.ts test/routes/job-money-state.route.test.ts test/workers/overdue-invoice-worker.test.ts test/routes/estimates.route.test.ts test/routes/invoices.route.test.ts test/proposals
 ```
 Expected: PASS — all files.
 
@@ -2046,16 +2537,16 @@ git commit -m "feat(api): schedule the overdue-invoice sweep"
 **1. Spec coverage** — §6's corrected gap (per commit `4b6a7111`) is "the job money-state field + its rollup wiring + an overdue-detection worker + the narrow webhook → job-state hook":
 - *Job money-state field* — Task 1 adds the `JobMoneyState` type, the `Job.moneyState` field, migration `095_jobs_money_state`, and the Pg mapping. ✅
 - *Rollup logic* — Task 2 (`computeJobMoneyState` precedence fn) + Task 3 (`refreshJobMoneyState` / `Safe`). ✅
-- *Rollup wiring* — Task 4 threads it through the four domain choke points; Task 5 makes the invoice/estimate routers + `app.ts` + `test-app.ts` supply the deps and adds the estimate `/send` explicit refresh. ✅
+- *Rollup wiring* — Task 4 threads it through the four domain choke points; Task 5 makes the invoice/estimate routers + `app.ts` + `test-app.ts` supply the deps and adds the estimate `/send` explicit refresh; Task 6 wires the three remaining live call sites (`/api/payments` route, `issue_invoice` + `record_payment` proposal handlers). A grep for each of the four function names confirms every live caller is now covered; the two dead callers (`stripe-invoice-updater.ts`, `invoice-payment-reconciler.ts`) are documented as deliberately skipped in the Task 4 call-site table. ✅
 - *Webhook → job-state hook* — Task 5 adds `estimateRepo?` to `WebhookRouterDeps` and passes refresh deps into both of the webhook's `recordPayment` calls, so a Stripe-driven payment rolls the job to `paid` and emits `job.money_state_changed`. ✅
-- *Overdue detection + event emission* — Task 6 (`runOverdueInvoiceSweep`, emits `invoice.overdue`) + Task 7 (hourly `setInterval` in `app.ts`). ✅
+- *Overdue detection + event emission* — Task 7 (`runOverdueInvoiceSweep`, emits `invoice.overdue`) + Task 8 (hourly `setInterval` in `app.ts`). ✅
 - Spec line: "Every job carries a visible money state (`no estimate / estimate sent / accepted / invoiced / paid / overdue`)" — the `JobMoneyState` union is exactly those six. ✅ "Overdue emits an event for Section 7" — the worker emits `invoice.overdue`. ✅
 
 **2. Placeholder scan** — every code step contains complete, copy-pasteable code; every test step has an exact path, command, and expected RED/GREEN outcome. No "TBD" / "add error handling" / "similar to Task N". The two test-fixture helper sets (`makeEstimate`/`makeInvoice`) are deliberately repeated in full in each test file rather than cross-referenced, since tasks may be executed out of order.
 
 **3. Type consistency** — `JobMoneyState` (Task 1) is the single source of truth, imported by `job-money-state.ts`, `pg-job.ts`. `RefreshJobMoneyStateDeps` (Task 3: `{ jobRepo, estimateRepo, invoiceRepo, auditRepo? }`) is the exact object built by the invoice router (`{ jobRepo, estimateRepo, invoiceRepo, auditRepo }`), the estimate router (`{ jobRepo: moneyStateDeps.jobRepo, estimateRepo, invoiceRepo: moneyStateDeps.invoiceRepo, auditRepo }`), the webhook (`{ jobRepo, estimateRepo, invoiceRepo, auditRepo }`), and the worker. The optional `moneyStateDeps?: RefreshJobMoneyStateDeps` 4th/5th param on `recordPayment` / `issueInvoice` / `transitionInvoiceStatus` / `transitionEstimateStatus` is named and typed identically across all four. `refreshJobMoneyState` / `refreshJobMoneyStateSafe` keep one signature `(tenantId, jobId, actorId, deps, logger?)`. The circular-import note (all `estimate`/`invoice`/`job` imports in `job-money-state.ts` are `import type`) is enforced by Tasks 2 and 3.
 
-**Cross-task evolution (intentional):** Task 4 adds the optional param to four domain functions but supplies no caller — the Task 4 test calls them directly. Task 5 then makes the routers/webhook supply the deps. Each domain function is byte-for-byte backwards-compatible when the param is omitted, so the build and existing tests stay green between Task 4 and Task 5.
+**Cross-task evolution (intentional):** Task 4 adds the optional param to four domain functions but supplies no caller — the Task 4 test calls them directly. Tasks 5–6 then make every live caller supply the deps (Task 5: invoice/estimate routers + Stripe webhook; Task 6: the `/api/payments` route + the `issue_invoice` / `record_payment` proposal handlers). Each domain function — and each widened constructor — is byte-for-byte backwards-compatible when the new optional param is omitted, so the build and existing tests stay green between Task 4 and Task 6.
 
 ---
 
