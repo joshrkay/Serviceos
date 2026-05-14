@@ -16,13 +16,16 @@ reading code.
 
 Tonight I stood up the full stack **locally** (API + web + a real migrated
 Postgres) and ran the verification harness against it for the first time. It
-surfaced **two real application bugs** — both **found and fixed and verified**:
+surfaced **three real application bugs** — all **found, fixed, and verified**:
 
 1. **Intermittent read-after-write 404** — the request transaction committed
    *after* the response was flushed.
 2. **Stripe webhook payments never recorded** — a `payment_method` value the DB
    CHECK constraint rejected, so every `checkout.session.completed` webhook
    500'd.
+3. **Every deploy after the first failed at `preDeployCommand`** — migration
+   070's strict constraint re-validated against existing rows on each
+   `migrate.js` run and aborted the whole migration.
 
 The CI test gate is green locally (build, lint, **4,147 API + 828 web + 73
 integration** tests). Both Docker build stages compile. The qa-matrix went from
@@ -36,13 +39,14 @@ verified-good against a real local stack.
 
 ---
 
-## What was done — 13 commits on this branch
+## What was done — 17 commits on this branch
 
 | Area | Commits |
 |---|---|
 | **Deploy config** | healthcheck `/ready`→`/health`; web port `80`→`8080`; dev-safe `[deploy.environment]` baked into both `railway.toml`s + `docs/deployment.md` checklist |
 | **Real bug #1** | `fix(api): commit the request transaction before flushing the response` — wraps `res.end` so COMMIT lands before the client sees the response; + regression test |
 | **Real bug #2** | `fix(payments): reconcile payment_method values` — migration 094 widens the DB CHECK constraint; `PaymentMethod` type + validation gain `'stripe'`; the Stripe webhook records `method: 'stripe'` |
+| **Real bug #3** | `fix(db): make migration 070 re-runnable` — `NOT VALID` on the superseded constraint so `migrate.js` doesn't abort on a populated DB; + migration-immutability snapshot lock |
 | **Auth** | `fix(auth): fall back to RS256 when an HMAC dev token doesn't verify` — dev env serves qa-matrix tokens AND real logins without a flag flip |
 | **Dead code** | removed `service-os-app` (Next.js prototype: no deploy config, not in the workspace, superseded by `packages/web`) |
 | **Harness fixes** | 8 qa-matrix harness bugs (the harness had never been run); INV-05/06 rewritten to send a correctly-shaped, **really-signed** Stripe webhook; integration tests can run without Docker via `TEST_DB_URL`; stale `getToken` test assertions |
@@ -54,7 +58,7 @@ part of the run.
 
 ---
 
-## The two real application bugs (both fixed + verified)
+## The three real application bugs (all fixed + verified)
 
 **#1 — Intermittent read-after-write 404.** `withTenantTransaction` committed
 the per-request DB transaction on `res.finish` (which fires *after* the
@@ -75,6 +79,22 @@ constraint to the union), adding `'stripe'` to the type/validation, and having
 the webhook record `method: 'stripe'`. Verified: a signed webhook now marks the
 invoice paid (`status: 'paid', amount_paid_cents: 20000`); a duplicate delivery
 is a no-op.
+
+**#3 — Every deploy after the first failed at `preDeployCommand`.** `migrate.js`
+(the Railway `preDeployCommand`) runs the *entire* `getMigrationSQL()` on every
+invocation. Migration 070 adds a strict `tenant_settings_us_region_check`
+(`country='US'` requires a 2-letter region); migration 088 later *relaxes* it,
+its own comment noting it "was added aspirationally" and "every tenant_settings
+INSERT was violating it." On a re-run against a populated DB, 070's
+`ADD CONSTRAINT` re-validates against existing rows — every `tenant_settings`
+row with the column defaults (`country='US'`, `region=NULL`) violates it — and
+the whole migration transaction aborts at 070, *before* 088 can relax it. So on
+a fresh DB the first deploy works, but every deploy after it fails. Fixed by
+adding `NOT VALID` to 070's constraint (it's dropped by 088 anyway; on a fresh
+DB the table is empty so it's equivalent). Verified: `migrate.js` now completes
+end-to-end against the populated local DB. The `migration-immutability` test
+correctly required a deliberate snapshot update for the in-place 070 edit —
+done, with a comment explaining why there is no new-migration alternative.
 
 ---
 
@@ -111,19 +131,16 @@ credential, or the mock-LLM path:
 | **`coverage-sweep`** (dead-button catcher) | No real Clerk key → SPA can't initialise; every route errors before the audit runs | Wire `E2E_CLERK_PUBLISHABLE_KEY` + `E2E_CLERK_SECRET_KEY` from a Clerk dev instance, then `npm run e2e:coverage-sweep`. |
 | **Assistant / voice intents** (AST rows) | No `AI_PROVIDER_API_KEY` → API uses the mock LLM gateway | Set `AI_PROVIDER_API_KEY`, re-run the qa-matrix. |
 
-## Flagged for follow-up (observed, not yet fixed)
+## Flagged for follow-up (deliberately not done)
 
-- **Migration re-runnability.** `migrate.js` runs the *entire* migration SQL on
-  every invocation (it's the Railway `preDeployCommand`). Re-running it against
-  the test-populated local DB failed on `tenant_settings_us_region_check`
-  ("violated by some row"). This may be test-data-specific or a real
-  re-runnability bug that would fail `preDeployCommand` against a populated
-  prod DB — it needs a focused look. Migration 094 itself is valid (verified by
-  applying it directly).
 - **INV-04** (payment-link HTTP route) is a *deliberate* deferral — a code
   comment in `app.ts` says the provider "will be wired into routes in a
   follow-up". Left as-is: implementing it needs design input (idempotency,
-  audit-event shape) the team should make.
+  audit-event shape) the team should make. It is the only fail-column row that
+  is genuinely "wire up an existing piece" rather than "build a feature".
+- **INV-07** (overdue lifecycle) and the assistant `send_invoice` / query /
+  orchestration intents (AST-04/05/07) are unbuilt features — backlog, with
+  matching predictions in `qa/backlog/`.
 
 ---
 
