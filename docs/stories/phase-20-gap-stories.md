@@ -159,7 +159,9 @@ optional, non-blocking code follow-up — see step 4.
 curl -sS -X POST https://<api-domain>/api/assistant/chat \
   -H 'Authorization: Bearer <token>' \
   -H 'content-type: application/json' \
-  -d '{"message":"hello"}'
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+# /api/assistant/chat validates a `messages` array (assistantChatRequestSchema);
+# a `{"message":"..."}` payload is rejected on request shape, not provider config.
 # Expect a real assistant reply, NOT the canned degraded envelope.
 ```
 
@@ -407,9 +409,11 @@ mobile.
 `packages/web/vite.config.ts` that splits vendor libraries out of the app
 entry chunk. Suggested groups: `react-vendor` (`react`, `react-dom`,
 `react-router`), `clerk` (`@clerk/*`), `stripe` (`@stripe/*`), `charts`
-(`recharts`), `radix` (`@radix-ui/*`). Target a main/entry chunk **well under
-300 KB**. Do **not** add or change dependencies, and do **not** touch
-`package.json`. Do not commit build output (`packages/web/dist/`).
+(`recharts`), `radix` (`@radix-ui/*`). Aim for the smallest practical app
+**entry** chunk — but note a **< 300 KB** entry additionally needs route-level
+`React.lazy()` splitting, which is **out of scope** here (this story does the
+vendor-splitting half). Do **not** add or change dependencies, and do **not**
+touch `package.json`. Do not commit build output (`packages/web/dist/`).
 
 **Review prompt:** Confirm `manualChunks` is present and the build succeeds.
 Confirm no new dependency was introduced. Confirm the function/object form of
@@ -420,8 +424,9 @@ and the largest chunk shrank materially versus the ~1.56 MB baseline.
 **Acceptance criteria:**
 - [ ] `packages/web/vite.config.ts` defines `build.rollupOptions.output.manualChunks`.
 - [ ] `npm run build --workspace=packages/web` succeeds.
-- [ ] The build emits multiple vendor chunks (react, clerk, stripe, charts, radix).
-- [ ] The largest single JS chunk is materially smaller than the ~1.56 MB baseline (entry chunk target < 300 KB).
+- [ ] The build emits multiple vendor chunks (react, clerk, stripe, charts; `radix` may be empty if those wrappers are unused).
+- [ ] The app **entry** chunk (`index-*.js`) is materially smaller than the ~1.56 MB baseline — gate ceiling **< 900 KB**. Large *isolated* vendor chunks (e.g. `recharts`) are expected and fine.
+- [ ] *(End goal — not gated by this story)* a **< 300 KB** entry chunk needs route-level `React.lazy()` splitting; track as a follow-up.
 - [ ] No dependency or `package.json` change.
 
 **Out of scope:** `package.json`; lazy-`import()` route splitting (a larger,

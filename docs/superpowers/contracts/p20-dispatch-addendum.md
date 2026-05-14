@@ -217,9 +217,18 @@ only; no dependency changes.
 cd "$(git rev-parse --show-toplevel)" && \
   grep -q 'manualChunks' packages/web/vite.config.ts && \
   npm run build --workspace=packages/web && \
-  node -e 'const fs=require("fs"),d="packages/web/dist/assets";const js=fs.readdirSync(d).filter(f=>f.endsWith(".js"));const sz=js.map(f=>fs.statSync(d+"/"+f).size);const max=Math.max(...sz);console.log("js chunks:",js.length,"largest bytes:",max);if(js.length<4){console.error("FAIL: expected >=4 JS chunks from vendor split");process.exit(1)}if(max>900000){console.error("FAIL: largest chunk "+max+" bytes > 900KB; vendors not pulled out of the entry chunk");process.exit(1)}' && \
+  node -e 'const fs=require("fs"),d="packages/web/dist/assets";const js=fs.readdirSync(d).filter(f=>f.endsWith(".js"));if(js.length<4){console.error("FAIL: expected >=4 JS chunks from vendor split");process.exit(1)}const entry=js.filter(f=>/^index-.*\.js$/.test(f));if(entry.length!==1){console.error("FAIL: expected exactly one entry chunk index-*.js, found "+entry.length);process.exit(1)}const entryBytes=fs.statSync(d+"/"+entry[0]).size;console.log("js chunks:",js.length,"entry:",entry[0],entryBytes,"bytes");if(entryBytes>900000){console.error("FAIL: entry chunk "+entryBytes+" bytes exceeds 900KB ceiling - vendors not split out of the app entry");process.exit(1)}' && \
   git diff --name-only HEAD~1 HEAD | grep -vE '^packages/web/vite\.config\.ts$' | (! grep . )
 ```
+
+**Verification scope note:** The gate enforces that vendor-splitting happened —
+≥ 4 JS chunks and the app **entry** chunk (`index-*.js`) under a 900 KB ceiling,
+well below the ~1.56 MB pre-split baseline. It deliberately does **not** size
+vendor chunks: a large *isolated* `recharts` / `clerk` chunk is correct, not a
+failure. The story's aspirational **< 300 KB** entry target is **not** reachable
+by `manualChunks` alone — it needs route-level `React.lazy()` splitting, out of
+P20-006's scope. Track that as a follow-up; this gate verifies the
+vendor-splitting half of the work.
 
 **Pre-flight:** none.
 
