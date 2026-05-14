@@ -24,6 +24,8 @@ import { createLead } from '../leads/lead-service';
 import { AuditRepository } from '../audit/audit';
 import { TenantRepository } from '../auth/clerk';
 import { attributionSchema, LeadSource } from '../leads/enums';
+import { SettingsRepository } from '../settings/settings';
+import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 
 const PUBLIC_INTAKE_SOURCE: LeadSource = 'web_form';
 const PUBLIC_INTAKE_ACTOR_ID = 'public_intake';
@@ -73,6 +75,8 @@ export function createPublicIntakeRouter(
   leadRepo: LeadRepository,
   tenantRepo: TenantRepository,
   auditRepo: AuditRepository,
+  settingsRepo: SettingsRepository,
+  packRegistry: VerticalPackRegistry,
 ): Router {
   const router = Router();
 
@@ -124,6 +128,46 @@ export function createPublicIntakeRouter(
 
       // Don't echo the full lead back — public callers don't need ids.
       res.status(201).json({ ok: true, leadId: lead.id });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  // Public tenant info for the intake form header + service-type list.
+  // Read-only; same UUID-in-path validation and rate limiting as the POST.
+  router.get('/:tenantId', async (req: Request, res: Response) => {
+    try {
+      const tenantId = req.params.tenantId;
+      if (!TENANT_UUID.test(tenantId)) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
+        return;
+      }
+
+      const tenant = await tenantRepo.findById(tenantId);
+      if (!tenant) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Intake form not found' });
+        return;
+      }
+
+      const settings = await settingsRepo.findByTenant(tenantId);
+
+      const serviceTypes: { verticalType: string; displayName: string }[] = [];
+      for (const packId of settings?.activeVerticalPacks ?? []) {
+        const pack = await packRegistry.getByPackId(packId);
+        if (pack) {
+          serviceTypes.push({
+            verticalType: pack.verticalType,
+            displayName: pack.displayName,
+          });
+        }
+      }
+
+      res.status(200).json({
+        businessName: settings?.businessName ?? tenant.name,
+        businessPhone: settings?.businessPhone ?? null,
+        serviceTypes,
+      });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);
