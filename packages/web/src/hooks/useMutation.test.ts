@@ -214,7 +214,7 @@ describe('P0-030 useMutation — Authorization Bearer header', () => {
 
     expect(resp).toEqual({ id: 'ok' });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(clerkState.getToken).toHaveBeenCalledWith({ skipCache: true });
+    expect(clerkState.getToken).toHaveBeenCalledWith({ template: 'serviceos', skipCache: true });
     // First call uses the cached token, second uses the fresh one.
     expect(getAuthHeader(fetchSpy.mock.calls[0]!)).toBe('Bearer tok-default');
     expect(getAuthHeader(fetchSpy.mock.calls[1]!)).toBe('Bearer tok-fresh');
