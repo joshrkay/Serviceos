@@ -206,6 +206,27 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(sqls).toContain('COMMIT');
   });
 
+  it('commits BEFORE the response is flushed (read-after-write safety)', async () => {
+    // Regression: the request transaction must COMMIT before the client
+    // receives the response. Committing on `res.finish` (post-flush) let a
+    // fast client issue a follow-up request inside the COMMIT window and
+    // read stale, pre-commit data — an intermittent read-after-write 404.
+    const { pool, calls } = makeMockPool();
+
+    const app = buildApp(pool, async (_req, res) => {
+      res.json({ ok: true });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(200);
+    // No `await setImmediate` here: the COMMIT must already be on record
+    // by the time the client observes the response.
+    expect(calls.map((c) => c.sql)).toContain('COMMIT');
+  });
+
   it('PgBaseRepository.withTenant reuses the request-scoped client', async () => {
     const { pool, calls } = makeMockPool();
 

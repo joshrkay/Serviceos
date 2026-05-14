@@ -106,14 +106,10 @@ export function withTenantTransaction(pool: Pool) {
       return;
     }
 
-    // Wire commit/rollback to the response lifecycle. `finish` fires
-    // after the last byte of the response is flushed; `close` fires
-    // when the underlying connection is torn down. They can fire in
-    // either order on different runtimes (and `close` MAY fire even
-    // when finish has already happened). Both flow through a single
-    // `cleanup()` that's idempotent — the `cleanedUp` flag prevents
-    // a COMMIT-after-ROLLBACK race that would otherwise execute a
-    // query on a client that's already back in the pool.
+    // Commit/rollback are wired to the response lifecycle via a single
+    // idempotent `cleanup()` — the `cleanedUp` flag prevents a
+    // COMMIT-after-ROLLBACK race that would otherwise execute a query on
+    // a client that's already back in the pool.
     let cleanedUp = false;
     const cleanup = async (commit: boolean) => {
       if (cleanedUp || released) return;
@@ -135,9 +131,30 @@ export function withTenantTransaction(pool: Pool) {
         releaseOnce();
       }
     };
-    res.once('finish', () => {
-      void cleanup(true);
-    });
+    // Commit BEFORE the response is flushed to the client. `res.finish`
+    // fires only after the bytes are already on the wire, so committing
+    // there lets a fast client issue a follow-up request before the
+    // COMMIT lands and read stale, pre-commit data — an intermittent
+    // read-after-write 404. Wrapping `res.end` is the single chokepoint
+    // (res.json / res.send / res.sendFile all funnel through it): the
+    // COMMIT is awaited, then the original end runs, so the client never
+    // sees the response until the transaction is durable.
+    if (typeof res.end === 'function') {
+      const originalEnd = res.end.bind(res) as (...endArgs: unknown[]) => Response;
+      let ending = false;
+      res.end = function patchedEnd(...endArgs: unknown[]): Response {
+        if (ending || cleanedUp || released) {
+          return originalEnd(...endArgs);
+        }
+        ending = true;
+        void cleanup(true).finally(() => {
+          originalEnd(...endArgs);
+        });
+        return res;
+      } as typeof res.end;
+    }
+    // Safety net: a client disconnect before `res.end` is ever called
+    // tears the socket down — roll back rather than leak the connection.
     res.once('close', () => {
       void cleanup(false);
     });
