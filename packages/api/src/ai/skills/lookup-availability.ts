@@ -22,6 +22,8 @@ export interface LookupAvailabilityInput {
   durationMs: number;
   technicianId?: string;
   count?: number;
+  /** Gap (ms) to enforce around existing appointments. Forwarded to the finder. */
+  bufferMs?: number;
   /**
    * IANA timezone for rendering the spoken summary (e.g.
    * "America/Los_Angeles"). When omitted the summary uses the runtime
@@ -100,6 +102,7 @@ export async function lookupAvailability(
     durationMs: input.durationMs,
     technicianId: input.technicianId,
     count: input.count,
+    bufferMs: input.bufferMs,
   });
 
   if (!result.ok) {
