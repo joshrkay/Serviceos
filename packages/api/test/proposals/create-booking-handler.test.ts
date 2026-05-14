@@ -2,10 +2,21 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { CreateBookingExecutionHandler } from '../../src/proposals/execution/create-booking-handler';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { createAppointment } from '../../src/appointments/appointment';
+import { createAppointment, updateAppointment } from '../../src/appointments/appointment';
+import type { Appointment } from '../../src/appointments/appointment';
 import { createProposal } from '../../src/proposals/proposal';
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
+
+/**
+ * Repo whose `update` always returns null (mutation failure) while `findById`
+ * still behaves normally — used to exercise the "Failed to confirm" branch.
+ */
+class UpdateFailsAppointmentRepository extends InMemoryAppointmentRepository {
+  async update(): Promise<Appointment | null> {
+    return null;
+  }
+}
 
 function bookingProposal(appointmentId: string) {
   return createProposal({
@@ -108,5 +119,67 @@ describe('CreateBookingExecutionHandler', () => {
     );
     expect(result.success).toBe(true);
     expect(result.resultEntityId).toBe('00000000-0000-4000-8000-0000000000a1');
+  });
+
+  it('rejects a canceled appointment — its slot was released', async () => {
+    const appt = await makeHeldAppointment(appointmentRepo, new Date('2099-01-01T00:00:00Z'));
+    await updateAppointment(
+      tenantA,
+      appt.id,
+      { status: 'canceled', holdPendingApproval: false },
+      appointmentRepo,
+    );
+
+    const result = await handler.execute(bookingProposal(appt.id), {
+      tenantId: tenantA,
+      executedBy: 'owner-1',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/cancel/i);
+  });
+
+  it('confirms the held appointment even when no auditRepo is wired', async () => {
+    const noAuditHandler = new CreateBookingExecutionHandler(appointmentRepo);
+    const appt = await makeHeldAppointment(appointmentRepo, new Date('2099-01-01T00:00:00Z'));
+
+    const result = await noAuditHandler.execute(bookingProposal(appt.id), {
+      tenantId: tenantA,
+      executedBy: 'owner-1',
+    });
+
+    expect(result.success).toBe(true);
+    const confirmed = await appointmentRepo.findById(tenantA, appt.id);
+    expect(confirmed?.holdPendingApproval).toBe(false);
+  });
+
+  it('rejects a proposal whose payload is missing appointmentId', async () => {
+    const result = await handler.execute(
+      createProposal({
+        tenantId: tenantA,
+        proposalType: 'create_booking',
+        payload: {},
+        summary: 'x',
+        createdBy: 'agent-1',
+      }),
+      { tenantId: tenantA, executedBy: 'owner-1' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/appointmentId/i);
+  });
+
+  it('surfaces an update failure as an error', async () => {
+    const failingRepo = new UpdateFailsAppointmentRepository();
+    const appt = await makeHeldAppointment(failingRepo, new Date('2099-01-01T00:00:00Z'));
+    const failingHandler = new CreateBookingExecutionHandler(failingRepo, auditRepo);
+
+    const result = await failingHandler.execute(bookingProposal(appt.id), {
+      tenantId: tenantA,
+      executedBy: 'owner-1',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/failed to confirm/i);
   });
 });

@@ -11,7 +11,7 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  * `appointment.booked` audit event for the customer-communications
  * subsystem to act on.
  *
- * Degrades to a synthetic-id passthrough when no appointmentRepo is
+ * Degrades to an id passthrough when no appointmentRepo is
  * wired — consistent with the other in-registry handlers used by
  * in-memory tests that don't exercise the mutation path.
  */
@@ -45,8 +45,20 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
       return { success: false, error: `Appointment ${appointmentId} not found` };
     }
 
+    // A canceled appointment can't be confirmed — its slot was released.
+    // (A canceled appt also has holdPendingApproval = false, so without
+    // this guard it would fall through to the idempotency branch below
+    // and be wrongly reported as an already-confirmed booking.)
+    if (appointment.status === 'canceled') {
+      return {
+        success: false,
+        error: `Appointment ${appointmentId} was canceled — cannot confirm`,
+      };
+    }
+
     // Idempotency: a non-held appointment is already confirmed, so we return
     // success without re-applying the mutation or emitting a second audit event.
+    // Idempotent re-run: already confirmed, intentionally no duplicate audit event.
     // This also silently succeeds if the appointment was never held in the first place
     // (stale or mis-routed `create_booking` proposal) — acceptable because
     // `create_booking` proposals are only ever issued against genuinely held slots,
@@ -75,6 +87,10 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
       return { success: false, error: 'Failed to confirm held appointment' };
     }
 
+    // Deliberate: the audit `create` below is a bare `await` with no try/catch.
+    // A throw here is intentionally surfaced to the caller — `appointment.booked`
+    // is the only audit event for this action, and silently losing it would be
+    // worse than failing the execution after the appointment was confirmed.
     if (this.auditRepo) {
       await this.auditRepo.create(
         createAuditEvent({
