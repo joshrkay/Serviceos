@@ -58,7 +58,7 @@ export class TrainingAssetService {
     const asset: VerticalTrainingAsset = {
       ...safeDraft,
       status: redacted.status,
-      scrubbedText: redacted.scrubbedText,
+      scrubbedText: redacted.status === 'redacted' ? redacted.scrubbedText : undefined,
       redactionSummary: redacted.summary,
       updatedAt: now,
     };

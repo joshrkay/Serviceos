@@ -413,6 +413,9 @@ describe('TrainingAssetService', () => {
       },
     });
 
+    expect(saved.status).toBe('quarantined');
+    expect(saved.scrubbedText).toBeUndefined();
+    expect(JSON.stringify(saved)).not.toContain('123456789');
     await expect(service.approve({
       tenantId: 'tenant-1',
       actorId: 'owner-1',
