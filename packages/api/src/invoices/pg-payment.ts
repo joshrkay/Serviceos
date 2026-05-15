@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Payment, PaymentRepository, PaymentMethod, PaymentStatus } from './payment';
+import { Payment, PaymentRepository, PaymentListOptions, PaymentMethod, PaymentStatus } from './payment';
 
 export class PgPaymentRepository extends PgBaseRepository implements PaymentRepository {
   constructor(pool: Pool) {
@@ -54,6 +54,33 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
         [tenantId, invoiceId],
       );
 
+      return rows.map((row) => this.mapRowToPayment(row));
+    });
+  }
+
+  async findByTenant(
+    tenantId: string,
+    options?: PaymentListOptions,
+  ): Promise<Payment[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const conditions: string[] = ['tenant_id = $1'];
+      const params: unknown[] = [tenantId];
+      if (options?.status) {
+        params.push(options.status);
+        conditions.push(`status = $${params.length}`);
+      }
+      if (options?.from) {
+        params.push(options.from);
+        conditions.push(`paid_at >= $${params.length}`);
+      }
+      if (options?.to) {
+        params.push(options.to);
+        conditions.push(`paid_at < $${params.length}`);
+      }
+      const { rows } = await client.query(
+        `SELECT * FROM payments WHERE ${conditions.join(' AND ')} ORDER BY paid_at DESC`,
+        params,
+      );
       return rows.map((row) => this.mapRowToPayment(row));
     });
   }
