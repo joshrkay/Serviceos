@@ -27,7 +27,6 @@ import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
-import { AuditRepository } from '../../audit/audit';
 
 export interface ExecutionContext {
   tenantId: string;
