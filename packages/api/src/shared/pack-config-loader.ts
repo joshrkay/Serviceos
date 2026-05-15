@@ -1,7 +1,6 @@
 import {
   VerticalType,
   ServiceCategory,
-  ElectricalServiceCategory,
   getServiceCategories,
 } from './vertical-types';
 import { VerticalPackRegistry } from './vertical-pack-registry';
@@ -119,79 +118,16 @@ const PLUMBING_INTAKE_CONFIG: PackIntakeConfig = {
   ],
 };
 
-const ELECTRICAL_TERMINOLOGY: TerminologyMap = {
-  breaker: {
-    canonical: 'breaker',
-    displayLabel: 'Breaker',
-    promptHint: 'Circuit breaker or breaker switch',
-    aliases: ['circuit breaker', 'tripped breaker', 'breaker switch'],
-  },
-  panel: {
-    canonical: 'panel',
-    displayLabel: 'Electrical Panel',
-    promptHint: 'Main or sub electrical panel',
-    aliases: ['electrical panel', 'breaker panel', 'service panel', 'panel box'],
-  },
-  gfci: {
-    canonical: 'gfci',
-    displayLabel: 'GFCI',
-    promptHint: 'Ground-fault circuit interrupter outlet or breaker',
-    aliases: ['gfi', 'gfci outlet', 'reset outlet', 'ground fault'],
-  },
-  outlet: {
-    canonical: 'outlet',
-    displayLabel: 'Outlet',
-    promptHint: 'Electrical receptacle or plug outlet',
-    aliases: ['receptacle', 'plug', 'wall outlet', 'socket'],
-  },
-  burning_smell: {
-    canonical: 'burning_smell',
-    displayLabel: 'Burning Smell',
-    promptHint: 'Potential overheating, arcing, or electrical fire risk',
-    aliases: ['burning odor', 'smells hot', 'smoke smell', 'electrical smell'],
-  },
-};
+function titleCaseCategory(category: ServiceCategory): string {
+  return category
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
 
-const ELECTRICAL_CATEGORY_DETAILS: Record<
-  ElectricalServiceCategory,
-  { name: string; description: string; typicalLineItems: string[] }
-> = {
-  diagnostic: {
-    name: 'Diagnostic',
-    description: 'Electrical troubleshooting, testing, and issue isolation',
-    typicalLineItems: ['Diagnostic service call', 'Circuit testing'],
-  },
-  repair: {
-    name: 'Repair',
-    description: 'Electrical component repair and restoration services',
-    typicalLineItems: ['Outlet repair', 'Breaker replacement'],
-  },
-  install: {
-    name: 'Installation',
-    description: 'New electrical device, fixture, or circuit installation',
-    typicalLineItems: ['Device installation', 'Circuit installation'],
-  },
-  panel: {
-    name: 'Panel',
-    description: 'Electrical panel inspection, repair, or upgrade work',
-    typicalLineItems: ['Panel inspection', 'Breaker installation'],
-  },
-  lighting: {
-    name: 'Lighting',
-    description: 'Lighting fixture, switch, and control services',
-    typicalLineItems: ['Light fixture installation', 'Switch replacement'],
-  },
-  safety: {
-    name: 'Safety',
-    description: 'Electrical safety concerns, code issues, and hazard checks',
-    typicalLineItems: ['Safety inspection', 'GFCI testing'],
-  },
-  emergency: {
-    name: 'Emergency',
-    description: 'Urgent electrical hazards and after-hours service',
-    typicalLineItems: ['Emergency service call', 'Hazard isolation'],
-  },
-};
+function electricalCategoryDescription(category: ServiceCategory): string {
+  return `Electrical ${category} service`;
+}
 
 function getTerminology(verticalType: VerticalType): TerminologyMap {
   switch (verticalType) {
@@ -200,7 +136,7 @@ function getTerminology(verticalType: VerticalType): TerminologyMap {
     case 'plumbing':
       return PLUMBING_TERMINOLOGY;
     case 'electrical':
-      return ELECTRICAL_TERMINOLOGY;
+      return {};
     default: {
       const _exhaustive: never = verticalType;
       throw new Error(`Unknown vertical type: ${verticalType}`);
@@ -226,16 +162,14 @@ function getCategories(verticalType: VerticalType): VerticalPackConfig['categori
         sortOrder: c.sortOrder,
         typicalLineItems: c.typicalLineItems,
       }));
-    case 'electrical': {
-      const categories = getServiceCategories('electrical') as ElectricalServiceCategory[];
-      return categories.map((category, index) => ({
+    case 'electrical':
+      return getServiceCategories('electrical').map((category, index) => ({
         id: category,
-        name: ELECTRICAL_CATEGORY_DETAILS[category].name,
-        description: ELECTRICAL_CATEGORY_DETAILS[category].description,
+        name: titleCaseCategory(category),
+        description: electricalCategoryDescription(category),
         sortOrder: index + 1,
-        typicalLineItems: ELECTRICAL_CATEGORY_DETAILS[category].typicalLineItems,
+        typicalLineItems: [],
       }));
-    }
     default: {
       const _exhaustive: never = verticalType;
       throw new Error(`Unknown vertical type: ${verticalType}`);
@@ -278,27 +212,7 @@ function getTemplates(verticalType: VerticalType): VerticalTemplateConfig[] {
         },
       ];
     case 'electrical':
-      return [
-        {
-          id: 'electrical-diagnostic-template',
-          name: 'Electrical Diagnostic Visit',
-          serviceCategory: 'diagnostic',
-          defaultLineItems: ['Diagnostic service call', 'Circuit testing'],
-          defaultNotes: 'Confirm safety risks before troubleshooting or quoting repairs.',
-        },
-        {
-          id: 'electrical-panel-template',
-          name: 'Electrical Panel Service',
-          serviceCategory: 'panel',
-          defaultLineItems: ['Panel inspection', 'Breaker replacement'],
-        },
-        {
-          id: 'electrical-lighting-template',
-          name: 'Lighting Service',
-          serviceCategory: 'lighting',
-          defaultLineItems: ['Fixture troubleshooting', 'Switch or fixture replacement'],
-        },
-      ];
+      return [];
     default: {
       const _exhaustive: never = verticalType;
       throw new Error(`Unknown vertical type: ${verticalType}`);
@@ -330,13 +244,9 @@ function getIntakeConfig(verticalType: VerticalType): VerticalIntakeConfig {
       };
     case 'electrical':
       return {
-        requiredFields: ['serviceAddress', 'affectedArea', 'issueDescription'],
-        optionalFields: ['breakerTripped', 'burningSmell', 'powerOutageScope'],
-        followUpQuestions: [
-          'Do you smell burning, see smoke, or notice heat near the panel or outlet?',
-          'Is the issue isolated to one area or affecting the whole property?',
-          'Has anyone turned off the affected breaker?',
-        ],
+        requiredFields: [],
+        optionalFields: [],
+        followUpQuestions: [],
       };
     default: {
       const _exhaustive: never = verticalType;
