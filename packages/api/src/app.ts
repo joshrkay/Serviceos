@@ -221,6 +221,7 @@ import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
@@ -2198,6 +2199,36 @@ export function createApp(): express.Express {
       });
     }
   }, 60_000);
+
+  // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
+  // have day granularity, so an hourly check surfaces newly-overdue
+  // invoices promptly without churn. Same setInterval driver + tenant
+  // lister pattern as the recurring-agreements sweep above; in-memory
+  // dev returns no tenants so it no-ops locally.
+  const overdueInvoiceLogger = createLogger({
+    service: 'overdue-invoice-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runOverdueInvoiceSweep({
+        jobRepo,
+        estimateRepo,
+        invoiceRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: overdueInvoiceLogger,
+      });
+    } catch (err) {
+      overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60 * 60_000);
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
