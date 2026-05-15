@@ -205,6 +205,15 @@ class FakeTrainingAssetPool {
   }
 }
 
+class RecordingTrainingAssetRepository extends InMemoryTrainingAssetRepository {
+  readonly savedAssets: VerticalTrainingAsset[] = [];
+
+  async save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset> {
+    this.savedAssets.push({ ...asset });
+    return super.save(asset);
+  }
+}
+
 describe('TrainingAssetRepository', () => {
   it('lists active assets by tenant and vertical only', async () => {
     const repo = new InMemoryTrainingAssetRepository();
@@ -341,7 +350,7 @@ describe('PrivacyAuditRepository', () => {
 
 describe('TrainingAssetService', () => {
   it('redacts before save and writes privacy audit without raw matched PII', async () => {
-    const assetRepo = new InMemoryTrainingAssetRepository();
+    const assetRepo = new RecordingTrainingAssetRepository();
     const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
     const service = new TrainingAssetService({
       assetRepo,
@@ -368,6 +377,12 @@ describe('TrainingAssetService', () => {
     expect(saved.status).toBe('redacted');
     expect(saved.scrubbedText).toContain('[CALLER_NAME]');
     expect(saved.scrubbedText).toContain('[PHONE]');
+    expect(assetRepo.savedAssets).toHaveLength(1);
+    expect(assetRepo.savedAssets[0].status).toBe('redacted');
+    expect(assetRepo.savedAssets[0].scrubbedText).toContain('[CALLER_NAME]');
+    expect(assetRepo.savedAssets[0].scrubbedText).toContain('[PHONE]');
+    expect(assetRepo.savedAssets[0].redactionSummary).toBeDefined();
+    expect(assetRepo.savedAssets.some((asset) => asset.status === 'draft')).toBe(false);
     expect(privacyAuditRepo.rows).toHaveLength(1);
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
