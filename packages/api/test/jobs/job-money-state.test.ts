@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { createJob, InMemoryJobRepository } from '../../src/jobs/job';
-import { computeJobMoneyState } from '../../src/jobs/job-money-state';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  computeJobMoneyState,
+  refreshJobMoneyState,
+  refreshJobMoneyStateSafe,
+} from '../../src/jobs/job-money-state';
 import type { Estimate, EstimateStatus } from '../../src/estimates/estimate';
 import type { Invoice, InvoiceStatus } from '../../src/invoices/invoice';
 import type { DocumentTotals } from '../../src/shared/billing-engine';
@@ -170,5 +177,131 @@ describe('computeJobMoneyState', () => {
     expect(
       computeJobMoneyState([], [makeInvoice('open', { dueDate: now })], now),
     ).toBe('invoiced');
+  });
+});
+
+describe('refreshJobMoneyState', () => {
+  async function setup() {
+    const jobRepo = new InMemoryJobRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const job = await createJob(
+      { tenantId: 't1', customerId: 'c1', locationId: 'l1', summary: 'Job', createdBy: 'u1' },
+      jobRepo,
+    );
+    return { jobRepo, estimateRepo, invoiceRepo, auditRepo, job };
+  }
+
+  it('no-ops when the recomputed state equals the stored state', async () => {
+    const { jobRepo, estimateRepo, invoiceRepo, auditRepo, job } = await setup();
+    const result = await refreshJobMoneyState('t1', job.id, 'u1', {
+      jobRepo,
+      estimateRepo,
+      invoiceRepo,
+      auditRepo,
+    });
+    expect(result.changed).toBe(false);
+    expect(result.current).toBe('no_estimate');
+  });
+
+  it('persists the new state and emits an audit event on a transition', async () => {
+    const { jobRepo, estimateRepo, invoiceRepo, auditRepo, job } = await setup();
+    await estimateRepo.create(makeEstimate('sent', job.id));
+
+    const result = await refreshJobMoneyState('t1', job.id, 'u1', {
+      jobRepo,
+      estimateRepo,
+      invoiceRepo,
+      auditRepo,
+    });
+
+    expect(result.changed).toBe(true);
+    expect(result.previous).toBe('no_estimate');
+    expect(result.current).toBe('estimate_sent');
+
+    const reloaded = await jobRepo.findById('t1', job.id);
+    expect(reloaded!.moneyState).toBe('estimate_sent');
+
+    const events = await auditRepo.findByEntity('t1', 'job', job.id);
+    const moneyEvent = events.find((e) => e.eventType === 'job.money_state_changed');
+    expect(moneyEvent).toBeDefined();
+    expect(moneyEvent!.metadata).toMatchObject({ from: 'no_estimate', to: 'estimate_sent' });
+  });
+
+  it('a second refresh after the transition is a no-op', async () => {
+    const { jobRepo, estimateRepo, invoiceRepo, auditRepo, job } = await setup();
+    await estimateRepo.create(makeEstimate('sent', job.id));
+    await refreshJobMoneyState('t1', job.id, 'u1', { jobRepo, estimateRepo, invoiceRepo, auditRepo });
+
+    const second = await refreshJobMoneyState('t1', job.id, 'u1', {
+      jobRepo,
+      estimateRepo,
+      invoiceRepo,
+      auditRepo,
+    });
+    expect(second.changed).toBe(false);
+    expect(second.current).toBe('estimate_sent');
+  });
+
+  it('returns a null no-op result for a missing job', async () => {
+    const { jobRepo, estimateRepo, invoiceRepo, auditRepo } = await setup();
+    const result = await refreshJobMoneyState('t1', 'does-not-exist', 'u1', {
+      jobRepo,
+      estimateRepo,
+      invoiceRepo,
+      auditRepo,
+    });
+    expect(result.job).toBeNull();
+    expect(result.changed).toBe(false);
+  });
+
+  it('returns a no-op result when the job is deleted between find and update', async () => {
+    const { jobRepo, estimateRepo, invoiceRepo, auditRepo, job } = await setup();
+    await estimateRepo.create(makeEstimate('sent', job.id));
+
+    // Simulate the race: findById succeeds, then update is called for an
+    // id that no longer exists. The in-memory repo's update returns null
+    // when id is unknown, mirroring what would happen if the job was
+    // deleted concurrently.
+    const originalUpdate = jobRepo.update.bind(jobRepo);
+    jobRepo.update = async () => null;
+
+    const result = await refreshJobMoneyState('t1', job.id, 'u1', {
+      jobRepo,
+      estimateRepo,
+      invoiceRepo,
+      auditRepo,
+    });
+
+    // Restore for cleanliness (vitest isolates per-test anyway, but be tidy).
+    jobRepo.update = originalUpdate;
+
+    expect(result.job).toBeNull();
+    expect(result.changed).toBe(false);
+    expect(result.previous).toBe('no_estimate');
+    expect(result.current).toBe('estimate_sent');
+
+    // CRITICAL: audit event must NOT fire in the race case.
+    const events = await auditRepo.findByEntity('t1', 'job', job.id);
+    expect(events.some((e) => e.eventType === 'job.money_state_changed')).toBe(false);
+  });
+
+  it('refreshJobMoneyStateSafe swallows errors and returns a no-op result', async () => {
+    const { estimateRepo, invoiceRepo, auditRepo, job } = await setup();
+    const throwingJobRepo = {
+      findById: async () => {
+        throw new Error('db down');
+      },
+    } as unknown as InMemoryJobRepository;
+
+    const result = await refreshJobMoneyStateSafe('t1', job.id, 'u1', {
+      jobRepo: throwingJobRepo,
+      estimateRepo,
+      invoiceRepo,
+      auditRepo,
+    });
+    expect(result.changed).toBe(false);
+    expect(result.job).toBeNull();
   });
 });
