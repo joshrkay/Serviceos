@@ -7,6 +7,7 @@ import { Role } from '../auth/rbac';
 import { ProposalRepository } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
 import { ProposalFilter } from '../proposals/proposal-contracts';
+import { buildInboxPayload } from '../proposals/inbox';
 import { listProposals, getProposalDetail } from '../proposals/routes';
 import {
   approveProposal,
@@ -46,6 +47,28 @@ export function createProposalsRouter(
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  router.get(
+    '/inbox',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        // Inbox fetches a capped slice of ready_for_review proposals for the
+        // tenant and runs `prioritizeProposals` over them. The 100-item cap
+        // keeps the response payload small; if a tenant routinely exceeds
+        // it, we'll add pagination — but for a solo operator the inbox is
+        // measured in single-digit dozens, not hundreds.
+        const all = await proposalRepo.findByStatus(req.auth!.tenantId, 'ready_for_review');
+        const inbox = buildInboxPayload(all, 100);
+        res.json(inbox);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   router.get(
