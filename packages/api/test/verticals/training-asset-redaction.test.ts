@@ -31,4 +31,17 @@ describe('TrainingAssetRedactionService', () => {
     expect(result.summary.hasResidualPii).toBe(true);
     expect(result.summary.residualSignals).toContain('digit_run_ge_7');
   });
+
+  it('detects residual PII deterministically across repeated redactions', () => {
+    const service = new TrainingAssetRedactionService();
+    const input = { text: 'Customer account 123456789 needs no heat dispatch.' };
+
+    const first = service.redact(input);
+    const second = service.redact(input);
+
+    expect(first.status).toBe('quarantined');
+    expect(first.summary.residualSignals).toContain('digit_run_ge_7');
+    expect(second.status).toBe('quarantined');
+    expect(second.summary.residualSignals).toContain('digit_run_ge_7');
+  });
 });
