@@ -202,4 +202,5 @@ export interface PrivacyAuditEntry {
 
 export interface PrivacyAuditRepository {
   create(entry: PrivacyAuditEntry): Promise<PrivacyAuditEntry>;
+  delete(tenantId: string, id: string): Promise<void>;
 }

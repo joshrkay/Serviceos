@@ -162,6 +162,16 @@ class FakeTrainingAssetClient {
       return { rows: [row] };
     }
 
+    if (normalizedSql.startsWith('DELETE FROM privacy_audit')) {
+      const index = this.privacyAuditRows.findIndex(
+        (row) => row.tenant_id === values[0] && row.id === values[1],
+      );
+      if (index >= 0) {
+        this.privacyAuditRows.splice(index, 1);
+      }
+      return { rows: [] };
+    }
+
     if (
       normalizedSql.startsWith('SELECT * FROM vertical_training_assets') &&
       normalizedSql.includes('AND id = $2')
@@ -242,6 +252,8 @@ class FailingPrivacyAuditRepository implements PrivacyAuditRepository {
   async create(_entry: PrivacyAuditEntry): Promise<PrivacyAuditEntry> {
     throw new Error('privacy audit unavailable');
   }
+
+  async delete(_tenantId: string, _id: string): Promise<void> {}
 }
 
 class FailingAuditRepository implements AuditRepository {
@@ -477,6 +489,22 @@ describe('PrivacyAuditRepository', () => {
     ]);
     expect(pool.client.releaseCount).toBe(pool.connectCount);
   });
+
+  it('deletes Pg privacy audit entries with tenant guard', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const repo = new PgPrivacyAuditRepository(pool as unknown as Pool);
+    const entry = makePrivacyAuditEntry({ id: 'audit-delete-1', tenantId: 'tenant-1' });
+    await repo.create(entry);
+
+    await repo.delete('tenant-2', entry.id);
+    expect(pool.client.privacyAuditRows).toHaveLength(1);
+
+    await repo.delete('tenant-1', entry.id);
+    expect(pool.client.privacyAuditRows).toEqual([]);
+    expect(pool.client.queries.some((query) =>
+      query.sql === 'DELETE FROM privacy_audit WHERE tenant_id = $1 AND id = $2',
+    )).toBe(true);
+  });
 });
 
 describe('TrainingAssetService', () => {
@@ -553,9 +581,10 @@ describe('TrainingAssetService', () => {
 
   it('rolls back created assets when standard audit creation fails', async () => {
     const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
     const service = new TrainingAssetService({
       assetRepo,
-      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      privacyAuditRepo,
       auditRepo: new FailingAuditRepository(),
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-audit-fail-2',
@@ -577,6 +606,7 @@ describe('TrainingAssetService', () => {
 
     expect(assetRepo.savedAssets).toHaveLength(1);
     await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
+    expect(privacyAuditRepo.rows).toEqual([]);
   });
 
   it('quarantines assets with residual PII and prevents activation', async () => {
@@ -762,6 +792,36 @@ describe('TrainingAssetService', () => {
     expect(saved.labels.expectedNextAction).toBe('Schedule [NAME] for diagnostic.');
     expect(saved.labels.expectedRetrievalTerms).toEqual(['[NAME] furnace history']);
     expect(saved.labels.entities).toEqual({ callerName: '[NAME]' });
+    expect(JSON.stringify(saved)).not.toContain('Sarah Jones');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('Sarah Jones');
+  });
+
+  it('redacts likely title-case names from raw text without known entities', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-raw-name-fallback-1',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Raw text privacy case',
+        rawText: 'Sarah Jones has no heat',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    });
+
+    expect(saved.status).toBe('redacted');
+    expect(saved.scrubbedText).toBe('[NAME] has no heat');
     expect(JSON.stringify(saved)).not.toContain('Sarah Jones');
     expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('Sarah Jones');
   });

@@ -67,4 +67,11 @@ export class InMemoryPrivacyAuditRepository implements PrivacyAuditRepository {
     this.rows.push(entry);
     return entry;
   }
+
+  async delete(tenantId: string, id: string): Promise<void> {
+    const index = this.rows.findIndex((row) => row.tenantId === tenantId && row.id === id);
+    if (index >= 0) {
+      this.rows.splice(index, 1);
+    }
+  }
 }

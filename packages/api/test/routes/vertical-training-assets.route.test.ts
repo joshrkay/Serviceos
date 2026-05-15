@@ -64,6 +64,27 @@ describe('vertical training assets routes', () => {
     expect(JSON.stringify(res.body)).not.toContain('415-555-0123');
   });
 
+  it('redacts likely title-case names from raw text without known entities', async () => {
+    const app = buildApp();
+
+    const res = await request(app)
+      .post('/api/vertical-training-assets')
+      .send({
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Raw text privacy route case',
+        rawText: 'Sarah Jones has no heat',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      })
+      .expect(201);
+
+    const body = JSON.stringify(res.body);
+    expect(res.body.status).toBe('redacted');
+    expect(res.body.scrubbedText).toBe('[NAME] has no heat');
+    expect(body).not.toContain('Sarah Jones');
+  });
+
   it('redacts metadata PII before returning the asset', async () => {
     const app = buildApp();
 

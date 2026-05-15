@@ -201,4 +201,14 @@ export class PgPrivacyAuditRepository extends PgBaseRepository implements Privac
       return rowToPrivacyAuditEntry(result.rows[0]);
     });
   }
+
+  async delete(tenantId: string, id: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `DELETE FROM privacy_audit
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+    });
+  }
 }

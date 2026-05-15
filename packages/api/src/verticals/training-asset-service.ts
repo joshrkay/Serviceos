@@ -209,10 +209,7 @@ export class TrainingAssetService {
       createdBy: request.actorId,
       now,
     });
-    const rawTextRedacted = this.deps.redaction.redact({
-      text: parsed.rawText,
-      knownEntities: request.knownEntities,
-    });
+    const rawTextRedacted = redactMetadataText(parsed.rawText);
     const allRedactions = combineRedactionResults([...metadataRedactions, rawTextRedacted]);
     const status = metadataHasResidualPii || rawTextRedacted.status === 'quarantined'
       ? 'quarantined'
@@ -227,9 +224,11 @@ export class TrainingAssetService {
     };
 
     const saved = await this.deps.assetRepo.save(asset);
+    const privacyAuditId = this.idGenerator();
+    let privacyAuditCreated = false;
     try {
       await this.deps.privacyAuditRepo.create({
-        id: this.idGenerator(),
+        id: privacyAuditId,
         tenantId: request.tenantId,
         actorId: request.actorId,
         entityType: 'vertical_training_asset',
@@ -239,6 +238,7 @@ export class TrainingAssetService {
         redactions: allRedactions.auditRedactions,
         createdAt: now,
       });
+      privacyAuditCreated = true;
       await this.deps.auditRepo.create(createAuditEvent({
         tenantId: request.tenantId,
         actorId: request.actorId,
@@ -254,6 +254,9 @@ export class TrainingAssetService {
       }));
     } catch (err) {
       await this.deps.assetRepo.delete(request.tenantId, asset.id);
+      if (privacyAuditCreated) {
+        await this.deps.privacyAuditRepo.delete(request.tenantId, privacyAuditId);
+      }
       throw err;
     }
     return saved;
