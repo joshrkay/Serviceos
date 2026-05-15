@@ -149,7 +149,7 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
       const result = await client.query(
         `SELECT * FROM vertical_training_assets
          WHERE tenant_id = $1 AND vertical_type = $2 AND status = 'active'
-         ORDER BY updated_at DESC${normalizedLimit === undefined ? '' : '\n         LIMIT $3'}`,
+         ORDER BY updated_at DESC, id ASC${normalizedLimit === undefined ? '' : '\n         LIMIT $3'}`,
         values,
       );
       return result.rows.map(rowToAsset);

@@ -40,7 +40,10 @@ export class InMemoryTrainingAssetRepository implements TrainingAssetRepository 
           row.verticalType === verticalType &&
           row.status === 'active',
       )
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime());
+      .sort((left, right) => {
+        const updatedDiff = right.updatedAt.getTime() - left.updatedAt.getTime();
+        return updatedDiff !== 0 ? updatedDiff : left.id.localeCompare(right.id);
+      });
     return limit === undefined ? rows : rows.slice(0, normalizeListLimit(limit));
   }
 }

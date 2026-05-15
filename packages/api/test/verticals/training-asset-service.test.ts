@@ -195,7 +195,10 @@ class FakeTrainingAssetClient {
 
   private sortedRows(): TrainingAssetRow[] {
     return [...this.rows.values()].sort(
-      (left, right) => right.updated_at.getTime() - left.updated_at.getTime(),
+      (left, right) => {
+        const updatedDiff = right.updated_at.getTime() - left.updated_at.getTime();
+        return updatedDiff !== 0 ? updatedDiff : left.id.localeCompare(right.id);
+      },
     );
   }
 }
@@ -239,7 +242,11 @@ describe('TrainingAssetRepository', () => {
       updatedAt: new Date('2026-05-15T00:00:00Z'),
     }));
     await repo.save(makeAsset({
-      id: 'asset-newest',
+      id: 'asset-z',
+      updatedAt: new Date('2026-05-15T03:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-a',
       updatedAt: new Date('2026-05-15T03:00:00Z'),
     }));
     await repo.save(makeAsset({
@@ -254,7 +261,7 @@ describe('TrainingAssetRepository', () => {
 
     const active = await repo.listActiveByTenantAndVertical('tenant-1', 'hvac', 2);
 
-    expect(active.map((asset) => asset.id)).toEqual(['asset-newest', 'asset-middle']);
+    expect(active.map((asset) => asset.id)).toEqual(['asset-a', 'asset-z']);
   });
 
   it('updates lifecycle status without duplicating assets', async () => {
@@ -334,7 +341,11 @@ describe('TrainingAssetRepository', () => {
       updatedAt: new Date('2026-05-15T00:00:00Z'),
     }));
     await repo.save(makeAsset({
-      id: 'asset-newest',
+      id: 'asset-z',
+      updatedAt: new Date('2026-05-15T03:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-a',
       updatedAt: new Date('2026-05-15T03:00:00Z'),
     }));
     await repo.save(makeAsset({
@@ -344,10 +355,11 @@ describe('TrainingAssetRepository', () => {
 
     const active = await repo.listActiveByTenantAndVertical('tenant-1', 'hvac', 2);
 
-    expect(active.map((asset) => asset.id)).toEqual(['asset-newest', 'asset-middle']);
+    expect(active.map((asset) => asset.id)).toEqual(['asset-a', 'asset-z']);
     const select = pool.client.queries.find((query) =>
       query.sql.includes("status = 'active'"),
     );
+    expect(select?.sql).toContain('ORDER BY updated_at DESC, id ASC');
     expect(select?.sql).toContain('LIMIT $3');
     expect(select?.values).toEqual(['tenant-1', 'hvac', 2]);
   });
