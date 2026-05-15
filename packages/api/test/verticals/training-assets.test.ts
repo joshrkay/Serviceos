@@ -9,6 +9,7 @@ import {
   createTrainingAssetDraft,
   trainingAssetInputSchema,
 } from '../../src/verticals/training-assets';
+import { buildMergedVerticalVoicePrompt } from '../../src/verticals/context-assembly';
 import { validateVerticalPack } from '../../src/verticals/registry';
 
 describe('vertical type support', () => {
@@ -98,5 +99,18 @@ describe('vertical training assets', () => {
 
     expect(buildTrainingAssetPromptSection([active])).toContain('Electrical training context');
     expect(buildTrainingAssetPromptSection([active])).toContain('Breaker triage');
+  });
+});
+
+describe('merged vertical voice prompt', () => {
+  it('places active tenant training assets after canonical pack context', () => {
+    const prompt = buildMergedVerticalVoicePrompt({
+      canonicalPrompt: 'Service vertical: HVAC Professional',
+      trainingAssetPrompt: 'Tenant-approved vertical voice training assets:\n- HVAC training context: Ask about heating or cooling.',
+    });
+
+    expect(prompt).toBe(
+      'Service vertical: HVAC Professional\n\nTenant-approved vertical voice training assets:\n- HVAC training context: Ask about heating or cooling.',
+    );
   });
 });

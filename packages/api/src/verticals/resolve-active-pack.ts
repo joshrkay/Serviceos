@@ -28,10 +28,13 @@ import type { PackActivationRepository } from '../settings/pack-activation';
 import type { VerticalPackRegistry, VerticalPack as CanonicalVerticalPack } from '../shared/vertical-pack-registry';
 import { isValidVerticalType } from '../shared/vertical-types';
 import {
+  buildMergedVerticalVoicePrompt,
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
   formatObjectionScriptsForPrompt,
 } from './context-assembly';
+import type { TrainingAssetRepository } from './training-assets';
+import { buildTrainingAssetPromptSection } from './training-assets';
 import type {
   IntakeQuestionList,
   ObjectionScriptList,
@@ -43,6 +46,7 @@ import type {
 export interface ResolveActivePackDeps {
   packActivationRepo: PackActivationRepository;
   canonicalPackRegistry: VerticalPackRegistry;
+  trainingAssetRepo?: TrainingAssetRepository;
   /**
    * Cache TTL in milliseconds. Defaults to 5 minutes — short enough
    * that a pack change appears to admins within a normal feedback
@@ -139,10 +143,17 @@ export function buildVerticalPromptResolver(
         const verticalBlock = formatVerticalForCallerPrompt(richPack);
         const intakeBlock = formatIntakeQuestionsForPrompt(richPack);
         const objectionBlock = formatObjectionScriptsForPrompt(richPack);
-        const formatted = [verticalBlock, intakeBlock, objectionBlock]
+        const trainingAssets = deps.trainingAssetRepo
+          ? await deps.trainingAssetRepo.listActiveByTenantAndVertical(tenantId, richPack.type)
+          : [];
+        const trainingAssetPrompt = buildTrainingAssetPromptSection(trainingAssets);
+        const canonicalPrompt = [verticalBlock, intakeBlock, objectionBlock]
           .filter((s) => s.length > 0)
           .join('\n\n');
-        section = formatted.length > 0 ? formatted : undefined;
+        section = buildMergedVerticalVoicePrompt({
+          canonicalPrompt,
+          trainingAssetPrompt,
+        });
       }
     }
 

@@ -1440,6 +1440,7 @@ export function createApp(): express.Express {
   const verticalPromptResolver = buildVerticalPromptResolver({
     packActivationRepo,
     canonicalPackRegistry,
+    trainingAssetRepo,
   });
   // §3C: caller-plan resolver. Returns a prompt-shaped block when the
   // caller's customerId resolves to an active maintenance agreement.
