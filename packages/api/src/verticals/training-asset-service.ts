@@ -100,6 +100,49 @@ export class TrainingAssetService {
     }
 
     const labels: TrainingAssetLabels = { ...parsed.labels };
+    const redactLabelText = (value: string): string | undefined => {
+      const result = this.deps.redaction.redact({
+        text: value,
+        knownEntities: request.knownEntities,
+      });
+      metadataRedactions.push(result);
+      if (result.status === 'quarantined') {
+        metadataHasResidualPii = true;
+        return undefined;
+      }
+      return result.scrubbedText;
+    };
+
+    if (parsed.labels.intent !== undefined) {
+      const intent = redactLabelText(parsed.labels.intent);
+      if (intent === undefined) {
+        delete labels.intent;
+      } else {
+        labels.intent = intent;
+      }
+    }
+    if (typeof parsed.labels.expectedNextQuestion === 'string') {
+      const expectedNextQuestion = redactLabelText(parsed.labels.expectedNextQuestion);
+      if (expectedNextQuestion === undefined) {
+        delete labels.expectedNextQuestion;
+      } else {
+        labels.expectedNextQuestion = expectedNextQuestion;
+      }
+    }
+    if (parsed.labels.expectedNextAction !== undefined) {
+      const expectedNextAction = redactLabelText(parsed.labels.expectedNextAction);
+      if (expectedNextAction === undefined) {
+        delete labels.expectedNextAction;
+      } else {
+        labels.expectedNextAction = expectedNextAction;
+      }
+    }
+    if (parsed.labels.expectedRetrievalTerms !== undefined) {
+      labels.expectedRetrievalTerms = parsed.labels.expectedRetrievalTerms.flatMap((term) => {
+        const sanitized = redactLabelText(term);
+        return sanitized === undefined ? [] : [sanitized];
+      });
+    }
     if (parsed.labels.entities !== undefined) {
       const entitiesRedacted = this.deps.redaction.redact({
         text: JSON.stringify(parsed.labels.entities),

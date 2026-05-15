@@ -516,6 +516,68 @@ describe('TrainingAssetService', () => {
     expect(JSON.stringify(saved)).not.toContain('123456789');
   });
 
+  it('sanitizes free-form label text before save and audit', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-6',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'eval_scenario',
+        title: 'Label privacy case',
+        rawText: 'Caller has no heat.',
+        labels: {
+          intent: 'Call Sarah Jones at 415-555-0123',
+          expectedNextQuestion: 'Ask Sarah Jones whether 123 Main St has heat.',
+          expectedNextAction: 'Dispatch to 123 Main St',
+          expectedRetrievalTerms: [
+            'Sarah Jones furnace history',
+            'account 123456789',
+            'call 415-555-0123',
+          ],
+          shouldEscalate: true,
+          urgencyTier: 'emergency',
+        },
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+      knownEntities: { names: ['Sarah Jones'] },
+    });
+
+    expect(saved.status).toBe('quarantined');
+    expect(saved.labels.intent).toBe('Call [CALLER_NAME] at [PHONE]');
+    expect(saved.labels.expectedNextQuestion).toBe(
+      'Ask [CALLER_NAME] whether [ADDRESS] has heat.',
+    );
+    expect(saved.labels.expectedNextAction).toBe('Dispatch to [ADDRESS]');
+    expect(saved.labels.expectedRetrievalTerms).toEqual([
+      '[CALLER_NAME] furnace history',
+      'call [PHONE]',
+    ]);
+    expect(saved.labels.shouldEscalate).toBe(true);
+    expect(saved.labels.urgencyTier).toBe('emergency');
+    expect(assetRepo.savedAssets).toHaveLength(1);
+    const persistedJson = JSON.stringify(assetRepo.savedAssets[0]);
+    expect(persistedJson).not.toContain('Sarah Jones');
+    expect(persistedJson).not.toContain('415-555-0123');
+    expect(persistedJson).not.toContain('123 Main St');
+    expect(persistedJson).not.toContain('123456789');
+    expect(privacyAuditRepo.rows).toHaveLength(1);
+    expect(privacyAuditRepo.rows[0].redactions.length).toBeGreaterThan(1);
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123 Main St');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123456789');
+  });
+
   it('approves then activates a redacted asset', async () => {
     const service = new TrainingAssetService({
       assetRepo: new InMemoryTrainingAssetRepository(),
