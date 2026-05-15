@@ -149,16 +149,23 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
         const refundedIds = new Set(refunded.map((p) => p.id));
         const payments = [...completed, ...refunded];
 
+        // Batch invoice lookup: dedupe by id and fetch in parallel so a
+        // window with N distinct invoices is one round-trip, not N
+        // sequential awaits.
+        const uniqueInvoiceIds = [...new Set(payments.map((p) => p.invoiceId))];
+        const fetchedInvoices = await Promise.all(
+          uniqueInvoiceIds.map((id) => deps.invoiceRepo!.findById(tenantId, id)),
+        );
         const invoiceCache = new Map<string, Invoice>();
+        for (let i = 0; i < uniqueInvoiceIds.length; i++) {
+          const inv = fetchedInvoices[i];
+          if (inv) invoiceCache.set(uniqueInvoiceIds[i], inv);
+        }
+
         const rows: TaxExportRow[] = [];
         for (const payment of payments) {
-          let inv = invoiceCache.get(payment.invoiceId);
-          if (!inv) {
-            const fetched = await deps.invoiceRepo.findById(tenantId, payment.invoiceId);
-            if (!fetched) continue; // orphan payment; FK should prevent
-            invoiceCache.set(payment.invoiceId, fetched);
-            inv = fetched;
-          }
+          const inv = invoiceCache.get(payment.invoiceId);
+          if (!inv) continue; // orphan payment; FK should prevent
           const isRefunded = refundedIds.has(payment.id);
           rows.push({
             date: payment.receivedAt.toISOString().slice(0, 10),
