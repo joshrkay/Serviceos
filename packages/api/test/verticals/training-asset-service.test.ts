@@ -423,6 +423,99 @@ describe('TrainingAssetService', () => {
     })).rejects.toThrow('Cannot approve quarantined training asset');
   });
 
+  it('redacts metadata before save and records safe audit redactions', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-4',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'labeled_call_example',
+        title: 'Sarah Jones no heat call',
+        rawText: 'Caller has no heat.',
+        labels: {
+          intent: 'emergency_dispatch',
+          shouldEscalate: true,
+          entities: {
+            serviceAddress: '123 Main St',
+            callerPhone: '415-555-0123',
+          },
+        },
+        provenance: {
+          source: 'tenant_admin',
+          sourceVersion: '1',
+          notes: 'Admin note from 415-555-0123',
+        },
+      },
+      knownEntities: { names: ['Sarah Jones'] },
+    });
+
+    expect(saved.status).toBe('redacted');
+    expect(saved.title).toBe('[CALLER_NAME] no heat call');
+    expect(saved.provenance.notes).toBe('Admin note from [PHONE]');
+    expect(saved.labels.entities).toEqual({
+      serviceAddress: '[ADDRESS]',
+      callerPhone: '[PHONE]',
+    });
+    expect(assetRepo.savedAssets).toHaveLength(1);
+    const persistedJson = JSON.stringify(assetRepo.savedAssets[0]);
+    expect(persistedJson).not.toContain('Sarah Jones');
+    expect(persistedJson).not.toContain('123 Main St');
+    expect(persistedJson).not.toContain('415-555-0123');
+    expect(privacyAuditRepo.rows).toHaveLength(1);
+    expect(privacyAuditRepo.rows[0].redactions.length).toBeGreaterThan(1);
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123 Main St');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
+  });
+
+  it('quarantines residual metadata and falls back to safe metadata fields', async () => {
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-5',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'plumbing',
+        assetKind: 'rag_seed',
+        title: 'Account 123456789 leak',
+        rawText: 'Ask whether the water is shut off.',
+        labels: {
+          intent: 'emergency_dispatch',
+          entities: { accountNumber: '123456789' },
+        },
+        provenance: {
+          source: 'tenant_admin',
+          sourceVersion: '1',
+          notes: 'Follow up on account 123456789',
+        },
+      },
+    });
+
+    expect(saved.status).toBe('quarantined');
+    expect(saved.title).toBe('Quarantined training asset');
+    expect(saved.scrubbedText).toBeUndefined();
+    expect(saved.provenance.notes).toBeUndefined();
+    expect(saved.labels.intent).toBe('emergency_dispatch');
+    expect(saved.labels.entities).toBeUndefined();
+    expect(JSON.stringify(saved)).not.toContain('123456789');
+  });
+
   it('approves then activates a redacted asset', async () => {
     const service = new TrainingAssetService({
       assetRepo: new InMemoryTrainingAssetRepository(),
