@@ -143,10 +143,18 @@ export function buildVerticalPromptResolver(
         const verticalBlock = formatVerticalForCallerPrompt(richPack);
         const intakeBlock = formatIntakeQuestionsForPrompt(richPack);
         const objectionBlock = formatObjectionScriptsForPrompt(richPack);
-        const trainingAssets = deps.trainingAssetRepo
-          ? await deps.trainingAssetRepo.listActiveByTenantAndVertical(tenantId, richPack.type)
-          : [];
-        const trainingAssetPrompt = buildTrainingAssetPromptSection(trainingAssets);
+        let trainingAssetPrompt = '';
+        if (deps.trainingAssetRepo) {
+          try {
+            const trainingAssets = await deps.trainingAssetRepo.listActiveByTenantAndVertical(
+              tenantId,
+              richPack.type,
+            );
+            trainingAssetPrompt = buildTrainingAssetPromptSection(trainingAssets);
+          } catch {
+            trainingAssetPrompt = '';
+          }
+        }
         const canonicalPrompt = [verticalBlock, intakeBlock, objectionBlock]
           .filter((s) => s.length > 0)
           .join('\n\n');

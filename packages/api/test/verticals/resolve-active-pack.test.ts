@@ -8,9 +8,44 @@ import {
   InMemoryVerticalPackRegistry,
   registerPack,
 } from '../../src/shared/vertical-pack-registry';
+import type {
+  TrainingAssetRepository,
+  VerticalTrainingAsset,
+} from '../../src/verticals/training-assets';
 
 const TENANT = 'tenant-resolve';
 const PACK_ID = 'hvac-pro-v1';
+
+function buildTrainingAsset(overrides: Partial<VerticalTrainingAsset> = {}): VerticalTrainingAsset {
+  const now = new Date('2026-05-15T00:00:00Z');
+  return {
+    id: 'asset-resolver-1',
+    tenantId: TENANT,
+    verticalType: 'hvac',
+    assetKind: 'prompt_context',
+    status: 'active',
+    title: 'Heating or cooling triage',
+    scrubbedText: 'Ask whether the issue is heating or cooling before booking.',
+    labels: {},
+    provenance: { source: 'tenant_admin', sourceVersion: '1' },
+    createdBy: 'user-resolver',
+    activatedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function buildTrainingAssetRepo(
+  listActiveByTenantAndVertical: TrainingAssetRepository['listActiveByTenantAndVertical'],
+): TrainingAssetRepository {
+  return {
+    save: async (asset) => asset,
+    findById: async () => null,
+    listByTenant: async () => [],
+    listActiveByTenantAndVertical,
+  };
+}
 
 async function seedRegistry(): Promise<InMemoryVerticalPackRegistry> {
   const registry = new InMemoryVerticalPackRegistry();
@@ -70,6 +105,41 @@ describe('buildVerticalPromptResolver', () => {
     expect(section).toContain('Service types offered:');
     expect(section).toContain('Installation');
     expect(section).toContain('Repair');
+  });
+
+  it('appends active training assets after canonical vertical context', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const trainingAssetRepo = buildTrainingAssetRepo(async () => [buildTrainingAsset()]);
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      trainingAssetRepo,
+      cacheTtlMs: 0,
+    });
+
+    const section = await resolve(TENANT);
+
+    expect(section).toContain('Service vertical: HVAC Professional');
+    expect(section).toContain('Tenant-approved vertical voice training assets:');
+    expect(section).toContain('Heating or cooling triage');
+    expect(section!.indexOf('Service vertical: HVAC Professional')).toBeLessThan(
+      section!.indexOf('Tenant-approved vertical voice training assets:'),
+    );
+  });
+
+  it('returns canonical vertical context when training asset lookup fails', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const trainingAssetRepo = buildTrainingAssetRepo(async () => {
+      throw new Error('training asset store unavailable');
+    });
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      trainingAssetRepo,
+      cacheTtlMs: 0,
+    });
+
+    await expect(resolve(TENANT)).resolves.toContain('Service vertical: HVAC Professional');
   });
 
   it('returns undefined when the activated packId is missing from the registry', async () => {
