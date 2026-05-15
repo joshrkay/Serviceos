@@ -96,8 +96,26 @@ export async function buildTestApp(): Promise<TestApp> {
 
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, new InMemoryQueue(), new NoopFeedbackDispatcher()));
   app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
-  app.use('/api/estimates', createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership));
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo));
+  app.use(
+    '/api/estimates',
+    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, undefined, undefined, {
+      jobRepo,
+      invoiceRepo,
+    }),
+  );
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      undefined,
+      jobRepo,
+      estimateRepo,
+    ),
+  );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo));
   app.use('/api/proposals', createProposalsRouter(proposalRepo));
 

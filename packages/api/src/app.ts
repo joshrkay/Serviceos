@@ -532,6 +532,7 @@ export function createApp(): express.Express {
     : new InMemorySettingsRepository();
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
   // and the rest of the app share a single instance — InMemory repos
@@ -646,6 +647,7 @@ export function createApp(): express.Express {
       tenantRepo,
       settingsRepo: webhookSettingsRepo,
       invoiceRepo: webhookInvoiceRepo,
+      estimateRepo: webhookEstimateRepo,
       paymentRepo: webhookPaymentRepo,
       jobRepo,
       // Tier 4 (Team members — PR 3). Invitee join-tenant path on
@@ -1873,12 +1875,17 @@ export function createApp(): express.Express {
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use(
     '/api/estimates',
-    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService, {
-      gateway: llmGateway,
-      proposalRepo,
-    }),
+    createEstimateRouter(
+      estimateRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      sendService,
+      { gateway: llmGateway, proposalRepo },
+      { jobRepo, invoiceRepo },
+    ),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
