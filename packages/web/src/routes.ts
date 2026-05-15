@@ -29,6 +29,7 @@ import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { TechnicianDayPage } from './components/technician/TechnicianDayPage';
 import { MaintenanceContractsPage } from './components/contracts/MaintenanceContractsPage';
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
+import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
 import { PortalShell } from './pages/portal/PortalShell';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
@@ -164,6 +165,7 @@ export const router = createBrowserRouter([
       { path: 'settings/price-book', Component: PriceBookPage },
       { path: 'settings/feedback', Component: FeedbackDashboard },
       { path: 'settings/language', Component: LanguageSettingsPage },
+      { path: 'reports/money', Component: MoneyDashboardPage },
       { path: 'reports/revenue-by-source', Component: RevenueBySourcePage },
       { path: 'technician/day', Component: TechnicianDayPage },
     ],
