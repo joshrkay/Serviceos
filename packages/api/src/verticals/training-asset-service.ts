@@ -20,14 +20,33 @@ const METADATA_NAME_PREFIX_WORDS = new Set(['Ask', 'Call', 'Dispatch', 'Schedule
 
 type RedactionResult = ReturnType<TrainingAssetRedactionService['redact']>;
 
-function applyMetadataNameFallback(text: string): string {
-  return text.replace(METADATA_TITLE_CASE_NAME_RE, (match) => {
+function applyMetadataNameFallback(text: string): {
+  scrubbedText: string;
+  auditRedactions: RedactionResult['auditRedactions'];
+} {
+  const auditRedactions: RedactionResult['auditRedactions'] = [];
+  const scrubbedText = text.replace(METADATA_TITLE_CASE_NAME_RE, (match, offset: number) => {
     const words = match.split(/\s+/);
     if (words.length > 2 && METADATA_NAME_PREFIX_WORDS.has(words[0])) {
+      const prefixMatch = /^(\S+)(\s+)/.exec(match);
+      const nameStart = offset + (prefixMatch?.[0].length ?? words[0].length + 1);
+      auditRedactions.push({
+        kind: 'metadata_name',
+        placeholder: '[NAME]',
+        start: nameStart,
+        end: offset + match.length,
+      });
       return `${words[0]} [NAME]`;
     }
+    auditRedactions.push({
+      kind: 'metadata_name',
+      placeholder: '[NAME]',
+      start: offset,
+      end: offset + match.length,
+    });
     return '[NAME]';
   });
+  return { scrubbedText, auditRedactions };
 }
 
 function combineRedactionResults(results: RedactionResult[]): {
@@ -92,9 +111,18 @@ export class TrainingAssetService {
         text: value,
         knownEntities: request.knownEntities,
       });
+      const fallback = applyMetadataNameFallback(result.scrubbedText);
+      const auditRedactions = [...result.auditRedactions, ...fallback.auditRedactions];
       return {
         ...result,
-        scrubbedText: applyMetadataNameFallback(result.scrubbedText),
+        scrubbedText: fallback.scrubbedText,
+        summary: {
+          ...result.summary,
+          redactionCount: auditRedactions.length,
+          redactionKinds: [...new Set(auditRedactions.map((redaction) => redaction.kind))],
+          placeholders: [...new Set(auditRedactions.map((redaction) => redaction.placeholder))],
+        },
+        auditRedactions,
       };
     };
 
@@ -271,6 +299,9 @@ export class TrainingAssetService {
         status: existing.status,
       });
     }
+    if (existing.status === 'approved') {
+      return existing;
+    }
     if (existing.status !== 'redacted') {
       throw new ValidationError(`Cannot approve training asset from status ${existing.status}`, {
         assetId: request.assetId,
@@ -307,6 +338,9 @@ export class TrainingAssetService {
   async activate(request: LifecycleRequest): Promise<VerticalTrainingAsset> {
     const existing = await this.deps.assetRepo.findById(request.tenantId, request.assetId);
     if (!existing) throw new NotFoundError('Training asset', request.assetId);
+    if (existing.status === 'active') {
+      return existing;
+    }
     if (existing.status !== 'approved') {
       throw new ValidationError(`Cannot activate training asset from status ${existing.status}`, {
         assetId: request.assetId,

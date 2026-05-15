@@ -246,6 +246,42 @@ describe('vertical training assets routes', () => {
     expect(activated.body.status).toBe('active');
   });
 
+  it('returns current resources for repeated successful lifecycle requests', async () => {
+    const app = buildApp();
+    const created = await request(app)
+      .post('/api/vertical-training-assets')
+      .send({
+        verticalType: 'plumbing',
+        assetKind: 'rag_seed',
+        title: 'Retry guidance',
+        rawText: 'Ask whether the water is shut off.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      })
+      .expect(201);
+
+    const approved = await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/approve`)
+      .send({})
+      .expect(200);
+    const approvedAgain = await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/approve`)
+      .send({})
+      .expect(200);
+    const activated = await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/activate`)
+      .send({})
+      .expect(200);
+    const activatedAgain = await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/activate`)
+      .send({})
+      .expect(200);
+
+    expect(approvedAgain.body).toEqual(approved.body);
+    expect(activatedAgain.body).toEqual(activated.body);
+    expect(activatedAgain.body.status).toBe('active');
+  });
+
   it('returns 400 when approving a quarantined asset', async () => {
     const app = buildApp();
     const created = await request(app)

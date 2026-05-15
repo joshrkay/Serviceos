@@ -794,6 +794,21 @@ describe('TrainingAssetService', () => {
     expect(saved.labels.entities).toEqual({ callerName: '[NAME]' });
     expect(JSON.stringify(saved)).not.toContain('Sarah Jones');
     expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('Sarah Jones');
+    expect(privacyAuditRepo.rows).toHaveLength(1);
+    expect(privacyAuditRepo.rows[0].redactionSummary.redactionCount).toBeGreaterThan(0);
+    expect(privacyAuditRepo.rows[0].redactionSummary.redactionKinds).toContain('metadata_name');
+    expect(privacyAuditRepo.rows[0].redactionSummary.placeholders).toContain('[NAME]');
+    expect(privacyAuditRepo.rows[0].redactions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'metadata_name',
+          placeholder: '[NAME]',
+          start: expect.any(Number),
+          end: expect.any(Number),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
   });
 
   it('redacts likely title-case names from raw text without known entities', async () => {
@@ -1011,6 +1026,71 @@ describe('TrainingAssetService', () => {
     ]);
     expect(JSON.stringify(auditRepo.getAll())).not.toContain('Breaker follow-up');
     expect(JSON.stringify(auditRepo.getAll())).not.toContain('Ask whether one breaker');
+  });
+
+  it('returns an already approved asset without duplicate saves or audit events', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const approvedAsset = makeAsset({
+      id: 'asset-approved-retry',
+      status: 'approved',
+      rawText: undefined,
+      scrubbedText: 'Safe approved training text.',
+      approvedBy: 'owner-1',
+      updatedAt: new Date('2026-05-15T01:00:00Z'),
+    });
+    await assetRepo.save(approvedAsset);
+    assetRepo.savedAssets.length = 0;
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T02:00:00Z'),
+    });
+
+    const retried = await service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-2',
+      assetId: approvedAsset.id,
+    });
+
+    expect(retried).toEqual(approvedAsset);
+    expect(assetRepo.savedAssets).toEqual([]);
+    expect(auditRepo.getAll()).toEqual([]);
+  });
+
+  it('returns an already active asset without duplicate saves or audit events', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const activeAsset = makeAsset({
+      id: 'asset-active-retry',
+      status: 'active',
+      rawText: undefined,
+      scrubbedText: 'Safe active training text.',
+      approvedBy: 'owner-1',
+      activatedAt: new Date('2026-05-15T01:00:00Z'),
+      updatedAt: new Date('2026-05-15T01:00:00Z'),
+    });
+    await assetRepo.save(activeAsset);
+    assetRepo.savedAssets.length = 0;
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T02:00:00Z'),
+    });
+
+    const retried = await service.activate({
+      tenantId: 'tenant-1',
+      actorId: 'owner-2',
+      assetId: activeAsset.id,
+    });
+
+    expect(retried).toEqual(activeAsset);
+    expect(assetRepo.savedAssets).toEqual([]);
+    expect(auditRepo.getAll()).toEqual([]);
   });
 
   it('restores approval transitions when standard audit creation fails', async () => {
