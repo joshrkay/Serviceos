@@ -58,7 +58,6 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
 
     // Idempotency: a non-held appointment is already confirmed, so we return
     // success without re-applying the mutation or emitting a second audit event.
-    // Idempotent re-run: already confirmed, intentionally no duplicate audit event.
     // This also silently succeeds if the appointment was never held in the first place
     // (stale or mis-routed `create_booking` proposal) — acceptable because
     // `create_booking` proposals are only ever issued against genuinely held slots,
