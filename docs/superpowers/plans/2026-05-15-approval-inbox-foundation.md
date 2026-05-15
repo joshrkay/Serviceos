@@ -357,7 +357,6 @@ router.get(
       // measured in single-digit dozens, not hundreds.
       const all = await proposalRepo.findByTenant(req.auth!.tenantId, {
         status: 'ready_for_review',
-        limit: 200, // fetch a buffer above the cap so we don't truncate before sorting
       });
       const inbox = buildInboxPayload(all, 100);
       res.json(inbox);
