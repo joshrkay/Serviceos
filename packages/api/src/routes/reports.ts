@@ -114,22 +114,40 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid `from`/`to` date' });
           return;
         }
+        if (from.getTime() >= to.getTime()) {
+          res
+            .status(400)
+            .json({ error: 'VALIDATION_ERROR', message: '`from` must be before `to`' });
+          return;
+        }
 
         // Cash-basis tax export: income is bucketed by when the cash arrived
         // (payment.receivedAt), not when the invoice was issued. Drives the
-        // export off completed payments in the window so a 2025-12 invoice
-        // paid 2026-01 lands in 2026 — matching how a sole prop / SMLLC
-        // files. Invoice rows are looked up by ID and cached so a tenant
-        // with many historic paid invoices doesn't blow up the response.
+        // export off completed AND refunded payments in the window — a
+        // refunded payment still represents cash that arrived in this
+        // period for tax purposes (the refund itself happens later, and
+        // ideally would be a negative line in its own period, but the
+        // schema doesn't yet carry a `refundedAt` date — so we flag the
+        // row with `[REFUNDED]` in the description and let the accountant
+        // adjust manually). Invoice rows are looked up by ID and cached so
+        // a tenant with many historic paid invoices doesn't blow up the
+        // response.
         const tenantId = req.auth!.tenantId;
-        const [payments, expenses] = await Promise.all([
+        const [completed, refunded, expenses] = await Promise.all([
           deps.paymentRepo.findByTenant(tenantId, {
             status: 'completed',
             from,
             to,
           }),
+          deps.paymentRepo.findByTenant(tenantId, {
+            status: 'refunded',
+            from,
+            to,
+          }),
           deps.expenseRepo.findByTenant(tenantId, { from, to }),
         ]);
+        const refundedIds = new Set(refunded.map((p) => p.id));
+        const payments = [...completed, ...refunded];
 
         const invoiceCache = new Map<string, Invoice>();
         const rows: TaxExportRow[] = [];
@@ -141,11 +159,12 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
             invoiceCache.set(payment.invoiceId, fetched);
             inv = fetched;
           }
+          const isRefunded = refundedIds.has(payment.id);
           rows.push({
             date: payment.receivedAt.toISOString().slice(0, 10),
             type: 'income',
             category: 'invoice',
-            description: inv.invoiceNumber,
+            description: isRefunded ? `[REFUNDED] ${inv.invoiceNumber}` : inv.invoiceNumber,
             jobId: inv.jobId,
             amountCents: payment.amountCents,
           });

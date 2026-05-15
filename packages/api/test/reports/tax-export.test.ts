@@ -80,4 +80,27 @@ describe('buildTaxExportCsv', () => {
     expect(csv).toContain("\"'+1234\"");
     expect(csv).toContain("\"'@SUM(A1:A10)\"");
   });
+
+  it('neutralizes CSV formula-injection even with leading whitespace (Excel trims before evaluating)', () => {
+    const csv = buildTaxExportCsv([
+      {
+        date: '2026-05-10',
+        type: 'expense',
+        category: 'materials',
+        description: ' =HYPERLINK("http://evil.example","click")',
+        amountCents: 1000,
+      },
+      {
+        date: '2026-05-11',
+        type: 'expense',
+        category: 'fuel',
+        description: '\t+1234',
+        amountCents: 500,
+      },
+    ]);
+    // Both rows must be force-quoted with a single-quote prefix even
+    // though the dangerous char isn't the literal first byte.
+    expect(csv).toContain('"\' =HYPERLINK(""http://evil.example"",""click"")"');
+    expect(csv).toContain("\"'\t+1234\"");
+  });
 });

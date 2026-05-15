@@ -100,6 +100,63 @@ describe('GET /api/reports/tax-export', () => {
     expect(res.status).toBe(400);
   });
 
+  it('rejects from >= to with 400', async () => {
+    const { app } = buildApp();
+    const res = await request(app).get(
+      '/api/reports/tax-export?from=2026-06-01&to=2026-05-01',
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/from.*before.*to/i);
+  });
+
+  it('includes refunded payments flagged with [REFUNDED] in the description', async () => {
+    const { app, invoiceRepo, paymentRepo } = buildApp();
+    const inv: Invoice = {
+      id: 'inv-refund-1',
+      tenantId: 'tenant-r1',
+      jobId: 'job-refund-1',
+      invoiceNumber: 'INV-REFUND-1',
+      status: 'paid',
+      lineItems: [],
+      totals: {
+        subtotalCents: 30000,
+        taxCents: 0,
+        totalCents: 30000,
+        discountCents: 0,
+        taxRateBps: 0,
+        taxableSubtotalCents: 30000,
+      },
+      amountPaidCents: 30000,
+      amountDueCents: 0,
+      issuedAt: new Date('2026-05-01'),
+      createdBy: 'user-r1',
+      createdAt: new Date('2026-05-01'),
+      updatedAt: new Date('2026-05-20'),
+    };
+    await invoiceRepo.create(inv);
+    const payment: Payment = {
+      id: 'pay-refund-1',
+      tenantId: 'tenant-r1',
+      invoiceId: inv.id,
+      amountCents: 30000,
+      method: 'credit_card',
+      status: 'refunded',
+      receivedAt: new Date('2026-05-10'),
+      processedBy: 'user-r1',
+      createdAt: new Date('2026-05-10'),
+      updatedAt: new Date('2026-05-20'),
+    };
+    await paymentRepo.create(payment);
+
+    const res = await request(app).get(
+      '/api/reports/tax-export?from=2026-05-01&to=2026-06-01',
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain(
+      '2026-05-10,income,invoice,[REFUNDED] INV-REFUND-1,job-refund-1,300.00',
+    );
+  });
+
   it('buckets income by payment.receivedAt (cash basis), not invoice.issuedAt', async () => {
     const { app, invoiceRepo, paymentRepo } = buildApp();
     // Invoice was ISSUED in December 2025 …

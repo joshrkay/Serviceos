@@ -28,11 +28,15 @@ const HEADER = 'Date,Type,Category,Description,Job ID,Amount';
  * (vendor, description, invoice number) and have it execute when the
  * accountant opens the CSV. OWASP "CSV Injection" / CWE-1236.
  *
- * Mitigation: any value starting with a dangerous prefix is force-quoted
- * and inner-prefixed with `'` so the spreadsheet treats it as a string.
+ * Mitigation: any value whose FIRST NON-WHITESPACE character is one of
+ * those prefixes is force-quoted and inner-prefixed with `'` so the
+ * spreadsheet treats it as a string. We strip leading whitespace before
+ * the check because Excel/Numbers trim leading whitespace when deciding
+ * whether to evaluate a cell as a formula — `" =CMD"` is still dangerous.
  */
 function csvField(value: string): string {
-  const dangerous = /^[=+\-@\t\r]/.test(value);
+  const trimmed = value.replace(/^\s+/, '');
+  const dangerous = /^[=+\-@\t\r]/.test(trimmed);
   if (dangerous) {
     return `"'${value.replace(/"/g, '""')}"`;
   }
