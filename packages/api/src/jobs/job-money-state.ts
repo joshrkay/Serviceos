@@ -70,6 +70,11 @@ export interface RefreshJobMoneyStateDeps {
    * (Tasks 5–7) do and should supply one via `deps.logger`.
    */
   logger?: Logger;
+  /**
+   * Optional injectable clock for tests / time-aware callers (e.g.
+   * the overdue-invoice sweep). Defaults to `() => new Date()`.
+   */
+  now?: () => Date;
 }
 
 export interface RefreshJobMoneyStateResult {
@@ -104,7 +109,8 @@ export async function refreshJobMoneyState(
     deps.estimateRepo.findByJob(tenantId, jobId),
     deps.invoiceRepo.findByJob(tenantId, jobId),
   ]);
-  const current = computeJobMoneyState(estimates, invoices, new Date());
+  const now = deps.now ? deps.now() : new Date();
+  const current = computeJobMoneyState(estimates, invoices, now);
 
   if (current === previous) {
     return { job, changed: false, previous, current };
