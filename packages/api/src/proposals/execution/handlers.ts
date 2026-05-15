@@ -13,8 +13,11 @@ import {
   RecordPaymentExecutionHandler,
   InvoiceDeliveryProvider,
 } from './voice-extended-handlers';
+import { LogExpenseExecutionHandler } from './log-expense-handler';
 import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
+import { ExpenseRepository } from '../../expenses/expense';
+import { AuditRepository } from '../../audit/audit';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
@@ -201,6 +204,8 @@ export function createExecutionHandlerRegistry(deps?: {
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
+  expenseRepo?: ExpenseRepository;
+  auditRepo?: AuditRepository;
 }): Map<ProposalType, ExecutionHandler> {
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
@@ -219,6 +224,7 @@ export function createExecutionHandlerRegistry(deps?: {
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo),
+    new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

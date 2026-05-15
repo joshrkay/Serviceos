@@ -161,6 +161,8 @@ import { PgAppointmentRepository } from './appointments/pg-appointment';
 import { PgEstimateRepository } from './estimates/pg-estimate';
 import { PgInvoiceRepository } from './invoices/pg-invoice';
 import { PgPaymentRepository } from './invoices/pg-payment';
+import { InMemoryExpenseRepository } from './expenses/expense';
+import { PgExpenseRepository } from './expenses/pg-expense';
 import { PgNoteRepository } from './notes/pg-note';
 import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
@@ -685,6 +687,7 @@ export function createApp(): express.Express {
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
@@ -1005,6 +1008,8 @@ export function createApp(): express.Express {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: schedulingConfirmationNotifier,
+    expenseRepo,
+    auditRepo,
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
