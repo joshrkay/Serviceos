@@ -1158,6 +1158,7 @@ export function createApp(): express.Express {
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
+    appointmentRepo,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
