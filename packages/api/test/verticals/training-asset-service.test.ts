@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   InMemoryPrivacyAuditRepository,
   InMemoryTrainingAssetRepository,
@@ -355,6 +356,7 @@ describe('TrainingAssetService', () => {
     const service = new TrainingAssetService({
       assetRepo,
       privacyAuditRepo,
+      auditRepo: new InMemoryAuditRepository(),
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-1',
       now: () => new Date('2026-05-15T00:00:00Z'),
@@ -395,6 +397,7 @@ describe('TrainingAssetService', () => {
     const service = new TrainingAssetService({
       assetRepo: new InMemoryTrainingAssetRepository(),
       privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-2',
       now: () => new Date('2026-05-15T00:00:00Z'),
@@ -429,6 +432,7 @@ describe('TrainingAssetService', () => {
     const service = new TrainingAssetService({
       assetRepo,
       privacyAuditRepo,
+      auditRepo: new InMemoryAuditRepository(),
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-4',
       now: () => new Date('2026-05-15T00:00:00Z'),
@@ -482,6 +486,7 @@ describe('TrainingAssetService', () => {
     const service = new TrainingAssetService({
       assetRepo: new InMemoryTrainingAssetRepository(),
       privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-5',
       now: () => new Date('2026-05-15T00:00:00Z'),
@@ -522,6 +527,7 @@ describe('TrainingAssetService', () => {
     const service = new TrainingAssetService({
       assetRepo,
       privacyAuditRepo,
+      auditRepo: new InMemoryAuditRepository(),
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-6',
       now: () => new Date('2026-05-15T00:00:00Z'),
@@ -579,9 +585,11 @@ describe('TrainingAssetService', () => {
   });
 
   it('approves then activates a redacted asset', async () => {
+    const auditRepo = new InMemoryAuditRepository();
     const service = new TrainingAssetService({
       assetRepo: new InMemoryTrainingAssetRepository(),
       privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo,
       redaction: new TrainingAssetRedactionService(),
       idGenerator: () => 'asset-3',
       now: () => new Date('2026-05-15T00:00:00Z'),
@@ -614,5 +622,50 @@ describe('TrainingAssetService', () => {
     expect(active.status).toBe('active');
     expect(active.approvedBy).toBe('owner-1');
     expect(active.activatedAt?.toISOString()).toBe('2026-05-15T00:00:00.000Z');
+    expect(auditRepo.getAll().map((event) => ({
+      eventType: event.eventType,
+      entityType: event.entityType,
+      entityId: event.entityId,
+      actorId: event.actorId,
+      actorRole: event.actorRole,
+      metadata: event.metadata,
+    }))).toEqual([
+      {
+        eventType: 'vertical_training_asset.created',
+        entityType: 'vertical_training_asset',
+        entityId: saved.id,
+        actorId: 'user-1',
+        actorRole: 'user',
+        metadata: {
+          status: 'redacted',
+          verticalType: 'electrical',
+          assetKind: 'intake_question',
+        },
+      },
+      {
+        eventType: 'vertical_training_asset.approved',
+        entityType: 'vertical_training_asset',
+        entityId: saved.id,
+        actorId: 'owner-1',
+        actorRole: 'user',
+        metadata: {
+          previousStatus: 'redacted',
+          status: 'approved',
+        },
+      },
+      {
+        eventType: 'vertical_training_asset.activated',
+        entityType: 'vertical_training_asset',
+        entityId: saved.id,
+        actorId: 'owner-1',
+        actorRole: 'user',
+        metadata: {
+          previousStatus: 'approved',
+          status: 'active',
+        },
+      },
+    ]);
+    expect(JSON.stringify(auditRepo.getAll())).not.toContain('Breaker follow-up');
+    expect(JSON.stringify(auditRepo.getAll())).not.toContain('Ask whether one breaker');
   });
 });

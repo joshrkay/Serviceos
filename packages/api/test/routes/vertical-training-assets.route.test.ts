@@ -2,6 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   InMemoryPrivacyAuditRepository,
   InMemoryTrainingAssetRepository,
@@ -26,6 +27,7 @@ function buildApp() {
   const service = new TrainingAssetService({
     assetRepo: new InMemoryTrainingAssetRepository(),
     privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+    auditRepo: new InMemoryAuditRepository(),
     redaction: new TrainingAssetRedactionService(),
     idGenerator: (() => {
       let n = 0;

@@ -755,6 +755,7 @@ export function createApp(): express.Express {
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
+    auditRepo,
     redaction: new TrainingAssetRedactionService(),
   });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();

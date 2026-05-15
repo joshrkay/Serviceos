@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { KnownEntities } from '../ai/training/scrub';
+import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import { NotFoundError, ValidationError } from '../shared/errors';
 import type { TrainingAssetRedactionService } from './training-asset-redaction';
 import {
@@ -41,6 +42,7 @@ function combineRedactionResults(results: RedactionResult[]): {
 export interface TrainingAssetServiceDeps {
   assetRepo: TrainingAssetRepository;
   privacyAuditRepo: PrivacyAuditRepository;
+  auditRepo: AuditRepository;
   redaction: TrainingAssetRedactionService;
   idGenerator?: () => string;
   now?: () => Date;
@@ -204,6 +206,19 @@ export class TrainingAssetService {
       redactions: allRedactions.auditRedactions,
       createdAt: now,
     });
+    await this.deps.auditRepo.create(createAuditEvent({
+      tenantId: request.tenantId,
+      actorId: request.actorId,
+      actorRole: 'user',
+      eventType: 'vertical_training_asset.created',
+      entityType: 'vertical_training_asset',
+      entityId: saved.id,
+      metadata: {
+        status: saved.status,
+        verticalType: saved.verticalType,
+        assetKind: saved.assetKind,
+      },
+    }));
     return saved;
   }
 
@@ -222,12 +237,25 @@ export class TrainingAssetService {
         status: existing.status,
       });
     }
-    return this.deps.assetRepo.save({
+    const approved = await this.deps.assetRepo.save({
       ...existing,
       status: 'approved',
       approvedBy: request.actorId,
       updatedAt: this.now(),
     });
+    await this.deps.auditRepo.create(createAuditEvent({
+      tenantId: request.tenantId,
+      actorId: request.actorId,
+      actorRole: 'user',
+      eventType: 'vertical_training_asset.approved',
+      entityType: 'vertical_training_asset',
+      entityId: approved.id,
+      metadata: {
+        previousStatus: existing.status,
+        status: approved.status,
+      },
+    }));
+    return approved;
   }
 
   async activate(request: LifecycleRequest): Promise<VerticalTrainingAsset> {
@@ -240,12 +268,25 @@ export class TrainingAssetService {
       });
     }
     const now = this.now();
-    return this.deps.assetRepo.save({
+    const active = await this.deps.assetRepo.save({
       ...existing,
       status: 'active',
       activatedAt: now,
       updatedAt: now,
     });
+    await this.deps.auditRepo.create(createAuditEvent({
+      tenantId: request.tenantId,
+      actorId: request.actorId,
+      actorRole: 'user',
+      eventType: 'vertical_training_asset.activated',
+      entityType: 'vertical_training_asset',
+      entityId: active.id,
+      metadata: {
+        previousStatus: existing.status,
+        status: active.status,
+      },
+    }));
+    return active;
   }
 
   async list(tenantId: string): Promise<VerticalTrainingAsset[]> {
