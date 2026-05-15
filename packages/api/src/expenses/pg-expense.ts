@@ -38,7 +38,7 @@ export class PgExpenseRepository extends PgBaseRepository implements ExpenseRepo
   }
 
   async create(expense: Expense): Promise<Expense> {
-    return this.withTenant(expense.tenantId, async (client) => {
+    return this.withTenantTransaction(expense.tenantId, async (client) => {
       const { rows } = await client.query<ExpenseRow>(
         `INSERT INTO expenses
            (id, tenant_id, job_id, description, amount_cents, category, vendor,
