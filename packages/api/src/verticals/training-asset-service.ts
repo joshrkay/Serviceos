@@ -15,8 +15,20 @@ import {
 } from './training-assets';
 
 const QUARANTINED_TITLE = 'Quarantined training asset';
+const METADATA_TITLE_CASE_NAME_RE = /\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+\b/g;
+const METADATA_NAME_PREFIX_WORDS = new Set(['Ask', 'Call', 'Dispatch', 'Schedule']);
 
 type RedactionResult = ReturnType<TrainingAssetRedactionService['redact']>;
+
+function applyMetadataNameFallback(text: string): string {
+  return text.replace(METADATA_TITLE_CASE_NAME_RE, (match) => {
+    const words = match.split(/\s+/);
+    if (words.length > 2 && METADATA_NAME_PREFIX_WORDS.has(words[0])) {
+      return `${words[0]} [NAME]`;
+    }
+    return '[NAME]';
+  });
+}
 
 function combineRedactionResults(results: RedactionResult[]): {
   summary: TrainingAssetRedactionSummary;
@@ -75,11 +87,18 @@ export class TrainingAssetService {
     const now = this.now();
     const metadataRedactions: RedactionResult[] = [];
     let metadataHasResidualPii = false;
+    const redactMetadataText = (value: string): RedactionResult => {
+      const result = this.deps.redaction.redact({
+        text: value,
+        knownEntities: request.knownEntities,
+      });
+      return {
+        ...result,
+        scrubbedText: applyMetadataNameFallback(result.scrubbedText),
+      };
+    };
 
-    const titleRedacted = this.deps.redaction.redact({
-      text: parsed.title,
-      knownEntities: request.knownEntities,
-    });
+    const titleRedacted = redactMetadataText(parsed.title);
     metadataRedactions.push(titleRedacted);
     const title = titleRedacted.status === 'quarantined'
       ? QUARANTINED_TITLE
@@ -89,17 +108,11 @@ export class TrainingAssetService {
     const provenance = { ...parsed.provenance };
     const sourceIdRedacted = parsed.provenance.sourceId === undefined
       ? undefined
-      : this.deps.redaction.redact({
-        text: parsed.provenance.sourceId,
-        knownEntities: request.knownEntities,
-      });
+      : redactMetadataText(parsed.provenance.sourceId);
     if (sourceIdRedacted) {
       metadataRedactions.push(sourceIdRedacted);
     }
-    const sourceVersionRedacted = this.deps.redaction.redact({
-      text: parsed.provenance.sourceVersion,
-      knownEntities: request.knownEntities,
-    });
+    const sourceVersionRedacted = redactMetadataText(parsed.provenance.sourceVersion);
     metadataRedactions.push(sourceVersionRedacted);
     const provenanceHasResidualPii =
       sourceIdRedacted?.status === 'quarantined' ||
@@ -116,10 +129,7 @@ export class TrainingAssetService {
     }
 
     if (parsed.provenance.notes !== undefined) {
-      const notesRedacted = this.deps.redaction.redact({
-        text: parsed.provenance.notes,
-        knownEntities: request.knownEntities,
-      });
+      const notesRedacted = redactMetadataText(parsed.provenance.notes);
       metadataRedactions.push(notesRedacted);
       if (notesRedacted.status === 'quarantined') {
         delete provenance.notes;
@@ -131,10 +141,7 @@ export class TrainingAssetService {
 
     const labels: TrainingAssetLabels = { ...parsed.labels };
     const redactLabelText = (value: string): string | undefined => {
-      const result = this.deps.redaction.redact({
-        text: value,
-        knownEntities: request.knownEntities,
-      });
+      const result = redactMetadataText(value);
       metadataRedactions.push(result);
       if (result.status === 'quarantined') {
         metadataHasResidualPii = true;
@@ -174,10 +181,7 @@ export class TrainingAssetService {
       });
     }
     if (parsed.labels.entities !== undefined) {
-      const entitiesRedacted = this.deps.redaction.redact({
-        text: JSON.stringify(parsed.labels.entities),
-        knownEntities: request.knownEntities,
-      });
+      const entitiesRedacted = redactMetadataText(JSON.stringify(parsed.labels.entities));
       metadataRedactions.push(entitiesRedacted);
       if (entitiesRedacted.status === 'quarantined') {
         delete labels.entities;
@@ -222,31 +226,36 @@ export class TrainingAssetService {
       updatedAt: now,
     };
 
-    await this.deps.privacyAuditRepo.create({
-      id: this.idGenerator(),
-      tenantId: request.tenantId,
-      actorId: request.actorId,
-      entityType: 'vertical_training_asset',
-      entityId: asset.id,
-      operation: 'redact_training_asset',
-      redactionSummary: allRedactions.summary,
-      redactions: allRedactions.auditRedactions,
-      createdAt: now,
-    });
-    await this.deps.auditRepo.create(createAuditEvent({
-      tenantId: request.tenantId,
-      actorId: request.actorId,
-      actorRole: 'user',
-      eventType: 'vertical_training_asset.created',
-      entityType: 'vertical_training_asset',
-      entityId: asset.id,
-      metadata: {
-        status: asset.status,
-        verticalType: asset.verticalType,
-        assetKind: asset.assetKind,
-      },
-    }));
     const saved = await this.deps.assetRepo.save(asset);
+    try {
+      await this.deps.privacyAuditRepo.create({
+        id: this.idGenerator(),
+        tenantId: request.tenantId,
+        actorId: request.actorId,
+        entityType: 'vertical_training_asset',
+        entityId: asset.id,
+        operation: 'redact_training_asset',
+        redactionSummary: allRedactions.summary,
+        redactions: allRedactions.auditRedactions,
+        createdAt: now,
+      });
+      await this.deps.auditRepo.create(createAuditEvent({
+        tenantId: request.tenantId,
+        actorId: request.actorId,
+        actorRole: 'user',
+        eventType: 'vertical_training_asset.created',
+        entityType: 'vertical_training_asset',
+        entityId: asset.id,
+        metadata: {
+          status: asset.status,
+          verticalType: asset.verticalType,
+          assetKind: asset.assetKind,
+        },
+      }));
+    } catch (err) {
+      await this.deps.assetRepo.delete(request.tenantId, asset.id);
+      throw err;
+    }
     return saved;
   }
 
@@ -271,19 +280,24 @@ export class TrainingAssetService {
       approvedBy: request.actorId,
       updatedAt: this.now(),
     };
-    await this.deps.auditRepo.create(createAuditEvent({
-      tenantId: request.tenantId,
-      actorId: request.actorId,
-      actorRole: 'user',
-      eventType: 'vertical_training_asset.approved',
-      entityType: 'vertical_training_asset',
-      entityId: approved.id,
-      metadata: {
-        previousStatus: existing.status,
-        status: approved.status,
-      },
-    }));
     await this.deps.assetRepo.save(approved);
+    try {
+      await this.deps.auditRepo.create(createAuditEvent({
+        tenantId: request.tenantId,
+        actorId: request.actorId,
+        actorRole: 'user',
+        eventType: 'vertical_training_asset.approved',
+        entityType: 'vertical_training_asset',
+        entityId: approved.id,
+        metadata: {
+          previousStatus: existing.status,
+          status: approved.status,
+        },
+      }));
+    } catch (err) {
+      await this.deps.assetRepo.save(existing);
+      throw err;
+    }
     return approved;
   }
 
@@ -303,19 +317,24 @@ export class TrainingAssetService {
       activatedAt: now,
       updatedAt: now,
     };
-    await this.deps.auditRepo.create(createAuditEvent({
-      tenantId: request.tenantId,
-      actorId: request.actorId,
-      actorRole: 'user',
-      eventType: 'vertical_training_asset.activated',
-      entityType: 'vertical_training_asset',
-      entityId: active.id,
-      metadata: {
-        previousStatus: existing.status,
-        status: active.status,
-      },
-    }));
     await this.deps.assetRepo.save(active);
+    try {
+      await this.deps.auditRepo.create(createAuditEvent({
+        tenantId: request.tenantId,
+        actorId: request.actorId,
+        actorRole: 'user',
+        eventType: 'vertical_training_asset.activated',
+        entityType: 'vertical_training_asset',
+        entityId: active.id,
+        metadata: {
+          previousStatus: existing.status,
+          status: active.status,
+        },
+      }));
+    } catch (err) {
+      await this.deps.assetRepo.save(existing);
+      throw err;
+    }
     return active;
   }
 

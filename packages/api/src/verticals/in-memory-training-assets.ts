@@ -18,6 +18,13 @@ export class InMemoryTrainingAssetRepository implements TrainingAssetRepository 
     return asset;
   }
 
+  async delete(tenantId: string, id: string): Promise<void> {
+    const existing = this.rows.get(id);
+    if (existing?.tenantId === tenantId) {
+      this.rows.delete(id);
+    }
+  }
+
   async findById(tenantId: string, id: string): Promise<VerticalTrainingAsset | null> {
     const row = this.rows.get(id);
     if (!row || row.tenantId !== tenantId) return null;

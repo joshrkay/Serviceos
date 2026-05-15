@@ -178,6 +178,7 @@ function normalizePromptTitle(value: string): string {
 
 export interface TrainingAssetRepository {
   save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset>;
+  delete(tenantId: string, id: string): Promise<void>;
   findById(tenantId: string, id: string): Promise<VerticalTrainingAsset | null>;
   listByTenant(tenantId: string): Promise<VerticalTrainingAsset[]>;
   listActiveByTenantAndVertical(

@@ -41,6 +41,7 @@ function buildTrainingAssetRepo(
 ): TrainingAssetRepository {
   return {
     save: async (asset) => asset,
+    delete: async () => {},
     findById: async () => null,
     listByTenant: async () => [],
     listActiveByTenantAndVertical,

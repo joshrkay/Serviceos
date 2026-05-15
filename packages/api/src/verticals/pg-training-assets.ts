@@ -123,6 +123,16 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
     });
   }
 
+  async delete(tenantId: string, id: string): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `DELETE FROM vertical_training_assets
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+    });
+  }
+
   async listByTenant(tenantId: string): Promise<VerticalTrainingAsset[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(

@@ -170,6 +170,14 @@ class FakeTrainingAssetClient {
       return { rows: row && row.tenant_id === values[0] ? [row] : [] };
     }
 
+    if (normalizedSql.startsWith('DELETE FROM vertical_training_assets')) {
+      const row = this.rows.get(String(values[1]));
+      if (row && row.tenant_id === values[0]) {
+        this.rows.delete(row.id);
+      }
+      return { rows: [] };
+    }
+
     if (
       normalizedSql.startsWith('SELECT * FROM vertical_training_assets') &&
       normalizedSql.includes("status = 'active'")
@@ -304,6 +312,17 @@ describe('TrainingAssetRepository', () => {
     expect(all[0].approvedBy).toBe('user-2');
   });
 
+  it('deletes in-memory assets with tenant guard', async () => {
+    const repo = new InMemoryTrainingAssetRepository();
+    await repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-1' }));
+
+    await repo.delete('tenant-2', 'asset-1');
+    await expect(repo.findById('tenant-1', 'asset-1')).resolves.toMatchObject({ id: 'asset-1' });
+
+    await repo.delete('tenant-1', 'asset-1');
+    await expect(repo.findById('tenant-1', 'asset-1')).resolves.toBeNull();
+  });
+
   it('rejects duplicate in-memory asset ids from another tenant', async () => {
     const repo = new InMemoryTrainingAssetRepository();
     await repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-1' }));
@@ -407,6 +426,21 @@ describe('TrainingAssetRepository', () => {
     });
     await expect(repo.findById('tenant-2', 'asset-1')).resolves.toBeNull();
   });
+
+  it('deletes Pg assets with tenant guard', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const repo = new PgTrainingAssetRepository(pool as unknown as Pool);
+    await repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-1' }));
+
+    await repo.delete('tenant-2', 'asset-1');
+    await expect(repo.findById('tenant-1', 'asset-1')).resolves.toMatchObject({ id: 'asset-1' });
+
+    await repo.delete('tenant-1', 'asset-1');
+    await expect(repo.findById('tenant-1', 'asset-1')).resolves.toBeNull();
+    expect(pool.client.queries.some((query) =>
+      query.sql === 'DELETE FROM vertical_training_assets WHERE tenant_id = $1 AND id = $2',
+    )).toBe(true);
+  });
 });
 
 describe('PrivacyAuditRepository', () => {
@@ -489,7 +523,7 @@ describe('TrainingAssetService', () => {
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
   });
 
-  it('does not save created assets when privacy audit creation fails', async () => {
+  it('rolls back created assets when privacy audit creation fails', async () => {
     const assetRepo = new RecordingTrainingAssetRepository();
     const service = new TrainingAssetService({
       assetRepo,
@@ -513,11 +547,11 @@ describe('TrainingAssetService', () => {
       },
     })).rejects.toThrow('privacy audit unavailable');
 
-    expect(assetRepo.savedAssets).toHaveLength(0);
+    expect(assetRepo.savedAssets).toHaveLength(1);
     await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
   });
 
-  it('does not save created assets when standard audit creation fails', async () => {
+  it('rolls back created assets when standard audit creation fails', async () => {
     const assetRepo = new RecordingTrainingAssetRepository();
     const service = new TrainingAssetService({
       assetRepo,
@@ -541,7 +575,7 @@ describe('TrainingAssetService', () => {
       },
     })).rejects.toThrow('audit unavailable');
 
-    expect(assetRepo.savedAssets).toHaveLength(0);
+    expect(assetRepo.savedAssets).toHaveLength(1);
     await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
   });
 
@@ -683,6 +717,53 @@ describe('TrainingAssetService', () => {
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123 Main St');
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123456789');
+  });
+
+  it('redacts likely title-case names from metadata without known entities', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-name-fallback-1',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'eval_scenario',
+        title: 'Sarah Jones no heat call',
+        rawText: 'Caller has no heat.',
+        labels: {
+          expectedNextQuestion: 'Ask Sarah Jones whether heat is out.',
+          expectedNextAction: 'Schedule Sarah Jones for diagnostic.',
+          expectedRetrievalTerms: ['Sarah Jones furnace history'],
+          entities: { callerName: 'Sarah Jones' },
+        },
+        provenance: {
+          source: 'tenant_admin',
+          sourceId: 'Sarah Jones upload',
+          sourceVersion: 'Sarah Jones v1',
+          notes: 'Sarah Jones provided this example',
+        },
+      },
+    });
+
+    expect(saved.title).toBe('[NAME] no heat call');
+    expect(saved.provenance.sourceId).toBe('[NAME] upload');
+    expect(saved.provenance.sourceVersion).toBe('[NAME] v1');
+    expect(saved.provenance.notes).toBe('[NAME] provided this example');
+    expect(saved.labels.expectedNextQuestion).toBe('Ask [NAME] whether heat is out.');
+    expect(saved.labels.expectedNextAction).toBe('Schedule [NAME] for diagnostic.');
+    expect(saved.labels.expectedRetrievalTerms).toEqual(['[NAME] furnace history']);
+    expect(saved.labels.entities).toEqual({ callerName: '[NAME]' });
+    expect(JSON.stringify(saved)).not.toContain('Sarah Jones');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('Sarah Jones');
   });
 
   it('quarantines residual metadata and falls back to safe metadata fields', async () => {
@@ -872,7 +953,7 @@ describe('TrainingAssetService', () => {
     expect(JSON.stringify(auditRepo.getAll())).not.toContain('Ask whether one breaker');
   });
 
-  it('does not save approval transitions when standard audit creation fails', async () => {
+  it('restores approval transitions when standard audit creation fails', async () => {
     const assetRepo = new RecordingTrainingAssetRepository();
     await assetRepo.save(makeAsset({
       id: 'asset-approve-audit-fail',
@@ -895,13 +976,13 @@ describe('TrainingAssetService', () => {
       assetId: 'asset-approve-audit-fail',
     })).rejects.toThrow('audit unavailable');
 
-    expect(assetRepo.savedAssets).toHaveLength(0);
+    expect(assetRepo.savedAssets.map((asset) => asset.status)).toEqual(['approved', 'redacted']);
     await expect(assetRepo.findById('tenant-1', 'asset-approve-audit-fail')).resolves.toMatchObject({
       status: 'redacted',
     });
   });
 
-  it('does not save activation transitions when standard audit creation fails', async () => {
+  it('restores activation transitions when standard audit creation fails', async () => {
     const assetRepo = new RecordingTrainingAssetRepository();
     await assetRepo.save(makeAsset({
       id: 'asset-activate-audit-fail',
@@ -925,7 +1006,7 @@ describe('TrainingAssetService', () => {
       assetId: 'asset-activate-audit-fail',
     })).rejects.toThrow('audit unavailable');
 
-    expect(assetRepo.savedAssets).toHaveLength(0);
+    expect(assetRepo.savedAssets.map((asset) => asset.status)).toEqual(['active', 'approved']);
     await expect(assetRepo.findById('tenant-1', 'asset-activate-audit-fail')).resolves.toMatchObject({
       status: 'approved',
     });

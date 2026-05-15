@@ -249,6 +249,22 @@ describe('vertical training assets routes', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 
+  it('returns 400 for malformed lifecycle asset ids', async () => {
+    const app = buildApp();
+
+    const approve = await request(app)
+      .post('/api/vertical-training-assets/not-a-uuid/approve')
+      .send({})
+      .expect(400);
+    const activate = await request(app)
+      .post('/api/vertical-training-assets/not-a-uuid/activate')
+      .send({})
+      .expect(400);
+
+    expect(approve.body.error).toBe('VALIDATION_ERROR');
+    expect(activate.body.error).toBe('VALIDATION_ERROR');
+  });
+
   it('returns 404 when approving a missing asset', async () => {
     const app = buildApp();
 
