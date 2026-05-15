@@ -8,6 +8,8 @@ import {
   PgPrivacyAuditRepository,
   PgTrainingAssetRepository,
 } from '../../src/verticals/pg-training-assets';
+import { TrainingAssetRedactionService } from '../../src/verticals/training-asset-redaction';
+import { TrainingAssetService } from '../../src/verticals/training-asset-service';
 import type { PrivacyAuditEntry, VerticalTrainingAsset } from '../../src/verticals/training-assets';
 
 vi.mock('../../src/db/schema', () => ({
@@ -334,5 +336,107 @@ describe('PrivacyAuditRepository', () => {
       entry.createdAt,
     ]);
     expect(pool.client.releaseCount).toBe(pool.connectCount);
+  });
+});
+
+describe('TrainingAssetService', () => {
+  it('redacts before save and writes privacy audit without raw matched PII', async () => {
+    const assetRepo = new InMemoryTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-1',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'labeled_call_example',
+        title: 'No heat emergency',
+        rawText: 'Sarah Jones at 415-555-0123 has no heat.',
+        labels: { intent: 'emergency_dispatch', shouldEscalate: true },
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+      knownEntities: { names: ['Sarah Jones'] },
+    });
+
+    expect(saved.status).toBe('redacted');
+    expect(saved.scrubbedText).toContain('[CALLER_NAME]');
+    expect(saved.scrubbedText).toContain('[PHONE]');
+    expect(privacyAuditRepo.rows).toHaveLength(1);
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
+  });
+
+  it('quarantines assets with residual PII and prevents activation', async () => {
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-2',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'plumbing',
+        assetKind: 'rag_seed',
+        title: 'Account leak example',
+        rawText: 'Account 123456789 has a leak.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    });
+
+    await expect(service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: saved.id,
+    })).rejects.toThrow('Cannot approve quarantined training asset');
+  });
+
+  it('approves then activates a redacted asset', async () => {
+    const service = new TrainingAssetService({
+      assetRepo: new InMemoryTrainingAssetRepository(),
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-3',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'electrical',
+        assetKind: 'intake_question',
+        title: 'Breaker follow-up',
+        rawText: 'Ask whether one breaker is tripping or the whole panel is out.',
+        labels: { expectedNextQuestion: 'Is one breaker tripping, or is the whole panel out?' },
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    });
+
+    const approved = await service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: saved.id,
+    });
+    const active = await service.activate({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: approved.id,
+    });
+
+    expect(active.status).toBe('active');
+    expect(active.approvedBy).toBe('owner-1');
+    expect(active.activatedAt?.toISOString()).toBe('2026-05-15T00:00:00.000Z');
   });
 });
