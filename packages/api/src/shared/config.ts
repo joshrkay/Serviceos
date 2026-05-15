@@ -49,7 +49,17 @@ let cachedConfig: AppConfig | null = null;
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   if (cachedConfig) return cachedConfig;
 
-  const result = configSchema.safeParse(env);
+  // GitHub Actions injects unset `secrets.*` references as empty strings
+  // rather than leaving them unset. For env-vars declared `.min(1).optional()`
+  // an empty string fails validation, but the intent is "absent". Coerce
+  // empty strings to undefined so secret-not-configured behaves the same
+  // as variable-not-set.
+  const normalized: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(env)) {
+    normalized[k] = v === '' ? undefined : v;
+  }
+
+  const result = configSchema.safeParse(normalized);
   if (!result.success) {
     const issues = result.error.issues.map(
       (i) => `  ${i.path.join('.')}: ${i.message}`

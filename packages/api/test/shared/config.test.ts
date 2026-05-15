@@ -63,6 +63,18 @@ describe('P0-006 — Secrets/config framework', () => {
     );
   });
 
+  it('coerces empty-string env values to undefined (GitHub Actions unset-secret behaviour)', () => {
+    const config = loadConfig({
+      NODE_ENV: 'dev',
+      DATABASE_URL: '',
+      CLERK_SECRET_KEY: '',
+      AI_PROVIDER_API_KEY: '',
+    });
+    expect(config.DATABASE_URL).toBeUndefined();
+    expect(config.CLERK_SECRET_KEY).toBeUndefined();
+    expect(config.AI_PROVIDER_API_KEY).toBeUndefined();
+  });
+
   it('happy path — config is cached after first load', () => {
     const c1 = loadConfig({ NODE_ENV: 'dev' });
     const c2 = loadConfig({ NODE_ENV: 'prod' });
