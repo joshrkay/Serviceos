@@ -122,6 +122,7 @@ const VERTICAL_LABELS: Record<VerticalType, string> = {
 };
 
 export const MAX_PROMPT_ASSETS = 5;
+const MAX_TITLE_CHARS = 160;
 const MAX_GUIDANCE_CHARS = 1000;
 const MAX_LABEL_CHARS = 300;
 const TRUNCATION_SUFFIX = '...';
@@ -140,7 +141,8 @@ export function buildTrainingAssetPromptSection(assets: readonly VerticalTrainin
   ];
   for (const asset of active) {
     const vertical = VERTICAL_LABELS[asset.verticalType];
-    lines.push(`- ${vertical} training context (${asset.assetKind}): ${asset.title}`);
+    lines.push(`- ${vertical} training context (${asset.assetKind})`);
+    lines.push(`  Reference title: ${formatReferenceText(normalizePromptTitle(asset.title), MAX_TITLE_CHARS)}`);
     lines.push(`  Reference text: ${formatReferenceText(asset.scrubbedText ?? '', MAX_GUIDANCE_CHARS)}`);
     if (asset.labels.expectedNextQuestion) {
       lines.push(
@@ -168,6 +170,10 @@ function truncatePromptText(value: string, maxChars: number): string {
 
 function formatReferenceText(value: string, maxChars: number): string {
   return JSON.stringify(truncatePromptText(value, maxChars));
+}
+
+function normalizePromptTitle(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }
 
 export interface TrainingAssetRepository {

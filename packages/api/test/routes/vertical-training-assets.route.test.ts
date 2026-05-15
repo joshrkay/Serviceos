@@ -99,6 +99,36 @@ describe('vertical training assets routes', () => {
     expect(body).not.toContain('415-555-0123');
   });
 
+  it('sanitizes provenance source identifiers before returning the asset', async () => {
+    const app = buildApp();
+
+    const res = await request(app)
+      .post('/api/vertical-training-assets')
+      .send({
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Provenance route privacy case',
+        rawText: 'Caller has no heat.',
+        labels: {},
+        provenance: {
+          source: 'tenant_admin',
+          sourceId: 'Sarah Jones 415-555-0123 at 123 Main St',
+          sourceVersion: 'account 123456789',
+        },
+        knownEntities: { names: ['Sarah Jones'] },
+      })
+      .expect(201);
+
+    const body = JSON.stringify(res.body);
+    expect(res.body.status).toBe('quarantined');
+    expect(res.body.provenance.sourceId).toBeUndefined();
+    expect(res.body.provenance.sourceVersion).toBe('redacted');
+    expect(body).not.toContain('Sarah Jones');
+    expect(body).not.toContain('415-555-0123');
+    expect(body).not.toContain('123 Main St');
+    expect(body).not.toContain('123456789');
+  });
+
   it('sanitizes free-form label text before returning the asset', async () => {
     const app = buildApp();
 

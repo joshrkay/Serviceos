@@ -550,6 +550,57 @@ describe('TrainingAssetService', () => {
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
   });
 
+  it('sanitizes provenance identifiers before save and audit', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-provenance-1',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Provenance privacy case',
+        rawText: 'Caller has no heat.',
+        labels: {},
+        provenance: {
+          source: 'tenant_admin',
+          sourceId: 'Sarah Jones 415-555-0123 at 123 Main St',
+          sourceVersion: 'account 123456789',
+        },
+      },
+      knownEntities: { names: ['Sarah Jones'] },
+    });
+
+    expect(saved.status).toBe('quarantined');
+    expect(saved.provenance.sourceId).toBeUndefined();
+    expect(saved.provenance.sourceVersion).toBe('redacted');
+    expect(assetRepo.savedAssets).toHaveLength(1);
+    expect(assetRepo.savedAssets[0].provenance.sourceId).toBeUndefined();
+    expect(assetRepo.savedAssets[0].provenance.sourceVersion).toBe('redacted');
+    expect(JSON.stringify(saved)).not.toContain('Sarah Jones');
+    expect(JSON.stringify(saved)).not.toContain('415-555-0123');
+    expect(JSON.stringify(saved)).not.toContain('123 Main St');
+    expect(JSON.stringify(saved)).not.toContain('123456789');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('Sarah Jones');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('415-555-0123');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('123 Main St');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('123456789');
+    expect(privacyAuditRepo.rows[0].redactions.length).toBeGreaterThan(0);
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123 Main St');
+    expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123456789');
+  });
+
   it('quarantines residual metadata and falls back to safe metadata fields', async () => {
     const service = new TrainingAssetService({
       assetRepo: new InMemoryTrainingAssetRepository(),

@@ -87,6 +87,34 @@ export class TrainingAssetService {
     metadataHasResidualPii ||= titleRedacted.status === 'quarantined';
 
     const provenance = { ...parsed.provenance };
+    const sourceIdRedacted = parsed.provenance.sourceId === undefined
+      ? undefined
+      : this.deps.redaction.redact({
+        text: parsed.provenance.sourceId,
+        knownEntities: request.knownEntities,
+      });
+    if (sourceIdRedacted) {
+      metadataRedactions.push(sourceIdRedacted);
+    }
+    const sourceVersionRedacted = this.deps.redaction.redact({
+      text: parsed.provenance.sourceVersion,
+      knownEntities: request.knownEntities,
+    });
+    metadataRedactions.push(sourceVersionRedacted);
+    const provenanceHasResidualPii =
+      sourceIdRedacted?.status === 'quarantined' ||
+      sourceVersionRedacted.status === 'quarantined';
+    if (provenanceHasResidualPii) {
+      delete provenance.sourceId;
+      provenance.sourceVersion = 'redacted';
+      metadataHasResidualPii = true;
+    } else {
+      if (sourceIdRedacted) {
+        provenance.sourceId = sourceIdRedacted.scrubbedText;
+      }
+      provenance.sourceVersion = sourceVersionRedacted.scrubbedText;
+    }
+
     if (parsed.provenance.notes !== undefined) {
       const notesRedacted = this.deps.redaction.redact({
         text: parsed.provenance.notes,
