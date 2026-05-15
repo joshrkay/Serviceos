@@ -138,17 +138,29 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
   async listActiveByTenantAndVertical(
     tenantId: string,
     verticalType: VerticalType,
+    limit?: number,
   ): Promise<VerticalTrainingAsset[]> {
     return this.withTenant(tenantId, async (client) => {
+      const normalizedLimit = normalizeListLimit(limit);
+      const values: unknown[] = [tenantId, verticalType];
+      if (normalizedLimit !== undefined) {
+        values.push(normalizedLimit);
+      }
       const result = await client.query(
         `SELECT * FROM vertical_training_assets
          WHERE tenant_id = $1 AND vertical_type = $2 AND status = 'active'
-         ORDER BY updated_at DESC`,
-        [tenantId, verticalType],
+         ORDER BY updated_at DESC${normalizedLimit === undefined ? '' : '\n         LIMIT $3'}`,
+        values,
       );
       return result.rows.map(rowToAsset);
     });
   }
+}
+
+function normalizeListLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined) return undefined;
+  if (!Number.isFinite(limit)) return 1;
+  return Math.min(50, Math.max(1, Math.floor(limit)));
 }
 
 export class PgPrivacyAuditRepository extends PgBaseRepository implements PrivacyAuditRepository {

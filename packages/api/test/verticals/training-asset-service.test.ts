@@ -166,13 +166,17 @@ class FakeTrainingAssetClient {
       normalizedSql.startsWith('SELECT * FROM vertical_training_assets') &&
       normalizedSql.includes("status = 'active'")
     ) {
+      const rows = this.sortedRows().filter(
+        (row) =>
+          row.tenant_id === values[0] &&
+          row.vertical_type === values[1] &&
+          row.status === 'active',
+      );
+      const limitedRows = normalizedSql.includes('LIMIT $3')
+        ? rows.slice(0, Number(values[2]))
+        : rows;
       return {
-        rows: this.sortedRows().filter(
-          (row) =>
-            row.tenant_id === values[0] &&
-            row.vertical_type === values[1] &&
-            row.status === 'active',
-        ),
+        rows: limitedRows,
       };
     }
 
@@ -226,6 +230,31 @@ describe('TrainingAssetRepository', () => {
     const active = await repo.listActiveByTenantAndVertical('tenant-1', 'hvac');
 
     expect(active.map((asset) => asset.id)).toEqual(['asset-1']);
+  });
+
+  it('lists active in-memory assets by updatedAt descending with an optional limit', async () => {
+    const repo = new InMemoryTrainingAssetRepository();
+    await repo.save(makeAsset({
+      id: 'asset-oldest',
+      updatedAt: new Date('2026-05-15T00:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-newest',
+      updatedAt: new Date('2026-05-15T03:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-middle',
+      updatedAt: new Date('2026-05-15T02:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-draft-newer',
+      status: 'draft',
+      updatedAt: new Date('2026-05-15T04:00:00Z'),
+    }));
+
+    const active = await repo.listActiveByTenantAndVertical('tenant-1', 'hvac', 2);
+
+    expect(active.map((asset) => asset.id)).toEqual(['asset-newest', 'asset-middle']);
   });
 
   it('updates lifecycle status without duplicating assets', async () => {
@@ -294,6 +323,33 @@ describe('TrainingAssetRepository', () => {
       pool.client.queries.filter((query) => query.sql.startsWith('SELECT')).map((query) => query.values),
     ).toEqual([['tenant-1', 'hvac'], ['tenant-1', 'asset-1'], ['tenant-2', 'asset-1'], ['tenant-1']]);
     expect(pool.client.releaseCount).toBe(pool.connectCount);
+  });
+
+  it('lists active Pg assets by updated_at descending with a parameterized limit', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const repo = new PgTrainingAssetRepository(pool as unknown as Pool);
+
+    await repo.save(makeAsset({
+      id: 'asset-oldest',
+      updatedAt: new Date('2026-05-15T00:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-newest',
+      updatedAt: new Date('2026-05-15T03:00:00Z'),
+    }));
+    await repo.save(makeAsset({
+      id: 'asset-middle',
+      updatedAt: new Date('2026-05-15T02:00:00Z'),
+    }));
+
+    const active = await repo.listActiveByTenantAndVertical('tenant-1', 'hvac', 2);
+
+    expect(active.map((asset) => asset.id)).toEqual(['asset-newest', 'asset-middle']);
+    const select = pool.client.queries.find((query) =>
+      query.sql.includes("status = 'active'"),
+    );
+    expect(select?.sql).toContain('LIMIT $3');
+    expect(select?.values).toEqual(['tenant-1', 'hvac', 2]);
   });
 
   it('rejects duplicate Pg asset ids from another tenant', async () => {

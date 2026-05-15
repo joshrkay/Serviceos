@@ -34,7 +34,7 @@ import {
   formatObjectionScriptsForPrompt,
 } from './context-assembly';
 import type { TrainingAssetRepository } from './training-assets';
-import { buildTrainingAssetPromptSection } from './training-assets';
+import { MAX_PROMPT_ASSETS, buildTrainingAssetPromptSection } from './training-assets';
 import type {
   IntakeQuestionList,
   ObjectionScriptList,
@@ -150,6 +150,7 @@ export function buildVerticalPromptResolver(
             const trainingAssets = await deps.trainingAssetRepo.listActiveByTenantAndVertical(
               tenantId,
               richPack.type,
+              MAX_PROMPT_ASSETS,
             );
             trainingAssetPrompt = buildTrainingAssetPromptSection(trainingAssets);
           } catch {

@@ -121,7 +121,7 @@ const VERTICAL_LABELS: Record<VerticalType, string> = {
   electrical: 'Electrical',
 };
 
-const MAX_PROMPT_ASSETS = 5;
+export const MAX_PROMPT_ASSETS = 5;
 const MAX_GUIDANCE_CHARS = 1000;
 const MAX_LABEL_CHARS = 300;
 const TRUNCATION_SUFFIX = '...';
@@ -168,6 +168,7 @@ export interface TrainingAssetRepository {
   listActiveByTenantAndVertical(
     tenantId: string,
     verticalType: VerticalType,
+    limit?: number,
   ): Promise<VerticalTrainingAsset[]>;
 }
 

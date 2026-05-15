@@ -31,14 +31,23 @@ export class InMemoryTrainingAssetRepository implements TrainingAssetRepository 
   async listActiveByTenantAndVertical(
     tenantId: string,
     verticalType: VerticalType,
+    limit?: number,
   ): Promise<VerticalTrainingAsset[]> {
-    return [...this.rows.values()].filter(
-      (row) =>
-        row.tenantId === tenantId &&
-        row.verticalType === verticalType &&
-        row.status === 'active',
-    );
+    const rows = [...this.rows.values()]
+      .filter(
+        (row) =>
+          row.tenantId === tenantId &&
+          row.verticalType === verticalType &&
+          row.status === 'active',
+      )
+      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime());
+    return limit === undefined ? rows : rows.slice(0, normalizeListLimit(limit));
   }
+}
+
+function normalizeListLimit(limit: number): number {
+  if (!Number.isFinite(limit)) return 1;
+  return Math.min(50, Math.max(1, Math.floor(limit)));
 }
 
 export class InMemoryPrivacyAuditRepository implements PrivacyAuditRepository {

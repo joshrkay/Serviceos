@@ -109,7 +109,11 @@ describe('buildVerticalPromptResolver', () => {
 
   it('appends active training assets after canonical vertical context', async () => {
     await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
-    const trainingAssetRepo = buildTrainingAssetRepo(async () => [buildTrainingAsset()]);
+    let capturedLimit: number | undefined;
+    const trainingAssetRepo = buildTrainingAssetRepo(async (_tenantId, _verticalType, limit) => {
+      capturedLimit = limit;
+      return [buildTrainingAsset()];
+    });
     const resolve = buildVerticalPromptResolver({
       packActivationRepo,
       canonicalPackRegistry,
@@ -125,6 +129,7 @@ describe('buildVerticalPromptResolver', () => {
     expect(section!.indexOf('Service vertical: HVAC Professional')).toBeLessThan(
       section!.indexOf('Tenant-approved vertical voice training assets:'),
     );
+    expect(capturedLimit).toBe(5);
   });
 
   it('returns canonical vertical context when training asset lookup fails', async () => {
