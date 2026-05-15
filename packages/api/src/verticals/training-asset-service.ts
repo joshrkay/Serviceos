@@ -222,13 +222,12 @@ export class TrainingAssetService {
       updatedAt: now,
     };
 
-    const saved = await this.deps.assetRepo.save(asset);
     await this.deps.privacyAuditRepo.create({
       id: this.idGenerator(),
       tenantId: request.tenantId,
       actorId: request.actorId,
       entityType: 'vertical_training_asset',
-      entityId: saved.id,
+      entityId: asset.id,
       operation: 'redact_training_asset',
       redactionSummary: allRedactions.summary,
       redactions: allRedactions.auditRedactions,
@@ -240,13 +239,14 @@ export class TrainingAssetService {
       actorRole: 'user',
       eventType: 'vertical_training_asset.created',
       entityType: 'vertical_training_asset',
-      entityId: saved.id,
+      entityId: asset.id,
       metadata: {
-        status: saved.status,
-        verticalType: saved.verticalType,
-        assetKind: saved.assetKind,
+        status: asset.status,
+        verticalType: asset.verticalType,
+        assetKind: asset.assetKind,
       },
     }));
+    const saved = await this.deps.assetRepo.save(asset);
     return saved;
   }
 
@@ -265,12 +265,12 @@ export class TrainingAssetService {
         status: existing.status,
       });
     }
-    const approved = await this.deps.assetRepo.save({
+    const approved: VerticalTrainingAsset = {
       ...existing,
       status: 'approved',
       approvedBy: request.actorId,
       updatedAt: this.now(),
-    });
+    };
     await this.deps.auditRepo.create(createAuditEvent({
       tenantId: request.tenantId,
       actorId: request.actorId,
@@ -283,6 +283,7 @@ export class TrainingAssetService {
         status: approved.status,
       },
     }));
+    await this.deps.assetRepo.save(approved);
     return approved;
   }
 
@@ -296,12 +297,12 @@ export class TrainingAssetService {
       });
     }
     const now = this.now();
-    const active = await this.deps.assetRepo.save({
+    const active: VerticalTrainingAsset = {
       ...existing,
       status: 'active',
       activatedAt: now,
       updatedAt: now,
-    });
+    };
     await this.deps.auditRepo.create(createAuditEvent({
       tenantId: request.tenantId,
       actorId: request.actorId,
@@ -314,6 +315,7 @@ export class TrainingAssetService {
         status: active.status,
       },
     }));
+    await this.deps.assetRepo.save(active);
     return active;
   }
 

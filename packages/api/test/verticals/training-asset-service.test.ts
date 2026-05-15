@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
-import { InMemoryAuditRepository } from '../../src/audit/audit';
+import {
+  InMemoryAuditRepository,
+  type AuditEvent,
+  type AuditRepository,
+} from '../../src/audit/audit';
 import {
   InMemoryPrivacyAuditRepository,
   InMemoryTrainingAssetRepository,
@@ -11,7 +15,11 @@ import {
 } from '../../src/verticals/pg-training-assets';
 import { TrainingAssetRedactionService } from '../../src/verticals/training-asset-redaction';
 import { TrainingAssetService } from '../../src/verticals/training-asset-service';
-import type { PrivacyAuditEntry, VerticalTrainingAsset } from '../../src/verticals/training-assets';
+import type {
+  PrivacyAuditEntry,
+  PrivacyAuditRepository,
+  VerticalTrainingAsset,
+} from '../../src/verticals/training-assets';
 
 vi.mock('../../src/db/schema', () => ({
   setTenantContext: (tenantId: string) => `SET app.current_tenant_id = '${tenantId}'`,
@@ -219,6 +227,26 @@ class RecordingTrainingAssetRepository extends InMemoryTrainingAssetRepository {
   async save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset> {
     this.savedAssets.push({ ...asset });
     return super.save(asset);
+  }
+}
+
+class FailingPrivacyAuditRepository implements PrivacyAuditRepository {
+  async create(_entry: PrivacyAuditEntry): Promise<PrivacyAuditEntry> {
+    throw new Error('privacy audit unavailable');
+  }
+}
+
+class FailingAuditRepository implements AuditRepository {
+  async create(_event: AuditEvent): Promise<AuditEvent> {
+    throw new Error('audit unavailable');
+  }
+
+  async findByEntity(): Promise<AuditEvent[]> {
+    return [];
+  }
+
+  async findByCorrelation(): Promise<AuditEvent[]> {
+    return [];
   }
 }
 
@@ -459,6 +487,62 @@ describe('TrainingAssetService', () => {
     expect(privacyAuditRepo.rows).toHaveLength(1);
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
+  });
+
+  it('does not save created assets when privacy audit creation fails', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new FailingPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-audit-fail-1',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    await expect(service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Audit failure case',
+        rawText: 'Caller has no heat.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    })).rejects.toThrow('privacy audit unavailable');
+
+    expect(assetRepo.savedAssets).toHaveLength(0);
+    await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
+  });
+
+  it('does not save created assets when standard audit creation fails', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new FailingAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-audit-fail-2',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    await expect(service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Audit failure case',
+        rawText: 'Caller has no heat.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    })).rejects.toThrow('audit unavailable');
+
+    expect(assetRepo.savedAssets).toHaveLength(0);
+    await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
   });
 
   it('quarantines assets with residual PII and prevents activation', async () => {
@@ -786,5 +870,64 @@ describe('TrainingAssetService', () => {
     ]);
     expect(JSON.stringify(auditRepo.getAll())).not.toContain('Breaker follow-up');
     expect(JSON.stringify(auditRepo.getAll())).not.toContain('Ask whether one breaker');
+  });
+
+  it('does not save approval transitions when standard audit creation fails', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    await assetRepo.save(makeAsset({
+      id: 'asset-approve-audit-fail',
+      status: 'redacted',
+      rawText: undefined,
+      scrubbedText: 'Safe redacted training text.',
+    }));
+    assetRepo.savedAssets.length = 0;
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new FailingAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    await expect(service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-approve-audit-fail',
+    })).rejects.toThrow('audit unavailable');
+
+    expect(assetRepo.savedAssets).toHaveLength(0);
+    await expect(assetRepo.findById('tenant-1', 'asset-approve-audit-fail')).resolves.toMatchObject({
+      status: 'redacted',
+    });
+  });
+
+  it('does not save activation transitions when standard audit creation fails', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    await assetRepo.save(makeAsset({
+      id: 'asset-activate-audit-fail',
+      status: 'approved',
+      rawText: undefined,
+      scrubbedText: 'Safe approved training text.',
+      approvedBy: 'owner-1',
+    }));
+    assetRepo.savedAssets.length = 0;
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new FailingAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    await expect(service.activate({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-activate-audit-fail',
+    })).rejects.toThrow('audit unavailable');
+
+    expect(assetRepo.savedAssets).toHaveLength(0);
+    await expect(assetRepo.findById('tenant-1', 'asset-activate-audit-fail')).resolves.toMatchObject({
+      status: 'approved',
+    });
   });
 });
