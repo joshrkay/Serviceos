@@ -99,8 +99,13 @@ export class PgVerticalPackRegistry
           categories = EXCLUDED.categories,
           terminology = EXCLUDED.terminology,
           updated_at = EXCLUDED.updated_at
-        WHERE vertical_packs.terminology @> '{"canonical": true}'::jsonb
-           OR vertical_packs.terminology->>'seededBy' = 'createApp'
+        WHERE (
+          vertical_packs.terminology @> '{"canonical": true}'::jsonb
+          OR vertical_packs.terminology->>'seededBy' = 'createApp'
+        ) AND (
+          EXCLUDED.terminology @> '{"canonical": true}'::jsonb
+          OR EXCLUDED.terminology->>'seededBy' = 'createApp'
+        )
         RETURNING *`,
         [
           pack.id,
