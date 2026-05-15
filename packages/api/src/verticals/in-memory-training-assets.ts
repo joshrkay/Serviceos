@@ -10,6 +10,10 @@ export class InMemoryTrainingAssetRepository implements TrainingAssetRepository 
   private readonly rows = new Map<string, VerticalTrainingAsset>();
 
   async save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset> {
+    const existing = this.rows.get(asset.id);
+    if (existing && existing.tenantId !== asset.tenantId) {
+      throw new Error('training asset id belongs to another tenant');
+    }
     this.rows.set(asset.id, asset);
     return asset;
   }

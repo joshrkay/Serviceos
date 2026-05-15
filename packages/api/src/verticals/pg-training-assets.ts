@@ -69,7 +69,6 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
           $12, $13, $14, $15, $16
         )
         ON CONFLICT (id) DO UPDATE SET
-          tenant_id = EXCLUDED.tenant_id,
           vertical_type = EXCLUDED.vertical_type,
           asset_kind = EXCLUDED.asset_kind,
           status = EXCLUDED.status,
@@ -84,6 +83,7 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
           activated_at = EXCLUDED.activated_at,
           created_at = EXCLUDED.created_at,
           updated_at = EXCLUDED.updated_at
+        WHERE vertical_training_assets.tenant_id = EXCLUDED.tenant_id
         RETURNING *`,
         [
           asset.id,
@@ -104,6 +104,9 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
           asset.updatedAt,
         ],
       );
+      if (result.rows.length === 0) {
+        throw new Error('training asset id belongs to another tenant');
+      }
       return rowToAsset(result.rows[0]);
     });
   }

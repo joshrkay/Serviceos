@@ -127,6 +127,10 @@ class FakeTrainingAssetClient {
         created_at: values[14] as Date,
         updated_at: values[15] as Date,
       };
+      const existing = this.rows.get(row.id);
+      if (existing && existing.tenant_id !== row.tenant_id) {
+        return { rows: [] };
+      }
       this.rows.set(row.id, row);
       return { rows: [row] };
     }
@@ -224,6 +228,21 @@ describe('TrainingAssetRepository', () => {
     expect(all[0].approvedBy).toBe('user-2');
   });
 
+  it('rejects duplicate in-memory asset ids from another tenant', async () => {
+    const repo = new InMemoryTrainingAssetRepository();
+    await repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-1' }));
+
+    await expect(repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-2' }))).rejects.toThrow(
+      'training asset id belongs to another tenant',
+    );
+
+    await expect(repo.findById('tenant-1', 'asset-1')).resolves.toMatchObject({
+      id: 'asset-1',
+      tenantId: 'tenant-1',
+    });
+    await expect(repo.findById('tenant-2', 'asset-1')).resolves.toBeNull();
+  });
+
   it('uses tenant-scoped Pg upserts and lists active assets by tenant and vertical', async () => {
     const pool = new FakeTrainingAssetPool();
     const repo = new PgTrainingAssetRepository(pool as unknown as Pool);
@@ -263,6 +282,22 @@ describe('TrainingAssetRepository', () => {
       pool.client.queries.filter((query) => query.sql.startsWith('SELECT')).map((query) => query.values),
     ).toEqual([['tenant-1', 'hvac'], ['tenant-1', 'asset-1'], ['tenant-2', 'asset-1'], ['tenant-1']]);
     expect(pool.client.releaseCount).toBe(pool.connectCount);
+  });
+
+  it('rejects duplicate Pg asset ids from another tenant', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const repo = new PgTrainingAssetRepository(pool as unknown as Pool);
+    await repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-1' }));
+
+    await expect(repo.save(makeAsset({ id: 'asset-1', tenantId: 'tenant-2' }))).rejects.toThrow(
+      'training asset id belongs to another tenant',
+    );
+
+    await expect(repo.findById('tenant-1', 'asset-1')).resolves.toMatchObject({
+      id: 'asset-1',
+      tenantId: 'tenant-1',
+    });
+    await expect(repo.findById('tenant-2', 'asset-1')).resolves.toBeNull();
   });
 });
 
