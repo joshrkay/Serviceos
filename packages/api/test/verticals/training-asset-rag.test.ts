@@ -37,6 +37,34 @@ describe('buildTrainingAssetKnowledgeChunkInput', () => {
     expect(JSON.stringify(chunk)).not.toContain('Sarah');
   });
 
+  it('uses strict numeric source versions', () => {
+    const chunk = buildTrainingAssetKnowledgeChunkInput({
+      asset: { ...activeAsset(), provenance: { source: 'tenant_admin', sourceVersion: '3' } },
+      embedding: Array.from({ length: 1536 }, () => 0.001),
+    });
+
+    expect(chunk.sourceVersion).toBe(3);
+  });
+
+  it('derives free-form source versions from updatedAt epoch seconds', () => {
+    const chunk = buildTrainingAssetKnowledgeChunkInput({
+      asset: { ...activeAsset(), provenance: { source: 'tenant_admin', sourceVersion: 'v3' } },
+      embedding: Array.from({ length: 1536 }, () => 0.001),
+    });
+
+    expect(chunk.sourceVersion).toBe(1778803200);
+  });
+
+  it('does not parse date-ish source versions as partial integers', () => {
+    const chunk = buildTrainingAssetKnowledgeChunkInput({
+      asset: { ...activeAsset(), provenance: { source: 'tenant_admin', sourceVersion: '2026-05-15' } },
+      embedding: Array.from({ length: 1536 }, () => 0.001),
+    });
+
+    expect(chunk.sourceVersion).toBe(1778803200);
+    expect(chunk.sourceVersion).not.toBe(2026);
+  });
+
   it('refuses inactive assets', () => {
     expect(() =>
       buildTrainingAssetKnowledgeChunkInput({
@@ -44,5 +72,40 @@ describe('buildTrainingAssetKnowledgeChunkInput', () => {
         embedding: Array.from({ length: 1536 }, () => 0.001),
       }),
     ).toThrow('Only active training assets can be embedded');
+  });
+
+  it('refuses active assets without scrubbed text', () => {
+    const { scrubbedText: _scrubbedText, ...asset } = activeAsset();
+
+    expect(() =>
+      buildTrainingAssetKnowledgeChunkInput({
+        asset,
+        embedding: Array.from({ length: 1536 }, () => 0.001),
+      }),
+    ).toThrow('Active training asset must have scrubbedText');
+  });
+
+  it('keeps scrubbed label and provenance placeholders from reintroducing raw PII', () => {
+    const chunk = buildTrainingAssetKnowledgeChunkInput({
+      asset: {
+        ...activeAsset(),
+        labels: {
+          intent: 'emergency_dispatch',
+          expectedNextQuestion: 'Is [CALLER_NAME] safe?',
+          shouldEscalate: true,
+        },
+        provenance: {
+          source: 'tenant_admin',
+          sourceId: 'call-[CALLER_NAME]',
+          sourceVersion: '[CALLER_NAME] v1',
+          notes: 'Approved example for [CALLER_NAME]',
+        },
+      },
+      embedding: Array.from({ length: 1536 }, () => 0.001),
+    });
+
+    const serialized = JSON.stringify(chunk);
+    expect(serialized).toContain('[CALLER_NAME]');
+    expect(serialized).not.toContain('Sarah');
   });
 });
