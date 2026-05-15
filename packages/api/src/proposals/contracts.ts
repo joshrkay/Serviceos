@@ -47,6 +47,10 @@ export const createAppointmentPayloadSchema = z.object({
   notes: z.string().optional(),
 });
 
+export const createBookingPayloadSchema = z.object({
+  appointmentId: z.string().uuid(),
+});
+
 const lineItemSchema = z.object({
   description: z.string().min(1),
   quantity: z.number(),
@@ -168,6 +172,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
+  create_booking: createBookingPayloadSchema,
   draft_estimate: draftEstimatePayloadSchema,
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,

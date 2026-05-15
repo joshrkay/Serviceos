@@ -40,6 +40,9 @@ export function useDispatchBoard(
 
       const response = await apiFetch(`/api/dispatch/board?${params.toString()}`);
       if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error('Session expired — please reload.');
+        }
         throw new Error(`Failed to load dispatch board: ${response.statusText}`);
       }
       const result = await response.json();

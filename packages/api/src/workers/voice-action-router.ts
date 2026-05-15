@@ -17,6 +17,7 @@ import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
 import { CreateAppointmentAITaskHandler } from '../ai/tasks/create-appointment-task';
 import { SlotConflictChecker } from '../ai/tasks/slot-conflict-checker';
 import { AvailabilityFinder } from '../ai/tasks/availability-finder';
+import { AppointmentRepository } from '../appointments/appointment';
 import { InvoiceEditTaskHandler } from '../ai/tasks/invoice-edit-task';
 import { EstimateEditTaskHandler } from '../ai/tasks/estimate-edit-task';
 import { CreateCustomerTaskHandler, TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
@@ -110,6 +111,8 @@ export interface VoiceActionRouterDeps {
   thresholdResolver?: (tenantId: string) => Promise<
     Partial<Record<'supervisor' | 'tech' | 'both', number>> | undefined
   >;
+  /** When provided, the create_appointment handler produces held-slot bookings. */
+  appointmentRepo?: AppointmentRepository;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -217,6 +220,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
       deps.gateway,
       deps.slotConflictChecker,
       deps.availabilityFinder,
+      deps.appointmentRepo,
     ),
   );
   handlers.set('update_invoice', new InvoiceEditTaskHandler(deps.gateway));

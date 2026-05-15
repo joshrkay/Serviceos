@@ -1005,6 +1005,7 @@ export function createApp(): express.Express {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: schedulingConfirmationNotifier,
+    auditRepo,
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
@@ -1157,6 +1158,7 @@ export function createApp(): express.Express {
     slotConflictChecker,
     availabilityFinder,
     thresholdResolver,
+    appointmentRepo,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1250,7 +1252,7 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry)
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
@@ -2057,7 +2059,7 @@ export function createApp(): express.Express {
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo));
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }

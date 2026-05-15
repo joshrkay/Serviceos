@@ -48,6 +48,14 @@ const ACTIVE_APPOINTMENT_STATUSES: ReadonlySet<AppointmentStatus> = new Set([
 const SEARCH_BUFFER_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_GRANULARITY_MS = 30 * 60 * 1000;
+/**
+ * Default gap enforced between a candidate slot and any existing
+ * appointment, on both sides. Covers travel/setup time so the voice
+ * agent never offers two jobs butted back-to-back. A per-tenant
+ * override is threaded through in a later plan; callers that pass no
+ * `bufferMs` get 0 (unchanged behavior).
+ */
+export const DEFAULT_BUFFER_MS = 30 * 60 * 1000;
 const DEFAULT_SLOT_COUNT = 3;
 const MAX_SLOT_COUNT = 10;
 
@@ -81,6 +89,12 @@ export interface FindOpenSlotsInput {
    * which is also typical service-business booking granularity.
    */
   granularityMs?: number;
+  /**
+   * Gap (ms) to enforce on BOTH sides of every busy interval, so no
+   * candidate slot touches an existing appointment. Defaults to 0
+   * (no buffer) for backward compatibility.
+   */
+  bufferMs?: number;
 }
 
 export interface AvailabilityFinder {
@@ -167,7 +181,16 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
 
-    let blocking = candidates.filter((a) => ACTIVE_APPOINTMENT_STATUSES.has(a.status));
+    const now = Date.now();
+    let blocking = candidates.filter((a) => {
+      if (!ACTIVE_APPOINTMENT_STATUSES.has(a.status)) return false;
+      // An expired hold has released its slot — treat it as free. A
+      // live hold (or a non-hold appointment) still blocks.
+      if (a.holdPendingApproval && a.holdExpiryAt && a.holdExpiryAt.getTime() < now) {
+        return false;
+      }
+      return true;
+    });
 
     if (input.technicianId) {
       const techId = input.technicianId;
@@ -199,10 +222,11 @@ export class DefaultAvailabilityFinder implements AvailabilityFinder {
       }
     }
 
+    const bufferMs = Math.max(0, input.bufferMs ?? 0);
     const busy = mergeIntervals(
       blocking.map((a) => ({
-        start: a.scheduledStart.getTime(),
-        end: a.scheduledEnd.getTime(),
+        start: a.scheduledStart.getTime() - bufferMs,
+        end: a.scheduledEnd.getTime() + bufferMs,
       })),
     );
 

@@ -89,11 +89,13 @@ async function sendToConversationAPI(
       proposal: msg.proposal,
       autoApplied: msg.autoApplied,
     };
-  } catch {
-    // Fallback when API is unreachable (e.g., local dev without backend)
+  } catch (err) {
+    // Network/auth failure reaching the assistant API. Surface an accurate,
+    // non-misleading message and log the real cause for debugging.
+    console.error('AI chat request failed:', err);
     return {
-      content: `I received your message: "${text}". The AI backend is not connected yet — connect it via AI_PROVIDER_API_KEY to get real responses.`,
-      reasoning: 'API unavailable — showing fallback response.',
+      content: 'Unable to connect to AI service — please try again or contact support.',
+      reasoning: 'Could not reach the AI service.',
     };
   }
 }
