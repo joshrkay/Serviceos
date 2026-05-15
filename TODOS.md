@@ -28,3 +28,24 @@ thread it through the lifecycle.
 **Effort:** ~30 min CC + careful thinking about crash recovery (what if the
 handler crashes mid-execution — do we reset `executing` back to `approved` on
 a timeout?). Flag before scaling past one dyno.
+
+---
+
+## Push notifications for critical-urgency proposals
+
+§3 launched with visual urgency cues in the inbox only. Notification
+infrastructure exists (Twilio/SendGrid) but is customer-facing — no
+operator push channel is wired. For solo operators who keep the inbox
+open during business hours, visual cues are sufficient. The gap appears
+when a tenant scales past one operator or wants out-of-app alerts (web
+push, native push, SMS-to-self).
+
+**Fix:** wire `urgency === 'critical'` rows in
+`packages/api/src/proposals/prioritization.ts:getUrgency` to fire a push
+notification to the operator's registered channel. Needs (1) an
+operator-channel registry (web push subscription + optional
+SMS-to-self per user) and (2) a hook from the proposal create path so
+the moment a critical proposal becomes `ready_for_review`, the push
+fires.
+
+**Effort:** ~2 hours CC, separate PR.

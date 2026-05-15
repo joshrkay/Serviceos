@@ -31,6 +31,7 @@ import { MaintenanceContractsPage } from './components/contracts/MaintenanceCont
 import { ContractDetailPage } from './components/contracts/ContractDetailPage';
 import { MoneyDashboardPage } from './components/reports/MoneyDashboardPage';
 import { RevenueBySourcePage } from './components/reports/RevenueBySourcePage';
+import { InboxPage } from './components/inbox/InboxPage';
 import { PortalShell } from './pages/portal/PortalShell';
 import { InvoiceCreate } from './pages/invoices/InvoiceCreate';
 import { EstimateCreate } from './pages/estimates/EstimateCreate';
@@ -158,6 +159,7 @@ export const router = createBrowserRouter([
       { path: 'invoices/:id',   Component: InvoiceDetailRoute },
       { path: 'contracts',      Component: MaintenanceContractsPage },
       { path: 'contracts/:id',  Component: ContractDetailPage },
+      { path: 'inbox',          Component: InboxPage        },
       { path: 'interactions',   Component: InteractionsPage },
       { path: 'interactions/dispatch', Component: DispatchLogPage },
       { path: 'settings',       Component: SettingsPage    },
