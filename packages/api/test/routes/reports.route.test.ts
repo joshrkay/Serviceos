@@ -21,7 +21,7 @@ function buildApp(): {
     };
     next();
   });
-  app.use('/api/reports', createReportsRouter(repo));
+  app.use('/api/reports', createReportsRouter({ revenueBySourceRepo: repo }));
   return { app, repo };
 }
 

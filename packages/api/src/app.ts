@@ -95,6 +95,7 @@ import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
 } from './reports/revenue-by-source';
+import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 
@@ -1909,11 +1910,24 @@ export function createApp(): express.Express {
   // the same instance.
   app.use('/api/billing', createBillingRouter({ billingService, connectService }));
 
-  // Tenant-scoped reporting (revenue by lead source / UTM).
+  // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
     ? new PgRevenueBySourceRepository(pool)
     : new InMemoryRevenueBySourceRepository();
-  app.use('/api/reports', createReportsRouter(revenueBySourceRepo));
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
+  app.use(
+    '/api/reports',
+    createReportsRouter({
+      revenueBySourceRepo,
+      moneyDashboardRepo,
+      expenseRepo,
+      invoiceRepo,
+    }),
+  );
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
 
