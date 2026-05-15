@@ -11,6 +11,7 @@ import {
   type VerticalTrainingAsset,
 } from '../../src/verticals/training-assets';
 import { buildMergedVerticalVoicePrompt } from '../../src/verticals/context-assembly';
+import { createElectricalPack } from '../../src/verticals/packs/electrical';
 import { validateVerticalPack } from '../../src/verticals/registry';
 
 function buildActiveTrainingAsset(
@@ -193,6 +194,30 @@ describe('merged vertical voice prompt', () => {
 
     expect(prompt).toBe(
       'Service vertical: HVAC Professional\n\nTenant-approved vertical voice training assets:\n- HVAC training context: Ask about heating or cooling.',
+    );
+  });
+});
+
+describe('default vertical training metadata', () => {
+  it('seeds electrical as a second-class pack with minimal voice context', () => {
+    const pack = createElectricalPack();
+
+    expect(pack.verticalType).toBe('electrical');
+    expect(pack.metadata.training_tier).toBe('second_class');
+    expect(pack.metadata.intake_questions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          question: 'Is power out in the whole home or only one circuit?',
+        }),
+      ]),
+    );
+    expect(pack.metadata.training_assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetKind: 'emergency_rule',
+          title: 'Electrical burning smell escalation',
+        }),
+      ]),
     );
   });
 });

@@ -2,9 +2,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { VerticalPackRegistry, VerticalPack } from './vertical-pack-registry';
 import { createHvacPack } from '../verticals/packs/hvac';
 import { createPlumbingPack } from '../verticals/packs/plumbing';
+import { createElectricalPack } from '../verticals/packs/electrical';
 
 /**
- * Adapt a rich pack (from `verticals/packs/{hvac,plumbing}.ts`) into
+ * Adapt a rich pack (from `verticals/packs/{hvac,plumbing,electrical}.ts`) into
  * the canonical shape stored by the registry. The rich pack already
  * carries terminology / categories / intake_questions / objection_scripts
  * in `metadata` (see `createVerticalPack` in `verticals/registry.ts`),
@@ -17,7 +18,12 @@ import { createPlumbingPack } from '../verticals/packs/plumbing';
  * for every tenant. The resolver now sees the same rich metadata
  * `loadPackConfig` derives at runtime.
  */
-function adaptToCanonical(packId: string, rich: ReturnType<typeof createHvacPack>): VerticalPack {
+type RichCanonicalPack =
+  | ReturnType<typeof createHvacPack>
+  | ReturnType<typeof createPlumbingPack>
+  | ReturnType<typeof createElectricalPack>;
+
+function adaptToCanonical(packId: string, rich: RichCanonicalPack): VerticalPack {
   const now = new Date();
   return {
     id: uuidv4(),
@@ -46,6 +52,9 @@ export async function seedCanonicalVerticalPacks(registry: VerticalPackRegistry)
     }),
     registry.register(adaptToCanonical('plumbing-v1', createPlumbingPack())).catch((err) => {
       process.stderr.write(`[seed] Failed to register plumbing-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
+    }),
+    registry.register(adaptToCanonical('electrical-v1', createElectricalPack())).catch((err) => {
+      process.stderr.write(`[seed] Failed to register electrical-v1 pack: ${err instanceof Error ? err.message : String(err)}\n`);
     }),
   ]);
 }
