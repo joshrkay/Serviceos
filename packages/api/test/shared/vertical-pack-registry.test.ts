@@ -117,7 +117,7 @@ describe('P4-001A — Canonical vertical pack registry model', () => {
     const errors = validatePackInput({
       packId: 'test',
       version: '1.0.0',
-      verticalType: 'electrical' as any,
+      verticalType: 'roofing' as any,
       displayName: 'Test',
     });
     expect(errors).toContain('Invalid verticalType');
