@@ -13,11 +13,11 @@ import { EXPENSE_CATEGORIES } from '../../expenses/expense';
  * timestamp); the execution handler parses it to a Date.
  */
 export const logExpensePayloadSchema = z.object({
-  description: z.string().min(1),
+  description: z.string().min(1).max(1000),
   amountCents: z.number().int().positive(),
   category: z.enum([...EXPENSE_CATEGORIES] as [string, ...string[]]),
-  vendor: z.string().optional(),
-  spentAt: z.string().min(1),
+  vendor: z.string().max(200).optional(),
+  spentAt: z.string().min(1).max(64),
   jobId: z.string().uuid().optional(),
 });
 

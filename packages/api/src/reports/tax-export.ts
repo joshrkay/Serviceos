@@ -19,8 +19,23 @@ export interface TaxExportRow {
 
 const HEADER = 'Date,Type,Category,Description,Job ID,Amount';
 
-/** RFC-4180 field quoting: wrap in quotes + double internal quotes when needed. */
+/**
+ * RFC-4180 field quoting + CSV formula-injection neutralization.
+ *
+ * Spreadsheet apps (Excel, Numbers, Sheets) interpret a cell starting with
+ * `=`, `+`, `-`, `@`, `\t`, or `\r` as a formula — letting an attacker
+ * pass `=HYPERLINK(...)` or `=cmd|...` through any free-text field
+ * (vendor, description, invoice number) and have it execute when the
+ * accountant opens the CSV. OWASP "CSV Injection" / CWE-1236.
+ *
+ * Mitigation: any value starting with a dangerous prefix is force-quoted
+ * and inner-prefixed with `'` so the spreadsheet treats it as a string.
+ */
 function csvField(value: string): string {
+  const dangerous = /^[=+\-@\t\r]/.test(value);
+  if (dangerous) {
+    return `"'${value.replace(/"/g, '""')}"`;
+  }
   if (/[",\n\r]/.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;
   }

@@ -1927,6 +1927,7 @@ export function createApp(): express.Express {
       moneyDashboardRepo,
       expenseRepo,
       invoiceRepo,
+      paymentRepo,
     }),
   );
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));

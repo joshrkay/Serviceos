@@ -5,7 +5,8 @@ import { toErrorResponse } from '../shared/errors';
 import { RevenueBySourceRepository } from '../reports/revenue-by-source';
 import { MoneyDashboardRepository } from '../reports/money-dashboard';
 import { ExpenseRepository } from '../expenses/expense';
-import { InvoiceRepository } from '../invoices/invoice';
+import { InvoiceRepository, Invoice } from '../invoices/invoice';
+import { PaymentRepository } from '../invoices/payment';
 import { buildTaxExportCsv, TaxExportRow } from '../reports/tax-export';
 
 /**
@@ -21,6 +22,7 @@ export interface ReportsRouterDeps {
   moneyDashboardRepo?: MoneyDashboardRepository;
   expenseRepo?: ExpenseRepository;
   invoiceRepo?: InvoiceRepository;
+  paymentRepo?: PaymentRepository;
 }
 
 /** 'YYYY-MM' for the current UTC month. */
@@ -94,7 +96,7 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
     requirePermission('invoices:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        if (!deps.expenseRepo || !deps.invoiceRepo) {
+        if (!deps.expenseRepo || !deps.invoiceRepo || !deps.paymentRepo) {
           res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Tax export unavailable' });
           return;
         }
@@ -113,23 +115,39 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
           return;
         }
 
+        // Cash-basis tax export: income is bucketed by when the cash arrived
+        // (payment.receivedAt), not when the invoice was issued. Drives the
+        // export off completed payments in the window so a 2025-12 invoice
+        // paid 2026-01 lands in 2026 — matching how a sole prop / SMLLC
+        // files. Invoice rows are looked up by ID and cached so a tenant
+        // with many historic paid invoices doesn't blow up the response.
         const tenantId = req.auth!.tenantId;
-        const [invoices, expenses] = await Promise.all([
-          deps.invoiceRepo.findByTenant(tenantId, { status: 'paid' }),
+        const [payments, expenses] = await Promise.all([
+          deps.paymentRepo.findByTenant(tenantId, {
+            status: 'completed',
+            from,
+            to,
+          }),
           deps.expenseRepo.findByTenant(tenantId, { from, to }),
         ]);
 
+        const invoiceCache = new Map<string, Invoice>();
         const rows: TaxExportRow[] = [];
-        for (const inv of invoices) {
-          const issued = inv.issuedAt ?? inv.createdAt;
-          if (issued.getTime() < from.getTime() || issued.getTime() >= to.getTime()) continue;
+        for (const payment of payments) {
+          let inv = invoiceCache.get(payment.invoiceId);
+          if (!inv) {
+            const fetched = await deps.invoiceRepo.findById(tenantId, payment.invoiceId);
+            if (!fetched) continue; // orphan payment; FK should prevent
+            invoiceCache.set(payment.invoiceId, fetched);
+            inv = fetched;
+          }
           rows.push({
-            date: issued.toISOString().slice(0, 10),
+            date: payment.receivedAt.toISOString().slice(0, 10),
             type: 'income',
             category: 'invoice',
             description: inv.invoiceNumber,
             jobId: inv.jobId,
-            amountCents: inv.totals.totalCents,
+            amountCents: payment.amountCents,
           });
         }
         for (const exp of expenses) {

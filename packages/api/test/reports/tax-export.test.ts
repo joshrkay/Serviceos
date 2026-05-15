@@ -49,4 +49,35 @@ describe('buildTaxExportCsv', () => {
   it('returns just the header for an empty row set', () => {
     expect(buildTaxExportCsv([])).toBe('Date,Type,Category,Description,Job ID,Amount');
   });
+
+  it('neutralizes CSV formula-injection in free-text fields (OWASP CWE-1236)', () => {
+    const csv = buildTaxExportCsv([
+      {
+        date: '2026-05-10',
+        type: 'expense',
+        category: 'materials',
+        description: '=HYPERLINK("http://evil.example","click")',
+        amountCents: 1000,
+      },
+      {
+        date: '2026-05-11',
+        type: 'expense',
+        category: 'fuel',
+        description: '+1234',
+        amountCents: 500,
+      },
+      {
+        date: '2026-05-12',
+        type: 'expense',
+        category: 'tools',
+        description: '@SUM(A1:A10)',
+        amountCents: 700,
+      },
+    ]);
+    // Each dangerous prefix is force-quoted and prepended with `'` so the
+    // spreadsheet treats the cell as a string literal, not a formula.
+    expect(csv).toContain('"\'=HYPERLINK(""http://evil.example"",""click"")"');
+    expect(csv).toContain("\"'+1234\"");
+    expect(csv).toContain("\"'@SUM(A1:A10)\"");
+  });
 });
