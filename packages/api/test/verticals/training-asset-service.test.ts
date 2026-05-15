@@ -1,8 +1,14 @@
 import type { Pool, PoolClient } from 'pg';
 import { describe, expect, it, vi } from 'vitest';
-import { InMemoryTrainingAssetRepository } from '../../src/verticals/in-memory-training-assets';
-import { PgTrainingAssetRepository } from '../../src/verticals/pg-training-assets';
-import type { VerticalTrainingAsset } from '../../src/verticals/training-assets';
+import {
+  InMemoryPrivacyAuditRepository,
+  InMemoryTrainingAssetRepository,
+} from '../../src/verticals/in-memory-training-assets';
+import {
+  PgPrivacyAuditRepository,
+  PgTrainingAssetRepository,
+} from '../../src/verticals/pg-training-assets';
+import type { PrivacyAuditEntry, VerticalTrainingAsset } from '../../src/verticals/training-assets';
 
 vi.mock('../../src/db/schema', () => ({
   setTenantContext: (tenantId: string) => `SET app.current_tenant_id = '${tenantId}'`,
@@ -28,6 +34,27 @@ function makeAsset(overrides: Partial<VerticalTrainingAsset> = {}): VerticalTrai
   };
 }
 
+function makePrivacyAuditEntry(overrides: Partial<PrivacyAuditEntry> = {}): PrivacyAuditEntry {
+  return {
+    id: 'audit-1',
+    tenantId: 'tenant-1',
+    actorId: 'user-1',
+    entityType: 'vertical_training_asset',
+    entityId: 'asset-1',
+    operation: 'redact_training_asset',
+    redactionSummary: {
+      redactionCount: 1,
+      redactionKinds: ['phone'],
+      placeholders: ['[PHONE_1]'],
+      residualSignals: [],
+      hasResidualPii: false,
+    },
+    redactions: [{ kind: 'phone', placeholder: '[PHONE_1]', start: 0, end: 9 }],
+    createdAt: new Date('2026-05-15T00:00:00Z'),
+    ...overrides,
+  };
+}
+
 type TrainingAssetRow = {
   id: string;
   tenant_id: string;
@@ -47,6 +74,18 @@ type TrainingAssetRow = {
   updated_at: Date;
 };
 
+type PrivacyAuditRow = {
+  id: string;
+  tenant_id: string;
+  actor_id: string;
+  entity_type: string;
+  entity_id: string;
+  operation: string;
+  redaction_summary: string;
+  redactions: string;
+  created_at: Date;
+};
+
 type RecordedQuery = {
   sql: string;
   values: unknown[];
@@ -54,11 +93,12 @@ type RecordedQuery = {
 
 class FakeTrainingAssetClient {
   readonly rows = new Map<string, TrainingAssetRow>();
+  readonly privacyAuditRows: PrivacyAuditRow[] = [];
   readonly queries: RecordedQuery[] = [];
   readonly tenantContexts: string[] = [];
   releaseCount = 0;
 
-  async query(sql: string, values: unknown[] = []): Promise<{ rows: TrainingAssetRow[] }> {
+  async query(sql: string, values: unknown[] = []): Promise<{ rows: Array<TrainingAssetRow | PrivacyAuditRow> }> {
     const normalizedSql = sql.replace(/\s+/g, ' ').trim();
     this.queries.push({ sql: normalizedSql, values });
 
@@ -88,6 +128,22 @@ class FakeTrainingAssetClient {
         updated_at: values[15] as Date,
       };
       this.rows.set(row.id, row);
+      return { rows: [row] };
+    }
+
+    if (normalizedSql.startsWith('INSERT INTO privacy_audit')) {
+      const row: PrivacyAuditRow = {
+        id: String(values[0]),
+        tenant_id: String(values[1]),
+        actor_id: String(values[2]),
+        entity_type: String(values[3]),
+        entity_id: String(values[4]),
+        operation: String(values[5]),
+        redaction_summary: String(values[6]),
+        redactions: String(values[7]),
+        created_at: values[8] as Date,
+      };
+      this.privacyAuditRows.push(row);
       return { rows: [row] };
     }
 
@@ -206,6 +262,42 @@ describe('TrainingAssetRepository', () => {
     expect(
       pool.client.queries.filter((query) => query.sql.startsWith('SELECT')).map((query) => query.values),
     ).toEqual([['tenant-1', 'hvac'], ['tenant-1', 'asset-1'], ['tenant-2', 'asset-1'], ['tenant-1']]);
+    expect(pool.client.releaseCount).toBe(pool.connectCount);
+  });
+});
+
+describe('PrivacyAuditRepository', () => {
+  it('stores and returns in-memory privacy audit entries', async () => {
+    const repo = new InMemoryPrivacyAuditRepository();
+    const entry = makePrivacyAuditEntry();
+
+    const created = await repo.create(entry);
+
+    expect(created).toEqual(entry);
+    expect(repo.rows).toEqual([entry]);
+  });
+
+  it('uses tenant-scoped Pg insert for privacy audit entries', async () => {
+    const pool = new FakeTrainingAssetPool();
+    const repo = new PgPrivacyAuditRepository(pool as unknown as Pool);
+    const entry = makePrivacyAuditEntry();
+
+    const created = await repo.create(entry);
+
+    expect(created).toEqual(entry);
+    expect(pool.client.tenantContexts).toEqual(['tenant-1']);
+    expect(pool.client.privacyAuditRows).toHaveLength(1);
+    expect(pool.client.queries.find((query) => query.sql.startsWith('INSERT INTO privacy_audit'))?.values).toEqual([
+      entry.id,
+      entry.tenantId,
+      entry.actorId,
+      entry.entityType,
+      entry.entityId,
+      entry.operation,
+      JSON.stringify(entry.redactionSummary),
+      JSON.stringify(entry.redactions),
+      entry.createdAt,
+    ]);
     expect(pool.client.releaseCount).toBe(pool.connectCount);
   });
 });
