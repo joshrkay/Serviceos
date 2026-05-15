@@ -28,6 +28,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'update_customer',
   'create_job',
   'create_appointment',
+  'create_booking',
   'draft_estimate',
   'update_estimate',
   'draft_invoice',
@@ -184,6 +185,7 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'update_customer':
     case 'create_job':
     case 'create_appointment':
+    case 'create_booking':
     case 'draft_estimate':
     case 'update_estimate':
     case 'draft_invoice':

@@ -10,6 +10,7 @@ import {
   DispatchAnalyticsRepository,
   captureDispatchEvent,
 } from '../../dispatch/analytics';
+import { AuditRepository, createAuditEvent } from '../../audit/audit';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -18,6 +19,7 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -141,6 +143,30 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
             newScheduledEnd,
           },
         });
+      }
+
+      // Deliberate: the audit `create` below is a bare `await` with no try/catch.
+      // A throw here is intentionally surfaced to the caller — `appointment.rescheduled`
+      // is the only audit event for this action, and silently losing it would be
+      // worse than failing the execution after the appointment was rescheduled.
+      if (this.auditRepo) {
+        await this.auditRepo.create(
+          createAuditEvent({
+            tenantId: context.tenantId,
+            actorId: context.executedBy,
+            actorRole: 'system',
+            eventType: 'appointment.rescheduled',
+            entityType: 'appointment',
+            entityId: appointmentId,
+            metadata: {
+              proposalId: proposal.id,
+              oldScheduledStart: appointment.scheduledStart.toISOString(),
+              oldScheduledEnd: appointment.scheduledEnd.toISOString(),
+              newScheduledStart,
+              newScheduledEnd,
+            },
+          }),
+        );
       }
 
       return { success: true, resultEntityId: appointmentId };

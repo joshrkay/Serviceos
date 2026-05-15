@@ -24,6 +24,8 @@ function mapRow(row: Record<string, unknown>): Appointment {
       : undefined,
     timezone: row.timezone as string,
     status: row.status as Appointment['status'],
+    holdPendingApproval: (row.hold_pending_approval as boolean) ?? false,
+    holdExpiryAt: row.hold_expiry_at ? new Date(row.hold_expiry_at as string) : undefined,
     notes: (row.notes as string) ?? undefined,
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
@@ -42,8 +44,9 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         `INSERT INTO appointments (
           id, tenant_id, job_id, scheduled_start, scheduled_end,
           arrival_window_start, arrival_window_end, timezone, status,
+          hold_pending_approval, hold_expiry_at,
           notes, created_by, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         RETURNING *`,
         [
           appointment.id,
@@ -55,6 +58,8 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
           appointment.arrivalWindowEnd ?? null,
           appointment.timezone,
           appointment.status,
+          appointment.holdPendingApproval ?? false,
+          appointment.holdExpiryAt ?? null,
           appointment.notes ?? null,
           appointment.createdBy,
           appointment.createdAt,
@@ -182,6 +187,8 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
         arrivalWindowEnd: 'arrival_window_end',
         timezone: 'timezone',
         status: 'status',
+        holdPendingApproval: 'hold_pending_approval',
+        holdExpiryAt: 'hold_expiry_at',
         notes: 'notes',
         updatedAt: 'updated_at',
       };

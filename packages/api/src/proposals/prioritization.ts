@@ -13,6 +13,7 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   issue_invoice: 1,
   update_estimate: 1,
   create_appointment: 2,
+  create_booking: 2,
   create_job: 3,
   create_customer: 4,
   update_customer: 5,

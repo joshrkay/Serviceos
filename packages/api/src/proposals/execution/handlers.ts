@@ -26,6 +26,8 @@ import { SettingsRepository } from '../../settings/settings';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
+import { CreateBookingExecutionHandler } from './create-booking-handler';
+import { AuditRepository } from '../../audit/audit';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -212,11 +214,12 @@ export function createExecutionHandlerRegistry(deps?: {
     new UpdateCustomerExecutionHandler(),
     new CreateJobExecutionHandler(),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
+    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
-    new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),
+    new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo, deps?.auditRepo),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is
     // absent (used by in-memory tests that don't exercise the
