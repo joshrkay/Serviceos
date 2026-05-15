@@ -8,9 +8,33 @@ import {
   buildTrainingAssetPromptSection,
   createTrainingAssetDraft,
   trainingAssetInputSchema,
+  type VerticalTrainingAsset,
 } from '../../src/verticals/training-assets';
 import { buildMergedVerticalVoicePrompt } from '../../src/verticals/context-assembly';
 import { validateVerticalPack } from '../../src/verticals/registry';
+
+function buildActiveTrainingAsset(
+  overrides: Partial<VerticalTrainingAsset> = {},
+): VerticalTrainingAsset {
+  const now = new Date('2026-05-15T00:00:00Z');
+  return {
+    id: 'asset-active-1',
+    tenantId: 'tenant-1',
+    verticalType: 'hvac',
+    assetKind: 'prompt_context',
+    status: 'active',
+    title: 'Default active asset',
+    rawText: 'RAW CUSTOMER TEXT THAT MUST NOT APPEAR',
+    scrubbedText: 'Ask whether the issue is heating or cooling.',
+    labels: {},
+    provenance: { source: 'tenant_admin', sourceVersion: '1' },
+    createdBy: 'user-1',
+    activatedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
 
 describe('vertical type support', () => {
   it('treats electrical as supported but second-class', () => {
@@ -99,6 +123,44 @@ describe('vertical training assets', () => {
 
     expect(buildTrainingAssetPromptSection([active])).toContain('Electrical training context');
     expect(buildTrainingAssetPromptSection([active])).toContain('Breaker triage');
+  });
+
+  it('includes at most five active scrubbed assets', () => {
+    const assets = Array.from({ length: 7 }, (_, index) =>
+      buildActiveTrainingAsset({
+        id: `asset-${index + 1}`,
+        title: `Budget asset ${index + 1}`,
+        scrubbedText: `Guidance ${index + 1}`,
+      }),
+    );
+
+    const prompt = buildTrainingAssetPromptSection(assets);
+
+    expect(prompt.match(/HVAC training context/g)).toHaveLength(5);
+    expect(prompt).toContain('Budget asset 5');
+    expect(prompt).not.toContain('Budget asset 6');
+    expect(prompt).not.toContain('Budget asset 7');
+  });
+
+  it('truncates long scrubbed guidance text', () => {
+    const prompt = buildTrainingAssetPromptSection([
+      buildActiveTrainingAsset({ scrubbedText: 'a'.repeat(1100) }),
+    ]);
+
+    expect(prompt).toContain(`Guidance: ${'a'.repeat(1000)}...`);
+    expect(prompt).not.toContain('a'.repeat(1001));
+  });
+
+  it('never includes raw text in prompt output', () => {
+    const prompt = buildTrainingAssetPromptSection([
+      buildActiveTrainingAsset({
+        rawText: 'RAW PRIVATE HVAC CUSTOMER STORY',
+        scrubbedText: 'Scrubbed HVAC guidance only.',
+      }),
+    ]);
+
+    expect(prompt).toContain('Scrubbed HVAC guidance only.');
+    expect(prompt).not.toContain('RAW PRIVATE HVAC CUSTOMER STORY');
   });
 });
 

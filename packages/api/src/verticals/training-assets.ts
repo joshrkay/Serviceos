@@ -121,23 +121,44 @@ const VERTICAL_LABELS: Record<VerticalType, string> = {
   electrical: 'Electrical',
 };
 
+const MAX_PROMPT_ASSETS = 5;
+const MAX_GUIDANCE_CHARS = 1000;
+const MAX_LABEL_CHARS = 300;
+const TRUNCATION_SUFFIX = '...';
+
 export function buildTrainingAssetPromptSection(assets: readonly VerticalTrainingAsset[]): string {
-  const active = assets.filter((asset) => asset.status === 'active' && asset.scrubbedText);
+  const active = assets
+    .filter((asset) => asset.status === 'active' && asset.scrubbedText)
+    .slice(0, MAX_PROMPT_ASSETS);
   if (active.length === 0) return '';
 
   const lines: string[] = ['Tenant-approved vertical voice training assets:'];
   for (const asset of active) {
     const vertical = VERTICAL_LABELS[asset.verticalType];
     lines.push(`- ${vertical} training context (${asset.assetKind}): ${asset.title}`);
-    lines.push(`  Guidance: ${asset.scrubbedText}`);
+    lines.push(`  Guidance: ${truncatePromptText(asset.scrubbedText ?? '', MAX_GUIDANCE_CHARS)}`);
     if (asset.labels.expectedNextQuestion) {
-      lines.push(`  Expected next question: ${asset.labels.expectedNextQuestion}`);
+      lines.push(
+        `  Expected next question: ${truncatePromptText(
+          asset.labels.expectedNextQuestion,
+          MAX_LABEL_CHARS,
+        )}`,
+      );
     }
     if (asset.labels.expectedNextAction) {
-      lines.push(`  Expected next action: ${asset.labels.expectedNextAction}`);
+      lines.push(
+        `  Expected next action: ${truncatePromptText(
+          asset.labels.expectedNextAction,
+          MAX_LABEL_CHARS,
+        )}`,
+      );
     }
   }
   return lines.join('\n');
+}
+
+function truncatePromptText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}${TRUNCATION_SUFFIX}` : value;
 }
 
 export interface TrainingAssetRepository {

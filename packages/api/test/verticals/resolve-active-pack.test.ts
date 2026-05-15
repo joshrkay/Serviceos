@@ -142,6 +142,60 @@ describe('buildVerticalPromptResolver', () => {
     await expect(resolve(TENANT)).resolves.toContain('Service vertical: HVAC Professional');
   });
 
+  it('does not cache prompt sections that depend on training assets', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    let calls = 0;
+    const trainingAssetRepo = buildTrainingAssetRepo(async () => {
+      calls += 1;
+      return [
+        buildTrainingAsset({
+          id: `asset-${calls}`,
+          title: calls === 1 ? 'Training asset A' : 'Training asset B',
+          scrubbedText: calls === 1 ? 'Guidance A' : 'Guidance B',
+        }),
+      ];
+    });
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      trainingAssetRepo,
+      cacheTtlMs: 60_000,
+    });
+
+    const first = await resolve(TENANT);
+    const second = await resolve(TENANT);
+
+    expect(first).toContain('Training asset A');
+    expect(first).not.toContain('Training asset B');
+    expect(second).toContain('Training asset B');
+    expect(second).not.toContain('Training asset A');
+  });
+
+  it('does not cache a training asset lookup failure', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    let calls = 0;
+    const trainingAssetRepo = buildTrainingAssetRepo(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('training asset store unavailable');
+      }
+      return [buildTrainingAsset({ title: 'Recovered training asset' })];
+    });
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      trainingAssetRepo,
+      cacheTtlMs: 60_000,
+    });
+
+    const first = await resolve(TENANT);
+    const second = await resolve(TENANT);
+
+    expect(first).toContain('Service vertical: HVAC Professional');
+    expect(first).not.toContain('Recovered training asset');
+    expect(second).toContain('Recovered training asset');
+  });
+
   it('returns undefined when the activated packId is missing from the registry', async () => {
     await activatePack({ tenantId: TENANT, packId: 'unknown-pack' }, packActivationRepo);
     const resolve = buildVerticalPromptResolver({ packActivationRepo, canonicalPackRegistry });

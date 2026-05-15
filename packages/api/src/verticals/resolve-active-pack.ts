@@ -81,7 +81,8 @@ export function buildVerticalPromptResolver(
   const cache = new Map<string, CacheEntry>();
 
   return async (tenantId: string): Promise<string | undefined> => {
-    if (ttlMs > 0) {
+    const shouldUseCache = ttlMs > 0 && !deps.trainingAssetRepo;
+    if (shouldUseCache) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {
         // Bump to back of LRU on hit.
@@ -165,7 +166,7 @@ export function buildVerticalPromptResolver(
       }
     }
 
-    if (ttlMs > 0) {
+    if (shouldUseCache) {
       cache.delete(tenantId);
       cache.set(tenantId, { section, expiresAt: now() + ttlMs });
       while (cache.size > maxEntries) {
