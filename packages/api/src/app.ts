@@ -1013,6 +1013,7 @@ export function createApp(): express.Express {
     schedulingNotifier: schedulingConfirmationNotifier,
     expenseRepo,
     auditRepo,
+    jobRepo,
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
@@ -1937,7 +1938,7 @@ export function createApp(): express.Express {
       paymentRepo,
     }),
   );
-  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
+  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
