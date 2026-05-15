@@ -382,6 +382,9 @@ describe('TrainingAssetService', () => {
     expect(assetRepo.savedAssets[0].scrubbedText).toContain('[CALLER_NAME]');
     expect(assetRepo.savedAssets[0].scrubbedText).toContain('[PHONE]');
     expect(assetRepo.savedAssets[0].redactionSummary).toBeDefined();
+    expect(assetRepo.savedAssets[0].rawText).toBeUndefined();
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('Sarah Jones');
+    expect(JSON.stringify(assetRepo.savedAssets[0])).not.toContain('415-555-0123');
     expect(assetRepo.savedAssets.some((asset) => asset.status === 'draft')).toBe(false);
     expect(privacyAuditRepo.rows).toHaveLength(1);
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');

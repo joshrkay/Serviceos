@@ -54,8 +54,9 @@ export class TrainingAssetService {
       text: parsed.rawText,
       knownEntities: request.knownEntities,
     });
+    const { rawText: _rawText, ...safeDraft } = draft;
     const asset: VerticalTrainingAsset = {
-      ...draft,
+      ...safeDraft,
       status: redacted.status,
       scrubbedText: redacted.scrubbedText,
       redactionSummary: redacted.summary,
