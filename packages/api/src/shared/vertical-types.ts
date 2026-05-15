@@ -1,6 +1,6 @@
-export type VerticalType = 'hvac' | 'plumbing';
+export type VerticalType = 'hvac' | 'plumbing' | 'electrical';
 
-export const VALID_VERTICAL_TYPES: VerticalType[] = ['hvac', 'plumbing'];
+export const VALID_VERTICAL_TYPES: VerticalType[] = ['hvac', 'plumbing', 'electrical'];
 
 export type PackStatus = 'draft' | 'active' | 'deprecated';
 
@@ -31,7 +31,29 @@ export const PLUMBING_SERVICE_CATEGORIES: PlumbingServiceCategory[] = [
   'diagnostic', 'repair', 'install', 'replacement', 'drain', 'water-heater', 'emergency',
 ];
 
-export type ServiceCategory = HvacServiceCategory | PlumbingServiceCategory;
+export type ElectricalServiceCategory =
+  | 'diagnostic'
+  | 'repair'
+  | 'install'
+  | 'panel'
+  | 'lighting'
+  | 'safety'
+  | 'emergency';
+
+export const ELECTRICAL_SERVICE_CATEGORIES: ElectricalServiceCategory[] = [
+  'diagnostic',
+  'repair',
+  'install',
+  'panel',
+  'lighting',
+  'safety',
+  'emergency',
+];
+
+export type ServiceCategory =
+  | HvacServiceCategory
+  | PlumbingServiceCategory
+  | ElectricalServiceCategory;
 
 export function isValidVerticalType(value: string): value is VerticalType {
   return VALID_VERTICAL_TYPES.includes(value as VerticalType);
@@ -47,5 +69,7 @@ export function getServiceCategories(verticalType: VerticalType): ServiceCategor
       return [...HVAC_SERVICE_CATEGORIES];
     case 'plumbing':
       return [...PLUMBING_SERVICE_CATEGORIES];
+    case 'electrical':
+      return [...ELECTRICAL_SERVICE_CATEGORIES];
   }
 }
