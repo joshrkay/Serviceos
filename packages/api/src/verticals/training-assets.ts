@@ -139,3 +139,29 @@ export function buildTrainingAssetPromptSection(assets: readonly VerticalTrainin
   }
   return lines.join('\n');
 }
+
+export interface TrainingAssetRepository {
+  save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset>;
+  findById(tenantId: string, id: string): Promise<VerticalTrainingAsset | null>;
+  listByTenant(tenantId: string): Promise<VerticalTrainingAsset[]>;
+  listActiveByTenantAndVertical(
+    tenantId: string,
+    verticalType: VerticalType,
+  ): Promise<VerticalTrainingAsset[]>;
+}
+
+export interface PrivacyAuditEntry {
+  id: string;
+  tenantId: string;
+  actorId: string;
+  entityType: 'vertical_training_asset';
+  entityId: string;
+  operation: 'redact_training_asset';
+  redactionSummary: TrainingAssetRedactionSummary;
+  redactions: Array<{ kind: string; placeholder: string; start: number; end: number }>;
+  createdAt: Date;
+}
+
+export interface PrivacyAuditRepository {
+  create(entry: PrivacyAuditEntry): Promise<PrivacyAuditEntry>;
+}
