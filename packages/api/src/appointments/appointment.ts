@@ -23,6 +23,15 @@ export interface Appointment {
    */
   timezone: string;
   status: AppointmentStatus;
+  /**
+   * When true, this appointment is a tentative AI-placed hold awaiting
+   * owner approval. The slot is reserved on the calendar but not yet
+   * confirmed. Cleared to false on approval; the appointment is
+   * canceled on rejection.
+   */
+  holdPendingApproval: boolean;
+  /** When the tentative hold auto-releases if not approved (set when holdPendingApproval is true). */
+  holdExpiryAt?: Date;
   notes?: string;
   createdBy: string;
   createdAt: Date;
@@ -43,6 +52,10 @@ export interface CreateAppointmentInput {
   /** Display/context timezone only; time fields are persisted as UTC instants. */
   timezone: string;
   notes?: string;
+  /** Create the appointment as a tentative hold awaiting approval. Defaults to false. */
+  holdPendingApproval?: boolean;
+  /** When the tentative hold auto-releases. Set when holdPendingApproval is true. */
+  holdExpiryAt?: Date;
   createdBy: string;
 }
 
@@ -55,6 +68,8 @@ export interface UpdateAppointmentInput {
   timezone?: string;
   notes?: string;
   status?: AppointmentStatus;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: Date;
 }
 
 export interface AppointmentListOptions {
@@ -161,6 +176,8 @@ export async function createAppointment(
     arrivalWindowEnd: input.arrivalWindowEnd ? toUtcDate(input.arrivalWindowEnd) : undefined,
     timezone: input.timezone,
     status: 'scheduled',
+    holdPendingApproval: input.holdPendingApproval ?? false,
+    holdExpiryAt: input.holdExpiryAt,
     notes: input.notes,
     createdBy: input.createdBy,
     createdAt: new Date(),

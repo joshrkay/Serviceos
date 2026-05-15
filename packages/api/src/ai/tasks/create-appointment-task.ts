@@ -4,6 +4,7 @@ import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence } from '../guardrails/confidence';
 import { SlotConflictChecker, SlotConflictResult } from './slot-conflict-checker';
 import { AvailabilityFinder, OpenSlot } from './availability-finder';
+import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 
 /**
  * LLM-backed CreateAppointmentTaskHandler.
@@ -49,6 +50,9 @@ Rules:
 - Never invent a customerId or jobId.`;
 
 const ISO_DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** A tentative hold survives 24h before the availability finder treats it as free. */
+const HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function isIsoDatetime(v: unknown): v is string {
   return typeof v === 'string' && ISO_DATETIME_REGEX.test(v);
@@ -186,15 +190,18 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
   private readonly gateway: LLMGateway;
   private readonly slotConflictChecker?: SlotConflictChecker;
   private readonly availabilityFinder?: AvailabilityFinder;
+  private readonly appointmentRepo?: AppointmentRepository;
 
   constructor(
     gateway: LLMGateway,
     slotConflictChecker?: SlotConflictChecker,
-    availabilityFinder?: AvailabilityFinder
+    availabilityFinder?: AvailabilityFinder,
+    appointmentRepo?: AppointmentRepository
   ) {
     this.gateway = gateway;
     this.slotConflictChecker = slotConflictChecker;
     this.availabilityFinder = availabilityFinder;
+    this.appointmentRepo = appointmentRepo;
   }
 
   async handle(context: TaskContext): Promise<TaskResult> {
@@ -271,6 +278,53 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
     };
+
+    // Held-slot booking path: when an appointmentRepo is wired AND the
+    // LLM produced a complete booking (jobId + both timestamps), place
+    // a tentative hold on the calendar up front and emit a
+    // `create_booking` proposal that references it. The slot is
+    // reserved immediately; approving the proposal confirms it,
+    // rejecting it releases it. Without a repo, or with an incomplete
+    // booking, fall through to the legacy create_appointment proposal.
+    const repo = this.appointmentRepo;
+    if (repo && typeof payload.jobId === 'string' && scheduledStart && scheduledEnd) {
+      let held;
+      try {
+        held = await createAppointment(
+          {
+            tenantId: context.tenantId,
+            jobId: payload.jobId,
+            scheduledStart: new Date(scheduledStart),
+            scheduledEnd: new Date(scheduledEnd),
+            timezone: 'UTC',
+            notes: typeof payload.summary === 'string' ? payload.summary : undefined,
+            createdBy: context.userId,
+            holdPendingApproval: true,
+            holdExpiryAt: new Date(Date.now() + HOLD_WINDOW_MS),
+          },
+          repo,
+        );
+      } catch {
+        // Repo error or validation failure — degrade to the legacy
+        // create_appointment proposal rather than failing the call.
+        return { proposal: createProposal(input), taskType: this.taskType };
+      }
+      const bookingInput: CreateProposalInput = {
+        tenantId: context.tenantId,
+        proposalType: 'create_booking',
+        payload: { appointmentId: held.id },
+        summary: context.message,
+        confidenceScore: confidence.score,
+        confidenceFactors: confidence.factors,
+        sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
+        createdBy: context.userId,
+        sourceTrustTier: 'autonomous',
+        ...(context.tenantThresholdOverride
+          ? { tenantThresholdOverride: context.tenantThresholdOverride }
+          : {}),
+      };
+      return { proposal: createProposal(bookingInput), taskType: 'create_booking' };
+    }
 
     return { proposal: createProposal(input), taskType: this.taskType };
   }
