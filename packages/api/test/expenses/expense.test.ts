@@ -43,6 +43,18 @@ describe('validateCreateExpenseInput', () => {
       'description is required',
     );
   });
+
+  it('rejects a NaN amount', () => {
+    expect(validateCreateExpenseInput({ ...baseInput, amountCents: NaN })).toContain(
+      'amountCents must be a positive number of cents',
+    );
+  });
+
+  it('rejects an invalid spentAt date', () => {
+    expect(
+      validateCreateExpenseInput({ ...baseInput, spentAt: new Date('not-a-date') }),
+    ).toContain('spentAt must be a valid date');
+  });
 });
 
 describe('createExpense', () => {
