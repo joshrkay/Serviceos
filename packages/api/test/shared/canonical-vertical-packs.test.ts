@@ -1,6 +1,26 @@
 import { describe, it, expect } from 'vitest';
 import { seedCanonicalVerticalPacks } from '../../src/shared/canonical-vertical-packs';
-import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
+import { InMemoryVerticalPackRegistry, type VerticalPack } from '../../src/shared/vertical-pack-registry';
+
+function staleCanonicalPack(overrides: Partial<VerticalPack> = {}): VerticalPack {
+  const now = new Date('2026-05-15T00:00:00Z');
+  return {
+    id: 'stale-hvac-pack',
+    packId: 'hvac-v1',
+    version: '1.0.0',
+    verticalType: 'hvac',
+    status: 'active',
+    displayName: 'HVAC Professional',
+    description: 'Stale canonical HVAC pack',
+    metadata: {
+      canonical: true,
+      seededBy: 'createApp',
+    },
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
 
 describe('seedCanonicalVerticalPacks (§3B/3D/3E P1 fix)', () => {
   it('seeds canonical hvac-v1 with rich metadata (terminology, categories, intake_questions, objection_scripts)', async () => {
@@ -57,5 +77,49 @@ describe('seedCanonicalVerticalPacks (§3B/3D/3E P1 fix)', () => {
     const hvacPacks = await registry.findByVertical('hvac');
     expect(hvacPacks.length).toBeGreaterThan(0);
     expect(hvacPacks[0].packId).toBe('hvac-v1');
+  });
+
+  it('refreshes an existing canonical hvac-v1 row with current training metadata', async () => {
+    const registry = new InMemoryVerticalPackRegistry();
+    await registry.register(staleCanonicalPack());
+
+    await seedCanonicalVerticalPacks(registry);
+
+    const hvac = await registry.getByPackId('hvac-v1');
+    expect(hvac).not.toBeNull();
+    const meta = hvac!.metadata as Record<string, unknown>;
+    expect(meta.training_tier).toBe('first_class');
+    expect(meta.training_assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetKind: 'emergency_rule',
+          title: 'No heat extreme weather escalation',
+        }),
+      ]),
+    );
+    expect(meta.canonical).toBe(true);
+    expect(meta.seededBy).toBe('createApp');
+  });
+
+  it('seeds electrical-v1 with second-class canonical training metadata', async () => {
+    const registry = new InMemoryVerticalPackRegistry();
+
+    await seedCanonicalVerticalPacks(registry);
+
+    const electrical = await registry.getByPackId('electrical-v1');
+    expect(electrical).not.toBeNull();
+    expect(electrical!.verticalType).toBe('electrical');
+    const meta = electrical!.metadata as Record<string, unknown>;
+    expect(meta.training_tier).toBe('second_class');
+    expect(meta.training_assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetKind: 'emergency_rule',
+          title: 'Electrical burning smell escalation',
+        }),
+      ]),
+    );
+    expect(meta.canonical).toBe(true);
+    expect(meta.seededBy).toBe('createApp');
   });
 });

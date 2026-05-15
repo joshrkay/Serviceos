@@ -83,32 +83,59 @@ export async function deprecatePack(
   return registry.update(id, { status: 'deprecated', updatedAt: new Date() });
 }
 
+function clonePack(pack: VerticalPack): VerticalPack {
+  return {
+    ...pack,
+    metadata: pack.metadata ? JSON.parse(JSON.stringify(pack.metadata)) : undefined,
+    createdAt: new Date(pack.createdAt),
+    updatedAt: new Date(pack.updatedAt),
+  };
+}
+
+function isCanonicalSeededPack(pack: VerticalPack): boolean {
+  return pack.metadata?.canonical === true || pack.metadata?.seededBy === 'createApp';
+}
+
 export class InMemoryVerticalPackRegistry implements VerticalPackRegistry {
   private packs: Map<string, VerticalPack> = new Map();
 
   async register(pack: VerticalPack): Promise<VerticalPack> {
-    this.packs.set(pack.id, JSON.parse(JSON.stringify(pack)));
-    return JSON.parse(JSON.stringify(pack));
+    const existing = Array.from(this.packs.values()).find((p) => p.packId === pack.packId);
+    if (existing) {
+      if (isCanonicalSeededPack(existing) && isCanonicalSeededPack(pack)) {
+        const refreshed = {
+          ...clonePack(pack),
+          id: existing.id,
+          createdAt: new Date(existing.createdAt),
+        };
+        this.packs.set(existing.id, refreshed);
+        return clonePack(refreshed);
+      }
+      return clonePack(existing);
+    }
+
+    this.packs.set(pack.id, clonePack(pack));
+    return clonePack(pack);
   }
 
   async get(id: string): Promise<VerticalPack | null> {
     const pack = this.packs.get(id);
-    return pack ? { ...pack } : null;
+    return pack ? clonePack(pack) : null;
   }
 
   async getByPackId(packId: string): Promise<VerticalPack | null> {
     const found = Array.from(this.packs.values()).find((p) => p.packId === packId);
-    return found ? { ...found } : null;
+    return found ? clonePack(found) : null;
   }
 
   async findByVertical(verticalType: VerticalType): Promise<VerticalPack[]> {
     return Array.from(this.packs.values())
       .filter((p) => p.verticalType === verticalType)
-      .map((p) => ({ ...p }));
+      .map(clonePack);
   }
 
   async list(): Promise<VerticalPack[]> {
-    return Array.from(this.packs.values()).map((p) => ({ ...p }));
+    return Array.from(this.packs.values()).map(clonePack);
   }
 
   async update(id: string, updates: Partial<VerticalPack>): Promise<VerticalPack | null> {
@@ -117,6 +144,6 @@ export class InMemoryVerticalPackRegistry implements VerticalPackRegistry {
     const { id: _id, packId: _pid, createdAt: _ca, ...safeUpdates } = updates;
     const updated = { ...pack, ...safeUpdates };
     this.packs.set(id, updated);
-    return { ...updated };
+    return clonePack(updated);
   }
 }
