@@ -16,7 +16,7 @@ export type ExpenseCategory =
   | 'office'
   | 'other';
 
-export const EXPENSE_CATEGORIES: ExpenseCategory[] = [
+export const EXPENSE_CATEGORIES: readonly ExpenseCategory[] = [
   'materials',
   'fuel',
   'tools',
@@ -78,12 +78,16 @@ export function validateCreateExpenseInput(input: CreateExpenseInput): string[] 
   if (!input.description || input.description.trim().length === 0) {
     errors.push('description is required');
   }
-  if (typeof input.amountCents !== 'number' || input.amountCents <= 0) {
+  if (
+    typeof input.amountCents !== 'number' ||
+    !Number.isFinite(input.amountCents) ||
+    input.amountCents <= 0
+  ) {
     errors.push('amountCents must be a positive number of cents');
   } else if (!Number.isInteger(input.amountCents)) {
     errors.push('amountCents must be an integer');
   }
-  if (!EXPENSE_CATEGORIES.includes(input.category)) {
+  if (!(EXPENSE_CATEGORIES as readonly string[]).includes(input.category)) {
     errors.push('category must be one of: ' + EXPENSE_CATEGORIES.join(', '));
   }
   if (!(input.spentAt instanceof Date) || Number.isNaN(input.spentAt.getTime())) {

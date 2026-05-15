@@ -30,10 +30,19 @@ export interface RecordPaymentInput {
   processedBy: string;
 }
 
+export interface PaymentListOptions {
+  status?: PaymentStatus;
+  /** Inclusive lower bound on `receivedAt`. */
+  from?: Date;
+  /** Exclusive upper bound on `receivedAt`. */
+  to?: Date;
+}
+
 export interface PaymentRepository {
   create(payment: Payment): Promise<Payment>;
   findById(tenantId: string, id: string): Promise<Payment | null>;
   findByInvoice(tenantId: string, invoiceId: string): Promise<Payment[]>;
+  findByTenant(tenantId: string, options?: PaymentListOptions): Promise<Payment[]>;
   update(tenantId: string, id: string, updates: Partial<Payment>): Promise<Payment | null>;
 }
 
@@ -134,6 +143,15 @@ export class InMemoryPaymentRepository implements PaymentRepository {
   async findByInvoice(tenantId: string, invoiceId: string): Promise<Payment[]> {
     return Array.from(this.payments.values())
       .filter((p) => p.tenantId === tenantId && p.invoiceId === invoiceId)
+      .map((p) => ({ ...p }));
+  }
+
+  async findByTenant(tenantId: string, options?: PaymentListOptions): Promise<Payment[]> {
+    return Array.from(this.payments.values())
+      .filter((p) => p.tenantId === tenantId)
+      .filter((p) => !options?.status || p.status === options.status)
+      .filter((p) => !options?.from || p.receivedAt.getTime() >= options.from.getTime())
+      .filter((p) => !options?.to || p.receivedAt.getTime() < options.to.getTime())
       .map((p) => ({ ...p }));
   }
 

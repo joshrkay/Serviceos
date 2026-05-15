@@ -95,6 +95,7 @@ import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
 } from './reports/revenue-by-source';
+import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
 
@@ -161,6 +162,8 @@ import { PgAppointmentRepository } from './appointments/pg-appointment';
 import { PgEstimateRepository } from './estimates/pg-estimate';
 import { PgInvoiceRepository } from './invoices/pg-invoice';
 import { PgPaymentRepository } from './invoices/pg-payment';
+import { InMemoryExpenseRepository } from './expenses/expense';
+import { PgExpenseRepository } from './expenses/pg-expense';
 import { PgNoteRepository } from './notes/pg-note';
 import { PgConversationRepository } from './conversations/pg-conversation';
 import { PgSettingsRepository } from './settings/pg-settings';
@@ -685,6 +688,7 @@ export function createApp(): express.Express {
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
+  const expenseRepo        = pool ? new PgExpenseRepository(pool)        : new InMemoryExpenseRepository();
   // P5-017: Resolve the payment-link provider via the factory so the mock
   // is hard-blocked in production. The factory throws at boot if
   // STRIPE_SECRET_KEY (or STRIPE_API_KEY) is missing while NODE_ENV=production,
@@ -1005,6 +1009,7 @@ export function createApp(): express.Express {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: schedulingConfirmationNotifier,
+    expenseRepo,
     auditRepo,
   });
   // P18-001: replace the stub create_customer handler from the registry
@@ -1906,11 +1911,25 @@ export function createApp(): express.Express {
   // the same instance.
   app.use('/api/billing', createBillingRouter({ billingService, connectService }));
 
-  // Tenant-scoped reporting (revenue by lead source / UTM).
+  // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
     ? new PgRevenueBySourceRepository(pool)
     : new InMemoryRevenueBySourceRepository();
-  app.use('/api/reports', createReportsRouter(revenueBySourceRepo));
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
+  app.use(
+    '/api/reports',
+    createReportsRouter({
+      revenueBySourceRepo,
+      moneyDashboardRepo,
+      expenseRepo,
+      invoiceRepo,
+      paymentRepo,
+    }),
+  );
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
 
