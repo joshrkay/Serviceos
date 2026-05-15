@@ -63,6 +63,13 @@ export interface RefreshJobMoneyStateDeps {
   invoiceRepo: InvoiceRepository;
   /** When provided, a `job.money_state_changed` event is emitted on every transition. */
   auditRepo?: AuditRepository;
+  /**
+   * Optional logger — when provided, `refreshJobMoneyStateSafe` will
+   * `logger.warn(...)` on rollup failure instead of swallowing silently.
+   * Domain functions don't have loggers; route and worker call sites
+   * (Tasks 5–7) do and should supply one via `deps.logger`.
+   */
+  logger?: Logger;
 }
 
 export interface RefreshJobMoneyStateResult {
@@ -147,7 +154,8 @@ export async function refreshJobMoneyStateSafe(
   try {
     return await refreshJobMoneyState(tenantId, jobId, actorId, deps);
   } catch (err) {
-    logger?.warn('refreshJobMoneyState failed', {
+    const effectiveLogger = logger ?? deps.logger;
+    effectiveLogger?.warn('refreshJobMoneyState failed', {
       tenantId,
       jobId,
       error: err instanceof Error ? err.message : String(err),
