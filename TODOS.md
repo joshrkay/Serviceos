@@ -63,6 +63,28 @@ infer it from their address.
 
 ---
 
+## charge.refund.updated handler for pending → succeeded transitions
+
+D2-4 (PR #384) added `charge.refunded` handling and `091e6e1` adds a
+`refund.status === 'succeeded'` guard so non-settled refunds (`pending`,
+`requires_action`, `failed`, `canceled`) are skip-ACKed without mutating
+`refundedAmountCents`. When Stripe later settles a previously-pending
+refund, it re-fires `charge.refunded` with `status='succeeded'`, so the
+guard is functional today.
+
+**Optional enhancement:** wire a dedicated `charge.refund.updated`
+handler in `packages/api/src/webhooks/routes.ts`. This event fires on
+every refund status transition (including `pending → failed`), letting
+us explicitly observe failed-refund cases for monitoring rather than
+relying on the absence of a re-fired `charge.refunded`. Low priority —
+the current handler is correct, this would just improve observability.
+
+**Effort:** ~30 min CC + 2 tests.
+
+Surfaced by `chatgpt-codex-connector[bot]` in PR #384 review (2026-05-16).
+
+---
+
 ## Partial refunds are unrepresentable ✅ MOSTLY CLOSED (D2-4)
 
 D2-4 (2026-05-16, PR #384) added `refunded_amount_cents`, `refunded_at`, and `last_refund_stripe_id` columns to `payments` (migration 100), wired `recordRefund()` in `packages/api/src/payments/payment-service.ts` (with over-refund guard), connected the Stripe `charge.refunded` webhook, and updated `tax-export.ts` + `money-dashboard.ts` to emit negative-income rows + gross/net distinction.
