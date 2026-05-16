@@ -2255,8 +2255,8 @@ export function createApp(): express.Express {
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
-  app.use('/api/templates', createTemplateRouter(templateRepo));
-  app.use('/api/bundles', createBundleRouter(bundleRepo));
+  app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
+  app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   const voiceLogger = createLogger({
     service: 'voice',
@@ -2273,7 +2273,7 @@ export function createApp(): express.Express {
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
     })
   );
-  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })

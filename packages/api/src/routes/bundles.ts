@@ -7,9 +7,14 @@ import {
   ServiceBundleRepository,
   createBundle,
   matchBundles,
+  updateBundle,
 } from '../verticals/bundles';
+import { AuditRepository } from '../audit/audit';
 
-export function createBundleRouter(bundleRepo: ServiceBundleRepository): Router {
+export function createBundleRouter(
+  bundleRepo: ServiceBundleRepository,
+  auditRepo?: AuditRepository,
+): Router {
   const router = Router();
 
   router.get(
@@ -66,7 +71,9 @@ export function createBundleRouter(bundleRepo: ServiceBundleRepository): Router 
           ...parsed,
           tenantId: req.auth!.tenantId,
         },
-        bundleRepo
+        bundleRepo,
+        { userId: req.auth!.userId, role: req.auth!.role },
+        auditRepo,
       );
       res.status(201).json(result);
     })
@@ -101,15 +108,22 @@ export function createBundleRouter(bundleRepo: ServiceBundleRepository): Router 
     requirePermission('estimates:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const { name, description, categoryIds, lineItemTemplates, triggerKeywords, isActive } = req.body;
-      const result = await bundleRepo.update(req.auth!.tenantId, req.params.id, {
-        ...(name !== undefined && { name }),
-        ...(description !== undefined && { description }),
-        ...(categoryIds !== undefined && { categoryIds }),
-        ...(lineItemTemplates !== undefined && { lineItemTemplates }),
-        ...(triggerKeywords !== undefined && { triggerKeywords }),
-        ...(isActive !== undefined && { isActive }),
-        updatedAt: new Date(),
-      });
+      const result = await updateBundle(
+        bundleRepo,
+        req.auth!.tenantId,
+        req.params.id,
+        {
+          ...(name !== undefined && { name }),
+          ...(description !== undefined && { description }),
+          ...(categoryIds !== undefined && { categoryIds }),
+          ...(lineItemTemplates !== undefined && { lineItemTemplates }),
+          ...(triggerKeywords !== undefined && { triggerKeywords }),
+          ...(isActive !== undefined && { isActive }),
+          updatedAt: new Date(),
+        },
+        { userId: req.auth!.userId, role: req.auth!.role },
+        auditRepo,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Bundle not found' });
         return;

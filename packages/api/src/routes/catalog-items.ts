@@ -8,9 +8,12 @@ import {
   CatalogCategory,
   CatalogItem,
   CatalogItemRepository,
+  archiveCatalogItem,
   createCatalogItem,
+  persistCatalogItem,
   updateCatalogItem,
 } from '../catalog/catalog-item';
+import { AuditRepository } from '../audit/audit';
 
 const listCatalogItemsQuerySchema = z.object({
   search: z.string().trim().optional(),
@@ -38,7 +41,10 @@ function toApiModel(item: CatalogItem) {
   };
 }
 
-export function createCatalogItemsRouter(catalogRepo: CatalogItemRepository): Router {
+export function createCatalogItemsRouter(
+  catalogRepo: CatalogItemRepository,
+  auditRepo?: AuditRepository,
+): Router {
   const router = Router();
 
   router.get(
@@ -76,10 +82,15 @@ export function createCatalogItemsRouter(catalogRepo: CatalogItemRepository): Ro
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = createCatalogItemSchema.parse(req.body);
-        const created = await catalogRepo.create(createCatalogItem({
-          tenantId: req.auth!.tenantId,
-          ...parsed,
-        }));
+        const created = await persistCatalogItem(
+          catalogRepo,
+          createCatalogItem({
+            tenantId: req.auth!.tenantId,
+            ...parsed,
+          }),
+          { userId: req.auth!.userId, role: req.auth!.role },
+          auditRepo,
+        );
 
         res.status(201).json(toApiModel(created));
       } catch (err) {
@@ -101,7 +112,14 @@ export function createCatalogItemsRouter(catalogRepo: CatalogItemRepository): Ro
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'At least one field is required' });
           return;
         }
-        const updated = await updateCatalogItem(catalogRepo, req.auth!.tenantId, req.params.id, parsed);
+        const updated = await updateCatalogItem(
+          catalogRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          parsed,
+          { userId: req.auth!.userId, role: req.auth!.role },
+          auditRepo,
+        );
 
         if (!updated) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Catalog item not found' });
@@ -123,7 +141,13 @@ export function createCatalogItemsRouter(catalogRepo: CatalogItemRepository): Ro
     requirePermission('settings:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const archived = await catalogRepo.archive(req.auth!.tenantId, req.params.id);
+        const archived = await archiveCatalogItem(
+          catalogRepo,
+          req.auth!.tenantId,
+          req.params.id,
+          { userId: req.auth!.userId, role: req.auth!.role },
+          auditRepo,
+        );
         if (!archived) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Catalog item not found' });
           return;
