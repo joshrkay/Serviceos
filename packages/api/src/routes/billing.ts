@@ -2,9 +2,10 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { toErrorResponse, NotFoundError } from '../shared/errors';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 /**
  * Tier 4 (Subscription — Fieldly billing). Endpoints for the SaaS
@@ -38,9 +39,12 @@ export interface BillingRouteDeps {
    *  status. Optional so legacy harnesses without Connect configured
    *  still build the router. */
   connectService?: StripeConnectService;
+  /** Optional audit repository for emitting billing lifecycle events. */
+  auditRepo?: AuditRepository;
 }
 
 export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
+  const { billingService, connectService, auditRepo } = deps;
   const router = Router();
 
   router.get(
@@ -50,14 +54,14 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
     requirePermission('settings:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        if (!deps.billingService) {
+        if (!billingService) {
           // Legacy harness without the service wired — return null
           // fields so the UI surfaces "not configured" rather than
           // a hard error.
           res.json({ customerId: null, subscriptionId: null, status: null });
           return;
         }
-        const view = await deps.billingService.getSubscription(req.auth!.tenantId);
+        const view = await billingService.getSubscription(req.auth!.tenantId);
         res.json(view);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -73,7 +77,7 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
     requirePermission('tenant:manage'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        if (!deps.billingService) {
+        if (!billingService) {
           res.status(503).json({
             error: 'BILLING_NOT_CONFIGURED',
             message: 'Subscription billing is not configured',
@@ -93,7 +97,7 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
           });
           return;
         }
-        const result = await deps.billingService.getOrCreatePortalUrl({
+        const result = await billingService!.getOrCreatePortalUrl({
           tenantId: req.auth!.tenantId,
           ownerEmail: email,
           returnUrl: parsed.returnUrl,
@@ -118,11 +122,11 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
     requirePermission('settings:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        if (!deps.connectService) {
+        if (!connectService) {
           res.json({ accountId: null, status: 'pending', chargesEnabled: false, payoutsEnabled: false });
           return;
         }
-        const view = await deps.connectService.getAccount(req.auth!.tenantId);
+        const view = await connectService.getAccount(req.auth!.tenantId);
         res.json(view);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -143,7 +147,7 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
     requirePermission('tenant:manage'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        if (!deps.connectService) {
+        if (!connectService) {
           res.status(503).json({
             error: 'CONNECT_NOT_CONFIGURED',
             message: 'Stripe Connect is not configured',
@@ -159,7 +163,7 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
           });
           return;
         }
-        const result = await deps.connectService.createOnboardingLink({
+        const result = await connectService!.createOnboardingLink({
           tenantId: req.auth!.tenantId,
           ownerEmail: email,
           returnUrl: parsed.returnUrl,
@@ -187,15 +191,79 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
     requirePermission('tenant:manage'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        if (!deps.connectService) {
+        if (!connectService) {
           res.status(503).json({
             error: 'CONNECT_NOT_CONFIGURED',
             message: 'Stripe Connect is not configured',
           });
           return;
         }
-        const ok = await deps.connectService.disconnect(req.auth!.tenantId);
+        const ok = await connectService!.disconnect(req.auth!.tenantId);
         res.json({ disconnected: ok });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * POST /api/billing/end-trial-now
+   *
+   * Ends the tenant's Stripe trial subscription immediately. Used by
+   * the upgrade-nudge banner when the operator opts in early. Requires
+   * billingService (503 when Stripe is not configured) and an active
+   * subscription on the tenant row (409 NO_SUBSCRIPTION otherwise).
+   * Emits a tenant.trial_ended_early audit event.
+   */
+  router.post(
+    '/end-trial-now',
+    requireAuth,
+    requireTenant,
+    requirePermission('tenant:manage'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!billingService) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+
+        // endTrialNow throws NotFoundError('Subscription', ...) when no
+        // stripe_subscription_id is on file — translate to 409 NO_SUBSCRIPTION.
+        try {
+          await billingService.endTrialNow(tenantId);
+        } catch (innerErr: unknown) {
+          if (
+            innerErr instanceof NotFoundError &&
+            innerErr.message.startsWith('Subscription not found')
+          ) {
+            res.status(409).json({ error: 'NO_SUBSCRIPTION' });
+            return;
+          }
+          throw innerErr;
+        }
+
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: userId,
+              actorRole: req.auth!.role,
+              eventType: 'tenant.trial_ended_early',
+              entityType: 'tenant',
+              entityId: tenantId,
+              metadata: {},
+            }),
+          );
+        }
+
+        res.json({ ok: true });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

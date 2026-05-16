@@ -40,6 +40,8 @@ const configSchema = z.object({
   CORS_ORIGIN: z.string().optional(),
   STRIPE_API_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  WEB_URL: z.string().url().optional().default('http://localhost:5173'),
+  STRIPE_PRICE_ID: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

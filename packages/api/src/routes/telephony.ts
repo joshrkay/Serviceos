@@ -98,6 +98,19 @@ export interface TelephonyRouterDeps {
    */
   mediaStreamsEnabled?: boolean;
   /**
+   * §10 onboarding — optional pre-flight gate run after tenant
+   * resolution and before AI routing. Composes the subscription
+   * status check (Gate A) and trial usage caps (Gate B). When
+   * `allowed=false`, the /voice route returns voicemail TwiML
+   * instead of invoking the adapter.
+   *
+   * When unset, no gate runs (legacy behavior).
+   */
+  voiceGate?: (input: { tenantId: string; callSid: string }) => Promise<{
+    allowed: boolean;
+    reason?: 'no_billing' | 'trial_cap_daily' | 'trial_cap_total' | 'trial_cap_concurrent';
+  }>;
+  /**
    * Optional health snapshot factory. When set, mounts a public
    * `GET /health` route that returns which voice capabilities are
    * wired (TTS, STT, recording, delivery, etc.). Surfaces booleans
@@ -215,6 +228,31 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       logger.error('telephony/voice: no tenant resolved', { to, from });
       res.status(500).type('text/plain').send('Tenant resolution failed');
       return;
+    }
+
+    // §10 voice gates — subscription status + trial usage caps. Logged
+    // via voiceBlocksTotal counter inside the gate; emits an audit event
+    // per block. Returns voicemail TwiML on block so leads can still leave
+    // a message (Twilio still bills the minute, but AI/OpenAI cost is zero).
+    if (deps.voiceGate) {
+      try {
+        const gate = await deps.voiceGate({ tenantId, callSid });
+        if (!gate.allowed) {
+          res
+            .status(200)
+            .type('text/xml')
+            .send(
+              `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">This number is being set up. Please leave a message after the tone.</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`,
+            );
+          return;
+        }
+      } catch (err) {
+        // Gate failures must not block real calls — log and fall through.
+        logger.error('telephony/voice: voiceGate failed open', {
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     try {

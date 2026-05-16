@@ -206,6 +206,13 @@ export interface TwilioAdapterDeps {
    * blocked by a settings lookup failure.
    */
   voicePersonaResolver?: VoicePersonaResolver;
+  /**
+   * §10 onboarding — fired after voice_sessions.ended_at is stamped.
+   * Drives the 30-minute upgrade nudge (banner + optional email).
+   * Failures are swallowed so call termination is never blocked by
+   * the nudge check.
+   */
+  onSessionEnded?: (event: { tenantId: string; callSid?: string }) => Promise<void>;
 }
 
 /**
@@ -1725,6 +1732,16 @@ export class TwilioGatherAdapter {
       });
     } catch {
       /* swallow — outcome stamping is best-effort */
+    }
+    if (this.deps.onSessionEnded) {
+      try {
+        await this.deps.onSessionEnded({
+          tenantId: session.tenantId,
+          ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
+        });
+      } catch {
+        /* swallow — nudge check must never block call end */
+      }
     }
   }
 
