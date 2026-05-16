@@ -231,6 +231,54 @@ describe('recordRefund (D2-4)', () => {
     ).rejects.toBeInstanceOf(NotFoundError);
   });
 
+  it('per-refund idempotency: same stripeRefundId twice does NOT double-count (Codex P1 PR #384)', async () => {
+    // The same Stripe refund.id can arrive via both charge.refunded AND
+    // charge.refund.updated; the outer webhook-event-id dedup doesn't
+    // help (the two events have different event.ids). recordRefund must
+    // short-circuit when payment.lastRefundStripeId === stripeRefundId.
+    const payment = makePayment({ amountCents: 50000 });
+    await paymentRepo.create(payment);
+
+    const refundedAt = new Date('2026-05-10T15:30:00Z');
+    const r1 = await recordRefund(
+      {
+        tenantId: TENANT_A,
+        paymentId: payment.id,
+        refundCents: 5000,
+        stripeRefundId: 're_1',
+        refundedAt,
+      },
+      paymentRepo,
+      auditRepo,
+    );
+    expect(r1.refundCents).toBe(5000);
+    expect(r1.totalRefundedCents).toBe(5000);
+
+    // Second call with the SAME stripeRefundId — must short-circuit,
+    // returning the existing state with refundCents=0.
+    const r2 = await recordRefund(
+      {
+        tenantId: TENANT_A,
+        paymentId: payment.id,
+        refundCents: 5000,
+        stripeRefundId: 're_1',
+        refundedAt,
+      },
+      paymentRepo,
+      auditRepo,
+    );
+    expect(r2.refundCents).toBe(0);
+    expect(r2.totalRefundedCents).toBe(5000);
+
+    const reread = await paymentRepo.findById(TENANT_A, payment.id);
+    expect(reread?.refundedAmountCents).toBe(5000); // unchanged
+    expect(reread?.lastRefundStripeId).toBe('re_1');
+
+    // Only ONE audit event emitted (the first call).
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.refunded');
+    expect(events).toHaveLength(1);
+  });
+
   it('audit event is optional (auditRepo undefined still completes the mutation)', async () => {
     const payment = makePayment({ amountCents: 50000 });
     await paymentRepo.create(payment);

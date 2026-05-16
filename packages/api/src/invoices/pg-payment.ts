@@ -103,6 +103,30 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
     });
   }
 
+  /**
+   * System-level lookup by Stripe payment_intent (the value we stamp into
+   * provider_reference at checkout.session.completed). Used by webhook
+   * handlers that receive payment events lacking explicit tenant metadata
+   * (e.g. charge.refund.updated, whose payload is just the Refund object
+   * without the parent charge's metadata.tenant_id).
+   *
+   * Bypasses tenant-scoped RLS via `withClient` (no `SET app.current_tenant_id`)
+   * — only call from server-internal trusted paths. The cross-tenant nature
+   * is intentional and is signalled by the explicit method name + the lack
+   * of a `tenantId` parameter; the resolved payment's own `tenantId` field
+   * is then used to scope all downstream writes (e.g. `recordRefund`).
+   */
+  async findByProviderReferenceCrossTenant(providerReference: string): Promise<Payment | null> {
+    return this.withClient(async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM payments WHERE reference_number = $1 ORDER BY paid_at DESC LIMIT 1`,
+        [providerReference],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
   async findByTenant(
     tenantId: string,
     options?: PaymentListOptions,

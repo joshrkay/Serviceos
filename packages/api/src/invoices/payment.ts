@@ -92,6 +92,14 @@ export interface PaymentRepository {
    * collisions could resolve incorrectly).
    */
   findByProviderReference(tenantId: string, providerReference: string): Promise<Payment | null>;
+  /**
+   * System-level lookup by Stripe payment_intent (the value we stamp into
+   * provider_reference at checkout.session.completed). Used by webhook
+   * handlers that receive payment events lacking explicit tenant metadata
+   * (e.g. charge.refund.updated). Bypasses tenant-scoped RLS via withClient
+   * — only call from server-internal trusted paths.
+   */
+  findByProviderReferenceCrossTenant(providerReference: string): Promise<Payment | null>;
   update(tenantId: string, id: string, updates: Partial<Payment>): Promise<Payment | null>;
   /**
    * D2-4 — atomically increment `refundedAmountCents` by `opts.refundCents`,
@@ -234,6 +242,13 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     // Most-recent-first matches the pg impl's ORDER BY received_at DESC.
     const matches = Array.from(this.payments.values())
       .filter((p) => p.tenantId === tenantId && p.providerReference === providerReference)
+      .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+    return matches[0] ? { ...matches[0] } : null;
+  }
+
+  async findByProviderReferenceCrossTenant(providerReference: string): Promise<Payment | null> {
+    const matches = Array.from(this.payments.values())
+      .filter((p) => p.providerReference === providerReference)
       .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
     return matches[0] ? { ...matches[0] } : null;
   }
