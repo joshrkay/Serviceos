@@ -82,7 +82,7 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
           approved_by = EXCLUDED.approved_by,
           activated_at = EXCLUDED.activated_at,
           created_at = EXCLUDED.created_at,
-          updated_at = EXCLUDED.updated_at
+          updated_at = COALESCE($16, vertical_training_assets.updated_at)
         WHERE vertical_training_assets.tenant_id = EXCLUDED.tenant_id
         RETURNING *`,
         [
