@@ -80,8 +80,16 @@ export class LogExpenseExecutionHandler implements ExecutionHandler {
             metadata: { proposalId: proposal.id, proposalType: 'log_expense', amountCents, category },
           }),
         );
-      } catch {
-        // Audit failures must not unwind a successful expense create.
+      } catch (auditErr) {
+        // Audit failures must not unwind a successful expense create —
+        // but they MUST be diagnosable. Without this warn, a silently
+        // broken audit pipeline would leave us blind to mutations that
+        // never made it into the audit trail. Mirrors the pattern in
+        // proposals/actions.ts:139.
+        const msg = auditErr instanceof Error ? auditErr.message : String(auditErr);
+        console.warn(
+          `Failed to emit expense.logged audit event for expense ${expenseId} (proposal ${proposal.id}): ${msg}`,
+        );
       }
     }
 
