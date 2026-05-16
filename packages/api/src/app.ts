@@ -91,6 +91,7 @@ import { createDispatchRoutes } from './dispatch/routes';
 import { createPublicFeedbackRouter } from './routes/public-feedback';
 import { createPublicIntakeRouter } from './routes/public-intake';
 import { createReportsRouter } from './routes/reports';
+import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
@@ -1983,6 +1984,11 @@ export function createApp(): express.Express {
     paymentRepo,
     expenseRepo,
   );
+  const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
+    proposalRepo,
+    settingsRepo,
+    voiceSessionRepo,
+  );
   app.use(
     '/api/reports',
     createReportsRouter({
@@ -1991,6 +1997,7 @@ export function createApp(): express.Express {
       expenseRepo,
       invoiceRepo,
       paymentRepo,
+      timeGivenBackReporter,
     }),
   );
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
