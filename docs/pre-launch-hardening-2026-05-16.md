@@ -39,12 +39,12 @@ running this sprint.
 
 ### Day 2 — Audit trail + revenue paths
 
-- [x] **D2-1 Phase 1** done (`13c47a5`) — `docs/quality/audit-coverage-2026-05-16.md` catalogs 28 routes: 2 COVERED / 2 PARTIAL / 16 MISSING / 5 READ-ONLY / 3 OUT-OF-SCOPE. Scope-guard tripped at 18 files; split into D2-1a-e sub-batches.
-  - [ ] **D2-1c** *(in flight, CRITICAL)* — proposals + settings + users + feature-flags audit coverage; wires existing `logProposalEvent` helper
-  - [ ] **D2-1a** *(queued)* — appointments + locations + notes + conversations
-  - [ ] **D2-1b** *(queued)* — catalog + templates + bundles
-  - [ ] **D2-1d** *(queued)* — portal + calendar-integrations + public-estimates + public-feedback + public-invoices
-  - [ ] **D2-1e** *(queued, low priority)* — pack-activation + maintenance-contracts
+- [x] **D2-1 ALL SUB-BATCHES COMPLETE** — 18 route files now emit audit events; 19 canary smoke tests green
+  - [x] **D2-1c** done (`b19983c`) — proposals (wired `logProposalEvent`) + settings + users + feature-flags (5 canary tests; uses `metadata.scope='platform'` for feature-flag cross-tenant tracking); 411 regression tests pass
+  - [x] **D2-1a** done (`0185a6f` → `66c0074`) — appointments + locations + notes + conversations (4 canary tests); kept `auditRepo` optional in router factories for test back-compat
+  - [x] **D2-1b** done (`92d9b18` → `d72d1e9`) — catalog + templates + bundles (3 canary tests); DELETE uses `archived` event (soft-delete)
+  - [x] **D2-1d** done (`9802928` → `a63b944`) — portal + calendar-integrations + public-estimates + public-feedback + public-invoices (4 canary tests); shared `publicActorFromToken()` helper for synthetic `public:<sha256(token).slice(0,12)>` actors
+  - [x] **D2-1e** done (`f9edbfc` → `22c0f32`) — pack-activation + maintenance-contracts (3 canary tests)
 - [x] **D2-2** done (`fb33a02` → `6b57cdb`) — `RESTRICTED_DISABLED_REASONS` set (6 reasons) + account.updated webhook persists status; 21 tests pass
 - [x] **D2-3** done (`ceff2d0`) — phone-number → tenant lookup via `tenant_integrations.provider_data->>'phoneE164'`; prod miss → Sentry error + "not in service" TwiML; dev fallback retained with WARN; 129 telephony tests pass
 - [x] **D2-4** done (`eb15b73` → `3d130f9`) — migration 100 adds `refunded_amount_cents`/`refunded_at`/`last_refund_stripe_id`; `recordRefund()` service + `charge.refunded` webhook; tax export emits negative-income rows dated by `refundedAt`; money dashboard gross vs net; 22 tests. **Follow-up:** checkout flow needs to stamp `payment_id` on Stripe metadata so refund webhook can resolve payments.
