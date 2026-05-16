@@ -7,7 +7,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "prepare": "tsc",
+    "prepare": "command -v tsc > /dev/null 2>&1 && tsc || true",
     "test": "vitest run"
   },
   "dependencies": {
