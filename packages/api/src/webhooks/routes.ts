@@ -863,6 +863,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               id?: string;
               amount?: number;
               created?: number;
+              status?: string;
               payment_intent?: string | { id?: string };
               metadata?: { tenant_id?: string; payment_id?: string };
             }>;
@@ -881,6 +882,31 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           });
           await webhookRepo.updateStatus(event.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
+        }
+
+        // Codex P1 (PR #384) — only mutate payment totals for SETTLED
+        // refunds. Stripe can return refunds in `pending` (e.g.
+        // insufficient platform balance) or `requires_action`; these may
+        // later transition to `failed` or `canceled`. We don't have a
+        // `charge.refund.updated` handler yet, so recording the amount
+        // on a non-succeeded refund would permanently overstate refunds
+        // if Stripe later fails it. Skip-ack (200) so Stripe stops
+        // retrying THIS event; the eventual `charge.refund.updated`
+        // event (or a re-fired `charge.refunded` once succeeded) will
+        // carry status='succeeded' and we'll record it then.
+        //
+        // Older API versions / older test fixtures may not carry a
+        // `status` field at all — treat undefined as succeeded for
+        // back-compat.
+        if (refund.status !== undefined && refund.status !== 'succeeded') {
+          logger.info('charge.refunded with non-succeeded refund status — deferring', {
+            eventId: event.id,
+            chargeId: charge.id,
+            refundId: refund.id,
+            refundStatus: refund.status,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, deferred: true, refundStatus: refund.status });
         }
 
         const tenantId =

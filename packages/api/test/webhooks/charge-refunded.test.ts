@@ -67,6 +67,8 @@ interface StripeEventOpts {
   chargePaymentIntentId?: string;
   refundMetadata?: Record<string, string>;
   chargeMetadata?: Record<string, string>;
+  /** Stripe refund status: 'succeeded' (default) | 'pending' | 'requires_action' | 'failed' | 'canceled' */
+  refundStatus?: string;
 }
 
 function buildChargeRefundedEvent(opts: StripeEventOpts): Record<string, unknown> {
@@ -84,6 +86,7 @@ function buildChargeRefundedEvent(opts: StripeEventOpts): Record<string, unknown
               id: opts.refundId ?? `re_${uuidv4()}`,
               amount: opts.refundAmountCents,
               created: Math.floor(Date.now() / 1000),
+              status: opts.refundStatus ?? 'succeeded',
               payment_intent: opts.paymentIntentId,
               metadata: opts.refundMetadata ?? {},
             },
@@ -265,5 +268,84 @@ describe('Stripe charge.refunded route (D2-4 — Codex P1 #2 + #3 follow-up)', (
 
     expect(res.status).toBe(200);
     expect(res.body?.skipped).toBe(true);
+  });
+
+  it('defers (200) when refund.status is pending — does NOT mutate refundedAmountCents (Codex P1 pending-refunds)', async () => {
+    // Stripe can return refunds in 'pending' (e.g. insufficient
+    // platform balance) that later transition to 'failed'. Recording
+    // the amount immediately would permanently overstate refunds.
+    const piId = `pi_${uuidv4()}`;
+    const payment = makePayment({ amountCents: 50000, providerReference: piId });
+    await paymentRepo.create(payment);
+
+    const res = await postSigned(
+      app,
+      buildChargeRefundedEvent({
+        refundAmountCents: 1500,
+        paymentIntentId: piId,
+        refundMetadata: { tenant_id: TENANT },
+        chargeMetadata: { tenant_id: TENANT },
+        refundStatus: 'pending',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body?.deferred).toBe(true);
+    expect(res.body?.refundStatus).toBe('pending');
+
+    // refundedAmountCents MUST NOT have moved.
+    const reread = await paymentRepo.findById(TENANT, payment.id);
+    expect(reread?.refundedAmountCents).toBe(0);
+    expect(reread?.refundedAt).toBeNull();
+    expect(auditRepo.getAll().some((e) => e.eventType === 'payment.refunded')).toBe(false);
+  });
+
+  it('defers (200) when refund.status is failed — does NOT mutate refundedAmountCents', async () => {
+    const piId = `pi_${uuidv4()}`;
+    const payment = makePayment({ amountCents: 50000, providerReference: piId });
+    await paymentRepo.create(payment);
+
+    const res = await postSigned(
+      app,
+      buildChargeRefundedEvent({
+        refundAmountCents: 1500,
+        paymentIntentId: piId,
+        refundMetadata: { tenant_id: TENANT },
+        chargeMetadata: { tenant_id: TENANT },
+        refundStatus: 'failed',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body?.deferred).toBe(true);
+
+    const reread = await paymentRepo.findById(TENANT, payment.id);
+    expect(reread?.refundedAmountCents).toBe(0);
+    expect(reread?.refundedAt).toBeNull();
+  });
+
+  it('processes refund when status is explicitly succeeded', async () => {
+    // The default behavior — just pinning that explicit 'succeeded'
+    // doesn't short-circuit.
+    const piId = `pi_${uuidv4()}`;
+    const payment = makePayment({ amountCents: 50000, providerReference: piId });
+    await paymentRepo.create(payment);
+
+    const res = await postSigned(
+      app,
+      buildChargeRefundedEvent({
+        refundAmountCents: 1500,
+        paymentIntentId: piId,
+        refundMetadata: { tenant_id: TENANT },
+        chargeMetadata: { tenant_id: TENANT },
+        refundStatus: 'succeeded',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body?.deferred).not.toBe(true);
+
+    const reread = await paymentRepo.findById(TENANT, payment.id);
+    expect(reread?.refundedAmountCents).toBe(1500);
   });
 });
