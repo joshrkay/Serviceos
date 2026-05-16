@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router';
 import type { OnboardingStatusResponse, OnboardingStepId } from '../../../types/onboarding';
 
 interface SidebarProps {
@@ -24,6 +25,7 @@ const ICON: Record<string, string> = {
 };
 
 export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
+  const navigate = useNavigate();
   const completedCount = status.steps.filter(
     (s) => s.status === 'done' || s.status === 'skipped',
   ).length;
@@ -61,6 +63,40 @@ export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
       </ul>
       <div className="mt-6 pt-4 border-t border-slate-200 text-xs text-slate-500">
         {completedCount} of 6 · keep going
+      </div>
+
+      {/* §10 Task 19 — optional polish steps. Only interactive once the
+          mandatory checklist is complete. Both link to /settings rather
+          than embedding the full forms here; a follow-up PR may relocate
+          the existing 9-step wizard's terminology + automation-rules
+          sub-flows into dedicated step components. */}
+      <div className="mt-8 pt-4 border-t border-slate-200">
+        <div className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+          Optional polish
+        </div>
+        <ul className="space-y-1">
+          {(['terminology', 'automation'] as const).map((id) => {
+            const enabled = status.isComplete;
+            const label = id === 'terminology' ? 'Tune terminology' : 'Set automation rules';
+            return (
+              <li key={id}>
+                <button
+                  type="button"
+                  disabled={!enabled}
+                  onClick={() => navigate('/settings')}
+                  className={`w-full text-left px-3 py-2 rounded text-sm flex items-center gap-2 ${
+                    enabled
+                      ? 'text-slate-600 hover:bg-slate-100'
+                      : 'text-slate-300 cursor-not-allowed'
+                  }`}
+                >
+                  <span aria-hidden>○</span>
+                  <span>{label}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       </div>
     </nav>
   );
