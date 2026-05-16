@@ -31,6 +31,7 @@ import {
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
+import { instrument } from '../monitoring/instrumentation';
 
 /**
  * voice-action-router — the bridge between "Whisper gave us a
@@ -397,12 +398,17 @@ export function createVoiceActionRouterWorker(
 ): WorkerHandler<VoiceActionRouterPayload> {
   const handlers = buildHandlers(deps);
 
-  return {
-    type: 'voice_action_router',
-    async handle(
+  // §11 H3: Wrap the per-message handler with instrument() so any
+  // unexpected throw inside the routing pipeline is tagged
+  // `path=voice-action-router` (plus tenant_id when available) and
+  // captured to Sentry before the error rethrows. Per-handler failures
+  // already log via the worker runtime; this captures the structural
+  // ones (gateway timeouts, repo errors, classifier crashes).
+  const handle = instrument(
+    async (
       message: QueueMessage<VoiceActionRouterPayload>,
       logger: Logger
-    ): Promise<void> {
+    ): Promise<void> => {
       const { tenantId, userId, transcript, conversationId, recordingId } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
@@ -523,5 +529,16 @@ export function createVoiceActionRouterWorker(
         proposalConfidence: proposal.confidenceScore,
       });
     },
+    {
+      path: 'voice-action-router',
+      extractTags: (message) => ({
+        tenant_id: message.payload.tenantId,
+      }),
+    },
+  );
+
+  return {
+    type: 'voice_action_router',
+    handle,
   };
 }

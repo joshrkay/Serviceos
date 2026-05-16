@@ -1,0 +1,42 @@
+name: Voice smoke (real call, daily)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # 09:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  real-call:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/api/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: packages/api
+      - name: Place call + assert proposal landed in staging DB
+        run: npx tsx scripts/voice-smoke-real.ts
+        working-directory: packages/api
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_TEST_NUMBER_FROM: ${{ secrets.TWILIO_TEST_NUMBER_FROM }}
+          TWILIO_TEST_NUMBER_TO: ${{ secrets.TWILIO_TEST_NUMBER_TO }}
+          STAGING_TWIML_URL: ${{ secrets.STAGING_TWIML_URL }}
+          STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": ":rotating_light: voice-smoke-real FAILED — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

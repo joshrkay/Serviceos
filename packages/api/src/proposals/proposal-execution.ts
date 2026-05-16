@@ -61,6 +61,25 @@ export interface ProposalExecutionRepository {
   /** Latest execution (by executed_at DESC) for a given proposal, if any. */
   findLatestByProposal(tenantId: string, proposalId: string): Promise<ProposalExecution | null>;
   listByProposal(tenantId: string, proposalId: string): Promise<ProposalExecution[]>;
+  /**
+   * Indexed lookup by (tenant_id, idempotency_key). Returns the latest
+   * succeeded execution for the key, or null. Used by IdempotencyGuard
+   * to short-circuit re-execution of a proposal whose side effect
+   * already landed. Backed by partial unique index
+   * `proposal_executions_tenant_idempotency_uniq` (migration 099).
+   *
+   * Only rows with status='succeeded' satisfy the guard — a failed or
+   * undone execution does not block a retry.
+   *
+   * Callers must supply idempotency keys that are unique per tenant, not
+   * merely per proposal — this lookup is not scoped by `proposalId`, so
+   * two different proposals sharing the same key would be ambiguous (the
+   * latest wins).
+   */
+  findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<ProposalExecution | null>;
 }
 
 function validateInput(input: RecordExecutionInput): void {
@@ -128,5 +147,20 @@ export class InMemoryProposalExecutionRepository implements ProposalExecutionRep
       .filter((r) => r.tenantId === tenantId && r.proposalId === proposalId)
       .sort((a, b) => b.executedAt.getTime() - a.executedAt.getTime())
       .map((r) => ({ ...r }));
+  }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<ProposalExecution | null> {
+    const matches = this.rows
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.idempotencyKey === idempotencyKey &&
+          r.status === 'succeeded',
+      )
+      .sort((a, b) => b.executedAt.getTime() - a.executedAt.getTime());
+    return matches.length > 0 ? { ...matches[0] } : null;
   }
 }
