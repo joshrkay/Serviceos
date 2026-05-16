@@ -99,6 +99,15 @@ describe('deriveOnboardingStatus', () => {
     expect(r.currentStep).toBeNull();
   });
 
+  it('intermediate twilio status (e.g., t0_requested): phone is current', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },
+      packActivated: true,
+      twilioStatus: 't0_requested',
+    }));
+    expect(r.steps[3].status).toBe('current');
+  });
+
   it('test call skipped: test_call=skipped, complete=true', () => {
     const r = deriveOnboardingStatus(facts({
       identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000 },

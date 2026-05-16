@@ -1,10 +1,13 @@
 import { Router, Response } from 'express';
+import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { SettingsRepository, TenantSettings } from '../settings/settings';
 import { PackActivationRepository, activatePack } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { v4 as uuidv4 } from 'uuid';
+import { loadOnboardingFacts } from '../onboarding/load-facts';
+import { deriveOnboardingStatus } from '../onboarding/derive-status';
 
 interface OnboardingConfigureBody {
   name: string;
@@ -26,12 +29,29 @@ const SERVICE_TO_PACK: Record<string, string> = {
   Contracting: 'contracting',
 };
 
-export function createOnboardingRouter(
-  settingsRepo: SettingsRepository,
-  packActivationRepo: PackActivationRepository,
-  auditRepo: AuditRepository
-): Router {
+export interface OnboardingRouterDeps {
+  settingsRepo: SettingsRepository;
+  packActivationRepo: PackActivationRepository;
+  auditRepo: AuditRepository;
+  pool: Pool;
+}
+
+export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
+  const { settingsRepo, packActivationRepo, auditRepo, pool } = deps;
   const router = Router();
+
+  router.get(
+    '/status',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const facts = await loadOnboardingFacts({ pool, settingsRepo }, tenantId);
+      const status = deriveOnboardingStatus(facts);
+      res.set('Cache-Control', 'private, max-age=2');
+      res.json(status);
+    }
+  );
 
   router.post(
     '/configure',

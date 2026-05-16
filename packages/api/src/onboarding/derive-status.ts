@@ -13,7 +13,7 @@ export interface OnboardingFacts {
     hourlyRateCents: number | null;
   };
   packActivated: boolean;
-  twilioStatus: 'pending' | 'provisioning' | 'full_readiness' | 'failed' | null;
+  twilioStatus: string | null;  // full set of tenant_integrations.status values; only 'full_readiness' and 'failed' have special handling
   subscription: {
     stripeSubscriptionId: string | null;
     status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete' | null;
