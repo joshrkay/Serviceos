@@ -153,6 +153,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
   ['096_create_expenses', '66dfd938628d33c4e65f25037c59d52fbed2848fa43123a94fb92f59b6d1a73e'],
+  ['097_add_tenant_hourly_rate', 'd991f1a6f2e51c0d0de81baee42d4779f79402ead79f11fb4a89876f72dc76ae'],
 ];
 
 function hashMigration(value: string): string {
