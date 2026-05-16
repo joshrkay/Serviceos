@@ -61,15 +61,15 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Run API migrations (Development)
-        run: railway run --service api --environment Development -- node packages/api/dist/src/db/migrate.js
+        run: railway run --service "@serviceos/api" --environment Development -- node packages/api/dist/src/db/migrate.js
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (Development)
-        run: railway up --service api --environment Development --detach
+        run: railway up --service "@serviceos/api" --environment Development --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (Development)
-        run: railway up --service web --environment Development --detach
+        run: railway up --service "@serviceos/web" --environment Development --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
 
@@ -83,14 +83,14 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Run API migrations (production)
-        run: railway run --service api --environment production -- node packages/api/dist/src/db/migrate.js
+        run: railway run --service "@serviceos/api" --environment production -- node packages/api/dist/src/db/migrate.js
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (production)
-        run: railway up --service api --environment production --detach
+        run: railway up --service "@serviceos/api" --environment production --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy Web to Railway (production)
-        run: railway up --service web --environment production --detach
+        run: railway up --service "@serviceos/web" --environment production --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
