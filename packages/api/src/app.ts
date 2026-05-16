@@ -2022,7 +2022,7 @@ export function createApp(): express.Express {
     createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
-  app.use('/api/locations', createLocationRouter(locationRepo, ownership));
+  app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
   app.use(
     '/api/jobs',
@@ -2047,7 +2047,7 @@ export function createApp(): express.Express {
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
       delayNotificationCoordinator,
-    })
+    }, auditRepo)
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use(
@@ -2126,7 +2126,7 @@ export function createApp(): express.Express {
     }),
   );
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
-  app.use('/api/notes', createNoteRouter(noteRepo, ownership));
+  app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
   // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
@@ -2238,7 +2238,7 @@ export function createApp(): express.Express {
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
-  app.use('/api/conversations', createConversationRouter(conversationRepo));
+  app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
 
   app.use(
     '/api/settings',
