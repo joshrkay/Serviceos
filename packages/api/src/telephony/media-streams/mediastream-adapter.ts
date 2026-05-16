@@ -540,17 +540,34 @@ export class TwilioMediaStreamAdapter {
       if (!text) continue;
       const turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
+      const controller = new AbortController();
       try {
-        const result = await ttsProvider.synthesize({
-          text,
-          tenantId: this.state.tenantId ?? undefined,
-        });
-        // If the caller barged in while we were synthesizing, drop this
-        // chunk so we don't speak over them.
-        if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-          continue;
+        if (typeof ttsProvider.synthesizeStream === 'function') {
+          const stream = ttsProvider.synthesizeStream({
+            text,
+            tenantId: this.state.tenantId ?? undefined,
+            signal: controller.signal,
+          });
+          for await (const chunk of stream) {
+            if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+              controller.abort();
+              break;
+            }
+            if (chunk.pcm.length > 0) {
+              await this.streamPcmAsMedia(chunk.pcm, turnId);
+            }
+            if (chunk.isFinal) break;
+          }
+        } else {
+          const result = await ttsProvider.synthesize({
+            text,
+            tenantId: this.state.tenantId ?? undefined,
+          });
+          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            continue;
+          }
+          await this.streamPcmAsMedia(result.audio, turnId);
         }
-        await this.streamPcmAsMedia(result.audio, turnId);
       } catch (err) {
         logger.warn('mediastream: TTS synthesize failed', {
           error: err instanceof Error ? err.message : String(err),
