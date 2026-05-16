@@ -38,22 +38,27 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
   let pool: Pool;
   let proposalRepo: PgProposalRepository;
   let executionRepo: PgProposalExecutionRepository;
-  let executor: ProposalExecutor;
-  // Captured by the test handler so each assertion can verify whether
-  // the handler ran (counter advances) or the guard short-circuited
-  // (counter does not advance). Reset to 0 inside each `it` to keep
-  // tests independent.
-  let handlerInvocations: number;
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
     proposalRepo = new PgProposalRepository(pool);
     executionRepo = new PgProposalExecutionRepository(pool);
+  });
 
-    // Test handler for `create_customer`. Returns a fresh
-    // `resultEntityId` per invocation so a second call (if the guard
-    // failed to short-circuit) would return a *different* id — and the
-    // resultEntityId equality assertion below would fail loudly.
+  // Build a fresh executor + invocation counter per test. Keeping the
+  // counter local (closed over by the handler) eliminates the shared
+  // mutable state that previously leaked across `it` blocks via a
+  // module-level `let`, which made test ordering matter.
+  //
+  // The handler returns a fresh `resultEntityId` per invocation so a
+  // second call (if the guard failed to short-circuit) would return a
+  // *different* id — and the resultEntityId equality assertion below
+  // would fail loudly.
+  function setupExecutor(): {
+    executor: ProposalExecutor;
+    getInvocations: () => number;
+  } {
+    let handlerInvocations = 0;
     const handler: ExecutionHandler = {
       proposalType: 'create_customer',
       async execute(
@@ -68,13 +73,14 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
       ['create_customer', handler],
     ]);
     const guard = new IdempotencyGuard(executionRepo, proposalRepo);
-    executor = new ProposalExecutor(handlers, proposalRepo, guard, {
+    const executor = new ProposalExecutor(handlers, proposalRepo, guard, {
       executionRepo,
     });
-  });
+    return { executor, getInvocations: () => handlerInvocations };
+  }
 
   it('records exactly one execution when the same proposal is executed twice', async () => {
-    handlerInvocations = 0;
+    const { executor, getInvocations } = setupExecutor();
     const tenant = await createTestTenant(pool);
     const idempotencyKey = `dup-key-${randomUUID().slice(0, 8)}`;
     const proposalId = await createApprovedProposal(
@@ -97,7 +103,7 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
     expect(first.alreadyExecuted).toBe(false);
     const firstEntityId = first.result.resultEntityId;
     expect(firstEntityId).toBe('entity-1');
-    expect(handlerInvocations).toBe(1);
+    expect(getInvocations()).toBe(1);
 
     // Second delivery — simulate queue redelivery by reloading the
     // proposal fresh from the DB. The post-execution row has status
@@ -113,10 +119,16 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
     // an operator re-clicking Approve before the UI refreshed). Without
     // re-staging we'd be testing the wrong invariant (status guard
     // rather than idempotency guard).
+    //
+    // We deliberately do NOT clear result_entity_id: in real
+    // redelivery the column stays populated from the first execute()
+    // (only the worker's post-execute status transition was lost). The
+    // guard reconstructs `resultEntityId` from this column on the
+    // short-circuit path, so clearing it would break the equality
+    // assertion without modeling a real-world scenario.
     await pool.query(
       `UPDATE proposals SET status = 'approved', approved_at = NULL,
-                            executed_at = NULL, executed_by = NULL,
-                            result_entity_id = NULL
+                            executed_at = NULL, executed_by = NULL
         WHERE tenant_id = $1 AND id = $2`,
       [tenant.tenantId, proposalId],
     );
@@ -131,7 +143,7 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
     // Critical: handler did NOT run a second time. If the guard had
     // failed, this would be 2 and resultEntityId above would be
     // 'entity-2' instead of 'entity-1'.
-    expect(handlerInvocations).toBe(1);
+    expect(getInvocations()).toBe(1);
 
     // Exactly one row in proposal_executions for this (tenant, key).
     const { rows } = await pool.query(
@@ -140,10 +152,21 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
       [tenant.tenantId, idempotencyKey],
     );
     expect(rows[0].n).toBe(1);
+
+    // Defensive: the single row must belong to *this* proposal. Guards
+    // against a future maintainer introducing ambiguous idempotency
+    // keys that could let one tenant's redelivery resolve to a
+    // different proposal's prior execution row.
+    const { rows: execRows } = await pool.query(
+      `SELECT proposal_id FROM proposal_executions
+        WHERE tenant_id = $1 AND idempotency_key = $2`,
+      [tenant.tenantId, idempotencyKey],
+    );
+    expect(execRows[0].proposal_id).toBe(proposalId);
   });
 
   it('records exactly one execution row on a clean first delivery', async () => {
-    handlerInvocations = 0;
+    const { executor, getInvocations } = setupExecutor();
     const tenant = await createTestTenant(pool);
     const idempotencyKey = `fresh-key-${randomUUID().slice(0, 8)}`;
     const proposalId = await createApprovedProposal(
@@ -160,7 +183,7 @@ describe('ProposalExecutor — double-delivery idempotency (§11 H1)', () => {
       executedBy: tenant.userId,
     });
     expect(result.alreadyExecuted).toBe(false);
-    expect(handlerInvocations).toBe(1);
+    expect(getInvocations()).toBe(1);
 
     const { rows } = await pool.query(
       `SELECT COUNT(*)::int AS n FROM proposal_executions
