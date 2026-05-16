@@ -289,6 +289,7 @@ import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation'
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
+import { IdempotencyGuard } from './proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
@@ -1056,6 +1057,14 @@ export function createApp(): express.Express {
     'create_customer',
     new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo),
   );
+  // §11 H1: every executor wiring threads an IdempotencyGuard so
+  // queue redelivery cannot double-execute side effects. The guard
+  // looks up prior `proposal_executions` rows by (tenant_id,
+  // idempotency_key) — passthrough when the proposal has no key.
+  const proposalIdempotencyGuard = new IdempotencyGuard(
+    proposalExecutionRepo,
+    proposalRepo,
+  );
   // Phase 4a-1: persist a proposal_executions row on success + fire the
   // proposal-correction-worker. The onExecuted callback is failure-soft
   // inside the executor itself (logs via console, never rethrows), so
@@ -1063,7 +1072,7 @@ export function createApp(): express.Express {
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
-    undefined,
+    proposalIdempotencyGuard,
     {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {

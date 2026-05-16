@@ -7,6 +7,7 @@ import {
 import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import { transitionProposal, UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import {
   createExecutionHandlerRegistry,
   ExecutionContext,
@@ -46,8 +47,10 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
 
   async function setupExecutor() {
     const repo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
     const handlers = createExecutionHandlerRegistry();
-    const executor = new ProposalExecutor(handlers, repo);
+    const guard = new IdempotencyGuard(executionRepo, repo);
+    const executor = new ProposalExecutor(handlers, repo, guard);
     return { repo, handlers, executor };
   }
 
@@ -105,7 +108,9 @@ describe('P2-010 — Deterministic proposal execution engine', () => {
   it('validation — rejects unknown proposal type handler', async () => {
     const { repo } = await setupExecutor();
     const emptyHandlers = new Map();
-    const executor = new ProposalExecutor(emptyHandlers, repo);
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, repo);
+    const executor = new ProposalExecutor(emptyHandlers, repo, guard);
     const proposal = makeApprovedProposal();
     await repo.create(proposal);
 

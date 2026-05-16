@@ -24,14 +24,17 @@ export interface ProposalExecutionEvent {
 
 export class ProposalExecutor {
   /**
-   * Optional idempotency guard. When supplied, proposals with an
+   * Idempotency guard (required, §11 H1). Proposals with an
    * `idempotencyKey` are checked against prior executed proposals
    * before the handler runs — if a previous success is found, the
    * executor short-circuits with that same `resultEntityId` instead
    * of double-creating entities. Protects against queue redelivery
-   * and operator re-approval after a network blip.
+   * and operator re-approval after a network blip. Proposals without
+   * a key flow through as a passthrough (the guard itself handles
+   * that branch), so wiring the guard is safe for every executor
+   * call site.
    */
-  private readonly idempotency?: IdempotencyGuard;
+  private readonly idempotency: IdempotencyGuard;
 
   /**
    * Optional repository to persist a `proposal_executions` row for each
@@ -52,7 +55,7 @@ export class ProposalExecutor {
   constructor(
     private readonly handlers: Map<ProposalType, ExecutionHandler>,
     private readonly proposalRepo: ProposalRepository,
-    idempotency?: IdempotencyGuard,
+    idempotency: IdempotencyGuard,
     options: {
       executionRepo?: ProposalExecutionRepository;
       onExecuted?: (event: ProposalExecutionEvent) => Promise<void> | void;
@@ -101,21 +104,15 @@ export class ProposalExecutor {
       );
     }
 
-    // Idempotency gate: route through the guard when present. When
+    // Idempotency gate: every execution routes through the guard
+    // (§11 H1 — guard is now a required constructor dep). When
     // `idempotencyKey` is absent the guard is a passthrough and runs
-    // the handler directly, preserving behavior for callers that
-    // haven't adopted idempotency keys yet.
-    let result: ExecutionResult;
-    let alreadyExecuted = false;
-    if (this.idempotency) {
-      const outcome = await this.idempotency.checkAndExecute(proposal, () =>
-        handler.execute(proposal, context)
-      );
-      result = outcome.result;
-      alreadyExecuted = outcome.alreadyExecuted;
-    } else {
-      result = await handler.execute(proposal, context);
-    }
+    // the handler directly.
+    const outcome = await this.idempotency.checkAndExecute(proposal, () =>
+      handler.execute(proposal, context)
+    );
+    const result: ExecutionResult = outcome.result;
+    const alreadyExecuted = outcome.alreadyExecuted;
 
     let updatedProposal: Proposal;
     if (result.success) {
