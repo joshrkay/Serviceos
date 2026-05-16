@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { loadOnboardingFacts } from '../onboarding/load-facts';
 import { deriveOnboardingStatus } from '../onboarding/derive-status';
 import { BusinessIdentityInputSchema, PackPickInputSchema } from '../onboarding/contracts';
+import { BillingService } from '../billing/subscription';
 
 interface OnboardingConfigureBody {
   name: string;
@@ -35,10 +36,11 @@ export interface OnboardingRouterDeps {
   packActivationRepo: PackActivationRepository;
   auditRepo: AuditRepository;
   pool?: Pool;
+  billingService?: BillingService;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
-  const { settingsRepo, packActivationRepo, auditRepo, pool } = deps;
+  const { settingsRepo, packActivationRepo, auditRepo, pool, billingService } = deps;
   const router = Router();
 
   router.get(
@@ -356,6 +358,57 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'TEST_CALL_SKIP_FAILED',
           message: error instanceof Error ? error.message : 'Failed to skip test call',
+        });
+      }
+    }
+  );
+
+  /**
+   * POST /api/onboarding/billing/checkout-session
+   *
+   * Mints a Stripe Checkout Session for the 14-day trial subscription.
+   * Requires billingService (503 when Stripe is not configured).
+   * Returns { url } for the operator to redirect to.
+   */
+  router.post(
+    '/billing/checkout-session',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!billingService) {
+          res.status(503).json({
+            error: 'BILLING_NOT_CONFIGURED',
+            message: 'Subscription billing is not configured',
+          });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const email = req.clerkUser?.email;
+        if (!email) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'Owner email not present on auth context',
+          });
+          return;
+        }
+
+        const webUrl = process.env.WEB_URL ?? 'http://localhost:5173';
+        const successUrl = `${webUrl}/onboarding?billing=ok`;
+        const cancelUrl = `${webUrl}/onboarding?billing=cancel`;
+
+        const result = await billingService.createTrialCheckoutSession({
+          tenantId,
+          ownerEmail: email,
+          successUrl,
+          cancelUrl,
+        });
+        res.json(result);
+      } catch (err: unknown) {
+        res.status(500).json({
+          error: 'CHECKOUT_SESSION_FAILED',
+          message: err instanceof Error ? err.message : 'Failed to create checkout session',
         });
       }
     }

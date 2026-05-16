@@ -1955,7 +1955,7 @@ export function createApp(): express.Express {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
@@ -2110,7 +2110,7 @@ export function createApp(): express.Express {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
-  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool }));
+  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService }));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({

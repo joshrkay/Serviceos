@@ -164,6 +164,95 @@ export class BillingService {
   }
 
   /**
+   * Creates a Stripe Checkout Session for a 14-day trial subscription.
+   * The operator is redirected to Stripe-hosted checkout where they
+   * enter card details. Trial starts immediately; billing begins after
+   * 14 days. Requires STRIPE_PRICE_ID to be set in the environment.
+   */
+  async createTrialCheckoutSession(input: {
+    tenantId: string;
+    ownerEmail: string;
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<{ url: string }> {
+    if (!this.deps.config?.apiKey) {
+      throw new ValidationError('Subscription billing is not configured');
+    }
+    const priceId = process.env.STRIPE_PRICE_ID;
+    if (!priceId) {
+      throw new ValidationError('STRIPE_PRICE_ID is not set');
+    }
+    const fetchFn = this.deps.fetchFn ?? fetch;
+    const body = new URLSearchParams();
+    body.set('mode', 'subscription');
+    body.set('line_items[0][price]', priceId);
+    body.set('line_items[0][quantity]', '1');
+    body.set('subscription_data[trial_period_days]', '14');
+    body.set('subscription_data[metadata][tenant_id]', input.tenantId);
+    body.set('payment_method_collection', 'always');
+    body.set('customer_email', input.ownerEmail);
+    body.set('success_url', input.successUrl);
+    body.set('cancel_url', input.cancelUrl);
+    body.set('client_reference_id', input.tenantId);
+    const res = await fetchFn('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.deps.config.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Stripe checkout session failed (${res.status}): ${text}`);
+    }
+    const session = (await res.json()) as { url?: string };
+    if (!session.url) {
+      throw new Error('Stripe checkout session returned no url');
+    }
+    return { url: session.url };
+  }
+
+  /**
+   * Ends the tenant's trial immediately by updating the Stripe
+   * subscription with `trial_end=now`. Prorations are created so the
+   * operator is billed for any time already used in the billing cycle.
+   * Throws NotFoundError when the tenant has no subscription on file.
+   */
+  async endTrialNow(tenantId: string): Promise<void> {
+    if (!this.deps.config?.apiKey) {
+      throw new ValidationError('Subscription billing is not configured');
+    }
+    const { rows } = await this.deps.pool.query(
+      `SELECT stripe_subscription_id FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    if (rows.length === 0) {
+      throw new NotFoundError('Tenant', tenantId);
+    }
+    const subId = (rows[0] as Record<string, unknown>).stripe_subscription_id as string | null;
+    if (!subId) {
+      throw new NotFoundError('Subscription', tenantId);
+    }
+    const fetchFn = this.deps.fetchFn ?? fetch;
+    const body = new URLSearchParams();
+    body.set('trial_end', 'now');
+    body.set('proration_behavior', 'create_prorations');
+    const res = await fetchFn(`https://api.stripe.com/v1/subscriptions/${subId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.deps.config.apiKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Stripe subscription update failed (${res.status}): ${text}`);
+    }
+  }
+
+  /**
    * Webhook handler — applies a customer.subscription.* event onto
    * the cached columns. Called by the Stripe webhook route when
    * deps.billingService is wired.
