@@ -6,6 +6,7 @@ import {
   LocationDuplicateLoader,
   normalizeAddress,
 } from './dedup';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface ServiceLocation {
   id: string;
@@ -112,7 +113,10 @@ export function validateLocationUpdateInput(
 
 export async function createLocation(
   input: CreateLocationInput,
-  repository: LocationRepository
+  repository: LocationRepository,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<ServiceLocationWithWarnings> {
   const errors = validateLocationInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
@@ -168,6 +172,20 @@ export async function createLocation(
   }
 
   const created = await repository.create(location);
+
+  if (auditRepo) {
+    const event = createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: actorId ?? 'unknown',
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'location.created',
+      entityType: 'location',
+      entityId: created.id,
+      metadata: { customerId: created.customerId, isPrimary: created.isPrimary },
+    });
+    await auditRepo.create(event);
+  }
+
   return warnings ? { ...created, warnings } : created;
 }
 
@@ -183,7 +201,10 @@ export async function updateLocation(
   tenantId: string,
   id: string,
   input: UpdateLocationInput,
-  repository: LocationRepository
+  repository: LocationRepository,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<ServiceLocation | null> {
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
@@ -191,13 +212,31 @@ export async function updateLocation(
   const validationErrors = validateLocationUpdateInput(existing, input);
   if (validationErrors.length > 0) throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
 
-  return repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+
+  if (auditRepo && actorId && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'location.updated',
+      entityType: 'location',
+      entityId: id,
+      metadata: { changes: Object.keys(input) },
+    });
+    await auditRepo.create(event);
+  }
+
+  return updated;
 }
 
 export async function archiveLocation(
   tenantId: string,
   id: string,
-  repository: LocationRepository
+  repository: LocationRepository,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<ServiceLocation | null> {
   const location = await repository.findById(tenantId, id);
   if (!location) return null;
@@ -211,12 +250,27 @@ export async function archiveLocation(
     }
   }
 
-  return repository.update(tenantId, id, {
+  const archived = await repository.update(tenantId, id, {
     isArchived: true,
     isPrimary: false,
     archivedAt: new Date(),
     updatedAt: new Date(),
   });
+
+  if (auditRepo && actorId && archived) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'location.archived',
+      entityType: 'location',
+      entityId: id,
+      metadata: { customerId: archived.customerId },
+    });
+    await auditRepo.create(event);
+  }
+
+  return archived;
 }
 
 export async function listByCustomer(
@@ -231,7 +285,10 @@ export async function listByCustomer(
 export async function setPrimary(
   tenantId: string,
   locationId: string,
-  repository: LocationRepository
+  repository: LocationRepository,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<ServiceLocation | null> {
   const location = await repository.findById(tenantId, locationId);
   if (!location) return null;
@@ -244,7 +301,22 @@ export async function setPrimary(
     }
   }
 
-  return repository.update(tenantId, locationId, { isPrimary: true, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, locationId, { isPrimary: true, updatedAt: new Date() });
+
+  if (auditRepo && actorId && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'location.primary_set',
+      entityType: 'location',
+      entityId: locationId,
+      metadata: { customerId: updated.customerId },
+    });
+    await auditRepo.create(event);
+  }
+
+  return updated;
 }
 
 export class InMemoryLocationRepository implements LocationRepository {
