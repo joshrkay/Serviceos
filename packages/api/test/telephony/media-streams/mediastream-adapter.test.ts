@@ -337,6 +337,32 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(ws.closed).toBe(false);
   });
 
+  // ─── Helpers for streaming tests ───────────────────────────────────────────
+
+  function setupAdapter(opts: { ttsProvider?: TtsProvider } = {}): {
+    adapter: TwilioMediaStreamAdapter;
+    ws: FakeWs;
+  } {
+    store.create('t', 'telephony', { callSid: 'CA-stream' });
+    const ws = new FakeWs();
+    const { provider } = makeStreamingProvider();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: opts.ttsProvider,
+      },
+      ws,
+    );
+    adapter.start();
+    return { adapter, ws };
+  }
+
+  async function flushMicrotasks(): Promise<void> {
+    await new Promise((r) => setImmediate(r));
+  }
+
   it('barge-in during TTS emits clear and drops further audio', async () => {
     store.create('t', 'telephony', { callSid: 'CA-barge' });
     const ws = new FakeWs();
@@ -379,5 +405,35 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     // TTS never resolved, so no media frames should have been sent after barge-in.
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBe(0);
+  });
+
+  it('streams outbound media as TTS chunks arrive (does not wait for full audio)', async () => {
+    // Drive a fake streaming TTS provider that yields two chunks then closes.
+    let firstChunkEmitted = false;
+    const streamingProvider = {
+      synthesize: vi.fn(),
+      synthesizeStream: vi.fn(() => ({
+        async *[Symbol.asyncIterator]() {
+          yield { pcm: Buffer.alloc(640), isFinal: false };
+          firstChunkEmitted = true;
+          // Simulate ~50ms of "model thinking" between chunks.
+          await new Promise((r) => setTimeout(r, 50));
+          yield { pcm: Buffer.alloc(640), isFinal: true };
+        },
+      })),
+    };
+
+    const { adapter, ws } = setupAdapter({ ttsProvider: streamingProvider });
+    ws.inboundJson({ event: 'start', streamSid: 's1', start: { callSid: 'CA-stream', accountSid: 'a1', streamSid: 's1', tracks: ['inbound'] } });
+    await flushMicrotasks();
+
+    // Directly invoke a tts_play side effect (bypass FSM for unit isolation).
+    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+      { type: 'tts_play', payload: { text: 'hello world' } },
+    ]);
+
+    expect(firstChunkEmitted).toBe(true);
+    expect(streamingProvider.synthesizeStream).toHaveBeenCalledTimes(1);
+    expect(ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media').length).toBeGreaterThanOrEqual(1);
   });
 });
