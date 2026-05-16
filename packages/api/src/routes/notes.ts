@@ -5,10 +5,12 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { createNoteSchema } from '../shared/contracts';
 import { OwnedEntityType, TenantOwnership } from '../shared/tenant-ownership';
 import { createNote, updateNote, deleteNote, listNotes, NoteRepository } from '../notes/note';
+import { AuditRepository } from '../audit/audit';
 
 export function createNoteRouter(
   noteRepo: NoteRepository,
-  ownership: TenantOwnership
+  ownership: TenantOwnership,
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -31,7 +33,8 @@ export function createNoteRouter(
           authorId: req.auth!.userId,
           authorRole: req.auth!.role,
         },
-        noteRepo
+        noteRepo,
+        auditRepo,
       );
       res.status(201).json(result);
     })
@@ -68,7 +71,15 @@ export function createNoteRouter(
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'content is required' });
         return;
       }
-      const result = await updateNote(req.auth!.tenantId, req.params.id, content, noteRepo);
+      const result = await updateNote(
+        req.auth!.tenantId,
+        req.params.id,
+        content,
+        noteRepo,
+        auditRepo,
+        req.auth!.userId,
+        req.auth!.role,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Note not found' });
         return;
@@ -83,7 +94,14 @@ export function createNoteRouter(
     requireTenant,
     requirePermission('notes:delete'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const deleted = await deleteNote(req.auth!.tenantId, req.params.id, noteRepo);
+      const deleted = await deleteNote(
+        req.auth!.tenantId,
+        req.params.id,
+        noteRepo,
+        auditRepo,
+        req.auth!.userId,
+        req.auth!.role,
+      );
       if (!deleted) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Note not found' });
         return;

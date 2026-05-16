@@ -104,17 +104,40 @@ describe('P5-010E: Stripe webhook ingestion', () => {
   });
 
   describe('Idempotency: duplicate event detected', () => {
-    it('should detect duplicate events', async () => {
+    it('should detect duplicate events after first delivery is marked processed', async () => {
       const payload = makePayload();
       const { rawBody, signature } = signPayload(payload);
 
       const first = await handleStripeWebhook(rawBody, signature, config, webhookRepo);
       expect(first.duplicate).toBe(false);
 
+      // Codex P1 (PR #384) — dedup now requires the first attempt to
+      // be marked 'processed'. Otherwise retries of failed/crashed
+      // deliveries would silently short-circuit instead of re-running
+      // the handler. Simulate the route's success path.
+      await webhookRepo.updateStatus(first.eventId, 'processed');
+
       // Send the same event again (re-sign since timestamp changes)
       const { rawBody: rawBody2, signature: sig2 } = signPayload(payload);
       const second = await handleStripeWebhook(rawBody2, sig2, config, webhookRepo);
       expect(second.duplicate).toBe(true);
+    });
+
+    it('should re-process duplicate events whose first delivery is still received/failed (retry)', async () => {
+      const payload = makePayload();
+      const { rawBody, signature } = signPayload(payload);
+
+      const first = await handleStripeWebhook(rawBody, signature, config, webhookRepo);
+      expect(first.duplicate).toBe(false);
+      // Simulate a failed first attempt (handler threw).
+      await webhookRepo.updateStatus(first.eventId, 'failed', 'transient');
+
+      const { rawBody: rawBody2, signature: sig2 } = signPayload(payload);
+      const second = await handleStripeWebhook(rawBody2, sig2, config, webhookRepo);
+
+      // Same event row id (stable for correlation) but allow re-processing.
+      expect(second.eventId).toBe(first.eventId);
+      expect(second.duplicate).toBe(false);
     });
   });
 

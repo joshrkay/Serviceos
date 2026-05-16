@@ -43,15 +43,15 @@
  */
 import OpenAI from 'openai';
 
-import { LLMGateway } from '../../gateway/gateway';
+import { LLMGateway } from './gateway';
 import type {
   LLMProvider,
   LLMRequest,
   LLMResponse,
   LLMGatewayConfig,
-} from '../../gateway/gateway';
-import type { AgentEventBus } from '../event-bus';
-import { costIncurredEvent } from '../events';
+} from './gateway';
+import type { AgentEventBus } from '../voice-quality/event-bus';
+import { costIncurredEvent } from '../voice-quality/events';
 
 /**
  * Anthropic Claude Haiku 4.5 pricing as of 2026-04-30.

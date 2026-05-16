@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ValidationError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type NoteEntityType = 'customer' | 'location' | 'job' | 'estimate' | 'invoice';
 
@@ -50,7 +51,8 @@ export function validateNoteInput(input: CreateNoteInput): string[] {
 
 export async function createNote(
   input: CreateNoteInput,
-  repository: NoteRepository
+  repository: NoteRepository,
+  auditRepo?: AuditRepository,
 ): Promise<InternalNote> {
   const errors = validateNoteInput(input);
   if (errors.length > 0) throw new Error(`Validation failed: ${errors.join(', ')}`);
@@ -68,24 +70,78 @@ export async function createNote(
     updatedAt: new Date(),
   };
 
-  return repository.create(note);
+  const created = await repository.create(note);
+
+  if (auditRepo) {
+    const event = createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.authorId,
+      actorRole: input.authorRole,
+      eventType: 'note.created',
+      entityType: 'note',
+      entityId: created.id,
+      metadata: { entityType: created.entityType, entityId: created.entityId },
+    });
+    await auditRepo.create(event);
+  }
+
+  return created;
 }
 
 export async function updateNote(
   tenantId: string,
   noteId: string,
   content: string,
-  repository: NoteRepository
+  repository: NoteRepository,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<InternalNote | null> {
-  return repository.update(tenantId, noteId, { content, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, noteId, { content, updatedAt: new Date() });
+
+  if (auditRepo && actorId && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'note.updated',
+      entityType: 'note',
+      entityId: noteId,
+      metadata: { entityType: updated.entityType, entityId: updated.entityId },
+    });
+    await auditRepo.create(event);
+  }
+
+  return updated;
 }
 
 export async function deleteNote(
   tenantId: string,
   noteId: string,
-  repository: NoteRepository
+  repository: NoteRepository,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<boolean> {
-  return repository.delete(tenantId, noteId);
+  const existing = auditRepo && actorId ? await repository.findById(tenantId, noteId) : null;
+  const deleted = await repository.delete(tenantId, noteId);
+
+  if (deleted && auditRepo && actorId) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'note.deleted',
+      entityType: 'note',
+      entityId: noteId,
+      metadata: existing
+        ? { entityType: existing.entityType, entityId: existing.entityId }
+        : {},
+    });
+    await auditRepo.create(event);
+  }
+
+  return deleted;
 }
 
 export async function pinNote(

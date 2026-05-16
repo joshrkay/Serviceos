@@ -3,9 +3,13 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { createConversationSchema, createMessageSchema } from '../shared/contracts';
-import { ConversationRepository } from '../conversations/conversation-service';
+import { createConversationWithAudit, ConversationRepository } from '../conversations/conversation-service';
+import { AuditRepository } from '../audit/audit';
 
-export function createConversationRouter(conversationRepo: ConversationRepository): Router {
+export function createConversationRouter(
+  conversationRepo: ConversationRepository,
+  auditRepo?: AuditRepository,
+): Router {
   const router = Router();
 
   router.post(
@@ -15,11 +19,16 @@ export function createConversationRouter(conversationRepo: ConversationRepositor
     requirePermission('conversations:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createConversationSchema.parse(req.body);
-      const result = await conversationRepo.createConversation({
-        ...parsed,
-        tenantId: req.auth!.tenantId,
-        createdBy: req.auth!.userId,
-      });
+      const result = await createConversationWithAudit(
+        {
+          ...parsed,
+          tenantId: req.auth!.tenantId,
+          createdBy: req.auth!.userId,
+        },
+        conversationRepo,
+        auditRepo,
+        req.auth!.role,
+      );
       res.status(201).json(result);
     })
   );

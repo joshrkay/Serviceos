@@ -4,13 +4,16 @@ import { validateProposalPayload } from './contracts';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { logProposalEvent } from './audit';
 
 export async function approveProposal(
   proposalRepo: ProposalRepository,
   tenantId: string,
   proposalId: string,
   actorId: string,
-  actorRole: Role
+  actorRole: Role,
+  auditRepo?: AuditRepository,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -32,6 +35,17 @@ export async function approveProposal(
     throw new NotFoundError('Proposal', proposalId);
   }
 
+  // D2-1c — audit-log the approval through the existing helper. The
+  // auditRepo arg is optional so legacy call-sites (tests that don't
+  // care about audit rows) compile unchanged; the router-factory always
+  // passes a real repo in production.
+  if (auditRepo) {
+    await logProposalEvent(auditRepo, updated, 'proposal.approved', {
+      id: actorId,
+      role: actorRole,
+    });
+  }
+
   return updated;
 }
 
@@ -48,7 +62,8 @@ export async function undoProposal(
   tenantId: string,
   proposalId: string,
   actorId: string,
-  actorRole: Role
+  actorRole: Role,
+  auditRepo?: AuditRepository,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     // Same permission as approve — if you can approve you can undo.
@@ -84,6 +99,15 @@ export async function undoProposal(
     throw new NotFoundError('Proposal', proposalId);
   }
 
+  // D2-1c — audit-log the undo so the timeline preserves the
+  // approve→undo sequence (distinct event from rejected).
+  if (auditRepo) {
+    await logProposalEvent(auditRepo, updated, 'proposal.undone', {
+      id: actorId,
+      role: actorRole,
+    });
+  }
+
   return updated;
 }
 
@@ -95,7 +119,8 @@ export async function rejectProposal(
   actorRole: Role,
   reason: string,
   details?: string,
-  appointmentRepo?: AppointmentRepository
+  appointmentRepo?: AppointmentRepository,
+  auditRepo?: AuditRepository,
 ): Promise<Proposal> {
   if (!hasPermission(actorRole, 'proposals:approve')) {
     throw new ForbiddenError();
@@ -114,6 +139,28 @@ export async function rejectProposal(
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // D2-1c — audit-log the rejection. Built inline (vs. logProposalEvent)
+  // so the rejection reason + details ride on metadata; the helper only
+  // carries the proposalType + status by default.
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.rejected',
+        entityType: 'proposal',
+        entityId: updated.id,
+        metadata: {
+          proposalType: updated.proposalType,
+          status: updated.status,
+          rejectionReason: reason,
+          rejectionDetails: details,
+        },
+      }),
+    );
   }
 
   // Releasing the held slot: a rejected create_booking proposal means
@@ -151,7 +198,8 @@ export async function editProposal(
   proposalId: string,
   actorId: string,
   actorRole: Role,
-  edits: Record<string, unknown>
+  edits: Record<string, unknown>,
+  auditRepo?: AuditRepository,
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -182,6 +230,27 @@ export async function editProposal(
   });
   if (!updated) {
     throw new NotFoundError('Proposal', proposalId);
+  }
+
+  // D2-1c — audit-log the edit. Custom event (vs. logProposalEvent) so
+  // editedFields rides on metadata; the inbox + history UI surfaces
+  // which keys changed.
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole,
+        eventType: 'proposal.edited',
+        entityType: 'proposal',
+        entityId: updated.id,
+        metadata: {
+          proposalType: updated.proposalType,
+          status: updated.status,
+          editedFields,
+        },
+      }),
+    );
   }
 
   return { proposal: updated, editedFields };

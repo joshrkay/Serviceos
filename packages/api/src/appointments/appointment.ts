@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { validateAppointmentTimes, validateAppointmentUpdateInput } from './validation';
 import { VALID_TIMEZONES } from '../settings/settings';
 import { toUtcDate } from './time';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'canceled' | 'no_show';
 
@@ -155,7 +156,9 @@ function normalizeAppointmentTimeUpdates(
 export async function createAppointment(
   input: CreateAppointmentInput,
   repository: AppointmentRepository,
-  options?: AppointmentWriteOptions
+  options?: AppointmentWriteOptions,
+  auditRepo?: AuditRepository,
+  actorRole?: string,
 ): Promise<Appointment> {
   const errors = validateAppointmentInput(input);
   const timeValidation = validateAppointmentTimes(input);
@@ -189,7 +192,22 @@ export async function createAppointment(
     console.warn(`Appointment validation warnings on create: ${timeValidation.warnings.join(', ')}`);
   }
 
-  return repository.create(appointment);
+  const created = await repository.create(appointment);
+
+  if (auditRepo) {
+    const event = createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.createdBy,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'appointment.created',
+      entityType: 'appointment',
+      entityId: created.id,
+      metadata: { jobId: created.jobId },
+    });
+    await auditRepo.create(event);
+  }
+
+  return created;
 }
 
 export async function getAppointment(
@@ -205,7 +223,10 @@ export async function updateAppointment(
   id: string,
   input: UpdateAppointmentInput,
   repository: AppointmentRepository,
-  options?: AppointmentWriteOptions
+  options?: AppointmentWriteOptions,
+  auditRepo?: AuditRepository,
+  actorId?: string,
+  actorRole?: string,
 ): Promise<Appointment | null> {
   if (input.timezone && !VALID_TIMEZONES.includes(input.timezone)) {
     throw new Error('Validation failed: Invalid timezone');
@@ -222,7 +243,26 @@ export async function updateAppointment(
   if (validation.errors.length > 0) throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
 
   const normalizedTimes = normalizeAppointmentTimeUpdates(input);
-  return repository.update(tenantId, id, { ...input, ...normalizedTimes, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, id, {
+    ...input,
+    ...normalizedTimes,
+    updatedAt: new Date(),
+  });
+
+  if (auditRepo && actorId && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'appointment.updated',
+      entityType: 'appointment',
+      entityId: id,
+      metadata: { changes: Object.keys(input) },
+    });
+    await auditRepo.create(event);
+  }
+
+  return updated;
 }
 
 export async function listByJob(
