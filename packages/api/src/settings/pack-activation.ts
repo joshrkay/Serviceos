@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type ActivationStatus = 'active' | 'deactivated';
 
@@ -30,49 +31,95 @@ export function validateActivationInput(input: ActivatePackInput): string[] {
   return errors;
 }
 
+export interface PackActivationAuditContext {
+  actorId: string;
+  actorRole?: string;
+}
+
 export async function activatePack(
   input: ActivatePackInput,
-  repository: PackActivationRepository
+  repository: PackActivationRepository,
+  auditRepo?: AuditRepository,
+  auditCtx?: PackActivationAuditContext
 ): Promise<TenantPackActivation> {
   const existing = await repository.findByTenantAndPack(input.tenantId, input.packId);
   if (existing && existing.status === 'active') {
     throw new Error('Pack already activated for this tenant');
   }
 
+  let result: TenantPackActivation;
+  let reactivated = false;
+
   if (existing && existing.status === 'deactivated') {
-    const reactivated = await repository.update(existing.id, {
+    const updated = await repository.update(existing.id, {
       status: 'active',
       activatedAt: new Date(),
       deactivatedAt: undefined,
     });
-    if (!reactivated) throw new Error('Failed to reactivate pack');
-    return reactivated;
+    if (!updated) throw new Error('Failed to reactivate pack');
+    result = updated;
+    reactivated = true;
+  } else {
+    const activation: TenantPackActivation = {
+      id: uuidv4(),
+      tenantId: input.tenantId,
+      packId: input.packId,
+      activatedAt: new Date(),
+      status: 'active',
+    };
+    result = await repository.create(activation);
   }
 
-  const activation: TenantPackActivation = {
-    id: uuidv4(),
-    tenantId: input.tenantId,
-    packId: input.packId,
-    activatedAt: new Date(),
-    status: 'active',
-  };
+  // D2-1e — all mutations emit audit events
+  if (auditRepo && auditCtx?.actorId) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: auditCtx.actorId,
+        actorRole: auditCtx.actorRole ?? 'unknown',
+        eventType: 'pack_activation.activated',
+        entityType: 'pack_activation',
+        entityId: result.id,
+        metadata: { packId: result.packId, reactivated },
+      })
+    );
+  }
 
-  return repository.create(activation);
+  return result;
 }
 
 export async function deactivatePack(
   tenantId: string,
   packId: string,
-  repository: PackActivationRepository
+  repository: PackActivationRepository,
+  auditRepo?: AuditRepository,
+  auditCtx?: PackActivationAuditContext
 ): Promise<TenantPackActivation | null> {
   const existing = await repository.findByTenantAndPack(tenantId, packId);
   if (!existing) return null;
   if (existing.status === 'deactivated') return { ...existing };
 
-  return repository.update(existing.id, {
+  const updated = await repository.update(existing.id, {
     status: 'deactivated',
     deactivatedAt: new Date(),
   });
+
+  // D2-1e — all mutations emit audit events
+  if (updated && auditRepo && auditCtx?.actorId) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: auditCtx.actorId,
+        actorRole: auditCtx.actorRole ?? 'unknown',
+        eventType: 'pack_activation.deactivated',
+        entityType: 'pack_activation',
+        entityId: updated.id,
+        metadata: { packId: updated.packId },
+      })
+    );
+  }
+
+  return updated;
 }
 
 export async function getActivePacks(
