@@ -768,7 +768,11 @@ describe('TrainingAssetService', () => {
     );
     expect(sourceFields.has('title')).toBe(true);
     expect(sourceFields.has('provenance.notes')).toBe(true);
-    expect(sourceFields.has('labels.entities')).toBe(true);
+    // Entity redactions identify the nested entity field so two
+    // different PII-bearing entries don't collapse into one ambiguous
+    // audit row.
+    expect(sourceFields.has('labels.entities.serviceAddress')).toBe(true);
+    expect(sourceFields.has('labels.entities.callerPhone')).toBe(true);
     for (const redaction of privacyAuditRepo.rows[0].redactions) {
       expect(typeof redaction.sourceField).toBe('string');
       expect(redaction.sourceField.length).toBeGreaterThan(0);

@@ -104,31 +104,37 @@ function applyMetadataNameFallback(text: string): {
  * rather than via `JSON.stringify(...)` + scrub + `JSON.parse(...)` so
  * placeholders containing JSON-significant chars can't break the parse,
  * and so PII-looking object keys aren't mangled into syntactically
- * invalid JSON.
+ * invalid JSON. The `path` argument is threaded into `redactString`
+ * so each audit entry records exactly which nested entity field the
+ * offsets refer to (e.g. `labels.entities.address.street`,
+ * `labels.entities.equipmentTags[1]`) — without it, every nested
+ * string would share the same `sourceField` and overlapping offsets
+ * would be ambiguous in the privacy audit trail.
  */
 function redactEntities(
   value: unknown,
-  redactString: (s: string) => { scrubbed: string; quarantined: boolean },
+  redactString: (s: string, path: string) => { scrubbed: string; quarantined: boolean },
+  path: string,
 ): { value: unknown; quarantined: boolean } {
   if (typeof value === 'string') {
-    const result = redactString(value);
+    const result = redactString(value, path);
     return { value: result.scrubbed, quarantined: result.quarantined };
   }
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     let quarantined = false;
-    for (const element of value) {
-      const child = redactEntities(element, redactString);
+    value.forEach((element, idx) => {
+      const child = redactEntities(element, redactString, `${path}[${idx}]`);
       out.push(child.value);
       quarantined ||= child.quarantined;
-    }
+    });
     return { value: out, quarantined };
   }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     let quarantined = false;
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      const child = redactEntities(v, redactString);
+      const child = redactEntities(v, redactString, `${path}.${k}`);
       out[k] = child.value;
       quarantined ||= child.quarantined;
     }
@@ -349,12 +355,16 @@ export class TrainingAssetService {
     }
     if (parsed.labels.entities !== undefined) {
       let entitiesQuarantined = false;
-      const redacted = redactEntities(parsed.labels.entities, (s) => {
-        const result = redactMetadataText(s, 'labels.entities');
-        const quarantined = result.status === 'quarantined';
-        entitiesQuarantined ||= quarantined;
-        return { scrubbed: result.scrubbedText, quarantined };
-      });
+      const redacted = redactEntities(
+        parsed.labels.entities,
+        (s, path) => {
+          const result = redactMetadataText(s, path);
+          const quarantined = result.status === 'quarantined';
+          entitiesQuarantined ||= quarantined;
+          return { scrubbed: result.scrubbedText, quarantined };
+        },
+        'labels.entities',
+      );
       if (entitiesQuarantined) {
         delete labels.entities;
         metadataHasResidualPii = true;
