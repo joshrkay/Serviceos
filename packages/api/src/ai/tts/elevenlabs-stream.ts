@@ -79,6 +79,13 @@ export class ElevenLabsStreamConnection {
     };
 
     ws.addEventListener('open', () => {
+      // BOS frame carries voice settings — ElevenLabs requires a space-only
+      // initial chunk to start the session. This aligns streaming voice
+      // characteristics with the REST synthesize() path.
+      ws.send(JSON.stringify({
+        text: ' ',
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }));
       // Send the text payload + an empty terminator per ElevenLabs WS protocol.
       ws.send(JSON.stringify({ text: input.text + ' ' }));
       ws.send(JSON.stringify({ text: '' }));
