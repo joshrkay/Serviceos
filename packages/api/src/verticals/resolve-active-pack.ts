@@ -81,7 +81,7 @@ export function buildVerticalPromptResolver(
   const cache = new Map<string, CacheEntry>();
 
   return async (tenantId: string): Promise<string | undefined> => {
-    const shouldUseCache = ttlMs > 0 && !deps.trainingAssetRepo;
+    const shouldUseCache = ttlMs > 0;
     if (shouldUseCache) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {
