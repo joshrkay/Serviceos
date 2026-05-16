@@ -77,6 +77,21 @@ export interface PaymentRepository {
   findById(tenantId: string, id: string): Promise<Payment | null>;
   findByInvoice(tenantId: string, invoiceId: string): Promise<Payment[]>;
   findByTenant(tenantId: string, options?: PaymentListOptions): Promise<Payment[]>;
+  /**
+   * D2-4 (Codex P1 #2 follow-up) — resolve a payment by the value we
+   * stamped into `provider_reference` at creation time. The Stripe
+   * webhook handler uses this to look up the local payment row from
+   * a `charge.refunded` event's `payment_intent` field, because our
+   * creation paths attach `tenant_id` / `invoice_id` metadata to the
+   * Stripe object but NOT a `payment_id` — so refund metadata alone is
+   * not enough to find the originating payment.
+   *
+   * Returns the most recently received matching payment, or `null` when
+   * none exists. `tenant_id` is required (the unique index on
+   * `provider_reference` is per-tenant; without it cross-tenant
+   * collisions could resolve incorrectly).
+   */
+  findByProviderReference(tenantId: string, providerReference: string): Promise<Payment | null>;
   update(tenantId: string, id: string, updates: Partial<Payment>): Promise<Payment | null>;
   /**
    * D2-4 — atomically increment `refundedAmountCents` by `opts.refundCents`,
@@ -210,6 +225,17 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     return Array.from(this.payments.values())
       .filter((p) => p.tenantId === tenantId && p.invoiceId === invoiceId)
       .map((p) => ({ ...p }));
+  }
+
+  async findByProviderReference(
+    tenantId: string,
+    providerReference: string,
+  ): Promise<Payment | null> {
+    // Most-recent-first matches the pg impl's ORDER BY received_at DESC.
+    const matches = Array.from(this.payments.values())
+      .filter((p) => p.tenantId === tenantId && p.providerReference === providerReference)
+      .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+    return matches[0] ? { ...matches[0] } : null;
   }
 
   async findByTenant(tenantId: string, options?: PaymentListOptions): Promise<Payment[]> {

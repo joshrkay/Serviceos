@@ -12,7 +12,7 @@ import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
-import { ValidationError } from '../shared/errors';
+import { NotFoundError, ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
@@ -635,6 +635,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           };
           amount_total?: number;
           payment_status?: string;
+          // D2-4 (Codex P1 #2) — Stripe returns payment_intent as a
+          // string by default; if the session was retrieved with
+          // expand=['payment_intent'] it becomes an object. We stamp
+          // the id (string) into the local payment's
+          // `provider_reference` so the later `charge.refunded`
+          // handler can resolve the payment row from the refund's
+          // `payment_intent` field.
+          payment_intent?: string | { id?: string };
         };
 
         // Only process fully-paid sessions. For ACH/bank transfers, Stripe can
@@ -707,6 +715,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           return res.status(500).json({ error: 'Payment processing not configured' });
         }
 
+        // D2-4 (Codex P1 #2) — stamp the Stripe payment_intent id into
+        // `providerReference` so `charge.refunded` can resolve back to
+        // this payment via `paymentRepo.findByProviderReference`. Our
+        // Stripe creation paths attach tenant_id+invoice_id metadata
+        // but NEVER payment_id, so without this the refund handler had
+        // no way to find the originating row and silently ACKed every
+        // real refund as 'skipped'. Fall back to the previous literal
+        // for the edge case where payment_intent is absent (preserves
+        // legacy behavior for any pre-existing fixtures).
+        const paymentIntentRef: string =
+          typeof session.payment_intent === 'string'
+            ? session.payment_intent
+            : (typeof session.payment_intent === 'object' &&
+                session.payment_intent !== null &&
+                typeof session.payment_intent.id === 'string')
+              ? session.payment_intent.id
+              : 'stripe_checkout';
+
         // §6 Time-to-Cash. Refresh deps for the post-payment job
         // money-state rollup. Undefined unless all three repos are
         // wired — recordPayment then skips the rollup cleanly.
@@ -728,7 +754,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               invoiceId,
               amountCents: amountTotal,
               method: 'credit_card',
-              providerReference: 'stripe_checkout',
+              providerReference: paymentIntentRef,
               processedBy: 'stripe_webhook',
             },
             deps.invoiceRepo,
@@ -750,7 +776,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                     invoiceId,
                     amountCents: invoice.amountDueCents,
                     method: 'credit_card',
-                    providerReference: 'stripe_checkout',
+                    providerReference: paymentIntentRef,
                     processedBy: 'stripe_webhook',
                   },
                   deps.invoiceRepo,
@@ -815,25 +841,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // recordRefund() service, which enforces the over-refund guard
       // and emits the `payment.refunded` audit event.
       //
-      // Payment lookup precedence:
-      //   1. metadata.payment_id on the refund (set by our checkout flow)
-      //   2. metadata.payment_id on the parent charge
-      //   3. metadata.tenant_id + metadata.payment_id combinations
+      // Payment lookup precedence (Codex P1 #2 — PR #384):
+      //   1. metadata.payment_id on the refund (set by manual API refunds)
+      //   2. metadata.payment_id on the parent charge (same)
+      //   3. FALLBACK: paymentRepo.findByProviderReference(tenantId,
+      //      payment_intent) — our checkout creation paths attach
+      //      tenant_id+invoice_id metadata but NEVER payment_id, so for
+      //      every real refund only path 3 actually resolves. The
+      //      payment_intent id is stamped into providerReference by the
+      //      checkout.session.completed branch above.
       //
-      // Without an explicit payment_id metadata we can't safely resolve
-      // the internal payment row (the providerReference today is a
-      // generic literal "stripe_checkout", not the payment_intent id);
-      // we log + skip rather than guess and mis-credit a refund.
+      // If none of the three resolve, we log + skip rather than guess
+      // and mis-credit a refund.
       if (event.type === 'charge.refunded') {
         const charge = event.data.object as {
           id?: string;
-          payment_intent?: string;
+          payment_intent?: string | { id?: string };
           metadata?: { tenant_id?: string; payment_id?: string };
           refunds?: {
             data?: Array<{
               id?: string;
               amount?: number;
               created?: number;
+              payment_intent?: string | { id?: string };
               metadata?: { tenant_id?: string; payment_id?: string };
             }>;
           };
@@ -855,11 +885,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
 
         const tenantId =
           refund.metadata?.tenant_id ?? charge.metadata?.tenant_id;
-        const paymentId =
+        let paymentId =
           refund.metadata?.payment_id ?? charge.metadata?.payment_id;
 
+        // Codex P1 #2 (PR #384) — our Stripe creation paths
+        // (stripe-payment-link / stripe-payment-intent) stamp only
+        // tenant_id and invoice_id into metadata, never payment_id. So
+        // for every real refund the metadata.payment_id lookup misses
+        // and we silently ACK'd as 'skipped' — refund tracking was
+        // non-functional in production. Fall back to looking up by the
+        // Stripe payment_intent which we now store as
+        // provider_reference at checkout.session.completed.
+        if (tenantId && !paymentId) {
+          const pi = refund.payment_intent ?? charge.payment_intent;
+          const piId =
+            typeof pi === 'string'
+              ? pi
+              : (typeof pi === 'object' && pi !== null && typeof pi.id === 'string')
+                ? pi.id
+                : undefined;
+          if (piId) {
+            const found = await deps.paymentRepo.findByProviderReference(tenantId, piId);
+            if (found) paymentId = found.id;
+          }
+        }
+
         if (!tenantId || !paymentId) {
-          logger.warn('charge.refunded missing tenant_id/payment_id metadata — cannot resolve payment', {
+          logger.warn('charge.refunded missing tenant_id/payment_id metadata and payment_intent lookup miss — cannot resolve payment', {
             eventId: event.id, chargeId: charge.id, refundId: refund.id,
           });
           await webhookRepo.updateStatus(event.id, 'processed');
@@ -892,10 +944,23 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             refundId: refund.id,
           });
         } catch (refundErr) {
+          if (refundErr instanceof NotFoundError) {
+            // Codex P1 #3 (PR #384) — webhook delivery ordering is not
+            // guaranteed; `charge.refunded` can arrive BEFORE the
+            // `checkout.session.completed` that creates the payment
+            // row. Surfacing this as 5xx lets Stripe retry (the outer
+            // webhookRepo dedups by event id, so retries are
+            // idempotent). Swallowing it the way ValidationError is
+            // would leave the refund un-recorded forever.
+            logger.warn('charge.refunded for unknown payment — letting Stripe retry', {
+              tenantId, paymentId, refundId: refund.id,
+            });
+            throw refundErr; // outer catch sets webhook 'failed' + 500
+          }
           if (refundErr instanceof ValidationError) {
-            // Over-refund / missing payment is a data condition the
-            // webhook can't fix by retrying; log + ack to stop Stripe
-            // from hammering us. Manual reconciliation required.
+            // Over-refund / other terminal validation — log + ack to
+            // stop Stripe from hammering us. Manual reconciliation
+            // required. NotFoundError above is the retryable case.
             logger.warn('charge.refunded validation failed; skipping', {
               tenantId, paymentId, refundId: refund.id,
               error: refundErr.message,

@@ -69,6 +69,40 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
     });
   }
 
+  /**
+   * D2-4 (Codex P1 #2 follow-up) — resolve a payment by the value we
+   * stamped into `provider_reference` at creation time. Used by the
+   * Stripe `charge.refunded` handler to look up the local payment row
+   * from the event's `payment_intent` id, since our checkout creation
+   * paths attach `tenant_id`/`invoice_id` metadata to the Stripe object
+   * but not a `payment_id`.
+   *
+   * `tenant_id` is included in the WHERE explicitly for defense-in-depth
+   * alongside RLS — a misconfigured GUC must not silently leak a payment
+   * from another tenant on a colliding reference.
+   *
+   * Returns the most recently received match (ORDER BY received_at DESC)
+   * to defend against an extremely rare duplicate-reference edge case
+   * (e.g. a manual replay that re-recorded the same payment_intent
+   * before D2-4 made the column unique). Returns `null` when no match.
+   */
+  async findByProviderReference(
+    tenantId: string,
+    providerReference: string,
+  ): Promise<Payment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM payments
+         WHERE tenant_id = $1 AND reference_number = $2
+         ORDER BY paid_at DESC
+         LIMIT 1`,
+        [tenantId, providerReference],
+      );
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
   async findByTenant(
     tenantId: string,
     options?: PaymentListOptions,
