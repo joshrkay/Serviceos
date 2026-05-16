@@ -332,16 +332,20 @@ describe('D2-3 inbound /voice tenant resolution', () => {
       To: UNKNOWN_NUMBER,
     });
 
-    expect(res.status).toBe(200);
-    expect(res.text).toMatch(/not in service/i);
+    // Codex P1 (PR #384) — DB outages MUST surface as 5xx so Twilio's
+    // retry policy can recover from transient failures. Previously we
+    // 200-declined which made every transient blip look like a
+    // permanent "number not in service" misroute.
+    expect(res.status).toBe(503);
+    expect(res.text).toMatch(/temporarily unavailable/i);
     expect(throwingRepo.findByNumber).toHaveBeenCalledTimes(1);
-    // Both error capture (from the throw) AND miss capture (from prod
-    // refusal afterwards) are emitted.
+    // Only the error capture is emitted now — we no longer fall through
+    // to the dev-fallback / prod-miss path on infra errors.
     expect(sentry.captures.map((c) => c.message)).toEqual(
-      expect.arrayContaining([
-        'telephony.tenant_lookup_error',
-        'telephony.tenant_lookup_miss',
-      ]),
+      expect.arrayContaining(['telephony.tenant_lookup_error']),
+    );
+    expect(sentry.captures.map((c) => c.message)).not.toContain(
+      'telephony.tenant_lookup_miss',
     );
 
     // Don't pollute the test app's unrelated harness.

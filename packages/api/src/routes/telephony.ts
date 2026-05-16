@@ -263,12 +263,28 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = await resolveInboundTenantId({
-      to,
-      from,
-      callSid,
-      deps,
-    });
+    let tenantId: string | undefined;
+    try {
+      tenantId = await resolveInboundTenantId({
+        to,
+        from,
+        callSid,
+        deps,
+      });
+    } catch (err) {
+      // Codex P1 (PR #384) — transient infra failures (DB outage during
+      // phone-number lookup) propagate as throws from
+      // resolveInboundTenantId in prod. Respond 5xx so Twilio retries
+      // the webhook; do NOT 200-decline (which would falsely tell the
+      // caller a real number is unassigned).
+      logger.error('telephony/voice: tenant lookup failed', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
+
     if (!tenantId) {
       // D2-3 — unknown DID. Sentry event + structured log already emitted
       // inside resolveInboundTenantId. Reply 200 + decline TwiML so Twilio
@@ -627,10 +643,12 @@ async function resolveInboundTenantId(opts: {
         return lookup.tenantId;
       }
     } catch (err) {
-      // A DB error here MUST NOT silently fall through to the env-var
-      // fallback in prod — that's exactly the silent-misroute footgun
-      // D2-3 is closing. Log + Sentry, then continue to dev-fallback
-      // logic (which itself refuses the fallback in prod).
+      // Codex P1 (PR #384) — distinguish "tenant not found" (terminal,
+      // 200 decline) from "DB outage" (transient, 5xx so Twilio
+      // retries). Previously the catch silently fell through to the
+      // dev-fallback logic which then 200-declined in prod, turning
+      // every transient DB blip into permanent "number not in service"
+      // misroutes and suppressing Twilio's retry behavior.
       logger.error('telephony.tenant_lookup_error', {
         to: normalizedTo,
         callSid,
@@ -638,6 +656,16 @@ async function resolveInboundTenantId(opts: {
       });
       const sentry = deps.sentry ?? getSentryClient();
       sentry.captureMessage('telephony.tenant_lookup_error', 'error');
+
+      // In prod / staging, re-throw so the route returns 5xx. In dev,
+      // continue to the legacy/env fallback so local development against
+      // a broken Pg doesn't lock out test calls.
+      const nodeEnv = deps.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+      const isProdLike =
+        nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
+      if (isProdLike) {
+        throw err;
+      }
     }
   }
 

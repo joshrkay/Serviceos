@@ -616,7 +616,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     // Idempotency guard: reject replays and concurrent deliveries of the same
     // Stripe event. webhookRepo is a module-level singleton so the dedup map
     // persists across requests. Uses the existing handleWebhookEvent() pattern.
-    const { duplicate } = await handleWebhookEvent(
+    // Codex P1 (PR #384) — capture the WebhookEvent's internal UUID
+    // (webhookEvent.id) for status-update calls. Previously the route
+    // used `event.id` (the SHADOWED Stripe event id from JSON.parse
+    // above), which the id-keyed updateStatus silently no-op'd, so rows
+    // stayed at status='received' and our new status-aware dedup re-ran
+    // the handler on retries.
+    const { event: webhookEvent, duplicate } = await handleWebhookEvent(
       'stripe',
       event.type,
       event.data as Record<string, unknown>,
@@ -661,7 +667,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Skipping incomplete Stripe checkout session', {
             eventId: event.id, paymentStatus: session.payment_status,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
         }
 
@@ -686,7 +692,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             logger.warn('Deposit checkout for unknown job', {
               eventId: event.id, tenantId, depositForJobId,
             });
-            await webhookRepo.updateStatus(event.id, 'processed');
+            await webhookRepo.updateStatus(webhookEvent.id, 'processed');
             return res.status(200).json({ received: true, skipped: true });
           }
           const required = job.depositRequiredCents ?? 0;
@@ -695,7 +701,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             logger.warn('Deposit paid for job with no required deposit', {
               eventId: event.id, tenantId, depositForJobId,
             });
-            await webhookRepo.updateStatus(event.id, 'processed');
+            await webhookRepo.updateStatus(webhookEvent.id, 'processed');
             return res.status(200).json({ received: true, skipped: true });
           }
           const newPaid = Math.min(previouslyPaid + amountTotal, required);
@@ -707,7 +713,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Deposit credited via Stripe checkout', {
             tenantId, depositForJobId, amountTotal, newPaid, required,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, deposit: true });
         }
 
@@ -715,7 +721,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('Stripe checkout.session.completed missing or invalid metadata', {
             eventId: event.id, tenantId, invoiceId, amountTotal,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
         }
 
@@ -889,7 +895,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('charge.refunded missing or zero refund amount', {
             eventId: event.id, chargeId: charge.id,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
         }
 
@@ -914,7 +920,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             refundId: refund.id,
             refundStatus: refund.status,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, deferred: true, refundStatus: refund.status });
         }
 
@@ -949,7 +955,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('charge.refunded missing tenant_id/payment_id metadata and payment_intent lookup miss — cannot resolve payment', {
             eventId: event.id, chargeId: charge.id, refundId: refund.id,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
         }
 
@@ -1047,7 +1053,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('charge.refund.updated with non-succeeded status — skipping', {
             eventId: event.id, refundId: refund.id, refundStatus: refund.status,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
         }
 
@@ -1055,7 +1061,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('charge.refund.updated missing or zero refund amount', {
             eventId: event.id, refundId: refund.id,
           });
-          await webhookRepo.updateStatus(event.id, 'processed');
+          await webhookRepo.updateStatus(webhookEvent.id, 'processed');
           return res.status(200).json({ received: true, skipped: true });
         }
 
@@ -1177,12 +1183,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
-      await webhookRepo.updateStatus(event.id, 'processed');
+      await webhookRepo.updateStatus(webhookEvent.id, 'processed');
       return res.status(200).json({ received: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       logger.error('Stripe webhook processing failed', { eventId: event.id, type: event.type, error: message });
-      await webhookRepo.updateStatus(event.id, 'failed', message);
+      await webhookRepo.updateStatus(webhookEvent.id, 'failed', message);
       return res.status(500).json({ error: 'Processing failed' });
     }
   });
