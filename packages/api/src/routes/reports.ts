@@ -8,6 +8,7 @@ import { ExpenseRepository } from '../expenses/expense';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
 import { PaymentRepository } from '../invoices/payment';
 import { buildTaxExportCsv, TaxExportRow } from '../reports/tax-export';
+import { TimeGivenBackReporter } from '../reports/time-given-back';
 
 /**
  * Tenant-scoped reporting endpoints. Add new reports here rather than
@@ -23,6 +24,8 @@ export interface ReportsRouterDeps {
   expenseRepo?: ExpenseRepository;
   invoiceRepo?: InvoiceRepository;
   paymentRepo?: PaymentRepository;
+  /** §9 — backs GET /time-given-back. 503 when absent. */
+  timeGivenBackReporter?: TimeGivenBackReporter;
 }
 
 /** 'YYYY-MM' for the current UTC month. */
@@ -195,6 +198,28 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
           `attachment; filename="tax-export-${fromRaw}-to-${toRaw}.csv"`,
         );
         res.send(csv);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.get(
+    '/time-given-back',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.timeGivenBackReporter) {
+          res
+            .status(503)
+            .json({ error: 'NOT_CONFIGURED', message: 'Time-given-back report unavailable' });
+          return;
+        }
+        const summary = await deps.timeGivenBackReporter.query(req.auth!.tenantId, new Date());
+        res.json({ data: summary });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

@@ -107,6 +107,13 @@ export interface TenantSettings {
    */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
   /**
+   * §9 — the owner's effective hourly rate, integer cents. Used by the
+   * Time-Given-Back surface to convert saved hours into a dollar
+   * figure. Null/undefined = not yet set (captured during §10
+   * onboarding); until then the headline shows hours only.
+   */
+  hourlyRateCents?: number | null;
+  /**
    * B1 — Per-tenant voice persona. When set, the calling agent uses
    * this name in its greeting ("Hi, I'm {voiceAgentName}. How can I
    * help?"). Null = use the default generic opener.
@@ -167,6 +174,8 @@ export interface UpdateSettingsInput {
   depositRequiredAboveCents?: number | null;
   /** Tier 4 — when the deposit is collected relative to approval. */
   depositTimingPolicy?: 'before_approval' | 'after_approval';
+  /** §9 — owner's effective hourly rate (integer cents); null clears. */
+  hourlyRateCents?: number | null;
   /** B1 — voice persona name; null clears the field. */
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */

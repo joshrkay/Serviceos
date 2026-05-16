@@ -2593,6 +2593,10 @@ export const MIGRATIONS = {
       ON vertical_training_assets (tenant_id, idempotency_key)
       WHERE idempotency_key IS NOT NULL;
   `,
+  '098_add_tenant_hourly_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS hourly_rate_cents INTEGER;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
