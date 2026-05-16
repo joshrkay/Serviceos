@@ -324,16 +324,31 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const tenantId = req.auth!.tenantId;
         const userId = req.auth!.userId;
 
-        // INSERT ... ON CONFLICT to mark test_call as skipped
+        // Ensure a tenant_settings row exists before stamping the skip
+        // timestamp. business_name is NOT NULL with no default, so a raw
+        // INSERT that omits it fails. Match /pack's pattern: use the
+        // settings repo to create the minimal row, then raw UPDATE the
+        // new column directly (repo doesn't yet expose it).
+        const existing = await settingsRepo.findByTenant(tenantId);
+        if (!existing) {
+          await settingsRepo.create({
+            id: uuidv4(),
+            tenantId,
+            businessName: '', // placeholder; /identity will populate
+            timezone: 'America/New_York',
+            estimatePrefix: 'EST-',
+            invoicePrefix: 'INV-',
+            nextEstimateNumber: 1001,
+            nextInvoiceNumber: 1001,
+            defaultPaymentTermDays: 30,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        }
         await pool.query(
-          `INSERT INTO tenant_settings (id, tenant_id, timezone, estimate_prefix, invoice_prefix,
-             next_estimate_number, next_invoice_number, default_payment_term_days,
-             onboarding_test_call_skipped_at, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, 'America/New_York', 'EST-', 'INV-',
-                   1001, 1001, 30, now(), now(), now())
-           ON CONFLICT (tenant_id) DO UPDATE SET
-             onboarding_test_call_skipped_at = now(),
-             updated_at = now()`,
+          `UPDATE tenant_settings
+             SET onboarding_test_call_skipped_at = now(), updated_at = now()
+           WHERE tenant_id = $1`,
           [tenantId]
         );
 
