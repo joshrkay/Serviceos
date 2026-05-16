@@ -22,6 +22,7 @@ import type { Socket } from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
 import twilio from 'twilio';
 import { createLogger } from '../../logging/logger';
+import { instrument } from '../../monitoring/instrumentation';
 import {
   TwilioMediaStreamAdapter,
   type MediaStreamAdapterDeps,
@@ -102,7 +103,14 @@ export function attachMediaStreamServer(
 
   const wss = new WebSocketServer({ noServer: true });
 
-  const upgradeHandler = async (req: IncomingMessage, socket: Socket, head: Buffer): Promise<void> => {
+  // §11 H3: Wrap the upgrade handler with instrument() so any unexpected
+  // throw during signature verification or adapter construction is tagged
+  // `path=voice` (plus correlation_id when Twilio supplied the call SID
+  // header) and captured to Sentry before the error rethrows. Expected
+  // rejections (bad signature, missing token) already exit via
+  // rejectUpgrade() without throwing, so they don't reach Sentry — only
+  // structural failures do.
+  const upgradeHandlerInner = async (req: IncomingMessage, socket: Socket, head: Buffer): Promise<void> => {
     // 1. Path filter — leave other upgrade paths (if any) untouched.
     const url = req.url ?? '';
     const pathOnly = url.split('?')[0];
@@ -161,6 +169,13 @@ export function attachMediaStreamServer(
       }
     });
   };
+
+  const upgradeHandler = instrument(upgradeHandlerInner, {
+    path: 'voice',
+    extractTags: (req) => ({
+      correlation_id: (req.headers['x-twilio-call-sid'] as string | undefined) ?? undefined,
+    }),
+  });
 
   httpServer.on('upgrade', upgradeHandler);
   logger.info('mediastream server attached', { path: MEDIA_STREAM_PATH });

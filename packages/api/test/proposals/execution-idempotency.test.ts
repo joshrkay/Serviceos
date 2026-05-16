@@ -4,6 +4,10 @@ import {
   InMemoryProposalRepository,
   Proposal,
 } from '../../src/proposals/proposal';
+import {
+  InMemoryProposalExecutionRepository,
+  ProposalExecutionRepository,
+} from '../../src/proposals/proposal-execution';
 import { transitionProposal } from '../../src/proposals/lifecycle';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { ExecutionResult } from '../../src/proposals/execution/handlers';
@@ -37,16 +41,43 @@ describe('P2-011 — Execution idempotency controls', () => {
     return proposal;
   }
 
+  /**
+   * Persist an "executed" proposal together with its matching
+   * proposal_executions row — mirrors what the real executor will write
+   * once Tasks 4 & 5 wire `ProposalExecutionRepository.recordExecution`
+   * into the success path. The guard's lookup is now indexed off the
+   * executions table, so the row must exist for retries to short-circuit.
+   */
+  async function persistExecuted(
+    proposalRepo: InMemoryProposalRepository,
+    executionRepo: ProposalExecutionRepository,
+    proposal: Proposal,
+  ): Promise<void> {
+    await proposalRepo.create(proposal);
+    if (!proposal.idempotencyKey) {
+      throw new Error('persistExecuted: proposal must have an idempotencyKey to create an execution row');
+    }
+    await executionRepo.recordExecution({
+      tenantId: proposal.tenantId,
+      proposalId: proposal.id,
+      executedPayload: proposal.payload,
+      executedBy: proposal.executedBy ?? 'user-1',
+      status: 'succeeded',
+      idempotencyKey: proposal.idempotencyKey,
+    });
+  }
+
   const successResult: ExecutionResult = {
     success: true,
     resultEntityId: 'new-entity-456',
   };
 
   it('happy path — first execution succeeds', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
     const proposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
-    await repo.create(proposal);
+    await proposalRepo.create(proposal);
 
     const executeFn = vi.fn().mockResolvedValue(successResult);
     const { result, alreadyExecuted } = await guard.checkAndExecute(proposal, executeFn);
@@ -57,11 +88,12 @@ describe('P2-011 — Execution idempotency controls', () => {
   });
 
   it('happy path — retry with same key returns previous result', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
 
     const executed = makeExecutedProposal({ idempotencyKey: 'key-1' });
-    await repo.create(executed);
+    await persistExecuted(proposalRepo, executionRepo, executed);
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
 
@@ -74,11 +106,12 @@ describe('P2-011 — Execution idempotency controls', () => {
   });
 
   it('happy path — different key executes normally', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
 
     const executed = makeExecutedProposal({ idempotencyKey: 'key-1' });
-    await repo.create(executed);
+    await persistExecuted(proposalRepo, executionRepo, executed);
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-2' });
 
@@ -91,8 +124,9 @@ describe('P2-011 — Execution idempotency controls', () => {
   });
 
   it('validation — proposal without key executes directly', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
     const proposal = makeApprovedProposal(); // no idempotencyKey
 
     const executeFn = vi.fn().mockResolvedValue(successResult);
@@ -104,11 +138,12 @@ describe('P2-011 — Execution idempotency controls', () => {
   });
 
   it('tenant isolation — same key different tenant executes independently', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
 
     const executed = makeExecutedProposal({ idempotencyKey: 'key-1', tenantId: 'tenant-1' });
-    await repo.create(executed);
+    await persistExecuted(proposalRepo, executionRepo, executed);
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-1', tenantId: 'tenant-2' });
 
@@ -121,11 +156,12 @@ describe('P2-011 — Execution idempotency controls', () => {
   });
 
   it('idempotency — already executed not re-executed', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
 
     const executed = makeExecutedProposal({ idempotencyKey: 'key-1' });
-    await repo.create(executed);
+    await persistExecuted(proposalRepo, executionRepo, executed);
 
     const retryProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
 
@@ -137,12 +173,13 @@ describe('P2-011 — Execution idempotency controls', () => {
   });
 
   it('invalid transition — non-executed previous result not treated as duplicate', async () => {
-    const repo = new InMemoryProposalRepository();
-    const guard = new IdempotencyGuard(repo);
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
 
-    // Create a proposal with same key but in approved (not executed) status
+    // Create a proposal with same key but in approved (not executed) status — no execution row.
     const approvedProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
-    await repo.create(approvedProposal);
+    await proposalRepo.create(approvedProposal);
 
     const newProposal = makeApprovedProposal({ idempotencyKey: 'key-1' });
 
@@ -152,5 +189,18 @@ describe('P2-011 — Execution idempotency controls', () => {
     expect(alreadyExecuted).toBe(false);
     expect(result.success).toBe(true);
     expect(executeFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the executions repository for the key lookup (indexed path)', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const executionRepo = new InMemoryProposalExecutionRepository();
+    const findByIdempotencyKeySpy = vi.spyOn(executionRepo, 'findByIdempotencyKey');
+    const findByTenantSpy = vi.spyOn(proposalRepo, 'findByTenant');
+
+    const guard = new IdempotencyGuard(executionRepo, proposalRepo);
+    await guard.findPreviousExecution('t1', 'some-key');
+
+    expect(findByIdempotencyKeySpy).toHaveBeenCalledWith('t1', 'some-key');
+    expect(findByTenantSpy).not.toHaveBeenCalled();
   });
 });

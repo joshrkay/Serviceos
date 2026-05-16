@@ -25,6 +25,7 @@ import { ProposalRepository, Proposal } from '../proposals/proposal';
 import { ProposalExecutor } from '../proposals/execution/executor';
 import { UNDO_WINDOW_MS } from '../proposals/lifecycle';
 import { Logger } from '../logging/logger';
+import { instrument } from '../monitoring/instrumentation';
 
 export interface ExecutionWorkerDeps {
   proposalRepo: ProposalRepository;
@@ -36,7 +37,7 @@ export interface ExecutionWorkerDeps {
   maxRetries?: number;
 }
 
-export async function runExecutionSweep(deps: ExecutionWorkerDeps): Promise<{
+async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
   executed: number;
   failed: number;
 }> {
@@ -94,3 +95,14 @@ export async function runExecutionSweep(deps: ExecutionWorkerDeps): Promise<{
 
   return { executed, failed };
 }
+
+/**
+ * §11 H3: Wrapped with instrument() so an unexpected throw in the sweep
+ * (vs. per-proposal failures, which are already caught and logged inline)
+ * is tagged `path=execution-worker` and captured to Sentry before the
+ * error rethrows. The sweep operates over many tenants per tick, so
+ * tenant_id is not extractable at this level.
+ */
+export const runExecutionSweep = instrument(runExecutionSweepInner, {
+  path: 'execution-worker',
+});

@@ -1,4 +1,5 @@
 import { verifyWebhookSignature, handleWebhookEvent, WebhookRepository } from '../webhooks/webhook-handler';
+import { instrument } from '../monitoring/instrumentation';
 
 export type StripeEventType = 'checkout.session.completed' | 'payment_intent.succeeded' | 'payment_intent.payment_failed';
 
@@ -60,7 +61,7 @@ export function parseStripeEvent(payload: Record<string, unknown>): {
   return { eventType, invoiceId, amountCents, currency, paymentIntentId };
 }
 
-export async function handleStripeWebhook(
+async function handleStripeWebhookInner(
   rawBody: string,
   signature: string,
   config: StripeWebhookConfig,
@@ -112,3 +113,15 @@ export async function handleStripeWebhook(
     duplicate,
   };
 }
+
+/**
+ * §11 H3: Wrapped with instrument() so Stripe webhook failures are tagged
+ * `path=stripe-webhook` and captured to Sentry before the error rethrows.
+ * Tag extractor is omitted because this handler receives only the raw
+ * payload + signature — tenant_id lives inside the parsed payload metadata
+ * and isn't reliable until after the failure point, so the path tag alone
+ * drives the alert rule (sufficient for §11 H3 acceptance criteria).
+ */
+export const handleStripeWebhook = instrument(handleStripeWebhookInner, {
+  path: 'stripe-webhook',
+});

@@ -18,6 +18,7 @@ import {
 } from '../mode/ModeSwitchModal';
 import { CompressedSessionStrip } from '../sessions/CompressedSessionStrip';
 import { useActiveSessions } from '../../hooks/useActiveSessions';
+import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 
 interface NavItem {
   to: string;
@@ -284,7 +285,14 @@ export function Shell() {
 
   return (
     <ErrorBoundary>
-    <div className="flex h-screen bg-slate-50 overflow-hidden">
+    <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
+
+      {/* §10 onboarding — early-upgrade nudge. Renders only when the
+          30-minute trial threshold has fired (and onboarding is otherwise
+          complete). Gated by VITE_ONBOARDING_V2_ENABLED via the hook. */}
+      {import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true' && <UpgradeNudgeBanner />}
+
+      <div className="flex flex-1 overflow-hidden">
 
       {/* Toast portal — mounted at the layout root so toasts surface
           across all authenticated pages. role="status"/role="alert" are
@@ -473,6 +481,7 @@ export function Shell() {
         />
       )}
 
+      </div>
     </div>
     </ErrorBoundary>
   );

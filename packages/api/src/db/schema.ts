@@ -2593,9 +2593,29 @@ export const MIGRATIONS = {
       ON vertical_training_assets (tenant_id, idempotency_key)
       WHERE idempotency_key IS NOT NULL;
   `,
-  '098_add_tenant_hourly_rate': `
-    ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS hourly_rate_cents INTEGER;
+  '098_tenant_settings_onboarding_fields': `
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS business_hours      JSONB       NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS service_area_text   TEXT;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS service_area_radius INT;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS job_buffer_minutes  INT         NOT NULL DEFAULT 30;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS hourly_rate_cents   INT;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS onboarding_test_call_skipped_at      TIMESTAMPTZ;
+    ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS onboarding_upgrade_prompt_shown_at   TIMESTAMPTZ;
+  `,
+  '099_proposal_executions_idempotency_index': `
+    -- §11 H1: replace the O(n) in-process scan in IdempotencyGuard with
+    -- an indexed lookup keyed by (tenant_id, idempotency_key). The existing
+    -- index on (tenant_id, proposal_id, idempotency_key) is wider than the
+    -- guard's lookup (the guard doesn't know proposal_id up-front for a
+    -- replay) so it can't be used. This partial unique index also serves
+    -- as defense-in-depth against app-layer regressions.
+    --
+    -- Partial WHERE idempotency_key IS NOT NULL: most legacy executions
+    -- and undo paths carry no key, and a NOT NULL constraint would block
+    -- them.
+    CREATE UNIQUE INDEX IF NOT EXISTS proposal_executions_tenant_idempotency_uniq
+      ON proposal_executions (tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
   `,
 };
 

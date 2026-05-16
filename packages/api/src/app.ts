@@ -74,6 +74,8 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createVoiceGate } from './voice/voice-gate';
+import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -100,6 +102,7 @@ import {
 import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
+import { initSentry, setSentryClient } from './monitoring/sentry';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -289,6 +292,7 @@ import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation'
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
+import { IdempotencyGuard } from './proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
@@ -418,6 +422,19 @@ class InMemoryWebhookEventRepository {
 }
 
 export function createApp(): express.Express {
+  // §11 H3: Initialize Sentry FIRST so any error thrown during startup
+  // or in handler construction below is captured. initSentry() is a no-op
+  // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
+  // The instrument() wrappers on the four critical paths read the registered
+  // client via getSentryClient() — without setSentryClient() they fall back
+  // to the no-op client and exceptions are silently swallowed by the monitor.
+  const sentryClient = initSentry({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    release: process.env.GIT_SHA ?? process.env.RAILWAY_GIT_COMMIT_SHA,
+  });
+  setSentryClient(sentryClient);
+
   const app = express();
 
   // Behind Railway / Cloudflare / any reverse proxy: trust the immediate
@@ -1056,6 +1073,14 @@ export function createApp(): express.Express {
     'create_customer',
     new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo),
   );
+  // §11 H1: every executor wiring threads an IdempotencyGuard so
+  // queue redelivery cannot double-execute side effects. The guard
+  // looks up prior `proposal_executions` rows by (tenant_id,
+  // idempotency_key) — passthrough when the proposal has no key.
+  const proposalIdempotencyGuard = new IdempotencyGuard(
+    proposalExecutionRepo,
+    proposalRepo,
+  );
   // Phase 4a-1: persist a proposal_executions row on success + fire the
   // proposal-correction-worker. The onExecuted callback is failure-soft
   // inside the executor itself (logs via console, never rethrows), so
@@ -1063,7 +1088,7 @@ export function createApp(): express.Express {
   const proposalExecutor = new ProposalExecutor(
     executionHandlers,
     proposalRepo,
-    undefined,
+    proposalIdempotencyGuard,
     {
       executionRepo: proposalExecutionRepo,
       onExecuted: async (event) => {
@@ -1501,6 +1526,15 @@ export function createApp(): express.Express {
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // inbound call ends. Pool-gated (no-op when running in-memory).
+    ...(pool
+      ? {
+          onSessionEnded: async ({ tenantId }: { tenantId: string }) => {
+            await checkAndFireUpgradeNudge({ pool }, tenantId);
+          },
+        }
+      : {}),
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1692,6 +1726,12 @@ export function createApp(): express.Express {
           warnings,
         };
       },
+      // §10 onboarding voice gates — only wired when both pool and auditRepo
+      // exist (production / integration test). In-memory dev mode skips
+      // gating entirely (the route stays legacy behavior).
+      ...(pool && auditRepo
+        ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
+        : {}),
     }),
   );
 
@@ -1956,7 +1996,7 @@ export function createApp(): express.Express {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
@@ -2117,7 +2157,7 @@ export function createApp(): express.Express {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
-  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
+  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService }));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
