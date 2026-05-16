@@ -58,7 +58,7 @@ import { gradePerceivedCompletion } from './graders/perceived-completion';
 import { aggregate } from './voting/majority-vote';
 import type { AggregatedResult, PerRunResult } from './voting/majority-vote';
 import type { LLMGateway } from '../gateway/gateway';
-import { wrapWithCostTracking } from './audio/real-llm-gateway-factory';
+import { wrapWithCostTracking } from '../gateway/real-layer-two-factory';
 import { AgentEventBus } from './event-bus';
 
 /**

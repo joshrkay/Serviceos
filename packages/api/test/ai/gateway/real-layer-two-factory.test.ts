@@ -52,7 +52,7 @@ import {
   HAIKU_OUTPUT_CENTS_PER_MTOKEN,
   HAIKU_CACHE_READ_CENTS_PER_MTOKEN,
   type LayerTwoCostTracker,
-} from '../../../src/ai/voice-quality/audio/real-llm-gateway-factory';
+} from '../../../src/ai/gateway/real-layer-two-factory';
 
 class MockCostTracker implements LayerTwoCostTracker {
   private total = 0;
