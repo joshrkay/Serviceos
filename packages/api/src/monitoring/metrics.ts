@@ -26,6 +26,15 @@ export const gatewayRequestsTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+// ---------- Voice gates (§10 onboarding — trial fraud guardrails) ----------
+
+export const voiceBlocksTotal = new Counter({
+  name: 'voice_blocks_total',
+  help: 'Inbound voice calls blocked by trial/billing gates, by reason',
+  labelNames: ['reason'],
+  registers: [metricsRegistry],
+});
+
 export const gatewayRequestLatencyMs = new Histogram({
   name: 'gateway_request_latency_ms',
   help: 'End-to-end LLM gateway request latency in ms',

@@ -74,6 +74,7 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createVoiceGate } from './voice/voice-gate';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -1691,6 +1692,12 @@ export function createApp(): express.Express {
           warnings,
         };
       },
+      // §10 onboarding voice gates — only wired when both pool and auditRepo
+      // exist (production / integration test). In-memory dev mode skips
+      // gating entirely (the route stays legacy behavior).
+      ...(pool && auditRepo
+        ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
+        : {}),
     }),
   );
 
