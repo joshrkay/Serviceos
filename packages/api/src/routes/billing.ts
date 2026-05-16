@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { toErrorResponse, NotFoundError } from '../shared/errors';
 import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -240,8 +240,8 @@ export function createBillingRouter(deps: BillingRouteDeps = {}): Router {
           await billingService.endTrialNow(tenantId);
         } catch (innerErr: unknown) {
           if (
-            innerErr instanceof Error &&
-            innerErr.message.includes('Subscription not found')
+            innerErr instanceof NotFoundError &&
+            innerErr.message.startsWith('Subscription not found')
           ) {
             res.status(409).json({ error: 'NO_SUBSCRIPTION' });
             return;
