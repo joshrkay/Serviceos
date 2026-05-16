@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
@@ -421,6 +422,86 @@ class InMemoryWebhookEventRepository {
   }
 }
 
+/**
+ * D1-3 — helmet options factory.
+ *
+ * Exported separately from `createApp()` so the middleware test can assert
+ * header behaviour without booting the full app (which would require a real
+ * Pg pool and a full set of production secrets when NODE_ENV=production).
+ *
+ * Production behaviour:
+ *   - CSP whitelists the production frontend's external deps: Clerk
+ *     (auth UI + JS), Stripe Elements, Twilio Voice JS SDK, Sentry browser
+ *     SDK.
+ *   - HSTS = 1 year, includeSubDomains, preload=false (preload list
+ *     submission must be a deliberate human action).
+ *   - X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
+ *     no-referrer.
+ *   - crossOriginEmbedderPolicy is DISABLED because COEP=require-corp breaks
+ *     Stripe Elements (cross-origin frames without CORP headers).
+ *
+ * Dev/test behaviour:
+ *   - CSP disabled so Vite HMR / local tooling keep working. Other helmet
+ *     defaults (nosniff, HSTS, frame deny, no-referrer) still apply.
+ */
+export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0] {
+  return {
+    contentSecurityPolicy: isProd
+      ? {
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: [
+              "'self'",
+              'https://js.stripe.com',
+              'https://*.clerk.com',
+              'https://*.clerk.accounts.dev',
+              'https://clerk.com',
+              'https://sdk.twilio.com',
+              'https://media.twiliocdn.com',
+            ],
+            styleSrc: [
+              "'self'",
+              "'unsafe-inline'",
+              'https://*.clerk.com',
+              'https://clerk.com',
+            ],
+            imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
+            connectSrc: [
+              "'self'",
+              'https://api.stripe.com',
+              'https://*.clerk.com',
+              'https://clerk.com',
+              'https://*.clerk.accounts.dev',
+              'wss://*.twilio.com',
+              'https://*.twilio.com',
+              'https://*.ingest.sentry.io',
+              'https://*.ingest.us.sentry.io',
+            ],
+            frameSrc: [
+              "'self'",
+              'https://js.stripe.com',
+              'https://hooks.stripe.com',
+              'https://*.clerk.com',
+            ],
+            workerSrc: ["'self'", 'blob:'],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"],
+            frameAncestors: ["'none'"],
+          },
+        }
+      : false,
+    strictTransportSecurity: {
+      maxAge: 60 * 60 * 24 * 365,
+      includeSubDomains: true,
+      preload: false,
+    },
+    noSniff: true,
+    xFrameOptions: { action: 'deny' },
+    referrerPolicy: { policy: 'no-referrer' },
+    crossOriginEmbedderPolicy: false,
+  };
+}
+
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
@@ -464,8 +545,18 @@ export function createApp(): express.Express {
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
 
-  // Swagger UI — no auth required
+  // Swagger UI — no auth required.
+  // Mounted BEFORE helmet() so the CSP below doesn't break swagger-ui-express
+  // (which injects inline scripts/styles to render). The /api-docs surface is
+  // already public + read-only; the security trade-off is acceptable.
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+
+  // D1-3 — helmet hardening. Adds CSP / HSTS / X-Frame-Options / nosniff /
+  // referrer-policy headers the security audit (docs/pre-launch-hardening-
+  // 2026-05-16.md) flagged as missing. See `buildHelmetOptions` below for
+  // the full CSP whitelist + rationale.
+  const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
+  app.use(helmet(buildHelmetOptions(isProd)));
 
   // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
   app.use(cors({
