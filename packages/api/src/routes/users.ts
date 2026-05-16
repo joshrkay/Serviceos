@@ -11,6 +11,7 @@ import {
   UserRole,
 } from '../users/user';
 import { PendingInvitationRepository } from '../users/pending-invitation';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const updateUserSchema = z.object({
   role: z.enum(['owner', 'dispatcher', 'technician']).optional(),
@@ -52,6 +53,7 @@ export interface UsersRouteDeps {
 export function createUsersRouter(
   userRepo: UserRepository,
   deps: UsersRouteDeps = {},
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -95,6 +97,26 @@ export function createUsersRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
           return;
         }
+
+        // D2-1c — audit-log role / name / canFieldServe edits. Role changes
+        // are RBAC-critical so this row is the timeline anchor that lets
+        // the operator-history view answer "who promoted whom and when".
+        // We emit `changedFields` (key list only) rather than before/after
+        // so PII (name fields) doesn't land in the audit log payload.
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'user.updated',
+              entityType: 'user',
+              entityId: updated.id,
+              metadata: { changedFields: Object.keys(parsed) },
+            }),
+          );
+        }
+
         res.json(updated);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -196,6 +218,27 @@ export function createUsersRouter(
             // Best-effort. Local row stays; UI surfaces "Invited" on
             // it regardless. Re-send is via Clerk dashboard.
           }
+        }
+
+        // D2-1c — audit-log the invitation. Entity id is the local pending
+        // invitation row (matches the eventual users.id that the Clerk
+        // webhook stamps on accept; until then, the pending row is the
+        // only durable id we can reference).
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'user.invited',
+              entityType: 'pending_invitation',
+              entityId: local.id,
+              metadata: {
+                invitedEmail: parsed.email,
+                invitedRole: parsed.role,
+              },
+            }),
+          );
         }
 
         res.status(201).json({ ...local, clerkInvitationId });

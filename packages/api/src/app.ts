@@ -2073,13 +2073,18 @@ export function createApp(): express.Express {
   const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
-    createUsersRouter(userRepo, {
-      // Same instance the Clerk webhook reads on user.created — the
-      // accept side reads what the invite side wrote.
-      pendingInvitationRepo,
-      clerkSecretKey: process.env.CLERK_SECRET_KEY,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-    }),
+    createUsersRouter(
+      userRepo,
+      {
+        // Same instance the Clerk webhook reads on user.created — the
+        // accept side reads what the invite side wrote.
+        pendingInvitationRepo,
+        clerkSecretKey: process.env.CLERK_SECRET_KEY,
+        appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+      },
+      // D2-1c — audit-log user role / name edits + invitations.
+      auditRepo,
+    ),
   );
 
   // Tier 4 (Calendar sync — PR 1). Auth'd lifecycle endpoints.
@@ -2237,10 +2242,15 @@ export function createApp(): express.Express {
 
   app.use(
     '/api/settings',
-    createSettingsRouter(settingsRepo, {
-      activationRepo: packActivationRepo,
-      verticalPackRegistry: canonicalPackRegistry,
-    }),
+    createSettingsRouter(
+      settingsRepo,
+      {
+        activationRepo: packActivationRepo,
+        verticalPackRegistry: canonicalPackRegistry,
+      },
+      // D2-1c — audit-log tenant-settings + language mutations.
+      auditRepo,
+    ),
   );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
@@ -2269,7 +2279,8 @@ export function createApp(): express.Express {
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo));
+  // D2-1c — audit-log proposal approve / reject / edit / undo.
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo));
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }
@@ -2456,7 +2467,11 @@ export function createApp(): express.Express {
     }
     await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
   })();
-  app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+  // D2-1c — audit-log platform-admin feature-flag upsert / delete.
+  app.use(
+    '/api/admin/feature-flags',
+    createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
+  );
 
   // Wire the WS publish-side kill switches: every call to publish()
   // consults the feature flag store at runtime, so flipping

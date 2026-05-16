@@ -14,6 +14,7 @@ import {
   FeatureFlagStore,
   FeatureFlagRepository,
 } from '../flags/feature-flags';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const upsertSchema = z.object({
   name: z.string().min(1),
@@ -46,7 +47,8 @@ export interface FeatureFlagsRouterOptions {
 export function createFeatureFlagsRouter(
   repo: FeatureFlagRepository,
   store: FeatureFlagStore,
-  options: FeatureFlagsRouterOptions = {}
+  options: FeatureFlagsRouterOptions = {},
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -109,6 +111,37 @@ export function createFeatureFlagsRouter(
         };
         const saved = await repo.upsert(flag);
         store.setFlag(saved);
+
+        // D2-1c — audit-log the upsert. Feature-flags are platform-admin
+        // gated → cross-tenant blast radius, so we tag the audit row with
+        // `metadata.scope: 'platform'` and write under the acting admin's
+        // home tenant. (The audit schema requires a non-empty tenantId;
+        // using a synthetic '__platform__' value would break the RLS-safe
+        // findByEntity query and the operator-history view, both of which
+        // filter on `tenantId = $1`.)
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'feature_flag.upserted',
+              entityType: 'feature_flag',
+              entityId: saved.name,
+              metadata: {
+                scope: 'platform',
+                flagName: saved.name,
+                value: {
+                  enabled: saved.enabled,
+                  environments: saved.environments,
+                  tenantIds: saved.tenantIds,
+                },
+                environment: process.env.NODE_ENV ?? 'development',
+              },
+            }),
+          );
+        }
+
         res.json(saved);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -130,6 +163,28 @@ export function createFeatureFlagsRouter(
           return;
         }
         store.removeFlag(req.params.name);
+
+        // D2-1c — audit-log the delete. Same scope='platform' tagging as
+        // the upsert path so the operator-history view can group
+        // platform-scope flag mutations regardless of which tenant the
+        // acting admin was authenticated under.
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'feature_flag.deleted',
+              entityType: 'feature_flag',
+              entityId: req.params.name,
+              metadata: {
+                scope: 'platform',
+                flagName: req.params.name,
+              },
+            }),
+          );
+        }
+
         res.status(204).send();
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
