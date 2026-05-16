@@ -2522,6 +2522,10 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_expenses ON expenses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  '097_add_tenant_hourly_rate': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS hourly_rate_cents INTEGER;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

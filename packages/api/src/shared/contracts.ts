@@ -290,6 +290,10 @@ export const updateSettingsSchema = z.object({
   // ('before_approval') or AFTER ('after_approval'). Default behavior
   // is 'after_approval'; existing tenants keep current flow.
   depositTimingPolicy: z.enum(['before_approval', 'after_approval']).optional(),
+  // §9 — owner's effective hourly rate (integer cents). Populated by
+  // §10 onboarding; until set, the Time-Given-Back card shows hours
+  // only. null clears the field.
+  hourlyRateCents: z.number().int().min(0).nullable().optional(),
   // B1 — Per-tenant voice persona. null clears the field.
   voiceAgentName: z.string().min(1).max(80).nullable().optional(),
   voiceGreeting: z.string().min(1).max(500).nullable().optional(),
