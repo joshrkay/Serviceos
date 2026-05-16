@@ -21,6 +21,16 @@ jobs:
         run: npx tsc --noEmit
         working-directory: packages/web
 
+      - name: Voice smoke (synthetic) — §11 H2 Layer A
+        # Fast structural gate: Media Streams server attaches and the
+        # documented upgrade contract is stable. Tier-2 promotion will
+        # add the full canned-audio → CreateBooking assertion.
+        # See docs/runbooks/launch-quality-bar.md.
+        run: npx vitest run test/voice/voice-smoke.synthetic.test.ts
+        working-directory: packages/api
+        env:
+          NODE_ENV: test
+
       - name: Lint
         run: npm run lint
 
