@@ -5,6 +5,8 @@ import { LocationRepository } from '../locations/location';
 import { SettingsRepository } from '../settings/settings';
 import { evaluateDepositRule, deriveDepositStatus } from '../jobs/deposit-rule';
 import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { publicActorFromToken } from '../feedback/feedback-response';
 
 /**
  * Service layer for the unauthenticated customer-facing estimate
@@ -121,6 +123,11 @@ export interface PublicEstimateServiceDeps {
   settingsRepo: SettingsRepository;
   stripeConfig?: DepositStripeConfig | null;
   stripeFetch?: DepositStripeFetch;
+  /**
+   * D2-1d — audit logging for token-scoped customer approval / decline.
+   * Optional so older harnesses still build the service.
+   */
+  auditRepo?: AuditRepository;
 }
 
 const TERMINAL_STATUSES = new Set(['accepted', 'rejected', 'expired']);
@@ -234,6 +241,29 @@ export class PublicEstimateService {
       // Approval already succeeded; deposit population is best-effort.
     }
 
+    if (this.deps.auditRepo) {
+      // D2-1d — token-scoped public actor. Raw token is NEVER persisted
+      // on the audit row; the 12-char SHA-256 prefix lets ops correlate
+      // back to the originating link without leaking the bearer credential.
+      await this.deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: updated.tenantId,
+          actorId: publicActorFromToken(input.token),
+          actorRole: 'customer',
+          eventType: 'public_estimate.approved',
+          entityType: 'estimate',
+          entityId: updated.id,
+          metadata: {
+            estimateNumber: updated.estimateNumber,
+            acceptedByName: trimmed,
+            totalCents: updated.totals.totalCents,
+            ipAddress: input.ip,
+            userAgent: input.userAgent,
+          },
+        }),
+      );
+    }
+
     return this.toView(updated);
   }
 
@@ -266,6 +296,29 @@ export class PublicEstimateService {
     if (!updated) {
       throw new NotFoundError('Estimate', estimate.id);
     }
+
+    if (this.deps.auditRepo) {
+      // D2-1d — same synthetic-actor contract as approve(). The optional
+      // `reason` carries customer free-text and is recorded for ops triage.
+      await this.deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: updated.tenantId,
+          actorId: publicActorFromToken(input.token),
+          actorRole: 'customer',
+          eventType: 'public_estimate.declined',
+          entityType: 'estimate',
+          entityId: updated.id,
+          metadata: {
+            estimateNumber: updated.estimateNumber,
+            reason: reason && reason.length > 0 ? reason : undefined,
+            totalCents: updated.totals.totalCents,
+            ipAddress: input.ip,
+            userAgent: input.userAgent,
+          },
+        }),
+      );
+    }
+
     return this.toView(updated);
   }
 

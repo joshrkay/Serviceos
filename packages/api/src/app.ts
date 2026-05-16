@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from './swagger/spec';
@@ -10,6 +11,7 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import {
@@ -275,15 +277,16 @@ import { InMemoryProposalExecutionRepository } from './proposals/proposal-execut
 import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
 import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
 import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
-import {
-  OpenAICompatibleProvider,
-  type EmbeddingProvider,
-} from './ai/providers/openai-compatible';
+import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
-import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import {
+  createLLMGateway,
+  createMockLLMGateway,
+  createEmbeddingProvider,
+} from './ai/gateway/factory';
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
@@ -421,6 +424,86 @@ class InMemoryWebhookEventRepository {
   }
 }
 
+/**
+ * D1-3 — helmet options factory.
+ *
+ * Exported separately from `createApp()` so the middleware test can assert
+ * header behaviour without booting the full app (which would require a real
+ * Pg pool and a full set of production secrets when NODE_ENV=production).
+ *
+ * Production behaviour:
+ *   - CSP whitelists the production frontend's external deps: Clerk
+ *     (auth UI + JS), Stripe Elements, Twilio Voice JS SDK, Sentry browser
+ *     SDK.
+ *   - HSTS = 1 year, includeSubDomains, preload=false (preload list
+ *     submission must be a deliberate human action).
+ *   - X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
+ *     no-referrer.
+ *   - crossOriginEmbedderPolicy is DISABLED because COEP=require-corp breaks
+ *     Stripe Elements (cross-origin frames without CORP headers).
+ *
+ * Dev/test behaviour:
+ *   - CSP disabled so Vite HMR / local tooling keep working. Other helmet
+ *     defaults (nosniff, HSTS, frame deny, no-referrer) still apply.
+ */
+export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0] {
+  return {
+    contentSecurityPolicy: isProd
+      ? {
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: [
+              "'self'",
+              'https://js.stripe.com',
+              'https://*.clerk.com',
+              'https://*.clerk.accounts.dev',
+              'https://clerk.com',
+              'https://sdk.twilio.com',
+              'https://media.twiliocdn.com',
+            ],
+            styleSrc: [
+              "'self'",
+              "'unsafe-inline'",
+              'https://*.clerk.com',
+              'https://clerk.com',
+            ],
+            imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
+            connectSrc: [
+              "'self'",
+              'https://api.stripe.com',
+              'https://*.clerk.com',
+              'https://clerk.com',
+              'https://*.clerk.accounts.dev',
+              'wss://*.twilio.com',
+              'https://*.twilio.com',
+              'https://*.ingest.sentry.io',
+              'https://*.ingest.us.sentry.io',
+            ],
+            frameSrc: [
+              "'self'",
+              'https://js.stripe.com',
+              'https://hooks.stripe.com',
+              'https://*.clerk.com',
+            ],
+            workerSrc: ["'self'", 'blob:'],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"],
+            frameAncestors: ["'none'"],
+          },
+        }
+      : false,
+    strictTransportSecurity: {
+      maxAge: 60 * 60 * 24 * 365,
+      includeSubDomains: true,
+      preload: false,
+    },
+    noSniff: true,
+    xFrameOptions: { action: 'deny' },
+    referrerPolicy: { policy: 'no-referrer' },
+    crossOriginEmbedderPolicy: false,
+  };
+}
+
 export function createApp(): express.Express {
   // §11 H3: Initialize Sentry FIRST so any error thrown during startup
   // or in handler construction below is captured. initSentry() is a no-op
@@ -464,8 +547,18 @@ export function createApp(): express.Express {
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
 
-  // Swagger UI — no auth required
+  // Swagger UI — no auth required.
+  // Mounted BEFORE helmet() so the CSP below doesn't break swagger-ui-express
+  // (which injects inline scripts/styles to render). The /api-docs surface is
+  // already public + read-only; the security trade-off is acceptable.
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+
+  // D1-3 — helmet hardening. Adds CSP / HSTS / X-Frame-Options / nosniff /
+  // referrer-policy headers the security audit (docs/pre-launch-hardening-
+  // 2026-05-16.md) flagged as missing. See `buildHelmetOptions` below for
+  // the full CSP whitelist + rationale.
+  const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
+  app.use(helmet(buildHelmetOptions(isProd)));
 
   // CORS — use explicit origin in prod/staging (validated by config), wildcard in dev/test.
   app.use(cors({
@@ -843,12 +936,8 @@ export function createApp(): express.Express {
   // doesn't apply to embeddings (`text-embedding-3-small` only). When
   // AI_PROVIDER_API_KEY is unset, embeddings are unavailable and the
   // ingestion workers stay un-registered — the rest of the app boots.
-  const embeddingProvider: EmbeddingProvider | null = config.AI_PROVIDER_API_KEY
-    ? new OpenAICompatibleProvider({
-        apiKey: config.AI_PROVIDER_API_KEY,
-        baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
-      })
-    : null;
+  const embeddingProvider: EmbeddingProvider | null =
+    createEmbeddingProvider(config);
 
   // Phase 4a-1 repositories — used by transcript-ingestion-worker and
   // proposal-correction-worker. All Pg-backed in production with
@@ -1298,7 +1387,10 @@ export function createApp(): express.Express {
   });
 
   // Public feedback routes are mounted before /api auth middleware.
-  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+  // D2-1d: auditRepo wired so the public feedback submission emits
+  // `feedback_response.submitted` with the synthetic public:<tokenHash>
+  // actor required by CLAUDE.md "all mutations emit audit events".
+  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo, auditRepo));
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
@@ -1334,6 +1426,9 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : null,
+    // D2-1d: emit public_estimate.{approved,declined} with the
+    // synthetic public:<tokenHash> actor on every public approve/decline.
+    auditRepo,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -1353,6 +1448,9 @@ export function createApp(): express.Express {
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
     paymentRepo,
+    // D2-1d: emit public_invoice.checkout_created on first link mint.
+    // Subsequent idempotent calls (cached URL) DO NOT re-emit.
+    auditRepo,
     connectAccountResolver: connectService
       ? {
           resolveTenantConnectAccount: async (tenantId: string) => {
@@ -1452,6 +1550,11 @@ export function createApp(): express.Express {
     // separate (googleApiUrl). 5173 is the Vite dev default; matches
     // publicBaseUrl elsewhere in this file.
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    // D2-1d: emit calendar_integration.{connected,disconnected,
+    // callback_consumed} for the per-user Google OAuth lifecycle. The
+    // callback uses `system:google-oauth-callback` because there is no
+    // Clerk session in flight when Google redirects the browser back.
+    auditRepo,
   };
   app.use(
     '/api/calendar-integrations',
@@ -1609,12 +1712,20 @@ export function createApp(): express.Express {
     }
   };
 
+  // D2-3 — real phone-number → tenant lookup for inbound /voice. The
+  // legacy `resolveTenantId` callback is still wired for `/gather` and
+  // `/dial-result`, which already run inside an established call; the
+  // /voice handler consults this repo first and only falls through to
+  // the env-var seam in dev (with a loud WARN).
+  const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
       authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
       publicBaseUrl: process.env.PUBLIC_API_URL,
+      ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
       mediaStreamsEnabled,
       // P8-014: mount the recording webhook in production. Without this
@@ -1922,10 +2033,12 @@ export function createApp(): express.Express {
   // the link points at this same deployment.
   app.use(
     '/api/portal-sessions',
-    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+    // D2-1d: portal tokens are bearer credentials; both mint and
+    // revoke emit portal_session.{created,revoked} via auditRepo.
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo, auditRepo }),
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
-  app.use('/api/locations', createLocationRouter(locationRepo, ownership));
+  app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo));
   app.use(
     '/api/jobs',
@@ -1950,7 +2063,7 @@ export function createApp(): express.Express {
     '/api/appointments',
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
       delayNotificationCoordinator,
-    })
+    }, auditRepo)
   );
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use(
@@ -1976,13 +2089,18 @@ export function createApp(): express.Express {
   const userRepo = pool ? new PgUserRepository(pool) : new InMemoryUserRepository();
   app.use(
     '/api/users',
-    createUsersRouter(userRepo, {
-      // Same instance the Clerk webhook reads on user.created — the
-      // accept side reads what the invite side wrote.
-      pendingInvitationRepo,
-      clerkSecretKey: process.env.CLERK_SECRET_KEY,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-    }),
+    createUsersRouter(
+      userRepo,
+      {
+        // Same instance the Clerk webhook reads on user.created — the
+        // accept side reads what the invite side wrote.
+        pendingInvitationRepo,
+        clerkSecretKey: process.env.CLERK_SECRET_KEY,
+        appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+      },
+      // D2-1c — audit-log user role / name edits + invitations.
+      auditRepo,
+    ),
   );
 
   // Tier 4 (Calendar sync — PR 1). Auth'd lifecycle endpoints.
@@ -2024,7 +2142,7 @@ export function createApp(): express.Express {
     }),
   );
   app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
-  app.use('/api/notes', createNoteRouter(noteRepo, ownership));
+  app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
   // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
@@ -2136,20 +2254,25 @@ export function createApp(): express.Express {
 
   app.use('/api/me', createMeRouter(userModeService, auditRepo));
   app.use('/api/feedback/responses', createFeedbackResponsesRouter(feedbackResponseRepo));
-  app.use('/api/conversations', createConversationRouter(conversationRepo));
+  app.use('/api/conversations', createConversationRouter(conversationRepo, auditRepo));
 
   app.use(
     '/api/settings',
-    createSettingsRouter(settingsRepo, {
-      activationRepo: packActivationRepo,
-      verticalPackRegistry: canonicalPackRegistry,
-    }),
+    createSettingsRouter(
+      settingsRepo,
+      {
+        activationRepo: packActivationRepo,
+        verticalPackRegistry: canonicalPackRegistry,
+      },
+      // D2-1c — audit-log tenant-settings + language mutations.
+      auditRepo,
+    ),
   );
-  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
+  app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
-  app.use('/api/templates', createTemplateRouter(templateRepo));
-  app.use('/api/bundles', createBundleRouter(bundleRepo));
+  app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
+  app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
   const voiceLogger = createLogger({
     service: 'voice',
@@ -2166,13 +2289,14 @@ export function createApp(): express.Express {
         technicianLocationAuthorizer.canSubmitForTechnician(auth, technicianId),
     })
   );
-  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo));
+  app.use('/api/catalog/items', createCatalogItemsRouter(catalogRepo, auditRepo));
   app.use(
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
   app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo));
+  // D2-1c — audit-log proposal approve / reject / edit / undo.
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo));
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }
@@ -2253,7 +2377,7 @@ export function createApp(): express.Express {
   // BUG-6 — backs the Contracts page (`MaintenanceContractsPage`,
   // `ContractDetailPage`, `CreateContractSheet`). Distinct surface
   // from /api/agreements; in-memory only.
-  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter());
+  app.use('/api/maintenance-contracts', createMaintenanceContractsRouter(auditRepo));
 
   // Recurring agreements sweep (P9-003). Runs every 60s. Uses the same
   // setInterval driver pattern as the execution-worker (P0-009). The
@@ -2359,7 +2483,11 @@ export function createApp(): express.Express {
     }
     await hydrateStoreFromRepository(featureFlagStore, featureFlagRepo);
   })();
-  app.use('/api/admin/feature-flags', createFeatureFlagsRouter(featureFlagRepo, featureFlagStore));
+  // D2-1c — audit-log platform-admin feature-flag upsert / delete.
+  app.use(
+    '/api/admin/feature-flags',
+    createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
+  );
 
   // Wire the WS publish-side kill switches: every call to publish()
   // consults the feature flag store at runtime, so flipping

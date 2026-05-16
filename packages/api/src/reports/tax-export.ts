@@ -5,6 +5,8 @@
  * PDF is explicitly deferred post-launch (the spec's "CSV/PDF" minimum
  * credible version is satisfied by CSV).
  */
+import type { Payment } from '../invoices/payment';
+
 export interface TaxExportRow {
   /** 'YYYY-MM-DD'. */
   date: string;
@@ -13,7 +15,10 @@ export interface TaxExportRow {
   description: string;
   /** Optional job linkage. */
   jobId?: string;
-  /** Integer cents. */
+  /**
+   * Integer cents. NEGATIVE for refund rows (D2-4) so YTD income nets
+   * correctly when summed against the paired original payment row.
+   */
   amountCents: number;
 }
 
@@ -47,6 +52,8 @@ function csvField(value: string): string {
 }
 
 function formatCents(cents: number): string {
+  // Negative cents render with a leading '-' (e.g. -50000 → "-500.00") so
+  // accountants and spreadsheet apps subtract refund rows naturally.
   return (cents / 100).toFixed(2);
 }
 
@@ -65,4 +72,53 @@ export function buildTaxExportCsv(rows: TaxExportRow[]): string {
     );
   }
   return lines.join('\n');
+}
+
+/**
+ * D2-4 — build the income rows for a single payment, accounting for
+ * partial refunds. A refund is NOT a status flip; the original payment
+ * row keeps its full magnitude (cash that DID arrive in this period for
+ * tax purposes) and any refunded portion is emitted as a SEPARATE
+ * negative-income row dated by `refundedAt`. YTD income therefore nets
+ * correctly when an accountant sums the Amount column.
+ *
+ * Returns 1 row for a payment with no refund; 2 rows when
+ * `refundedAmountCents > 0`. The refund row's description is prefixed
+ * with "[REFUND] " and references the original payment id so the pair
+ * is easy to reconcile.
+ */
+export interface PaymentRowContext {
+  /** Invoice number for the description (or any human-readable token). */
+  invoiceNumber: string;
+  /** Optional job linkage carried onto both rows. */
+  jobId?: string;
+}
+
+export function buildPaymentIncomeRows(
+  payment: Payment,
+  ctx: PaymentRowContext,
+): TaxExportRow[] {
+  const out: TaxExportRow[] = [];
+  // Original payment — full magnitude, original received date.
+  out.push({
+    date: payment.receivedAt.toISOString().slice(0, 10),
+    type: 'income',
+    category: 'invoice',
+    description: ctx.invoiceNumber,
+    ...(ctx.jobId ? { jobId: ctx.jobId } : {}),
+    amountCents: payment.amountCents,
+  });
+
+  const refundedCents = payment.refundedAmountCents ?? 0;
+  if (refundedCents > 0 && payment.refundedAt) {
+    out.push({
+      date: payment.refundedAt.toISOString().slice(0, 10),
+      type: 'income',
+      category: 'invoice',
+      description: `[REFUND] ${ctx.invoiceNumber} (payment ${payment.id})`,
+      ...(ctx.jobId ? { jobId: ctx.jobId } : {}),
+      amountCents: -refundedCents,
+    });
+  }
+  return out;
 }

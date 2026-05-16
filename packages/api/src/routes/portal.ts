@@ -13,6 +13,8 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { CustomerRepository } from '../customers/customer';
 import { toErrorResponse } from '../shared/errors';
+import { extractIp } from '../shared/extract-ip';
+import { AuditRepository } from '../audit/audit';
 import { PortalSessionRepository } from '../portal/portal-session';
 import {
   DEFAULT_PORTAL_TTL_DAYS,
@@ -29,6 +31,11 @@ const createSchema = z.object({
 export interface PortalRouterDeps {
   portalRepo: PortalSessionRepository;
   customerRepo: CustomerRepository;
+  /**
+   * D2-1d: audit logging for portal-session mint / revoke. Optional so
+   * older harnesses that don't wire it still build the router.
+   */
+  auditRepo?: AuditRepository;
 }
 
 export function createPortalRouter(deps: PortalRouterDeps): Router {
@@ -60,6 +67,12 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
         auth.userId,
         deps.portalRepo,
         parsed.ttlDays ?? DEFAULT_PORTAL_TTL_DAYS,
+        deps.auditRepo,
+        {
+          actorRole: auth.role,
+          ipAddress: extractIp(req),
+          userAgent: req.headers['user-agent'],
+        },
       );
 
       const url = `${req.protocol}://${req.get('host')}/portal/${session.token}`;
@@ -84,6 +97,13 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
         auth.tenantId,
         req.params.id,
         deps.portalRepo,
+        deps.auditRepo,
+        {
+          actorId: auth.userId,
+          actorRole: auth.role,
+          ipAddress: extractIp(req),
+          userAgent: req.headers['user-agent'],
+        },
       );
       if (!session) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Portal session not found' });

@@ -1,4 +1,17 @@
 import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+
+/**
+ * D2-1d — synthetic public actor for token-scoped audit rows. The
+ * raw token is NEVER persisted to the audit row; we store a 12-char
+ * SHA-256 prefix so the row can be correlated to the originating
+ * link without leaking the bearer credential itself.
+ */
+export function publicActorFromToken(token: string): string {
+  const hash = crypto.createHash('sha256').update(token).digest('hex').slice(0, 12);
+  return `public:${hash}`;
+}
 
 export interface FeedbackResponse {
   id: string;

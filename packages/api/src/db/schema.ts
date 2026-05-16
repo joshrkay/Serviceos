@@ -2617,6 +2617,22 @@ export const MIGRATIONS = {
       ON proposal_executions (tenant_id, idempotency_key)
       WHERE idempotency_key IS NOT NULL;
   `,
+
+  // D2-4 — partial-refund tracking on payments. Previously a $50 refund on
+  // a $500 payment could not be represented (PaymentStatus has no REFUNDED
+  // state, and there was no mechanism for partials at all). Refunds are
+  // modeled as cumulative magnitude on the original payment row plus a
+  // last-refund timestamp/Stripe id; a refund is NOT a status flip — the
+  // original payment row keeps its full magnitude, and the tax export
+  // emits a paired negative income row dated by refunded_at.
+  '100_payments_refund_tracking': `
+    ALTER TABLE payments
+      ADD COLUMN IF NOT EXISTS refunded_amount_cents BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ NULL,
+      ADD COLUMN IF NOT EXISTS last_refund_stripe_id TEXT NULL;
+    CREATE INDEX IF NOT EXISTS idx_payments_refunded_at
+      ON payments(refunded_at) WHERE refunded_at IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

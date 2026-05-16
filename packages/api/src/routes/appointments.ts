@@ -22,6 +22,7 @@ import {
   DelayAcknowledgmentMetadata,
   JOB_TIMELINE_EVENT_TYPES,
 } from '../jobs/job-lifecycle';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 export interface DelayNotificationEnqueuer {
   enqueueDelayNotice(input: {
     tenantId: string;
@@ -42,7 +43,8 @@ export function createAppointmentRouter(
   ownership: TenantOwnership,
   jobRepo: JobRepository,
   timelineRepo: JobTimelineRepository,
-  options?: AppointmentRouterOptions
+  options?: AppointmentRouterOptions,
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -66,7 +68,10 @@ export function createAppointmentRouter(
             arrivalWindowEnd: parsed.arrivalWindowEnd ? new Date(parsed.arrivalWindowEnd) : undefined,
             createdBy: req.auth!.userId,
           },
-          appointmentRepo
+          appointmentRepo,
+          undefined,
+          auditRepo,
+          req.auth!.role,
         );
         res.status(201).json(result);
       } catch (err) {
@@ -231,7 +236,16 @@ export function createAppointmentRouter(
         if (updates.arrivalWindowStart) updates.arrivalWindowStart = new Date(updates.arrivalWindowStart);
         if (updates.arrivalWindowEnd) updates.arrivalWindowEnd = new Date(updates.arrivalWindowEnd);
 
-        const result = await updateAppointment(req.auth!.tenantId, req.params.id, updates, appointmentRepo);
+        const result = await updateAppointment(
+          req.auth!.tenantId,
+          req.params.id,
+          updates,
+          appointmentRepo,
+          undefined,
+          auditRepo,
+          req.auth!.userId,
+          req.auth!.role,
+        );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
           return;
@@ -297,6 +311,25 @@ export function createAppointmentRouter(
           timelineRepo,
           metadata
         );
+
+        if (auditRepo) {
+          const auditEvent = createAuditEvent({
+            tenantId: req.auth!.tenantId,
+            actorId,
+            actorRole: role,
+            eventType: 'appointment.delay_acknowledged',
+            entityType: 'appointment',
+            entityId: appointment.id,
+            metadata: {
+              jobId: appointment.jobId,
+              isRunningBehind: parsed.isRunningBehind,
+              delayMinutes: parsed.delayMinutes,
+              reasonCode: parsed.reasonCode,
+              inferredTriggerState,
+            },
+          });
+          await auditRepo.create(auditEvent);
+        }
 
         let delayNoticeIdempotencyKey: string | null = null;
         if (parsed.isRunningBehind && parsed.delayMinutes) {

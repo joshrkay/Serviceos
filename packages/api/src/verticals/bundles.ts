@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { VerticalType } from './registry';
 import { LineItemTemplate } from '../templates/estimate-template';
 import { ValidationError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export interface ServiceBundle {
   id: string;
@@ -60,7 +61,9 @@ export function validateBundleInput(input: CreateBundleInput): string[] {
 
 export async function createBundle(
   input: CreateBundleInput,
-  repository: ServiceBundleRepository
+  repository: ServiceBundleRepository,
+  actor?: { userId: string; role: string },
+  auditRepo?: AuditRepository
 ): Promise<ServiceBundle> {
   const errors = validateBundleInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -80,7 +83,53 @@ export async function createBundle(
     updatedAt: new Date(),
   };
 
-  return repository.create(bundle);
+  const created = await repository.create(bundle);
+
+  if (auditRepo && actor) {
+    const event = createAuditEvent({
+      tenantId: created.tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'service_bundle.created',
+      entityType: 'service_bundle',
+      entityId: created.id,
+      metadata: {
+        name: created.name,
+        verticalType: created.verticalType,
+        categoryIds: created.categoryIds,
+      },
+    });
+    await auditRepo.create(event);
+  }
+
+  return created;
+}
+
+// D2-1b: Update wrapper that emits service_bundle.updated.
+export async function updateBundle(
+  repository: ServiceBundleRepository,
+  tenantId: string,
+  id: string,
+  updates: Partial<ServiceBundle>,
+  actor?: { userId: string; role: string },
+  auditRepo?: AuditRepository
+): Promise<ServiceBundle | null> {
+  const updated = await repository.update(tenantId, id, updates);
+
+  if (auditRepo && actor && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'service_bundle.updated',
+      entityType: 'service_bundle',
+      entityId: id,
+      metadata: { changes: Object.keys(updates).filter((k) => k !== 'updatedAt') },
+    });
+    await auditRepo.create(event);
+  }
+
+  return updated;
 }
 
 export function matchBundles(

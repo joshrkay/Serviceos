@@ -82,7 +82,7 @@ import {
   type WhisperBufferTranscriber,
 } from '../../src/ai/voice-quality/audio/whisper-real-provider';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
-import { createRealLayerTwoGateway } from '../../src/ai/voice-quality/audio/real-llm-gateway-factory';
+import { createRealLayerTwoGateway } from '../../src/ai/gateway/real-layer-two-factory';
 import { OpenAiTtsProvider } from '../../src/ai/tts/tts-provider';
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';

@@ -54,18 +54,117 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
     expect(event.status).toBe('received');
   });
 
-  it('happy path — handleWebhookEvent detects duplicate', async () => {
+  it('happy path — handleWebhookEvent detects duplicate of PROCESSED event', async () => {
     const repo = new InMemoryWebhookRepository();
-    await handleWebhookEvent('stripe', 'payment.completed', { amount: 100 }, 'evt_123', repo);
+    const first = await handleWebhookEvent(
+      'stripe',
+      'payment.completed',
+      { amount: 100 },
+      'evt_123',
+      repo,
+    );
+    // Simulate a successful processing pass.
+    await repo.updateStatus(first.event.id, 'processed');
+
     const { duplicate } = await handleWebhookEvent(
       'stripe',
       'payment.completed',
       { amount: 100 },
       'evt_123',
-      repo
+      repo,
     );
 
     expect(duplicate).toBe(true);
+  });
+
+  it('Codex P1 (PR #384) — handleWebhookEvent allows retry of FAILED event', async () => {
+    // If the first attempt at processing threw, the event is marked
+    // 'failed'. Stripe (or any upstream) retries the delivery. The
+    // handler MUST be allowed to re-run — otherwise transient errors
+    // and out-of-order webhooks (e.g. charge.refunded arriving before
+    // checkout.session.completed) are silently lost.
+    const repo = new InMemoryWebhookRepository();
+    const first = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_1' },
+      'evt_failed_retry',
+      repo,
+    );
+    expect(first.duplicate).toBe(false);
+    await repo.updateStatus(first.event.id, 'failed', 'Payment not found');
+
+    const second = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_1' },
+      'evt_failed_retry',
+      repo,
+    );
+
+    // Same event row (stable id) but NOT short-circuited as duplicate.
+    expect(second.event.id).toBe(first.event.id);
+    expect(second.duplicate).toBe(false);
+  });
+
+  it('Codex P1 (PR #384) — handleWebhookEvent BLOCKS recent in-flight RECEIVED (concurrent delivery)', async () => {
+    // If a second delivery of the same event arrives while the first
+    // handler is still running (row at 'received', recent createdAt),
+    // we must return duplicate=true to prevent double side effects
+    // (e.g. deposit crediting, payment-link mints).
+    const repo = new InMemoryWebhookRepository();
+    const first = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_2' },
+      'evt_inflight',
+      repo,
+    );
+    expect(first.duplicate).toBe(false);
+    // status stays at 'received' AND createdAt is now (within staleness window)
+
+    const second = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_2' },
+      'evt_inflight',
+      repo,
+    );
+
+    expect(second.event.id).toBe(first.event.id);
+    // Concurrent delivery: blocked.
+    expect(second.duplicate).toBe(true);
+  });
+
+  it('Codex P1 (PR #384) — handleWebhookEvent ALLOWS retry of STALE RECEIVED (handler crashed > 30s ago)', async () => {
+    // If the handler crashed and the row is stuck at 'received' for
+    // longer than the in-flight staleness threshold, retries should
+    // re-execute to recover.
+    const repo = new InMemoryWebhookRepository();
+    const first = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_3' },
+      'evt_stale_crashed',
+      repo,
+    );
+    expect(first.duplicate).toBe(false);
+
+    // Backdate createdAt to 60s ago (past INFLIGHT_STALENESS_MS=30s).
+    const row = (repo as any).events.get(first.event.id);
+    row.createdAt = new Date(Date.now() - 60_000);
+
+    const second = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_3' },
+      'evt_stale_crashed',
+      repo,
+    );
+
+    expect(second.event.id).toBe(first.event.id);
+    // Stale: allow retry.
+    expect(second.duplicate).toBe(false);
   });
 
   it('validation — malformed signature format rejected', () => {
