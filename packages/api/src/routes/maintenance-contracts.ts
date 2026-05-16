@@ -18,6 +18,7 @@ import { randomUUID } from 'crypto';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse, ValidationError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 interface MaintenanceContract {
   id: string;
@@ -46,7 +47,7 @@ function setForTenant(tenantId: string, rows: MaintenanceContract[]): void {
   contractsByTenant.set(tenantId, rows);
 }
 
-export function createMaintenanceContractsRouter(): Router {
+export function createMaintenanceContractsRouter(auditRepo: AuditRepository): Router {
   const router = Router();
 
   router.get(
@@ -82,7 +83,7 @@ export function createMaintenanceContractsRouter(): Router {
     requireAuth,
     requireTenant,
     requirePermission('customers:create'),
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
         const body = (req.body ?? {}) as Record<string, unknown>;
@@ -113,6 +114,24 @@ export function createMaintenanceContractsRouter(): Router {
 
         const rows = listForTenant(tenantId);
         setForTenant(tenantId, [contract, ...rows]);
+
+        // D2-1e — all mutations emit audit events. Forward-compat with the
+        // future-real maintenance_contract repository.
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: req.auth!.userId,
+            actorRole: req.auth!.role ?? 'unknown',
+            eventType: 'maintenance_contract.created',
+            entityType: 'maintenance_contract',
+            entityId: contract.id,
+            metadata: {
+              title: contract.title,
+              cadence: contract.cadence,
+            },
+          })
+        );
+
         res.status(201).json(contract);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
