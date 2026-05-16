@@ -42,8 +42,10 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       job_buffer_minutes: number | null;
       hourly_rate_cents: number | null;
       onboarding_test_call_skipped_at: Date | null;
+      onboarding_upgrade_prompt_shown_at: Date | null;
     }>(
-      `SELECT business_hours, job_buffer_minutes, hourly_rate_cents, onboarding_test_call_skipped_at
+      `SELECT business_hours, job_buffer_minutes, hourly_rate_cents,
+              onboarding_test_call_skipped_at, onboarding_upgrade_prompt_shown_at
          FROM tenant_settings WHERE tenant_id=$1`,
       [tenantId]
     ),
@@ -69,5 +71,6 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     },
     inboundCallCount: callsRes.rows[0]?.n ?? 0,
     testCallSkippedAt: ts?.onboarding_test_call_skipped_at ?? null,
+    upgradePromptShownAt: ts?.onboarding_upgrade_prompt_shown_at ?? null,
   };
 }

@@ -48,5 +48,7 @@ export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(6),
   currentStep: OnboardingStepIdSchema.nullable(),
   isComplete: z.boolean(),
+  /** ISO-8601 timestamp of the 30-minute upgrade nudge fire-event. Drives the in-app banner. */
+  upgradePromptShownAt: z.string().datetime().optional(),
 });
 export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;

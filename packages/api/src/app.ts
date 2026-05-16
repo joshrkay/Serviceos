@@ -75,6 +75,7 @@ import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
+import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -1501,6 +1502,15 @@ export function createApp(): express.Express {
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // inbound call ends. Pool-gated (no-op when running in-memory).
+    ...(pool
+      ? {
+          onSessionEnded: async ({ tenantId }: { tenantId: string }) => {
+            await checkAndFireUpgradeNudge({ pool }, tenantId);
+          },
+        }
+      : {}),
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
