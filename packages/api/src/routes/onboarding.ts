@@ -33,7 +33,7 @@ export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
   packActivationRepo: PackActivationRepository;
   auditRepo: AuditRepository;
-  pool: Pool;
+  pool?: Pool;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
@@ -45,11 +45,26 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     requireAuth,
     requireTenant,
     async (req: AuthenticatedRequest, res: Response) => {
-      const tenantId = req.auth!.tenantId;
-      const facts = await loadOnboardingFacts({ pool, settingsRepo }, tenantId);
-      const status = deriveOnboardingStatus(facts);
-      res.set('Cache-Control', 'private, max-age=2');
-      res.json(status);
+      try {
+        if (!pool) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Onboarding status requires a database connection',
+          });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const facts = await loadOnboardingFacts({ pool, settingsRepo }, tenantId);
+        const status = deriveOnboardingStatus(facts);
+        res.set('Cache-Control', 'private, max-age=2');
+        res.json(status);
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'ONBOARDING_STATUS_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to load onboarding status',
+        });
+      }
     }
   );
 

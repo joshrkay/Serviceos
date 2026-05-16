@@ -2,6 +2,14 @@ import type { Pool } from 'pg';
 import type { SettingsRepository } from '../settings/settings';
 import type { OnboardingFacts } from './derive-status';
 
+const VALID_SUBSCRIPTION_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
+type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete';
+
+function normalizeSubscriptionStatus(raw: string | null | undefined): SubscriptionStatus | null {
+  if (!raw) return null;
+  return VALID_SUBSCRIPTION_STATUSES.has(raw) ? (raw as SubscriptionStatus) : null;
+}
+
 export interface LoadFactsDeps {
   pool: Pool;
   settingsRepo: SettingsRepository;
@@ -55,7 +63,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     twilioStatus: integRes.rows[0]?.status ?? null,
     subscription: {
       stripeSubscriptionId: tenant?.stripe_subscription_id ?? null,
-      status: (tenant?.subscription_status ?? null) as OnboardingFacts['subscription']['status'],
+      status: normalizeSubscriptionStatus(tenant?.subscription_status),
     },
     inboundCallCount: callsRes.rows[0]?.n ?? 0,
     testCallSkippedAt: ts?.onboarding_test_call_skipped_at ?? null,
