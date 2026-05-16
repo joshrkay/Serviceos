@@ -1,4 +1,5 @@
-import type { Proposal, ProposalType } from '../proposals/proposal';
+import type { Proposal, ProposalType, ProposalRepository } from '../proposals/proposal';
+import type { SettingsRepository } from '../settings/settings';
 import {
   TIME_CREDIT_VERSION,
   CALL_HANDLED_CREDIT_MINUTES,
@@ -114,4 +115,55 @@ export function computeTimeGivenBack(input: TimeGivenBackInput): TimeGivenBackSu
  */
 export interface TimeGivenBackReporter {
   query(tenantId: string, now: Date): Promise<TimeGivenBackSummary>;
+}
+
+/**
+ * The voice-session repo, structurally — the reporter only needs to
+ * list a tenant's sessions and read each one's `endedAt`. Kept minimal
+ * so the reporter does not couple to the full VoiceSessionRepository
+ * surface (see packages/api/src/voice/voice-session.ts). The optional
+ * opts mirror VoiceSessionRepository.findByTenant — production wiring
+ * passes `{ endedOnly: true, limit: 10000 }` to avoid the default
+ * 50-row cap silently undercounting calls.
+ */
+export interface CountableVoiceSessionRepository {
+  findByTenant(
+    tenantId: string,
+    opts?: { endedOnly?: boolean; limit?: number },
+  ): Promise<CountableVoiceSession[]>;
+}
+
+/**
+ * Production + test reporter. Composes the existing tenant-scoped
+ * repositories — each already RLS-scoped — and runs the single tested
+ * `computeTimeGivenBack`. One implementation serves both the Pg and
+ * in-memory boot paths because the repositories abstract storage.
+ *
+ * `voiceSessionRepo` is optional: if it is not wired, handled-call
+ * credits contribute zero rather than failing the whole rollup.
+ */
+export class RepoBackedTimeGivenBackReporter implements TimeGivenBackReporter {
+  constructor(
+    private readonly proposalRepo: ProposalRepository,
+    private readonly settingsRepo: SettingsRepository,
+    private readonly voiceSessionRepo?: CountableVoiceSessionRepository,
+  ) {}
+
+  async query(tenantId: string, now: Date): Promise<TimeGivenBackSummary> {
+    const { weekStart, weekEnd } = currentWeekWindow(now);
+    const [proposals, settings, voiceSessions] = await Promise.all([
+      this.proposalRepo.findByTenant(tenantId),
+      this.settingsRepo.findByTenant(tenantId),
+      this.voiceSessionRepo
+        ? this.voiceSessionRepo.findByTenant(tenantId, { endedOnly: true, limit: 10000 })
+        : Promise.resolve([] as CountableVoiceSession[]),
+    ]);
+    return computeTimeGivenBack({
+      proposals,
+      voiceSessions,
+      hourlyRateCents: settings?.hourlyRateCents ?? null,
+      weekStart,
+      weekEnd,
+    });
+  }
 }
