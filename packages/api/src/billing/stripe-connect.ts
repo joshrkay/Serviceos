@@ -55,29 +55,102 @@ export interface CreateOnboardingLinkInput {
 }
 
 /**
- * Derives the UI-friendly status from charges/payouts flags.
- * Connect onboarding can land in one of three real states:
- *   - charges_enabled === true → 'active'
- *   - charges_enabled === false but account exists → 'pending'
- *     (KYC incomplete) or 'restricted' (Stripe paused them).
+ * Stripe `account.requirements.disabled_reason` values that mean
+ * "Stripe has paused this account — the operator cannot self-resolve
+ * by completing KYC". For any of these we surface 'restricted' so the
+ * UI can show a "contact support" prompt rather than "finish
+ * onboarding". All OTHER disabled_reasons (`requirements.past_due`,
+ * `requirements.pending_verification`, etc.) are user-resolvable and
+ * stay 'pending'.
  *
- * TODO(connect-restricted): we can't distinguish pending from
- * restricted without inspecting `requirements.disabled_reason` on
- * the Stripe Account object, which a future PR can pull from the
- * account.updated webhook payload (`event.data.object.requirements`).
- * Until then, both collapse to 'pending'. The 'restricted' enum
- * value, DB CHECK, and PaymentMethodsSheet branch are kept in
- * place so the refinement is a pure logic change with no schema
- * or UI churn.
+ * Source: https://stripe.com/docs/api/accounts/object#account_object-requirements-disabled_reason
+ *   - rejected.fraud           — Stripe rejected the account for fraud
+ *   - rejected.terms_of_service — Stripe rejected for ToS violation
+ *   - rejected.listed          — Stripe rejected because the account
+ *                                was on a prohibited / blocked list
+ *   - rejected.other           — Stripe rejected for an unspecified
+ *                                reason (still operator-unrecoverable)
+ *   - listed                   — Account appeared on a third-party
+ *                                prohibited list (under investigation)
+ *   - under_review             — Stripe Risk is reviewing the account
+ *                                and has paused charges/payouts
+ */
+export const RESTRICTED_DISABLED_REASONS: ReadonlySet<string> = new Set([
+  'rejected.fraud',
+  'rejected.terms_of_service',
+  'rejected.listed',
+  'rejected.other',
+  'listed',
+  'under_review',
+]);
+
+/**
+ * Subset of the Stripe `Account` object we read for status derivation.
+ * Matches the shape Stripe sends on `account.updated` webhooks; all
+ * fields are optional because Stripe omits absent ones.
+ */
+export interface StripeAccountSnapshot {
+  id?: string | null;
+  /** Stripe sets this on the event object when the account was deleted. */
+  deleted?: boolean;
+  charges_enabled?: boolean;
+  payouts_enabled?: boolean;
+  details_submitted?: boolean;
+  requirements?: {
+    disabled_reason?: string | null;
+    currently_due?: string[] | null;
+  } | null;
+}
+
+/**
+ * Maps a Stripe Account snapshot to the cached ConnectStatus.
+ *
+ * Order matters:
+ *   1. `deleted` flag → 'disconnected' (account removed from Stripe)
+ *   2. fully enabled (charges + payouts) → 'active'
+ *   3. `requirements.disabled_reason` in RESTRICTED_DISABLED_REASONS
+ *      → 'restricted' (Stripe paused them — operator can't self-fix)
+ *   4. anything else → 'pending' (KYC incomplete or user-resolvable
+ *      requirements outstanding)
+ *
+ * Note: a `disabled_reason` of `requirements.pending_verification` or
+ * `requirements.past_due` is the operator's to fix (upload docs,
+ * update info), so we stay 'pending' rather than scaring them with
+ * "contact support".
+ */
+export function mapAccountToStatus(account: StripeAccountSnapshot): ConnectStatus {
+  if (account.deleted) return 'disconnected';
+  if (!account.id) return 'pending';
+  if (account.charges_enabled === true && account.payouts_enabled === true) {
+    return 'active';
+  }
+  const reason = account.requirements?.disabled_reason ?? null;
+  if (reason && RESTRICTED_DISABLED_REASONS.has(reason)) {
+    return 'restricted';
+  }
+  return 'pending';
+}
+
+/**
+ * Backwards-compatible derivation that works from just the cached
+ * boolean flags (no requirements payload). Used by callers that only
+ * have the persisted columns to work from. New code should prefer
+ * `mapAccountToStatus` which can also emit 'restricted'.
  */
 export function deriveConnectStatus(
   accountId: string | null,
   chargesEnabled: boolean,
   payoutsEnabled: boolean,
+  options: { disabledReason?: string | null } = {},
 ): ConnectStatus {
-  if (!accountId) return 'pending';
-  if (chargesEnabled && payoutsEnabled) return 'active';
-  return 'pending';
+  return mapAccountToStatus({
+    id: accountId ?? undefined,
+    charges_enabled: chargesEnabled,
+    payouts_enabled: payoutsEnabled,
+    requirements: options.disabledReason
+      ? { disabled_reason: options.disabledReason }
+      : null,
+  });
 }
 
 export class StripeConnectService {
@@ -185,17 +258,30 @@ export class StripeConnectService {
    * Webhook entrypoint for `account.updated`. Mirrors
    * charges_enabled / payouts_enabled and recomputes the status
    * shorthand. Idempotent: writes the current snapshot, no merge.
+   *
+   * `disabledReason` is the raw `requirements.disabled_reason` from
+   * the Stripe Account; we use it to distinguish 'restricted'
+   * (Stripe paused us — operator must contact support) from 'pending'
+   * (operator can self-resolve by finishing KYC). `deleted` flips the
+   * status to 'disconnected' when Stripe sent an account.deleted-style
+   * payload (or the account otherwise no longer exists upstream).
    */
   async applyAccountUpdated(input: {
     accountId: string;
     chargesEnabled: boolean;
     payoutsEnabled: boolean;
+    disabledReason?: string | null;
+    detailsSubmitted?: boolean;
+    deleted?: boolean;
   }): Promise<{ updatedTenants: number }> {
-    const status = deriveConnectStatus(
-      input.accountId,
-      input.chargesEnabled,
-      input.payoutsEnabled,
-    );
+    const status = mapAccountToStatus({
+      id: input.accountId,
+      deleted: input.deleted,
+      charges_enabled: input.chargesEnabled,
+      payouts_enabled: input.payoutsEnabled,
+      details_submitted: input.detailsSubmitted,
+      requirements: { disabled_reason: input.disabledReason ?? null },
+    });
     const result = await this.deps.pool.query(
       `UPDATE tenants
        SET stripe_connect_charges_enabled = $1,
