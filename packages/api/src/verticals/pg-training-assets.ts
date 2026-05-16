@@ -4,9 +4,15 @@ import type { VerticalType } from '../shared/vertical-types';
 import type {
   PrivacyAuditEntry,
   PrivacyAuditRepository,
+  TrainingAssetListOptions,
+  TrainingAssetListPage,
   TrainingAssetRepository,
+  TryUpdateResult,
   VerticalTrainingAsset,
 } from './training-assets';
+
+const DEFAULT_LIST_LIMIT = 50;
+const MAX_LIST_LIMIT = 200;
 
 function jsonValue<T>(value: unknown, fallback: T): T {
   if (value === null || value === undefined) return fallback;
@@ -34,6 +40,10 @@ function rowToAsset(row: Record<string, unknown>): VerticalTrainingAsset {
     activatedAt: row.activated_at ? new Date(String(row.activated_at)) : undefined,
     createdAt: new Date(String(row.created_at)),
     updatedAt: new Date(String(row.updated_at)),
+    idempotencyKey:
+      row.idempotency_key === null || row.idempotency_key === undefined
+        ? undefined
+        : String(row.idempotency_key),
   };
 }
 
@@ -62,11 +72,13 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
         `INSERT INTO vertical_training_assets (
           id, tenant_id, vertical_type, asset_kind, status, title,
           raw_text, scrubbed_text, labels, provenance, redaction_summary,
-          created_by, approved_by, activated_at, created_at, updated_at
+          created_by, approved_by, activated_at, created_at, updated_at,
+          idempotency_key
         ) VALUES (
           $1, $2, $3, $4, $5, $6,
           $7, $8, $9, $10, $11,
-          $12, $13, $14, $15, $16
+          $12, $13, $14, $15, $16,
+          $17
         )
         ON CONFLICT (id) DO UPDATE SET
           vertical_type = EXCLUDED.vertical_type,
@@ -82,7 +94,8 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
           approved_by = EXCLUDED.approved_by,
           activated_at = EXCLUDED.activated_at,
           created_at = EXCLUDED.created_at,
-          updated_at = COALESCE($16, vertical_training_assets.updated_at)
+          updated_at = COALESCE($16, vertical_training_assets.updated_at),
+          idempotency_key = EXCLUDED.idempotency_key
         WHERE vertical_training_assets.tenant_id = EXCLUDED.tenant_id
         RETURNING *`,
         [
@@ -102,12 +115,61 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
           asset.activatedAt ?? null,
           asset.createdAt,
           asset.updatedAt,
+          asset.idempotencyKey ?? null,
         ],
       );
       if (result.rows.length === 0) {
         throw new Error('training asset id belongs to another tenant');
       }
       return rowToAsset(result.rows[0]);
+    });
+  }
+
+  async tryUpdate(
+    asset: VerticalTrainingAsset,
+    expectedUpdatedAt: Date,
+  ): Promise<TryUpdateResult> {
+    return this.withTenant(asset.tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE vertical_training_assets SET
+          status = $3,
+          title = $4,
+          scrubbed_text = $5,
+          labels = $6,
+          provenance = $7,
+          redaction_summary = $8,
+          approved_by = $9,
+          activated_at = $10,
+          updated_at = $11
+        WHERE tenant_id = $1
+          AND id = $2
+          AND updated_at = $12
+        RETURNING *`,
+        [
+          asset.tenantId,
+          asset.id,
+          asset.status,
+          asset.title,
+          asset.scrubbedText ?? null,
+          JSON.stringify(asset.labels),
+          JSON.stringify(asset.provenance),
+          asset.redactionSummary ? JSON.stringify(asset.redactionSummary) : null,
+          asset.approvedBy ?? null,
+          asset.activatedAt ?? null,
+          asset.updatedAt,
+          expectedUpdatedAt,
+        ],
+      );
+      if (result.rows.length > 0) {
+        return { kind: 'updated', asset: rowToAsset(result.rows[0]) };
+      }
+      const existsResult = await client.query(
+        `SELECT 1 FROM vertical_training_assets
+         WHERE tenant_id = $1 AND id = $2
+         LIMIT 1`,
+        [asset.tenantId, asset.id],
+      );
+      return existsResult.rows.length > 0 ? { kind: 'stale' } : { kind: 'missing' };
     });
   }
 
@@ -123,6 +185,21 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
     });
   }
 
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VerticalTrainingAsset | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM vertical_training_assets
+         WHERE tenant_id = $1 AND idempotency_key = $2
+         LIMIT 1`,
+        [tenantId, idempotencyKey],
+      );
+      return result.rows.length > 0 ? rowToAsset(result.rows[0]) : null;
+    });
+  }
+
   async delete(tenantId: string, id: string): Promise<void> {
     await this.withTenant(tenantId, async (client) => {
       await client.query(
@@ -133,15 +210,33 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
     });
   }
 
-  async listByTenant(tenantId: string): Promise<VerticalTrainingAsset[]> {
+  async listByTenant(
+    tenantId: string,
+    options: TrainingAssetListOptions = {},
+  ): Promise<TrainingAssetListPage> {
     return this.withTenant(tenantId, async (client) => {
-      const result = await client.query(
-        `SELECT * FROM vertical_training_assets
-         WHERE tenant_id = $1
-         ORDER BY updated_at DESC`,
-        [tenantId],
-      );
-      return result.rows.map(rowToAsset);
+      const limit = normalizePaginationLimit(options.limit);
+      const offset = normalizePaginationOffset(options.offset);
+      const [pageResult, countResult] = await Promise.all([
+        client.query(
+          `SELECT * FROM vertical_training_assets
+           WHERE tenant_id = $1
+           ORDER BY updated_at DESC, id ASC
+           LIMIT $2 OFFSET $3`,
+          [tenantId, limit, offset],
+        ),
+        client.query(
+          `SELECT COUNT(*)::int AS count FROM vertical_training_assets
+           WHERE tenant_id = $1`,
+          [tenantId],
+        ),
+      ]);
+      return {
+        data: pageResult.rows.map(rowToAsset),
+        total: Number(countResult.rows[0]?.count ?? 0),
+        limit,
+        offset,
+      };
     });
   }
 
@@ -151,7 +246,7 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
     limit?: number,
   ): Promise<VerticalTrainingAsset[]> {
     return this.withTenant(tenantId, async (client) => {
-      const normalizedLimit = normalizeListLimit(limit);
+      const normalizedLimit = normalizeActiveListLimit(limit);
       const values: unknown[] = [tenantId, verticalType];
       if (normalizedLimit !== undefined) {
         values.push(normalizedLimit);
@@ -167,10 +262,20 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
   }
 }
 
-function normalizeListLimit(limit: number | undefined): number | undefined {
+function normalizeActiveListLimit(limit: number | undefined): number | undefined {
   if (limit === undefined) return undefined;
   if (!Number.isFinite(limit)) return 1;
   return Math.min(50, Math.max(1, Math.floor(limit)));
+}
+
+function normalizePaginationLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_LIST_LIMIT;
+  return Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(limit)));
+}
+
+function normalizePaginationOffset(offset: number | undefined): number {
+  if (offset === undefined || !Number.isFinite(offset)) return 0;
+  return Math.max(0, Math.floor(offset));
 }
 
 export class PgPrivacyAuditRepository extends PgBaseRepository implements PrivacyAuditRepository {

@@ -88,6 +88,7 @@ export interface VerticalTrainingAsset {
   activatedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
+  idempotencyKey?: string;
 }
 
 export interface CreateTrainingAssetDraftInput extends TrainingAssetInput {
@@ -176,16 +177,72 @@ function normalizePromptTitle(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+export interface TrainingAssetListPage {
+  data: VerticalTrainingAsset[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TrainingAssetListOptions {
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Returned by `TrainingAssetRepository.tryUpdate` to surface optimistic-
+ * concurrency outcomes without throwing: the service translates `null`
+ * into a 409 ConflictError. `stale` means a row exists but its
+ * `updatedAt` no longer matches the caller's expected timestamp.
+ */
+export type TryUpdateResult =
+  | { kind: 'updated'; asset: VerticalTrainingAsset }
+  | { kind: 'stale' }
+  | { kind: 'missing' };
+
 export interface TrainingAssetRepository {
   save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset>;
+  /**
+   * Update an existing asset only if its persisted `updated_at` still
+   * matches `expectedUpdatedAt`. Used by approve/activate/archive to
+   * block lost-update races between concurrent admins.
+   */
+  tryUpdate(asset: VerticalTrainingAsset, expectedUpdatedAt: Date): Promise<TryUpdateResult>;
   delete(tenantId: string, id: string): Promise<void>;
   findById(tenantId: string, id: string): Promise<VerticalTrainingAsset | null>;
-  listByTenant(tenantId: string): Promise<VerticalTrainingAsset[]>;
+  findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<VerticalTrainingAsset | null>;
+  listByTenant(
+    tenantId: string,
+    options?: TrainingAssetListOptions,
+  ): Promise<TrainingAssetListPage>;
   listActiveByTenantAndVertical(
     tenantId: string,
     verticalType: VerticalType,
     limit?: number,
   ): Promise<VerticalTrainingAsset[]>;
+}
+
+export type PrivacyAuditOperation =
+  | 'redact_training_asset'
+  | 'approve_training_asset'
+  | 'activate_training_asset'
+  | 'archive_training_asset';
+
+export interface PrivacyAuditRedactionEntry {
+  kind: string;
+  placeholder: string;
+  start: number;
+  end: number;
+  /**
+   * Which source field the offsets refer to. Without this, flattened
+   * audit redactions are impossible to re-locate because offsets are
+   * per-string (title, sourceId, sourceVersion, notes, intent,
+   * expectedNextQuestion/Action/RetrievalTerms, entities, rawText).
+   */
+  sourceField: string;
 }
 
 export interface PrivacyAuditEntry {
@@ -194,9 +251,9 @@ export interface PrivacyAuditEntry {
   actorId: string;
   entityType: 'vertical_training_asset';
   entityId: string;
-  operation: 'redact_training_asset';
+  operation: PrivacyAuditOperation;
   redactionSummary: TrainingAssetRedactionSummary;
-  redactions: Array<{ kind: string; placeholder: string; start: number; end: number }>;
+  redactions: PrivacyAuditRedactionEntry[];
   createdAt: Date;
 }
 

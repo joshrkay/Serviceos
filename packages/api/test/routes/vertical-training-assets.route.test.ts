@@ -2,6 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import type { Role } from '../../src/auth/rbac';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   InMemoryPrivacyAuditRepository,
@@ -11,15 +12,26 @@ import { TrainingAssetRedactionService } from '../../src/verticals/training-asse
 import { TrainingAssetService } from '../../src/verticals/training-asset-service';
 import { createVerticalTrainingAssetsRouter } from '../../src/routes/vertical-training-assets';
 
-function buildApp() {
+interface AuthOverride {
+  tenantId?: string;
+  userId?: string;
+  role?: Role | 'invalid';
+  skipAuth?: boolean;
+}
+
+function buildApp(authOverride: AuthOverride = {}) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
+    if (authOverride.skipAuth) {
+      next();
+      return;
+    }
     (req as AuthenticatedRequest).auth = {
-      tenantId: 'tenant-1',
-      userId: 'user-1',
+      tenantId: authOverride.tenantId ?? 'tenant-1',
+      userId: authOverride.userId ?? 'user-1',
       sessionId: 'session-1',
-      role: 'owner',
+      role: (authOverride.role ?? 'owner') as Role,
     };
     next();
   });
@@ -331,5 +343,174 @@ describe('vertical training assets routes', () => {
       .expect(404);
 
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('returns 401 when the request has no auth context', async () => {
+    const app = buildApp({ skipAuth: true });
+
+    await request(app).get('/api/vertical-training-assets').expect(401);
+    await request(app)
+      .post('/api/vertical-training-assets')
+      .send({
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Unauth attempt',
+        rawText: 'Caller question.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      })
+      .expect(401);
+  });
+
+  it('rejects technician role from creating, approving, activating, or archiving', async () => {
+    const techApp = buildApp({ role: 'technician' });
+
+    const create = await request(techApp)
+      .post('/api/vertical-training-assets')
+      .send({
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Forbidden create',
+        rawText: 'Caller question.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      })
+      .expect(403);
+
+    expect(create.body.error).toBe('FORBIDDEN');
+
+    const stubId = '00000000-0000-4000-8000-000000000001';
+    for (const verb of ['approve', 'activate', 'archive']) {
+      await request(techApp)
+        .post(`/api/vertical-training-assets/${stubId}/${verb}`)
+        .send({})
+        .expect(403);
+    }
+  });
+
+  it('rejects dispatcher role from approving / activating / archiving but allows reading', async () => {
+    // settings:update is owner-only today, so dispatcher cannot create
+    // either. The split permission `vertical_training_assets:approve`
+    // also locks them out of approve/activate/archive.
+    const dispatcherApp = buildApp({ role: 'dispatcher' });
+    await request(dispatcherApp)
+      .get('/api/vertical-training-assets')
+      .expect(200);
+    const stubId = '00000000-0000-4000-8000-000000000001';
+    await request(dispatcherApp)
+      .post(`/api/vertical-training-assets/${stubId}/approve`)
+      .send({})
+      .expect(403);
+    await request(dispatcherApp)
+      .post(`/api/vertical-training-assets/${stubId}/activate`)
+      .send({})
+      .expect(403);
+    await request(dispatcherApp)
+      .post(`/api/vertical-training-assets/${stubId}/archive`)
+      .send({})
+      .expect(403);
+  });
+
+  it('deduplicates a retried create by Idempotency-Key', async () => {
+    const app = buildApp();
+    const body = {
+      verticalType: 'hvac' as const,
+      assetKind: 'prompt_context' as const,
+      title: 'Idempotent create',
+      rawText: 'Caller has no heat.',
+      labels: {},
+      provenance: { source: 'tenant_admin' as const, sourceVersion: '1' },
+    };
+
+    const first = await request(app)
+      .post('/api/vertical-training-assets')
+      .set('Idempotency-Key', 'create-key-1')
+      .send(body)
+      .expect(201);
+    const replay = await request(app)
+      .post('/api/vertical-training-assets')
+      .set('Idempotency-Key', 'create-key-1')
+      .send(body)
+      .expect(201);
+
+    expect(replay.body.id).toBe(first.body.id);
+  });
+
+  it('rejects malformed Idempotency-Key values', async () => {
+    const app = buildApp();
+    const res = await request(app)
+      .post('/api/vertical-training-assets')
+      .set('Idempotency-Key', 'has spaces')
+      .send({
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Bad idempotency key',
+        rawText: 'Caller question.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      })
+      .expect(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('archives an active asset and reports the new status', async () => {
+    const app = buildApp();
+    const created = await request(app)
+      .post('/api/vertical-training-assets')
+      .send({
+        verticalType: 'hvac',
+        assetKind: 'rag_seed',
+        title: 'Archive lifecycle',
+        rawText: 'Ask if the customer has heat now.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      })
+      .expect(201);
+    await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/approve`)
+      .send({})
+      .expect(200);
+    await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/activate`)
+      .send({})
+      .expect(200);
+    const archived = await request(app)
+      .post(`/api/vertical-training-assets/${created.body.id}/archive`)
+      .send({})
+      .expect(200);
+
+    expect(archived.body.status).toBe('archived');
+  });
+
+  it('paginates listByTenant with limit / offset / total', async () => {
+    const app = buildApp();
+    for (let i = 0; i < 3; i += 1) {
+      await request(app)
+        .post('/api/vertical-training-assets')
+        .send({
+          verticalType: 'hvac',
+          assetKind: 'prompt_context',
+          title: `Asset ${i}`,
+          rawText: `Body text ${i}`,
+          labels: {},
+          provenance: { source: 'tenant_admin', sourceVersion: '1' },
+        })
+        .expect(201);
+    }
+
+    const firstPage = await request(app)
+      .get('/api/vertical-training-assets?limit=2&offset=0')
+      .expect(200);
+    expect(firstPage.body.data).toHaveLength(2);
+    expect(firstPage.body.total).toBe(3);
+    expect(firstPage.body.limit).toBe(2);
+    expect(firstPage.body.offset).toBe(0);
+
+    const secondPage = await request(app)
+      .get('/api/vertical-training-assets?limit=2&offset=2')
+      .expect(200);
+    expect(secondPage.body.data).toHaveLength(1);
+    expect(secondPage.body.total).toBe(3);
+    expect(secondPage.body.offset).toBe(2);
   });
 });

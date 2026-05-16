@@ -752,11 +752,18 @@ export function createApp(): express.Express {
   const privacyAuditRepo = pool
     ? new PgPrivacyAuditRepository(pool)
     : new InMemoryPrivacyAuditRepository();
+  // Holder set later once the vertical prompt resolver is built (it
+  // depends on canonicalPackRegistry, which is created further down).
+  // Lifecycle mutations call this to drop the cached prompt section
+  // for the affected tenant so admins see activate/archive without
+  // waiting for the 5-minute TTL.
+  let invalidateVerticalPromptCache: ((tenantId: string) => void) | null = null;
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
     auditRepo,
     redaction: new TrainingAssetRedactionService(),
+    invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
   });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
@@ -1437,11 +1444,17 @@ export function createApp(): express.Express {
   // §3B + §3D: shared vertical-prompt resolver injected into both
   // calling-agent adapters so per-tenant equipment terminology AND
   // intake-question disambiguation reach the classifier.
+  const verticalPromptResolverLogger = createLogger({
+    service: 'vertical-prompt-resolver',
+    environment: process.env.NODE_ENV ?? 'development',
+  });
   const verticalPromptResolver = buildVerticalPromptResolver({
     packActivationRepo,
     canonicalPackRegistry,
     trainingAssetRepo,
+    logger: verticalPromptResolverLogger,
   });
+  invalidateVerticalPromptCache = (tenantId) => verticalPromptResolver.invalidate(tenantId);
   // §3C: caller-plan resolver. Returns a prompt-shaped block when the
   // caller's customerId resolves to an active maintenance agreement.
   const callerPlanResolver = async (

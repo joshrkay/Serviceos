@@ -25,6 +25,7 @@
  */
 
 import type { PackActivationRepository } from '../settings/pack-activation';
+import type { Logger } from '../logging/logger';
 import type { VerticalPackRegistry, VerticalPack as CanonicalVerticalPack } from '../shared/vertical-pack-registry';
 import { isValidVerticalType } from '../shared/vertical-types';
 import {
@@ -62,6 +63,24 @@ export interface ResolveActivePackDeps {
   maxCacheEntries?: number;
   /** Injectable clock for tests. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * Optional structured logger. Used to surface failures fetching
+   * training assets — silent degradation in the privacy-sensitive
+   * read path would otherwise be indistinguishable from "tenant has
+   * no active assets."
+   */
+  logger?: Logger;
+}
+
+export interface VerticalPromptResolver {
+  (tenantId: string): Promise<string | undefined>;
+  /**
+   * Drop the cached prompt section for a tenant so the next resolve
+   * re-reads training assets and pack state. Called by the training-
+   * asset service after activate / archive so admins see changes
+   * without waiting for TTL.
+   */
+  invalidate(tenantId: string): void;
 }
 
 interface CacheEntry {
@@ -74,14 +93,20 @@ const DEFAULT_MAX_CACHE_ENTRIES = 1000;
 
 export function buildVerticalPromptResolver(
   deps: ResolveActivePackDeps,
-): (tenantId: string) => Promise<string | undefined> {
+): VerticalPromptResolver {
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const maxEntries = deps.maxCacheEntries ?? DEFAULT_MAX_CACHE_ENTRIES;
   const now = deps.now ?? Date.now;
   const cache = new Map<string, CacheEntry>();
+  const logger = deps.logger;
 
-  return async (tenantId: string): Promise<string | undefined> => {
-    const shouldUseCache = ttlMs > 0;
+  const resolve = async (tenantId: string): Promise<string | undefined> => {
+    // Tenants with training assets need fresh reads: an admin
+    // activate/archive must be visible to the next caller turn without
+    // waiting for cache TTL. (The training-asset service also calls
+    // `invalidate()` on lifecycle changes, but skipping the cache
+    // entirely makes the freshness guarantee independent of wiring.)
+    const shouldUseCache = ttlMs > 0 && deps.trainingAssetRepo === undefined;
     if (shouldUseCache) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {
@@ -153,8 +178,18 @@ export function buildVerticalPromptResolver(
               MAX_PROMPT_ASSETS,
             );
             trainingAssetPrompt = buildTrainingAssetPromptSection(trainingAssets);
-          } catch {
+          } catch (err) {
+            // Privacy-sensitive read path: a silent failure would let
+            // an outage or RLS regression look identical to "no assets
+            // configured." Log structured context so on-call can spot
+            // the regression in dashboards, then continue with the
+            // canonical pack rather than failing the turn.
             trainingAssetPrompt = '';
+            logger?.warn('vertical_training_assets.resolve_failed', {
+              tenantId,
+              verticalType: richPack.type,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         }
         const canonicalPrompt = [verticalBlock, intakeBlock, objectionBlock]
@@ -178,6 +213,12 @@ export function buildVerticalPromptResolver(
     }
     return section;
   };
+
+  const resolver = resolve as VerticalPromptResolver;
+  resolver.invalidate = (tenantId: string): void => {
+    cache.delete(tenantId);
+  };
+  return resolver;
 }
 
 /**

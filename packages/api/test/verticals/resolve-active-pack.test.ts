@@ -41,9 +41,11 @@ function buildTrainingAssetRepo(
 ): TrainingAssetRepository {
   return {
     save: async (asset) => asset,
+    tryUpdate: async (asset) => ({ kind: 'updated' as const, asset }),
     delete: async () => {},
     findById: async () => null,
-    listByTenant: async () => [],
+    findByIdempotencyKey: async () => null,
+    listByTenant: async () => ({ data: [], total: 0, limit: 50, offset: 0 }),
     listActiveByTenantAndVertical,
   };
 }
@@ -146,6 +148,59 @@ describe('buildVerticalPromptResolver', () => {
     });
 
     await expect(resolve(TENANT)).resolves.toContain('Service vertical: HVAC Professional');
+  });
+
+  it('logs a structured warning when training asset lookup fails', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    const trainingAssetRepo = buildTrainingAssetRepo(async () => {
+      throw new Error('training asset store unavailable');
+    });
+    const warn = vi.fn();
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn,
+      error: vi.fn(),
+      child: vi.fn().mockReturnThis(),
+    };
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      trainingAssetRepo,
+      cacheTtlMs: 0,
+      logger,
+    });
+
+    await resolve(TENANT);
+
+    expect(warn).toHaveBeenCalledWith('vertical_training_assets.resolve_failed', {
+      tenantId: TENANT,
+      verticalType: 'hvac',
+      error: 'training asset store unavailable',
+    });
+  });
+
+  it('invalidate() drops the cached prompt section so the next call re-resolves', async () => {
+    await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
+    let activationCalls = 0;
+    const originalFindByTenant = packActivationRepo.findByTenant.bind(packActivationRepo);
+    packActivationRepo.findByTenant = async (tenantId: string) => {
+      activationCalls += 1;
+      return originalFindByTenant(tenantId);
+    };
+    const resolve = buildVerticalPromptResolver({
+      packActivationRepo,
+      canonicalPackRegistry,
+      cacheTtlMs: 60_000,
+    });
+
+    await resolve(TENANT);
+    await resolve(TENANT);
+    expect(activationCalls).toBe(1);
+
+    resolve.invalidate(TENANT);
+    await resolve(TENANT);
+    expect(activationCalls).toBe(2);
   });
 
   it('does not cache prompt sections that depend on training assets', async () => {

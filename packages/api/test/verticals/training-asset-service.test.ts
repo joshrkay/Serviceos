@@ -146,6 +146,44 @@ class FakeTrainingAssetClient {
       return { rows: [row] };
     }
 
+    if (normalizedSql.startsWith('UPDATE vertical_training_assets')) {
+      const tenantId = String(values[0]);
+      const id = String(values[1]);
+      const existing = this.rows.get(id);
+      const expectedUpdatedAt = values[11] as Date;
+      if (
+        !existing ||
+        existing.tenant_id !== tenantId ||
+        existing.updated_at.getTime() !== expectedUpdatedAt.getTime()
+      ) {
+        return { rows: [] };
+      }
+      const updated: TrainingAssetRow = {
+        ...existing,
+        status: String(values[2]),
+        title: String(values[3]),
+        scrubbed_text: values[4] === null ? null : String(values[4]),
+        labels: String(values[5]),
+        provenance: String(values[6]),
+        redaction_summary: values[7] === null ? null : String(values[7]),
+        approved_by: values[8] === null ? null : String(values[8]),
+        activated_at: values[9] instanceof Date ? values[9] : null,
+        updated_at: values[10] as Date,
+      };
+      this.rows.set(id, updated);
+      return { rows: [updated] };
+    }
+
+    if (normalizedSql.startsWith('SELECT 1 FROM vertical_training_assets')) {
+      const existing = this.rows.get(String(values[1]));
+      return { rows: existing && existing.tenant_id === values[0] ? [existing] : [] };
+    }
+
+    if (normalizedSql.startsWith('SELECT COUNT(*)')) {
+      const count = [...this.rows.values()].filter((row) => row.tenant_id === values[0]).length;
+      return { rows: [{ count } as unknown as TrainingAssetRow] };
+    }
+
     if (normalizedSql.startsWith('INSERT INTO privacy_audit')) {
       const row: PrivacyAuditRow = {
         id: String(values[0]),
@@ -178,6 +216,13 @@ class FakeTrainingAssetClient {
     ) {
       const row = this.rows.get(String(values[1]));
       return { rows: row && row.tenant_id === values[0] ? [row] : [] };
+    }
+
+    if (
+      normalizedSql.startsWith('SELECT * FROM vertical_training_assets') &&
+      normalizedSql.includes('AND idempotency_key = $2')
+    ) {
+      return { rows: [] };
     }
 
     if (normalizedSql.startsWith('DELETE FROM vertical_training_assets')) {
@@ -245,6 +290,17 @@ class RecordingTrainingAssetRepository extends InMemoryTrainingAssetRepository {
   async save(asset: VerticalTrainingAsset): Promise<VerticalTrainingAsset> {
     this.savedAssets.push({ ...asset });
     return super.save(asset);
+  }
+
+  async tryUpdate(
+    asset: VerticalTrainingAsset,
+    expectedUpdatedAt: Date,
+  ): Promise<ReturnType<InMemoryTrainingAssetRepository['tryUpdate']> extends Promise<infer T> ? T : never> {
+    const result = await super.tryUpdate(asset, expectedUpdatedAt);
+    if (result.kind === 'updated') {
+      this.savedAssets.push({ ...result.asset });
+    }
+    return result;
   }
 }
 
@@ -317,11 +373,12 @@ describe('TrainingAssetRepository', () => {
     await repo.save(makeAsset({ id: 'asset-1', status: 'redacted' }));
     await repo.save(makeAsset({ id: 'asset-1', status: 'approved', approvedBy: 'user-2' }));
 
-    const all = await repo.listByTenant('tenant-1');
+    const page = await repo.listByTenant('tenant-1');
 
-    expect(all).toHaveLength(1);
-    expect(all[0].status).toBe('approved');
-    expect(all[0].approvedBy).toBe('user-2');
+    expect(page.data).toHaveLength(1);
+    expect(page.total).toBe(1);
+    expect(page.data[0].status).toBe('approved');
+    expect(page.data[0].approvedBy).toBe('user-2');
   });
 
   it('deletes in-memory assets with tenant guard', async () => {
@@ -368,12 +425,15 @@ describe('TrainingAssetRepository', () => {
 
     await repo.save(makeAsset({ id: 'asset-1', status: 'approved', approvedBy: 'user-2' }));
 
-    const all = await repo.listByTenant('tenant-1');
-    const assetOneRows = all.filter((asset) => asset.id === 'asset-1');
+    const page = await repo.listByTenant('tenant-1');
+    const assetOneRows = page.data.filter((asset) => asset.id === 'asset-1');
 
     expect(assetOneRows).toHaveLength(1);
     expect(assetOneRows[0].status).toBe('approved');
     expect(assetOneRows[0].approvedBy).toBe('user-2');
+    expect(page.total).toBe(3);
+    expect(page.limit).toBe(50);
+    expect(page.offset).toBe(0);
     expect(pool.client.tenantContexts).toEqual([
       'tenant-1',
       'tenant-2',
@@ -385,9 +445,16 @@ describe('TrainingAssetRepository', () => {
       'tenant-1',
       'tenant-1',
     ]);
-    expect(
-      pool.client.queries.filter((query) => query.sql.startsWith('SELECT')).map((query) => query.values),
-    ).toEqual([['tenant-1', 'hvac'], ['tenant-1', 'asset-1'], ['tenant-2', 'asset-1'], ['tenant-1']]);
+    const selectValues = pool.client.queries
+      .filter((query) => query.sql.startsWith('SELECT') && !query.sql.startsWith('SELECT 1'))
+      .map((query) => query.values);
+    expect(selectValues).toEqual([
+      ['tenant-1', 'hvac'],
+      ['tenant-1', 'asset-1'],
+      ['tenant-2', 'asset-1'],
+      ['tenant-1', 50, 0],
+      ['tenant-1'],
+    ]);
     expect(pool.client.releaseCount).toBe(pool.connectCount);
   });
 
@@ -576,7 +643,7 @@ describe('TrainingAssetService', () => {
     })).rejects.toThrow('privacy audit unavailable');
 
     expect(assetRepo.savedAssets).toHaveLength(1);
-    await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
+    await expect(assetRepo.listByTenant('tenant-1')).resolves.toMatchObject({ data: [], total: 0 });
   });
 
   it('rolls back created assets when standard audit creation fails', async () => {
@@ -605,7 +672,7 @@ describe('TrainingAssetService', () => {
     })).rejects.toThrow('audit unavailable');
 
     expect(assetRepo.savedAssets).toHaveLength(1);
-    await expect(assetRepo.listByTenant('tenant-1')).resolves.toEqual([]);
+    await expect(assetRepo.listByTenant('tenant-1')).resolves.toMatchObject({ data: [], total: 0 });
     expect(privacyAuditRepo.rows).toEqual([]);
   });
 
@@ -696,6 +763,152 @@ describe('TrainingAssetService', () => {
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('Sarah Jones');
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('123 Main St');
     expect(JSON.stringify(privacyAuditRepo.rows[0])).not.toContain('415-555-0123');
+    const sourceFields = new Set(
+      privacyAuditRepo.rows[0].redactions.map((redaction) => redaction.sourceField),
+    );
+    expect(sourceFields.has('title')).toBe(true);
+    expect(sourceFields.has('provenance.notes')).toBe(true);
+    expect(sourceFields.has('labels.entities')).toBe(true);
+    for (const redaction of privacyAuditRepo.rows[0].redactions) {
+      expect(typeof redaction.sourceField).toBe('string');
+      expect(redaction.sourceField.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('returns the original asset when create is retried with the same idempotency key', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    let counter = 0;
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      auditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => `asset-idem-${++counter}`,
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const baseRequest = {
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      idempotencyKey: 'create-key-1',
+      input: {
+        verticalType: 'hvac' as const,
+        assetKind: 'prompt_context' as const,
+        title: 'Idempotent create',
+        rawText: 'Caller has no heat.',
+        labels: {},
+        provenance: { source: 'tenant_admin' as const, sourceVersion: '1' },
+      },
+    };
+
+    const first = await service.create(baseRequest);
+    const replay = await service.create(baseRequest);
+
+    expect(replay.id).toBe(first.id);
+    expect(assetRepo.savedAssets).toHaveLength(1);
+    expect(privacyAuditRepo.rows).toHaveLength(1);
+    expect(auditRepo.getAll().filter((event) => event.eventType === 'vertical_training_asset.created')).toHaveLength(1);
+  });
+
+  it('rejects approve when the asset was updated after the read (optimistic concurrency)', async () => {
+    const assetRepo = new InMemoryTrainingAssetRepository();
+    const originalAsset = makeAsset({
+      id: 'asset-concurrent',
+      status: 'redacted',
+      rawText: undefined,
+      scrubbedText: 'Safe redacted text.',
+      updatedAt: new Date('2026-05-15T00:00:00Z'),
+    });
+    await assetRepo.save(originalAsset);
+
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T01:00:00Z'),
+    });
+
+    // Simulate a concurrent writer bumping updatedAt between findById and tryUpdate.
+    const findById = assetRepo.findById.bind(assetRepo);
+    assetRepo.findById = async (tenantId, id) => {
+      const result = await findById(tenantId, id);
+      if (result) {
+        // Concurrent writer comes in *after* the read returned.
+        await assetRepo.save({
+          ...result,
+          updatedAt: new Date('2026-05-15T00:30:00Z'),
+        });
+      }
+      return result;
+    };
+
+    await expect(service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-concurrent',
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('invalidates the prompt cache after a successful activation', async () => {
+    const assetRepo = new InMemoryTrainingAssetRepository();
+    await assetRepo.save(makeAsset({
+      id: 'asset-activate-invalidate',
+      status: 'approved',
+      rawText: undefined,
+      scrubbedText: 'Safe approved text.',
+      approvedBy: 'owner-1',
+    }));
+    const invalidations: string[] = [];
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T01:00:00Z'),
+      invalidatePromptCache: (tenantId) => invalidations.push(tenantId),
+    });
+
+    await service.activate({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-activate-invalidate',
+    });
+
+    expect(invalidations).toEqual(['tenant-1']);
+  });
+
+  it('archives an approved asset and emits an archive audit event', async () => {
+    const assetRepo = new InMemoryTrainingAssetRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    await assetRepo.save(makeAsset({
+      id: 'asset-archive-1',
+      status: 'active',
+      rawText: undefined,
+      scrubbedText: 'Safe active text.',
+      approvedBy: 'owner-1',
+      activatedAt: new Date('2026-05-15T00:00:00Z'),
+    }));
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T02:00:00Z'),
+    });
+
+    const archived = await service.archive({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-archive-1',
+    });
+
+    expect(archived.status).toBe('archived');
+    expect(auditRepo.getAll().map((event) => event.eventType)).toEqual([
+      'vertical_training_asset.archived',
+    ]);
   });
 
   it('sanitizes provenance identifiers before save and audit', async () => {

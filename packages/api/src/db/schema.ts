@@ -2586,6 +2586,13 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_expenses ON expenses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  '097_vertical_training_assets_idempotency': `
+    ALTER TABLE vertical_training_assets
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vertical_training_assets_idempotency
+      ON vertical_training_assets (tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
