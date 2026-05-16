@@ -39,10 +39,15 @@ running this sprint.
 
 ### Day 2 — Audit trail + revenue paths
 
-- [ ] **D2-1** `/dispatch-story` ×4 (parallel by area: customers/jobs/proposals/settings) — X3 inject `auditRepo` into the 28 route files missing it
-- [ ] **D2-2** `/dispatch-story` — X6 distinguish pending vs restricted Stripe Connect status via `requirements.disabled_reason`
-- [ ] **D2-3** `/dispatch-story` — X5 replace `TWILIO_DEFAULT_TENANT_ID` fallback with phone-number → tenant lookup + Sentry alert on miss
-- [ ] **D2-4** `/dispatch-story` — X9 partial-refund schema (`refunded_amount_cents`, `refunded_at`) + tax-export update
+- [x] **D2-1 Phase 1** done (`13c47a5`) — `docs/quality/audit-coverage-2026-05-16.md` catalogs 28 routes: 2 COVERED / 2 PARTIAL / 16 MISSING / 5 READ-ONLY / 3 OUT-OF-SCOPE. Scope-guard tripped at 18 files; split into D2-1a-e sub-batches.
+  - [ ] **D2-1c** *(in flight, CRITICAL)* — proposals + settings + users + feature-flags audit coverage; wires existing `logProposalEvent` helper
+  - [ ] **D2-1a** *(queued)* — appointments + locations + notes + conversations
+  - [ ] **D2-1b** *(queued)* — catalog + templates + bundles
+  - [ ] **D2-1d** *(queued)* — portal + calendar-integrations + public-estimates + public-feedback + public-invoices
+  - [ ] **D2-1e** *(queued, low priority)* — pack-activation + maintenance-contracts
+- [x] **D2-2** done (`fb33a02` → `6b57cdb`) — `RESTRICTED_DISABLED_REASONS` set (6 reasons) + account.updated webhook persists status; 21 tests pass
+- [x] **D2-3** done (`ceff2d0`) — phone-number → tenant lookup via `tenant_integrations.provider_data->>'phoneE164'`; prod miss → Sentry error + "not in service" TwiML; dev fallback retained with WARN; 129 telephony tests pass
+- [x] **D2-4** done (`eb15b73` → `3d130f9`) — migration 100 adds `refunded_amount_cents`/`refunded_at`/`last_refund_stripe_id`; `recordRefund()` service + `charge.refunded` webhook; tax export emits negative-income rows dated by `refundedAt`; money dashboard gross vs net; 22 tests. **Follow-up:** checkout flow needs to stamp `payment_id` on Stripe metadata so refund webhook can resolve payments.
 
 ### Day 3 — Voice agent prompts + transcript regression
 
