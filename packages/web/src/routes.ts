@@ -14,6 +14,7 @@ import { PriceBookPage } from './components/settings/PriceBookPage';
 import { FeedbackDashboard } from './components/settings/FeedbackDashboard';
 import { LanguageSettingsPage } from './pages/settings/LanguageSettings';
 import { OnboardingPage } from './components/onboarding/OnboardingPage';
+import { OnboardingShell } from './components/onboarding/v2/OnboardingShell';
 import { EstimateApprovalPage } from './components/customer/EstimateApprovalPage';
 import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
 import { IntakeFormPage } from './components/customer/IntakeFormPage';
@@ -123,7 +124,11 @@ export const router = createBrowserRouter([
   { path: '/signup', Component: SignupPage },
 
   // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
-  { path: '/onboarding', Component: OnboardingPage },
+  // §10 onboarding v2 — flag-gated. Off → legacy 9-step wizard.
+  {
+    path: '/onboarding',
+    Component: import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true' ? OnboardingShell : OnboardingPage,
+  },
   { path: '/e/:id',      Component: EstimateApprovalPage },
   { path: '/pay/:id',    Component: InvoicePaymentPage },
   { path: '/intake',     Component: IntakeFormPage },
