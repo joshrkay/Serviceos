@@ -23,8 +23,8 @@ import {
   requireAuth,
   requireTenant,
   setCachedMode,
+  type Mode,
 } from '../middleware/auth';
-import { type Mode } from '@ai-service-os/shared';
 import { getPermissions, isValidRole, Role } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { TenantIntegrationStatus } from '../integrations/status-machine';

@@ -26,8 +26,8 @@ import { useEffect, useState } from 'react';
 import { X, Zap, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
-import type { Mode } from '@ai-service-os/shared';
 
+type Mode = 'supervisor' | 'tech' | 'both';
 type ThresholdMap = Partial<Record<Mode, number>>;
 
 const DEFAULTS: Record<Mode, number> = {

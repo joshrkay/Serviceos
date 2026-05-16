@@ -15,11 +15,6 @@ RUN npm ci --include=dev
 # Copy tsconfig files
 COPY tsconfig.json tsconfig.base.json ./
 
-# Build shared first — vite resolves @ai-service-os/shared via
-# package.json main → dist/index.js, so dist must exist before web builds.
-COPY packages/shared ./packages/shared
-RUN npm run build --workspace=packages/shared
-
 # Copy web source
 COPY packages/web ./packages/web
 RUN npm run build --workspace=packages/web
