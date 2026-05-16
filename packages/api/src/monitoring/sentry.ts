@@ -75,6 +75,32 @@ export function assertSentryRedactionProcessors(environment: string): void {
   }
 }
 
+let currentClient: SentryClient | null = null;
+
+/**
+ * Register the Sentry client for the process. Called once at app startup
+ * after initSentry(). Subsequent calls override the registration (useful
+ * for test setup that swaps in a fake). Pass `null` (or call resetSentryClient)
+ * to restore the no-op fallback.
+ */
+export function setSentryClient(client: SentryClient | null): void {
+  currentClient = client;
+}
+
+/** Restore the no-op fallback. Test convenience. */
+export function resetSentryClient(): void {
+  currentClient = null;
+}
+
+/**
+ * Get the registered Sentry client, or a no-op client if none has been set.
+ * Used by instrumentation wrappers (see ./instrumentation.ts) so they work
+ * whether or not Sentry is configured for the environment.
+ */
+export function getSentryClient(): SentryClient {
+  return currentClient ?? createNoOpSentryClient();
+}
+
 function createNoOpSentryClient(): SentryClient {
   const noOpTransaction: SentryTransaction = {
     finish: () => {},
