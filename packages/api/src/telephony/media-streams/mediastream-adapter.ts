@@ -180,6 +180,8 @@ interface RuntimeState {
    * of overlapping the next caller turn.
    */
   outboundTurnId: number;
+  /** Active TTS turn's AbortController so barge-in can immediately cancel a pending WS read. */
+  ttsController: AbortController | null;
   closed: boolean;
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
@@ -278,6 +280,7 @@ export class TwilioMediaStreamAdapter {
       deepgram: null,
       agentSpeaking: false,
       outboundTurnId: 0,
+      ttsController: null,
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
@@ -543,6 +546,7 @@ export class TwilioMediaStreamAdapter {
       const controller = new AbortController();
       try {
         if (typeof ttsProvider.synthesizeStream === 'function') {
+          this.state.ttsController = controller;
           const stream = ttsProvider.synthesizeStream({
             text,
             tenantId: this.state.tenantId ?? undefined,
@@ -573,6 +577,9 @@ export class TwilioMediaStreamAdapter {
           error: err instanceof Error ? err.message : String(err),
         });
       } finally {
+        if (this.state.ttsController === controller) {
+          this.state.ttsController = null;
+        }
         if (turnId === this.state.outboundTurnId) {
           this.state.agentSpeaking = false;
         }
@@ -674,6 +681,7 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    this.state.ttsController?.abort();
     if (!this.state.streamSid) return;
     this.state.outboundTurnId++;
     this.state.agentSpeaking = false;
