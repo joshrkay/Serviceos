@@ -181,8 +181,34 @@ const PLUMBING_OBJECTION_SCRIPTS: readonly ObjectionScript[] = [
   },
 ];
 
+const PLUMBING_TRAINING_ASSETS = [
+  {
+    assetKind: 'emergency_rule',
+    title: 'Burst pipe escalation',
+    scrubbedText:
+      'If the caller reports a burst pipe, active flooding, or uncontrolled water, treat as urgent and escalate to a human dispatcher.',
+    labels: {
+      intent: 'emergency_dispatch',
+      urgencyTier: 'emergency',
+      expectedNextAction: 'escalate_to_oncall',
+      shouldEscalate: true,
+    },
+    provenance: { source: 'synthetic_default', sourceVersion: '2026-05-15' },
+  },
+  {
+    assetKind: 'eval_scenario',
+    title: 'Leak versus clog disambiguation',
+    scrubbedText:
+      'When a caller reports a plumbing issue, ask whether it is a leak, clog, no water, or fixture problem before proposing next steps.',
+    labels: {
+      expectedNextQuestion: 'Is this a leak, a clog, no water, or a fixture issue?',
+    },
+    provenance: { source: 'synthetic_default', sourceVersion: '2026-05-15' },
+  },
+];
+
 export function createPlumbingPack(): VerticalPack {
-  return createVerticalPack(
+  const pack = createVerticalPack(
     'plumbing',
     'Plumbing Professional',
     '1.0.0',
@@ -192,6 +218,12 @@ export function createPlumbingPack(): VerticalPack {
     PLUMBING_INTAKE_QUESTIONS,
     PLUMBING_OBJECTION_SCRIPTS
   );
+  pack.metadata = {
+    ...pack.metadata,
+    training_tier: 'first_class',
+    training_assets: PLUMBING_TRAINING_ASSETS,
+  };
+  return pack;
 }
 
 export const PLUMBING_LINE_ITEM_DEFAULTS = {

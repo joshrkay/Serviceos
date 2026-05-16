@@ -152,8 +152,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
-  ['095_jobs_money_state', 'c5e881fafd5d46f9f6185bf76c6e5c321e48ff46679608df2db33548528972d3'],
+  ['095_vertical_training_assets', '2c97e28a9f31bf562a69e4204779da6ed7a8aaf4f65ead102ce5c97a45156350'],
   ['096_create_expenses', '66dfd938628d33c4e65f25037c59d52fbed2848fa43123a94fb92f59b6d1a73e'],
+  ['097_vertical_training_assets_idempotency', '3c0fbe088bd918a4900e6c1b3c6b68ace51959ff7ae3ecf2b09aae3285ed025a'],
 ];
 
 function hashMigration(value: string): string {

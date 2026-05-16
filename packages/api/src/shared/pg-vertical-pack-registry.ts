@@ -84,18 +84,28 @@ export class PgVerticalPackRegistry
 
   async register(pack: VerticalPack): Promise<VerticalPack> {
     return this.withClient(async (client) => {
-      // Idempotent seed: on the unique `type` constraint, leave the existing
-      // row untouched (preserves any subsequent tenant customization) and
-      // return it. Callers like seedCanonicalVerticalPacks() invoke this on
-      // every API startup, so plain INSERT would log a unique-key violation
-      // every cold start (see BUG-SEED-01 in
-      // docs/verification-runs/beta-verification-2026-05-13.md).
+      // Idempotent seed: refresh canonical rows on startup while leaving any
+      // non-canonical/custom row with the same type untouched.
       const inserted = await client.query(
         `INSERT INTO vertical_packs (
           id, type, name, version, description, is_active,
           categories, terminology, created_at, updated_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        ON CONFLICT (type) DO NOTHING
+        ON CONFLICT (type) DO UPDATE SET
+          name = EXCLUDED.name,
+          version = EXCLUDED.version,
+          description = EXCLUDED.description,
+          is_active = EXCLUDED.is_active,
+          categories = EXCLUDED.categories,
+          terminology = EXCLUDED.terminology,
+          updated_at = EXCLUDED.updated_at
+        WHERE (
+          vertical_packs.terminology @> '{"canonical": true}'::jsonb
+          OR vertical_packs.terminology->>'seededBy' = 'createApp'
+        ) AND (
+          EXCLUDED.terminology @> '{"canonical": true}'::jsonb
+          OR EXCLUDED.terminology->>'seededBy' = 'createApp'
+        )
         RETURNING *`,
         [
           pack.id,
