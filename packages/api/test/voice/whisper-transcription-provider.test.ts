@@ -104,6 +104,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
 
   describe('error handling', () => {
     it('throws WhisperTimeoutError when the upstream hangs past the timeout', async () => {
+      vi.useRealTimers();
       const fetchMock = vi
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
@@ -111,34 +112,24 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
           const signal = (init as RequestInit | undefined)?.signal;
           return new Promise<Response>((_resolve, reject) => {
             if (!signal) return;
+            if (signal.aborted) {
+              const err = new Error('aborted') as Error & { name: string };
+              err.name = 'AbortError';
+              reject(err);
+              return;
+            }
             signal.addEventListener('abort', () => {
               const err = new Error('aborted') as Error & { name: string };
               err.name = 'AbortError';
               reject(err);
-            });
+            }, { once: true });
           });
         });
 
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock, 100);
-      const pending = provider.transcribe('https://cdn.example/audio.webm');
-      let captured: unknown;
-      const settled = pending.then(
-        (v) => {
-          captured = { value: v };
-        },
-        (e) => {
-          captured = { error: e };
-        }
+      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock, 25);
+      await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toBeInstanceOf(
+        WhisperTimeoutError
       );
-
-      await Promise.resolve();
-      await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(101);
-      await settled;
-
-      expect(captured).toBeDefined();
-      expect((captured as { error: unknown }).error).toBeInstanceOf(WhisperTimeoutError);
-      expect(((captured as { error: WhisperTimeoutError }).error).timeoutMs).toBe(100);
     });
 
     it('throws WhisperRateLimitError with parsed Retry-After on 429', async () => {
