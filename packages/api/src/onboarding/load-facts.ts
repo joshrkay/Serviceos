@@ -20,8 +20,9 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
 
   const [settings, integRes, tenantRes, callsRes, tsRes] = await Promise.all([
     settingsRepo.findByTenant(tenantId),
-    pool.query<{ status: string }>(
-      `SELECT status FROM tenant_integrations WHERE tenant_id=$1 AND provider='twilio' LIMIT 1`,
+    pool.query<{ status: string; phone_e164: string | null }>(
+      `SELECT status, (provider_data->>'phoneE164') AS phone_e164
+         FROM tenant_integrations WHERE tenant_id=$1 AND provider='twilio' LIMIT 1`,
       [tenantId]
     ),
     pool.query<{ stripe_subscription_id: string | null; subscription_status: string | null }>(
@@ -61,6 +62,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     },
     packActivated: (settings?.activeVerticalPacks?.length ?? 0) > 0,
     twilioStatus: integRes.rows[0]?.status ?? null,
+    twilioPhoneNumber: integRes.rows[0]?.phone_e164 ?? null,
     subscription: {
       stripeSubscriptionId: tenant?.stripe_subscription_id ?? null,
       status: normalizeSubscriptionStatus(tenant?.subscription_status),

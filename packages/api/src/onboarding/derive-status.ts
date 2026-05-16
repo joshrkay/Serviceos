@@ -14,6 +14,8 @@ export interface OnboardingFacts {
   };
   packActivated: boolean;
   twilioStatus: string | null;  // full set of tenant_integrations.status values; only 'full_readiness' and 'failed' have special handling
+  /** Provisioned phone number in E.164 (from tenant_integrations.provider_data->>'phoneE164'). null until purchase completes. */
+  twilioPhoneNumber?: string | null;
   subscription: {
     stripeSubscriptionId: string | null;
     status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete' | null;
@@ -50,15 +52,21 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
   const order: OnboardingStepId[] = ['signup', 'identity', 'pack', 'phone', 'billing', 'test_call'];
   const firstNotDone = order.find((id) => !done[id]) ?? null;
 
-  const steps = order.map((id): { id: OnboardingStepId; status: OnboardingStepStatus; blockers?: string[] } => {
+  const phoneMetadata = f.twilioPhoneNumber ? { phoneNumber: f.twilioPhoneNumber } : undefined;
+
+  const steps = order.map((id): { id: OnboardingStepId; status: OnboardingStepStatus; blockers?: string[]; metadata?: Record<string, unknown> } => {
     if (id === 'phone' && f.twilioStatus === 'failed') {
-      return { id, status: 'error', blockers: ['twilio_provisioning_failed'] };
+      return { id, status: 'error', blockers: ['twilio_provisioning_failed'], ...(phoneMetadata ? { metadata: phoneMetadata } : {}) };
     }
     if (id === 'test_call' && isTestCallSkipped(f)) {
       return { id, status: 'skipped' };
     }
-    if (done[id]) return { id, status: 'done' };
-    if (id === firstNotDone) return { id, status: 'current' };
+    if (done[id]) {
+      return { id, status: 'done', ...(id === 'phone' && phoneMetadata ? { metadata: phoneMetadata } : {}) };
+    }
+    if (id === firstNotDone) {
+      return { id, status: 'current', ...(id === 'phone' && phoneMetadata ? { metadata: phoneMetadata } : {}) };
+    }
     return { id, status: 'pending' };
   });
 
