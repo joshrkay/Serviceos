@@ -74,6 +74,8 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createVoiceGate } from './voice/voice-gate';
+import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -1524,6 +1526,15 @@ export function createApp(): express.Express {
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
+    // §10 onboarding — fire the 30-minute upgrade nudge after every
+    // inbound call ends. Pool-gated (no-op when running in-memory).
+    ...(pool
+      ? {
+          onSessionEnded: async ({ tenantId }: { tenantId: string }) => {
+            await checkAndFireUpgradeNudge({ pool }, tenantId);
+          },
+        }
+      : {}),
   });
   // P8-012: feature flag the Media Streams (live audio) path. Default
   // off — when off, the existing Gather adapter remains the only
@@ -1715,6 +1726,12 @@ export function createApp(): express.Express {
           warnings,
         };
       },
+      // §10 onboarding voice gates — only wired when both pool and auditRepo
+      // exist (production / integration test). In-memory dev mode skips
+      // gating entirely (the route stays legacy behavior).
+      ...(pool && auditRepo
+        ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
+        : {}),
     }),
   );
 
@@ -1979,7 +1996,7 @@ export function createApp(): express.Express {
 
   // billingService is hoisted earlier so the Stripe webhook can use
   // the same instance.
-  app.use('/api/billing', createBillingRouter({ billingService, connectService }));
+  app.use('/api/billing', createBillingRouter({ billingService, connectService, auditRepo }));
 
   // Tenant-scoped reporting (revenue by lead source / UTM, money dashboard, tax export).
   const revenueBySourceRepo = pool
@@ -2140,7 +2157,7 @@ export function createApp(): express.Express {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
-  app.use('/api/onboarding', createOnboardingRouter(settingsRepo, packActivationRepo, auditRepo));
+  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService }));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({

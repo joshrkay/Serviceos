@@ -1,6 +1,9 @@
 import { useAuth } from '@clerk/clerk-react';
 import { Navigate, Outlet, useLocation } from 'react-router';
 import { Zap } from 'lucide-react';
+import { useOnboardingStatus } from '../../hooks/useOnboardingStatus';
+
+const ONBOARDING_V2 = import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true';
 
 export function ProtectedRoute() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -23,6 +26,30 @@ export function ProtectedRoute() {
 
   if (!isSignedIn) {
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  return <OnboardingGuard />;
+}
+
+/**
+ * §10 onboarding completion guard. Only active when the v2 flag is on.
+ * Redirects to /onboarding whenever the tenant has incomplete steps and
+ * is trying to view any other authed route. Status is polled at 30s so
+ * completion elsewhere (or a webhook-driven step flip) unblocks soon.
+ */
+function OnboardingGuard() {
+  const location = useLocation();
+  const { data, isLoading } = useOnboardingStatus(ONBOARDING_V2 ? 30_000 : 0);
+
+  // Flag off → never gate (preserves legacy behavior).
+  if (!ONBOARDING_V2) return <Outlet />;
+
+  // While loading, render outlet — letting the user see the app one render
+  // late is preferable to blocking the whole shell on a status fetch.
+  if (isLoading || !data) return <Outlet />;
+
+  if (!data.isComplete && !location.pathname.startsWith('/onboarding')) {
+    return <Navigate to="/onboarding" replace />;
   }
 
   return <Outlet />;
