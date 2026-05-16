@@ -1,4 +1,8 @@
-import { VerticalType, ServiceCategory } from './vertical-types';
+import {
+  VerticalType,
+  ServiceCategory,
+  getServiceCategories,
+} from './vertical-types';
 import { VerticalPackRegistry } from './vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { TerminologyMap } from '../verticals/hvac/terminology';
@@ -114,12 +118,25 @@ const PLUMBING_INTAKE_CONFIG: PackIntakeConfig = {
   ],
 };
 
+function titleCaseCategory(category: ServiceCategory): string {
+  return category
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function electricalCategoryDescription(category: ServiceCategory): string {
+  return `Electrical ${category} service`;
+}
+
 function getTerminology(verticalType: VerticalType): TerminologyMap {
   switch (verticalType) {
     case 'hvac':
       return HVAC_TERMINOLOGY;
     case 'plumbing':
       return PLUMBING_TERMINOLOGY;
+    case 'electrical':
+      return {};
     default: {
       const _exhaustive: never = verticalType;
       throw new Error(`Unknown vertical type: ${verticalType}`);
@@ -144,6 +161,14 @@ function getCategories(verticalType: VerticalType): VerticalPackConfig['categori
         description: c.description,
         sortOrder: c.sortOrder,
         typicalLineItems: c.typicalLineItems,
+      }));
+    case 'electrical':
+      return getServiceCategories('electrical').map((category, index) => ({
+        id: category,
+        name: titleCaseCategory(category),
+        description: electricalCategoryDescription(category),
+        sortOrder: index + 1,
+        typicalLineItems: [],
       }));
     default: {
       const _exhaustive: never = verticalType;
@@ -186,6 +211,8 @@ function getTemplates(verticalType: VerticalType): VerticalTemplateConfig[] {
           defaultLineItems: ['Drain cleaning', 'Snake / auger service'],
         },
       ];
+    case 'electrical':
+      return [];
     default: {
       const _exhaustive: never = verticalType;
       throw new Error(`Unknown vertical type: ${verticalType}`);
@@ -214,6 +241,12 @@ function getIntakeConfig(verticalType: VerticalType): VerticalIntakeConfig {
           'Is the issue isolated to one fixture or multiple fixtures?',
           'Has this issue happened before?',
         ],
+      };
+    case 'electrical':
+      return {
+        requiredFields: [],
+        optionalFields: [],
+        followUpQuestions: [],
       };
     default: {
       const _exhaustive: never = verticalType;

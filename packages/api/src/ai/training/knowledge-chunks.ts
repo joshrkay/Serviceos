@@ -46,7 +46,10 @@ export type KnowledgeChunkSourceType =
   | 'wording_preference'
   | 'tenant_setting'
   | 'vertical_terminology'
-  | 'vertical_category';
+  | 'vertical_category'
+  | 'vertical_training_asset'
+  | 'vertical_eval_scenario'
+  | 'vertical_labeled_call_example';
 
 export const EMBEDDING_DIMENSIONS = 1536;
 export const EMBEDDING_MODEL = 'text-embedding-3-small' as const;

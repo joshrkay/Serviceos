@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LineItem, DocumentTotals, calculateDocumentTotals } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 
 export type EstimateStatus = 'draft' | 'ready_for_review' | 'sent' | 'accepted' | 'rejected' | 'expired';
 
@@ -242,7 +243,8 @@ export async function transitionEstimateStatus(
   tenantId: string,
   id: string,
   newStatus: EstimateStatus,
-  repository: EstimateRepository
+  repository: EstimateRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
 ): Promise<Estimate | null> {
   const estimate = await repository.findById(tenantId, id);
   if (!estimate) return null;
@@ -251,7 +253,14 @@ export async function transitionEstimateStatus(
     throw new ValidationError(`Invalid transition from ${estimate.status} to ${newStatus}`);
   }
 
-  return repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+
+  // §6 Time-to-Cash. Best-effort job money-state rollup.
+  if (updated && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(tenantId, updated.jobId, 'system', moneyStateDeps);
+  }
+
+  return updated;
 }
 
 export class InMemoryEstimateRepository implements EstimateRepository {

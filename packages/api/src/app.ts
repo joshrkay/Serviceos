@@ -68,6 +68,7 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createVerticalRouter } from './routes/verticals';
+import { createVerticalTrainingAssetsRouter } from './routes/vertical-training-assets';
 import { createTemplateRouter } from './routes/templates';
 import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
@@ -121,6 +122,12 @@ import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
 import { LookupEventService } from './lookup-events/lookup-event-service';
 import { InMemoryEstimateTemplateRepository } from './templates/estimate-template';
 import { InMemoryServiceBundleRepository } from './verticals/bundles';
+import {
+  InMemoryPrivacyAuditRepository,
+  InMemoryTrainingAssetRepository,
+} from './verticals/in-memory-training-assets';
+import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
+import { TrainingAssetService } from './verticals/training-asset-service';
 import { InMemoryQualityMetricsRepository } from './quality/metrics';
 import { InMemoryVoiceRepository, createTranscribeAudioFn } from './voice/voice-service';
 import { createWhisperTranscriptionProvider } from './voice/transcription-providers';
@@ -171,6 +178,10 @@ import { PgSettingsRepository } from './settings/pg-settings';
 import { PgAuditRepository } from './audit/pg-audit';
 import { PgEstimateTemplateRepository } from './templates/pg-estimate-template';
 import { PgServiceBundleRepository } from './verticals/pg-bundles';
+import {
+  PgPrivacyAuditRepository,
+  PgTrainingAssetRepository,
+} from './verticals/pg-training-assets';
 import { PgQualityMetricsRepository } from './quality/pg-metrics';
 import { PgVoiceRepository } from './voice/pg-voice';
 import { InMemoryVoiceSessionRepository } from './voice/voice-session';
@@ -222,6 +233,7 @@ import { createPublicInvoicesRouter } from './routes/public-invoices';
 import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
+import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
@@ -533,6 +545,7 @@ export function createApp(): express.Express {
     : new InMemorySettingsRepository();
   // Constructed early so the Stripe webhook handler can record payments.
   const webhookInvoiceRepo = pool ? new PgInvoiceRepository(pool) : new InMemoryInvoiceRepository();
+  const webhookEstimateRepo = pool ? new PgEstimateRepository(pool) : new InMemoryEstimateRepository();
   const webhookPaymentRepo = pool ? new PgPaymentRepository(pool) : new InMemoryPaymentRepository();
   // Tier 4 (Deposit rules — PR 3b). Hoisted up so the Stripe webhook
   // and the rest of the app share a single instance — InMemory repos
@@ -647,6 +660,7 @@ export function createApp(): express.Express {
       tenantRepo,
       settingsRepo: webhookSettingsRepo,
       invoiceRepo: webhookInvoiceRepo,
+      estimateRepo: webhookEstimateRepo,
       paymentRepo: webhookPaymentRepo,
       jobRepo,
       // Tier 4 (Team members — PR 3). Invitee join-tenant path on
@@ -736,6 +750,25 @@ export function createApp(): express.Express {
   const approvalRepo       = pool ? new PgApprovalRepository(pool)       : new InMemoryApprovalRepository();
   const deltaRepo          = pool ? new PgEditDeltaRepository(pool)      : new InMemoryEditDeltaRepository();
   const packActivationRepo = pool ? new PgPackActivationRepository(pool) : new InMemoryPackActivationRepository();
+  const trainingAssetRepo = pool
+    ? new PgTrainingAssetRepository(pool)
+    : new InMemoryTrainingAssetRepository();
+  const privacyAuditRepo = pool
+    ? new PgPrivacyAuditRepository(pool)
+    : new InMemoryPrivacyAuditRepository();
+  // Holder set later once the vertical prompt resolver is built (it
+  // depends on canonicalPackRegistry, which is created further down).
+  // Lifecycle mutations call this to drop the cached prompt section
+  // for the affected tenant so admins see activate/archive without
+  // waiting for the 5-minute TTL.
+  let invalidateVerticalPromptCache: ((tenantId: string) => void) | null = null;
+  const trainingAssetService = new TrainingAssetService({
+    assetRepo: trainingAssetRepo,
+    privacyAuditRepo,
+    auditRepo,
+    redaction: new TrainingAssetRedactionService(),
+    invalidatePromptCache: (tenantId) => invalidateVerticalPromptCache?.(tenantId),
+  });
   const fileRepo           = pool ? new PgFileRepository(pool)           : new InMemoryFileRepository();
   const jobFileRepo        = pool ? new PgJobFileRepository(pool)        : new InMemoryJobFileRepository();
   const jobPhotoRepo       = pool ? new PgJobPhotoRepository(pool)       : new InMemoryJobPhotoRepository();
@@ -1012,6 +1045,7 @@ export function createApp(): express.Express {
     schedulingNotifier: schedulingConfirmationNotifier,
     expenseRepo,
     auditRepo,
+    jobRepo,
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
@@ -1415,10 +1449,17 @@ export function createApp(): express.Express {
   // §3B + §3D: shared vertical-prompt resolver injected into both
   // calling-agent adapters so per-tenant equipment terminology AND
   // intake-question disambiguation reach the classifier.
+  const verticalPromptResolverLogger = createLogger({
+    service: 'vertical-prompt-resolver',
+    environment: process.env.NODE_ENV ?? 'development',
+  });
   const verticalPromptResolver = buildVerticalPromptResolver({
     packActivationRepo,
     canonicalPackRegistry,
+    trainingAssetRepo,
+    logger: verticalPromptResolverLogger,
   });
+  invalidateVerticalPromptCache = (tenantId) => verticalPromptResolver.invalidate(tenantId);
   // §3C: caller-plan resolver. Returns a prompt-shaped block when the
   // caller's customerId resolves to an active maintenance agreement.
   const callerPlanResolver = async (
@@ -1874,12 +1915,17 @@ export function createApp(): express.Express {
   app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
   app.use(
     '/api/estimates',
-    createEstimateRouter(estimateRepo, settingsRepo, auditRepo, ownership, sendService, {
-      gateway: llmGateway,
-      proposalRepo,
-    }),
+    createEstimateRouter(
+      estimateRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      sendService,
+      { gateway: llmGateway, proposalRepo },
+      { jobRepo, invoiceRepo },
+    ),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo));
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
@@ -1937,7 +1983,7 @@ export function createApp(): express.Express {
       timeGivenBackReporter,
     }),
   );
-  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo));
+  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
   app.use('/api/notes', createNoteRouter(noteRepo, ownership));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
@@ -2061,6 +2107,7 @@ export function createApp(): express.Express {
   );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
+  app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
   app.use('/api/templates', createTemplateRouter(templateRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
@@ -2197,6 +2244,36 @@ export function createApp(): express.Express {
       });
     }
   }, 60_000);
+
+  // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
+  // have day granularity, so an hourly check surfaces newly-overdue
+  // invoices promptly without churn. Same setInterval driver + tenant
+  // lister pattern as the recurring-agreements sweep above; in-memory
+  // dev returns no tenants so it no-ops locally.
+  const overdueInvoiceLogger = createLogger({
+    service: 'overdue-invoice-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runOverdueInvoiceSweep({
+        jobRepo,
+        estimateRepo,
+        invoiceRepo,
+        auditRepo,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: overdueInvoiceLogger,
+      });
+    } catch (err) {
+      overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60 * 60_000);
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.

@@ -242,13 +242,13 @@ describe('T4-007 — Zod schema validation for all onboarding proposal types', (
     expect(result.success).toBe(true);
   });
 
-  it('onboarding_service_category — rejects invalid vertical type', () => {
+  it('onboarding_service_category — accepts electrical as a basic supported vertical type', () => {
     const result = onboardingServiceCategoryPayloadSchema.safeParse({
       verticalType: 'electrical',
       categoryId: 'wiring',
       displayName: 'Wiring',
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it('onboarding_estimate_template — valid payload', () => {

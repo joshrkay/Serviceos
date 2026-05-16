@@ -37,12 +37,12 @@ describe('Onboarding proposal contract validation', () => {
       expect(result.valid).toBe(false);
     });
 
-    it('rejects invalid vertical type', () => {
+    it('accepts electrical as a basic supported vertical type', () => {
       const result = validateProposalPayload('onboarding_tenant_settings', {
         businessName: 'Test',
         verticalPacks: ['electrical'],
       });
-      expect(result.valid).toBe(false);
+      expect(result.valid).toBe(true);
     });
   });
 
