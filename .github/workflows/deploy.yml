@@ -58,6 +58,14 @@ jobs:
     environment: dev
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Build API (for migration runner)
+        run: npm run build
+        working-directory: packages/api
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Run API migrations (Development)
@@ -80,6 +88,14 @@ jobs:
     environment: prod
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Build API (for migration runner)
+        run: npm run build
+        working-directory: packages/api
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Run API migrations (production)
