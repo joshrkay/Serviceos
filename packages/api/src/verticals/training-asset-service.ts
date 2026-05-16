@@ -453,7 +453,27 @@ export class TrainingAssetService {
       );
     }
     const updated = updateResult.asset;
+    // Order matters: write the privacy_audit row first, then the
+    // standard audit event. If the standard audit write fails, we can
+    // delete the privacy_audit row and revert state, leaving no
+    // orphaned audit trail. If we wrote the standard audit first and
+    // the privacy audit failed, the revert would still leave a "this
+    // succeeded" row claiming a transition that never persisted.
+    const privacyAuditId = this.idGenerator();
+    let privacyAuditCreated = false;
     try {
+      await this.deps.privacyAuditRepo.create({
+        id: privacyAuditId,
+        tenantId: request.tenantId,
+        actorId: request.actorId,
+        entityType: 'vertical_training_asset',
+        entityId: updated.id,
+        operation: spec.privacyAuditOperation,
+        redactionSummary: emptyRedactionSummary(),
+        redactions: [],
+        createdAt: now,
+      });
+      privacyAuditCreated = true;
       await this.deps.auditRepo.create(createAuditEvent({
         tenantId: request.tenantId,
         actorId: request.actorId,
@@ -466,18 +486,10 @@ export class TrainingAssetService {
           status: updated.status,
         },
       }));
-      await this.deps.privacyAuditRepo.create({
-        id: this.idGenerator(),
-        tenantId: request.tenantId,
-        actorId: request.actorId,
-        entityType: 'vertical_training_asset',
-        entityId: updated.id,
-        operation: spec.privacyAuditOperation,
-        redactionSummary: emptyRedactionSummary(),
-        redactions: [],
-        createdAt: now,
-      });
     } catch (err) {
+      if (privacyAuditCreated) {
+        await this.deps.privacyAuditRepo.delete(request.tenantId, privacyAuditId);
+      }
       const revertResult = await this.deps.assetRepo.tryUpdate(existing, updated.updatedAt);
       if (revertResult.kind !== 'updated') {
         // Best-effort revert: if another writer raced in we let the

@@ -880,6 +880,64 @@ describe('TrainingAssetService', () => {
     expect(invalidations).toEqual(['tenant-1']);
   });
 
+  it('does not leave a success audit row when the privacy audit write fails', async () => {
+    const assetRepo = new InMemoryTrainingAssetRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    await assetRepo.save(makeAsset({
+      id: 'asset-orphan-audit',
+      status: 'redacted',
+      rawText: undefined,
+      scrubbedText: 'Safe redacted text.',
+    }));
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new FailingPrivacyAuditRepository(),
+      auditRepo,
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T01:00:00Z'),
+    });
+
+    await expect(service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-orphan-audit',
+    })).rejects.toThrow('privacy audit unavailable');
+
+    expect(auditRepo.getAll()).toEqual([]);
+    await expect(assetRepo.findById('tenant-1', 'asset-orphan-audit')).resolves.toMatchObject({
+      status: 'redacted',
+    });
+  });
+
+  it('deletes the privacy_audit row when the standard audit write fails after it succeeds', async () => {
+    const assetRepo = new InMemoryTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    await assetRepo.save(makeAsset({
+      id: 'asset-rollback-cleanup',
+      status: 'redacted',
+      rawText: undefined,
+      scrubbedText: 'Safe redacted text.',
+    }));
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      auditRepo: new FailingAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      now: () => new Date('2026-05-15T01:00:00Z'),
+    });
+
+    await expect(service.approve({
+      tenantId: 'tenant-1',
+      actorId: 'owner-1',
+      assetId: 'asset-rollback-cleanup',
+    })).rejects.toThrow('audit unavailable');
+
+    expect(privacyAuditRepo.rows).toEqual([]);
+    await expect(assetRepo.findById('tenant-1', 'asset-rollback-cleanup')).resolves.toMatchObject({
+      status: 'redacted',
+    });
+  });
+
   it('archives an approved asset and emits an archive audit event', async () => {
     const assetRepo = new InMemoryTrainingAssetRepository();
     const auditRepo = new InMemoryAuditRepository();
