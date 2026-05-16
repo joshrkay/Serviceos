@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { Permission, hasPermission, Role, isValidRole } from '../auth/rbac';
+import { Mode } from '@ai-service-os/shared';
 
 // P12-001 — `req.auth.mode` is set by `requireTenant` below. We avoid
 // editing `auth/clerk.ts` (out of this story's scope: owned by the
@@ -26,8 +27,6 @@ type AuthWithMode = NonNullable<AuthenticatedRequest['auth']> & {
 // staleness; multi-instance deploys may see up to 60s skew on a mode
 // switch. Risk-noted in the story body.
 // ─────────────────────────────────────────────────────────────────────────────
-
-export type Mode = 'supervisor' | 'tech' | 'both';
 
 export type UserModeLoader = (
   userId: string,
