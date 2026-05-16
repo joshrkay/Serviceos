@@ -39,12 +39,19 @@ describe('migration 099: proposal_executions idempotency index (§11 H1)', () =>
   });
 
   it('blocks duplicate (tenant_id, idempotency_key) inserts within a tenant', async () => {
+    // Use two distinct parent proposals so the pre-existing wider index
+    // on (tenant_id, proposal_id, idempotency_key) cannot fire — this
+    // isolates the new (tenant_id, idempotency_key) index as the only
+    // uniqueness constraint capable of rejecting the second insert,
+    // matching how IdempotencyGuard.findPreviousExecution looks up
+    // replays by (tenant, key) alone without knowing proposal_id.
     const tenant = await createTestTenant(pool);
-    const proposalId = await createProposal(pool, tenant.tenantId, 'prop-key-A');
+    const proposalA = await createProposal(pool, tenant.tenantId, 'prop-key-A1');
+    const proposalB = await createProposal(pool, tenant.tenantId, 'prop-key-A2');
 
-    await insertExecution(pool, tenant.tenantId, proposalId, 'exec-key-1');
+    await insertExecution(pool, tenant.tenantId, proposalA, 'k-cross-proposal');
     await expect(
-      insertExecution(pool, tenant.tenantId, proposalId, 'exec-key-1'),
+      insertExecution(pool, tenant.tenantId, proposalB, 'k-cross-proposal'),
     ).rejects.toThrow(/duplicate key/);
   });
 
