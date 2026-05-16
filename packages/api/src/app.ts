@@ -11,6 +11,7 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
 import {
@@ -1697,12 +1698,20 @@ export function createApp(): express.Express {
     }
   };
 
+  // D2-3 — real phone-number → tenant lookup for inbound /voice. The
+  // legacy `resolveTenantId` callback is still wired for `/gather` and
+  // `/dial-result`, which already run inside an established call; the
+  // /voice handler consults this repo first and only falls through to
+  // the env-var seam in dev (with a loud WARN).
+  const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
       adapter: twilioAdapter,
       authTokenGetter: ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
       publicBaseUrl: process.env.PUBLIC_API_URL,
+      ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
       resolveTenantId: ({ to }) => resolveTenantIdByPhoneNumber(to),
       mediaStreamsEnabled,
       // P8-014: mount the recording webhook in production. Without this
