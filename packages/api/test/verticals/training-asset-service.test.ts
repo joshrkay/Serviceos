@@ -938,6 +938,123 @@ describe('TrainingAssetService', () => {
     });
   });
 
+  it('does not redact domain vocabulary like "Water Heater" or "Circuit Breaker"', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-vocab',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'prompt_context',
+        title: 'Water Heater installation',
+        rawText:
+          'Ask whether the Water Heater is gas or electric. ' +
+          'Verify the Circuit Breaker has not tripped on the Heat Pump.',
+        labels: { intent: 'Service Call routing' },
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    });
+
+    expect(saved.status).toBe('redacted');
+    expect(saved.title).toBe('Water Heater installation');
+    expect(saved.labels.intent).toBe('Service Call routing');
+    expect(saved.scrubbedText).toContain('Water Heater');
+    expect(saved.scrubbedText).toContain('Circuit Breaker');
+    expect(saved.scrubbedText).toContain('Heat Pump');
+    expect(saved.scrubbedText).not.toContain('[NAME]');
+  });
+
+  it('redacts individual entity values without round-tripping through JSON', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo: new InMemoryPrivacyAuditRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-entities',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    const saved = await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'labeled_call_example',
+        title: 'Entities iteration case',
+        rawText: 'Caller has no heat.',
+        labels: {
+          entities: {
+            primaryPhone: '415-555-0123',
+            equipmentTags: ['Heat Pump', 'serial 415-555-9999'],
+            address: { street: '123 Main St', unit: 'Apt 4' },
+            // A key that looks like JSON would have broken the old stringify path.
+            'note"key': 'follow up with the customer',
+          },
+        },
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+    });
+
+    expect(saved.labels.entities).toEqual({
+      primaryPhone: '[PHONE]',
+      equipmentTags: ['Heat Pump', 'serial [PHONE]'],
+      address: { street: '[ADDRESS]', unit: 'Apt 4' },
+      'note"key': 'follow up with the customer',
+    });
+  });
+
+  it('tags privacy audit redactions with offsetBasis = original vs scrubbed', async () => {
+    const assetRepo = new RecordingTrainingAssetRepository();
+    const privacyAuditRepo = new InMemoryPrivacyAuditRepository();
+    const service = new TrainingAssetService({
+      assetRepo,
+      privacyAuditRepo,
+      auditRepo: new InMemoryAuditRepository(),
+      redaction: new TrainingAssetRedactionService(),
+      idGenerator: () => 'asset-offset',
+      now: () => new Date('2026-05-15T00:00:00Z'),
+    });
+
+    await service.create({
+      tenantId: 'tenant-1',
+      actorId: 'user-1',
+      input: {
+        verticalType: 'hvac',
+        assetKind: 'labeled_call_example',
+        title: 'Caller Margaret Thatcher example',
+        rawText: 'Margaret Thatcher at 415-555-0123 needs service.',
+        labels: {},
+        provenance: { source: 'tenant_admin', sourceVersion: '1' },
+      },
+      knownEntities: { phones: ['415-555-0123'] },
+    });
+
+    const redactions = privacyAuditRepo.rows[0].redactions;
+    expect(redactions.length).toBeGreaterThan(0);
+    for (const redaction of redactions) {
+      expect(['original', 'scrubbed']).toContain(redaction.offsetBasis);
+    }
+    // Phone-number redactions are emitted by the primary scrubber against
+    // the original text (tagged `phone` for regex matches or `known_phone`
+    // when knownEntities supplied it).
+    expect(redactions.some(
+      (r) => (r.kind === 'phone' || r.kind === 'known_phone') && r.offsetBasis === 'original',
+    )).toBe(true);
+    // The "Margaret Thatcher" -> [NAME] redaction comes from the
+    // metadata-name fallback which scans the post-scrub text.
+    expect(redactions.some((r) => r.kind === 'metadata_name' && r.offsetBasis === 'scrubbed')).toBe(true);
+  });
+
   it('archives an approved asset and emits an archive audit event', async () => {
     const assetRepo = new InMemoryTrainingAssetRepository();
     const auditRepo = new InMemoryAuditRepository();

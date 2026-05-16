@@ -203,7 +203,7 @@ describe('buildVerticalPromptResolver', () => {
     expect(activationCalls).toBe(2);
   });
 
-  it('does not cache prompt sections that depend on training assets', async () => {
+  it('caches prompt sections that include training assets until invalidated', async () => {
     await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
     let calls = 0;
     const trainingAssetRepo = buildTrainingAssetRepo(async () => {
@@ -225,14 +225,17 @@ describe('buildVerticalPromptResolver', () => {
 
     const first = await resolve(TENANT);
     const second = await resolve(TENANT);
-
     expect(first).toContain('Training asset A');
-    expect(first).not.toContain('Training asset B');
-    expect(second).toContain('Training asset B');
-    expect(second).not.toContain('Training asset A');
+    expect(second).toContain('Training asset A');
+    expect(calls).toBe(1);
+
+    resolve.invalidate(TENANT);
+    const third = await resolve(TENANT);
+    expect(third).toContain('Training asset B');
+    expect(calls).toBe(2);
   });
 
-  it('does not cache a training asset lookup failure', async () => {
+  it('caches a training asset lookup failure until invalidated', async () => {
     await activatePack({ tenantId: TENANT, packId: PACK_ID }, packActivationRepo);
     let calls = 0;
     const trainingAssetRepo = buildTrainingAssetRepo(async () => {
@@ -251,10 +254,14 @@ describe('buildVerticalPromptResolver', () => {
 
     const first = await resolve(TENANT);
     const second = await resolve(TENANT);
-
     expect(first).toContain('Service vertical: HVAC Professional');
-    expect(first).not.toContain('Recovered training asset');
-    expect(second).toContain('Recovered training asset');
+    expect(second).toContain('Service vertical: HVAC Professional');
+    expect(calls).toBe(1);
+
+    resolve.invalidate(TENANT);
+    const third = await resolve(TENANT);
+    expect(third).toContain('Recovered training asset');
+    expect(calls).toBe(2);
   });
 
   it('returns undefined when the activated packId is missing from the registry', async () => {

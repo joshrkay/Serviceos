@@ -22,6 +22,43 @@ const QUARANTINED_TITLE = 'Quarantined training asset';
 const METADATA_TITLE_CASE_NAME_RE = /\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+\b/g;
 const METADATA_NAME_PREFIX_WORDS = new Set(['Ask', 'Call', 'Dispatch', 'Schedule']);
 
+/**
+ * Domain vocabulary the metadata-name fallback must not redact. The
+ * fallback regex matches any sequence of title-case words ≥3 chars,
+ * which would otherwise rewrite plain HVAC / plumbing / electrical
+ * terms ("Water Heater", "Circuit Breaker", "Heat Pump", etc.) to
+ * `[NAME]`, degrading prompt quality and downstream retrieval. The
+ * lookup is case-insensitive on the matched phrase.
+ */
+const METADATA_NAME_VOCAB_DENYLIST: ReadonlySet<string> = new Set([
+  // HVAC
+  'air conditioner', 'air conditioning', 'air filter', 'air flow', 'air handler',
+  'air quality', 'carbon monoxide', 'condenser coil', 'condenser unit',
+  'cooling system', 'ductless mini split', 'evaporator coil', 'forced air',
+  'heat exchanger', 'heat pump', 'heating system', 'mini split',
+  'natural gas', 'split system', 'thermostat upgrade',
+  // Plumbing
+  'backflow preventer', 'cold water', 'drain cleaning', 'drain pipe',
+  'expansion tank', 'garbage disposal', 'hot water', 'hose bib',
+  'main line', 'pipe insulation', 'pressure regulator', 'pressure tank',
+  'pressure relief', 'sewer line', 'shut off', 'sump pump',
+  'tank water', 'tankless water heater', 'tankless heater', 'water heater',
+  'water line', 'water main', 'water meter', 'water pressure',
+  'water softener', 'water damage',
+  // Electrical
+  'arc fault', 'breaker box', 'breaker panel', 'ceiling fan',
+  'circuit breaker', 'electrical panel', 'fuse box', 'ground fault',
+  'junction box', 'knob and tube', 'light fixture', 'main panel',
+  'outlet box', 'power outage', 'power surge', 'service entrance',
+  'service panel', 'smoke detector', 'sub panel', 'subpanel install',
+  // Service / business
+  'annual inspection', 'customer service', 'emergency service',
+  'free estimate', 'free quote', 'job site', 'maintenance agreement',
+  'maintenance contract', 'maintenance plan', 'maintenance visit',
+  'same day', 'service area', 'service call', 'service plan',
+  'service tier', 'service visit', 'site visit', 'work order',
+]);
+
 type RedactionResult = ReturnType<TrainingAssetRedactionService['redact']>;
 
 function applyMetadataNameFallback(text: string): {
@@ -30,8 +67,16 @@ function applyMetadataNameFallback(text: string): {
 } {
   const auditRedactions: RedactionResult['auditRedactions'] = [];
   const scrubbedText = text.replace(METADATA_TITLE_CASE_NAME_RE, (match, offset: number) => {
+    const lowered = match.toLowerCase();
+    if (METADATA_NAME_VOCAB_DENYLIST.has(lowered)) {
+      return match;
+    }
     const words = match.split(/\s+/);
     if (words.length > 2 && METADATA_NAME_PREFIX_WORDS.has(words[0])) {
+      const trailingLowered = words.slice(1).join(' ').toLowerCase();
+      if (METADATA_NAME_VOCAB_DENYLIST.has(trailingLowered)) {
+        return match;
+      }
       const prefixMatch = /^(\S+)(\s+)/.exec(match);
       const nameStart = offset + (prefixMatch?.[0].length ?? words[0].length + 1);
       auditRedactions.push({
@@ -53,8 +98,49 @@ function applyMetadataNameFallback(text: string): {
   return { scrubbedText, auditRedactions };
 }
 
+/**
+ * Recursively walk an entities object and apply a string-redacting
+ * function to every string value, preserving structure. Done per-value
+ * rather than via `JSON.stringify(...)` + scrub + `JSON.parse(...)` so
+ * placeholders containing JSON-significant chars can't break the parse,
+ * and so PII-looking object keys aren't mangled into syntactically
+ * invalid JSON.
+ */
+function redactEntities(
+  value: unknown,
+  redactString: (s: string) => { scrubbed: string; quarantined: boolean },
+): { value: unknown; quarantined: boolean } {
+  if (typeof value === 'string') {
+    const result = redactString(value);
+    return { value: result.scrubbed, quarantined: result.quarantined };
+  }
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    let quarantined = false;
+    for (const element of value) {
+      const child = redactEntities(element, redactString);
+      out.push(child.value);
+      quarantined ||= child.quarantined;
+    }
+    return { value: out, quarantined };
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    let quarantined = false;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const child = redactEntities(v, redactString);
+      out[k] = child.value;
+      quarantined ||= child.quarantined;
+    }
+    return { value: out, quarantined };
+  }
+  return { value, quarantined: false };
+}
+
 interface SourcedRedactionResult {
   sourceField: string;
+  /** How many of the auditRedactions at the tail are scrubbed-basis (metadata-name fallback). */
+  fallbackCount: number;
   result: RedactionResult;
 }
 
@@ -62,12 +148,15 @@ function combineSourcedRedactionResults(results: SourcedRedactionResult[]): {
   summary: TrainingAssetRedactionSummary;
   auditRedactions: PrivacyAuditRedactionEntry[];
 } {
-  const auditRedactions: PrivacyAuditRedactionEntry[] = results.flatMap((entry) =>
-    entry.result.auditRedactions.map((redaction) => ({
+  const auditRedactions: PrivacyAuditRedactionEntry[] = results.flatMap((entry) => {
+    const all = entry.result.auditRedactions;
+    const fallbackStart = all.length - entry.fallbackCount;
+    return all.map((redaction, idx) => ({
       ...redaction,
       sourceField: entry.sourceField,
-    })),
-  );
+      offsetBasis: idx >= fallbackStart ? 'scrubbed' as const : 'original' as const,
+    }));
+  });
   const redactionKinds = [...new Set(auditRedactions.map((redaction) => redaction.kind))];
   const placeholders = [...new Set(auditRedactions.map((redaction) => redaction.placeholder))];
   const residualSignals = [
@@ -164,7 +253,11 @@ export class TrainingAssetService {
         },
         auditRedactions,
       };
-      sourcedRedactions.push({ sourceField, result: merged });
+      sourcedRedactions.push({
+        sourceField,
+        fallbackCount: fallback.auditRedactions.length,
+        result: merged,
+      });
       return merged;
     };
 
@@ -255,20 +348,18 @@ export class TrainingAssetService {
       );
     }
     if (parsed.labels.entities !== undefined) {
-      const entitiesRedacted = redactMetadataText(
-        JSON.stringify(parsed.labels.entities),
-        'labels.entities',
-      );
-      if (entitiesRedacted.status === 'quarantined') {
+      let entitiesQuarantined = false;
+      const redacted = redactEntities(parsed.labels.entities, (s) => {
+        const result = redactMetadataText(s, 'labels.entities');
+        const quarantined = result.status === 'quarantined';
+        entitiesQuarantined ||= quarantined;
+        return { scrubbed: result.scrubbedText, quarantined };
+      });
+      if (entitiesQuarantined) {
         delete labels.entities;
         metadataHasResidualPii = true;
       } else {
-        try {
-          labels.entities = JSON.parse(entitiesRedacted.scrubbedText) as Record<string, unknown>;
-        } catch {
-          delete labels.entities;
-          metadataHasResidualPii = true;
-        }
+        labels.entities = redacted.value as Record<string, unknown>;
       }
     }
 

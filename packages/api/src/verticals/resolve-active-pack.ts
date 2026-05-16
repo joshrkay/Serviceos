@@ -101,12 +101,14 @@ export function buildVerticalPromptResolver(
   const logger = deps.logger;
 
   const resolve = async (tenantId: string): Promise<string | undefined> => {
-    // Tenants with training assets need fresh reads: an admin
-    // activate/archive must be visible to the next caller turn without
-    // waiting for cache TTL. (The training-asset service also calls
-    // `invalidate()` on lifecycle changes, but skipping the cache
-    // entirely makes the freshness guarantee independent of wiring.)
-    const shouldUseCache = ttlMs > 0 && deps.trainingAssetRepo === undefined;
+    // Cache is invalidated by the training-asset service on
+    // activate / archive (see `invalidate()` below + the
+    // `invalidatePromptCache` wiring in `app.ts`), so we can safely
+    // cache prompts that include training assets — admins still see
+    // lifecycle changes immediately, and the voice hot path avoids
+    // re-querying pack activation + canonical registry + training
+    // assets on every classifier turn.
+    const shouldUseCache = ttlMs > 0;
     if (shouldUseCache) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {

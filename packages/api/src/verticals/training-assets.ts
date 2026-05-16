@@ -243,6 +243,15 @@ export interface PrivacyAuditRedactionEntry {
    * expectedNextQuestion/Action/RetrievalTerms, entities, rawText).
    */
   sourceField: string;
+  /**
+   * Whether `start`/`end` are offsets into the ORIGINAL submitted text
+   * or into the already-SCRUBBED text. Primary `scrubPii` matches are
+   * `'original'`; the metadata-name fallback scans post-scrub text and
+   * reports `'scrubbed'`. Without this flag the offsets are unusable
+   * because the two coordinate systems are interleaved in the audit
+   * row.
+   */
+  offsetBasis: 'original' | 'scrubbed';
 }
 
 export interface PrivacyAuditEntry {
