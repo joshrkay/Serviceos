@@ -10,10 +10,12 @@ import {
   validateActivationInput,
 } from '../settings/pack-activation';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
+import { AuditRepository } from '../audit/audit';
 
 export function createPackActivationRouter(
   packActivationRepo: PackActivationRepository,
-  verticalPackRegistry: VerticalPackRegistry
+  verticalPackRegistry: VerticalPackRegistry,
+  auditRepo: AuditRepository
 ): Router {
   const router = Router();
 
@@ -55,7 +57,12 @@ export function createPackActivationRouter(
         return;
       }
 
-      const activation = await activatePack({ tenantId, packId }, packActivationRepo);
+      const activation = await activatePack(
+        { tenantId, packId },
+        packActivationRepo,
+        auditRepo,
+        { actorId: req.auth!.userId, actorRole: req.auth!.role }
+      );
       res.status(201).json(activation);
     })
   );
@@ -69,7 +76,13 @@ export function createPackActivationRouter(
       const tenantId = req.auth!.tenantId;
       const packId = req.params.packId;
 
-      const result = await deactivatePack(tenantId, packId, packActivationRepo);
+      const result = await deactivatePack(
+        tenantId,
+        packId,
+        packActivationRepo,
+        auditRepo,
+        { actorId: req.auth!.userId, actorRole: req.auth!.role }
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Pack activation not found' });
         return;

@@ -4,6 +4,8 @@ import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { publicActorFromToken } from '../feedback/feedback-response';
 
 export interface StripeConfig {
   apiKey: string;
@@ -83,6 +85,12 @@ export interface PublicInvoiceServiceDeps {
   connectAccountResolver?: ConnectAccountResolver;
   /** Override-able fetch for unit tests. */
   stripeFetch?: typeof fetch;
+  /**
+   * D2-1d — audit logging for the first-mint checkout link creation.
+   * Optional so older harnesses still build. Subsequent calls that
+   * return the cached URL DO NOT re-emit the event.
+   */
+  auditRepo?: AuditRepository;
 }
 
 export class PublicInvoiceService {
@@ -224,6 +232,29 @@ export class PublicInvoiceService {
 
       const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
       throw new Error(`Failed to persist Stripe payment link ${data.id}: ${msg}`);
+    }
+
+    if (this.deps.auditRepo) {
+      // D2-1d — first-mint only (the early-return above short-circuits
+      // when a link already exists, so we never re-emit on idempotent
+      // repeats). Token is hashed into the synthetic actor — raw token
+      // is never persisted.
+      await this.deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: invoice.tenantId,
+          actorId: publicActorFromToken(token),
+          actorRole: 'customer',
+          eventType: 'public_invoice.checkout_created',
+          entityType: 'invoice',
+          entityId: invoice.id,
+          metadata: {
+            invoiceNumber: invoice.invoiceNumber,
+            amountDueCents: invoice.amountDueCents,
+            stripePaymentLinkId: data.id,
+            viaConnect: Boolean(useConnect),
+          },
+        }),
+      );
     }
 
     return { url: data.url };

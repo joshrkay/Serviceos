@@ -6,6 +6,7 @@ import { toErrorResponse, ValidationError } from '../shared/errors';
 import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
   getSettings,
   updateSettings,
@@ -50,7 +51,8 @@ interface SettingsRouterDependencies {
 
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
-  deps?: SettingsRouterDependencies
+  deps?: SettingsRouterDependencies,
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -99,13 +101,14 @@ export function createSettingsRouter(
     requireAuth,
     requireTenant,
     requirePermission('settings:update'),
-    (req: AuthenticatedRequest, res: Response) => {
+    async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
         const current = languageSettingsStore.get(tenantId) ?? DEFAULT_LANGUAGE_SETTINGS;
         const patch = (req.body ?? {}) as Partial<LanguageSettings> & Record<string, unknown>;
 
         const next: LanguageSettings = { ...current };
+        const changedKeys: string[] = [];
         if (patch.defaultLanguage !== undefined) {
           if (!isLanguage(patch.defaultLanguage)) {
             throw new ValidationError('defaultLanguage must be "en" or "es"', {
@@ -113,12 +116,15 @@ export function createSettingsRouter(
             });
           }
           next.defaultLanguage = patch.defaultLanguage;
+          changedKeys.push('defaultLanguage');
         }
         if (patch.ttsVoiceEn !== undefined) {
           next.ttsVoiceEn = patch.ttsVoiceEn === null ? null : String(patch.ttsVoiceEn);
+          changedKeys.push('ttsVoiceEn');
         }
         if (patch.ttsVoiceEs !== undefined) {
           next.ttsVoiceEs = patch.ttsVoiceEs === null ? null : String(patch.ttsVoiceEs);
+          changedKeys.push('ttsVoiceEs');
         }
         if (patch.autoDetectLanguage !== undefined) {
           if (typeof patch.autoDetectLanguage !== 'boolean') {
@@ -127,6 +133,7 @@ export function createSettingsRouter(
             });
           }
           next.autoDetectLanguage = patch.autoDetectLanguage;
+          changedKeys.push('autoDetectLanguage');
         }
         if (patch.spanishDispatcherUserIds !== undefined) {
           if (
@@ -138,9 +145,28 @@ export function createSettingsRouter(
             });
           }
           next.spanishDispatcherUserIds = patch.spanishDispatcherUserIds;
+          changedKeys.push('spanishDispatcherUserIds');
         }
 
         languageSettingsStore.set(tenantId, next);
+
+        // D2-1c — audit-log the language settings change. Entity is the
+        // tenant_settings row keyed by tenantId (this surface has no
+        // separate id; the languageSettingsStore is keyed by tenant).
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.language.updated',
+              entityType: 'tenant_settings',
+              entityId: tenantId,
+              metadata: { changedKeys },
+            }),
+          );
+        }
+
         res.json(next);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -194,6 +220,24 @@ export function createSettingsRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });
           return;
         }
+
+        // D2-1c — audit-log the tenant-settings mutation. Records WHICH
+        // keys the actor touched so the timeline diffs reconstruct
+        // without storing the full before/after payload (PII-safe).
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'settings.tenant.updated',
+              entityType: 'tenant_settings',
+              entityId: result.id,
+              metadata: { changedKeys: Object.keys(parsed) },
+            }),
+          );
+        }
+
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

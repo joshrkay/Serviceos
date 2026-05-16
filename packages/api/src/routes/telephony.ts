@@ -10,11 +10,20 @@
  * and an `X-Twilio-Signature` header. Signature verification is enforced
  * by `requireTwilioSignature` middleware on every route in this file.
  *
- * Tenant resolution
- * ─────────────────
- * Twilio doesn't carry our tenant_id. For now we use a single-tenant
- * fallback via the `TWILIO_DEFAULT_TENANT_ID` env var. A proper
- * tenant-by-phone-number lookup is a follow-up — TODO below.
+ * Tenant resolution (D2-3)
+ * ────────────────────────
+ * Twilio doesn't carry our tenant_id. We resolve it by looking the dialed
+ * "To" number up in `tenant_integrations` (via PhoneNumberRepository).
+ *
+ *   • Found  → use that tenant for the rest of the call.
+ *   • Missed in prod/staging → emit a Sentry `error` event, log
+ *     `telephony.tenant_lookup_miss`, and return 200 + "this number
+ *     is not in service" TwiML so Twilio doesn't 5xx-retry.
+ *   • Missed in dev → if `TWILIO_DEFAULT_TENANT_ID` is set we use it but
+ *     log a loud WARN; if unset we return the same decline TwiML.
+ *
+ * The legacy `TWILIO_DEFAULT_TENANT_ID` env var is now ONLY a dev seam
+ * and is explicitly disabled in prod/staging.
  */
 
 import { Router, Request, Response } from 'express';
@@ -31,6 +40,11 @@ import type { StorageProvider } from '../files/file-service';
 import { createLogger } from '../logging/logger';
 import { escalateToHuman } from '../ai/skills/escalate-to-human';
 import { maskPhone } from '../telephony/twilio-call-control';
+import {
+  normalizeE164,
+  type PhoneNumberRepository,
+} from '../integrations/twilio/phone-number-repository';
+import { getSentryClient, type SentryClient } from '../monitoring/sentry';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -52,12 +66,38 @@ export interface TelephonyRouterDeps {
    */
   publicBaseUrl?: string;
   /**
-   * Phone-number → tenant lookup. Receives the `to` and `from` numbers
-   * from Twilio's webhook. Async to allow database lookups against
-   * `tenant_integrations.provider_data->>'phoneE164'`. Legacy callers
-   * may return a synchronous fallback (`TWILIO_DEFAULT_TENANT_ID`).
+   * D2-3 — primary phone-number → tenant lookup. Inbound Twilio webhooks
+   * carry only the dialed "To" number; we resolve that to a tenant via
+   * the `tenant_integrations.provider_data->>'phoneE164'` mapping.
+   *
+   * When omitted, falls back to the legacy `resolveTenantId` callback
+   * (existing tests and the dispatched recording/dial-result paths
+   * still use that path). New wiring SHOULD provide the repo so unknown
+   * numbers can be rejected with a polite TwiML instead of silently
+   * routing to `TWILIO_DEFAULT_TENANT_ID`.
+   */
+  phoneNumberRepo?: PhoneNumberRepository;
+  /**
+   * Legacy phone-number → tenant lookup callback. Kept for the
+   * `/gather` and `/dial-result` endpoints (which already have a
+   * tenant from /voice) and for callers that pre-date `phoneNumberRepo`.
+   * For `/voice`, `phoneNumberRepo` is consulted first.
    */
   resolveTenantId: (opts: { to: string; from: string }) => Promise<string | undefined> | string | undefined;
+  /**
+   * D2-3 — test seam for the Sentry client used to capture
+   * `telephony.tenant_lookup_miss` events. Defaults to
+   * `getSentryClient()`, which falls back to a no-op when Sentry isn't
+   * configured for the environment.
+   */
+  sentry?: SentryClient;
+  /**
+   * D2-3 — `process.env.NODE_ENV` override. Pure test seam; production
+   * code never needs to set this. When `'production' | 'prod' | 'staging'`,
+   * the `TWILIO_DEFAULT_TENANT_ID` fallback is refused even if the env
+   * var is set.
+   */
+  nodeEnv?: string;
   /**
    * Business name used in the "we'll call you back" copy when the
    * rotation cascade is exhausted. Defaults to a generic phrasing
@@ -223,10 +263,37 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    const tenantId = await Promise.resolve(deps.resolveTenantId({ to, from }));
+    let tenantId: string | undefined;
+    try {
+      tenantId = await resolveInboundTenantId({
+        to,
+        from,
+        callSid,
+        deps,
+      });
+    } catch (err) {
+      // Codex P1 (PR #384) — transient infra failures (DB outage during
+      // phone-number lookup) propagate as throws from
+      // resolveInboundTenantId in prod. Respond 5xx so Twilio retries
+      // the webhook; do NOT 200-decline (which would falsely tell the
+      // caller a real number is unassigned).
+      logger.error('telephony/voice: tenant lookup failed', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      return;
+    }
+
     if (!tenantId) {
-      logger.error('telephony/voice: no tenant resolved', { to, from });
-      res.status(500).type('text/plain').send('Tenant resolution failed');
+      // D2-3 — unknown DID. Sentry event + structured log already emitted
+      // inside resolveInboundTenantId. Reply 200 + decline TwiML so Twilio
+      // doesn't retry the webhook and so the caller hears a graceful
+      // "not in service" rather than dead air.
+      res
+        .status(200)
+        .type('text/xml')
+        .send(numberNotInServiceTwiml());
       return;
     }
 
@@ -524,5 +591,139 @@ function buildDialResultUrl(publicBaseUrl: string | undefined, sessionId: string
     return `${publicBaseUrl.replace(/\/+$/, '')}${path}`;
   }
   return path;
+}
+
+/**
+ * D2-3 — TwiML returned when the dialed number is not provisioned for any
+ * tenant. We respond 200 (not 5xx) so Twilio doesn't retry the webhook
+ * and so the caller hears the message instead of dead air. The hangup
+ * after the Say verb ensures the call leg terminates promptly.
+ */
+function numberNotInServiceTwiml(): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<Response>` +
+    `<Say voice="Polly.Joanna">This number is not in service. Goodbye.</Say>` +
+    `<Hangup/>` +
+    `</Response>`
+  );
+}
+
+/**
+ * D2-3 — inbound `/voice` tenant resolution path.
+ *
+ * Precedence:
+ *   1. `phoneNumberRepo.findByNumber(To)` — the real lookup.
+ *   2. (dev only) legacy `resolveTenantId({to, from})` callback, which
+ *      historically wrapped a SQL query plus `TWILIO_DEFAULT_TENANT_ID`
+ *      fallback. We accept whatever it returns but log a loud WARN
+ *      whenever the dev fallback resolves a tenant the repo could not.
+ *   3. (dev only) `process.env.TWILIO_DEFAULT_TENANT_ID` as a last-ditch
+ *      seam for local development without a populated `tenant_integrations`
+ *      row.
+ *
+ * In production / staging, only (1) is accepted. A miss returns
+ * `undefined`, emits a Sentry `error` event, and the caller responds
+ * with the "not in service" TwiML.
+ */
+async function resolveInboundTenantId(opts: {
+  to: string;
+  from: string;
+  callSid: string;
+  deps: TelephonyRouterDeps;
+}): Promise<string | undefined> {
+  const { to, from, callSid, deps } = opts;
+  const normalizedTo = normalizeE164(to);
+
+  // 1) Primary path — phone-numbers repo lookup.
+  if (deps.phoneNumberRepo) {
+    try {
+      const lookup = await deps.phoneNumberRepo.findByNumber(normalizedTo);
+      if (lookup) {
+        return lookup.tenantId;
+      }
+    } catch (err) {
+      // Codex P1 (PR #384) — distinguish "tenant not found" (terminal,
+      // 200 decline) from "DB outage" (transient, 5xx so Twilio
+      // retries). Previously the catch silently fell through to the
+      // dev-fallback logic which then 200-declined in prod, turning
+      // every transient DB blip into permanent "number not in service"
+      // misroutes and suppressing Twilio's retry behavior.
+      logger.error('telephony.tenant_lookup_error', {
+        to: normalizedTo,
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      const sentry = deps.sentry ?? getSentryClient();
+      sentry.captureMessage('telephony.tenant_lookup_error', 'error');
+
+      // In prod / staging, re-throw so the route returns 5xx. In dev,
+      // continue to the legacy/env fallback so local development against
+      // a broken Pg doesn't lock out test calls.
+      const nodeEnv = deps.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+      const isProdLike =
+        nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
+      if (isProdLike) {
+        throw err;
+      }
+    }
+  }
+
+  // 2) Dev-only fallback. Refuse outright in prod/staging.
+  const nodeEnv = deps.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+  const isProdLike = nodeEnv === 'production' || nodeEnv === 'prod' || nodeEnv === 'staging';
+
+  if (isProdLike) {
+    logger.error('telephony.tenant_lookup_miss', {
+      to: normalizedTo,
+      callSid,
+      env: nodeEnv,
+    });
+    const sentry = deps.sentry ?? getSentryClient();
+    sentry.captureMessage('telephony.tenant_lookup_miss', 'error');
+    return undefined;
+  }
+
+  // Dev path — try the legacy resolver, then the env var.
+  try {
+    const legacy = await Promise.resolve(deps.resolveTenantId({ to: normalizedTo, from }));
+    if (legacy) {
+      logger.warn('telephony.tenant_lookup_dev_fallback', {
+        to: normalizedTo,
+        callSid,
+        source: 'resolveTenantId',
+        env: nodeEnv,
+      });
+      return legacy;
+    }
+  } catch (err) {
+    logger.warn('telephony.tenant_lookup_legacy_resolver_failed', {
+      to: normalizedTo,
+      callSid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const envFallback = process.env.TWILIO_DEFAULT_TENANT_ID;
+  if (envFallback) {
+    logger.warn('telephony.tenant_lookup_dev_fallback', {
+      to: normalizedTo,
+      callSid,
+      source: 'TWILIO_DEFAULT_TENANT_ID',
+      env: nodeEnv,
+    });
+    return envFallback;
+  }
+
+  // Dev miss with nothing configured — still log + Sentry so dev surfaces
+  // misconfigured webhooks early instead of hearing dead air.
+  logger.error('telephony.tenant_lookup_miss', {
+    to: normalizedTo,
+    callSid,
+    env: nodeEnv,
+  });
+  const sentry = deps.sentry ?? getSentryClient();
+  sentry.captureMessage('telephony.tenant_lookup_miss', 'error');
+  return undefined;
 }
 

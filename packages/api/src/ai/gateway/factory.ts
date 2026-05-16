@@ -1,6 +1,7 @@
 import { LLMGateway } from './gateway';
 import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
+import type { EmbeddingProvider } from '../providers/openai-compatible';
 import { MockLLMProvider } from '../providers/mock';
 import {
   ShadowComparisonGateway,
@@ -122,4 +123,28 @@ export function createMockLLMGateway(defaultResponse = '{"mock": true}'): {
   const gatewayConfig: LLMGatewayConfig = { defaultProvider: 'mock' };
   const gateway = new LLMGateway(gatewayConfig, providers);
   return { gateway, provider };
+}
+
+/**
+ * Phase 4a-1 — dedicated `EmbeddingProvider` for the RAG corpus.
+ *
+ * Returns `null` when `AI_PROVIDER_API_KEY` is unset so the rest of the
+ * app boots without embeddings (the ingestion workers stay
+ * un-registered in that case). The chat-completions gateway routes
+ * through shadow/router logic that does not apply to embeddings
+ * (`text-embedding-3-small` only), which is why this is a separate
+ * factory rather than a method on `LLMGateway`.
+ *
+ * Centralising construction here is what keeps the
+ * "all AI calls route through ai/gateway" invariant true — callers
+ * outside this directory must never `new OpenAICompatibleProvider(...)`.
+ */
+export function createEmbeddingProvider(
+  config: AppConfig
+): EmbeddingProvider | null {
+  if (!config.AI_PROVIDER_API_KEY) return null;
+  return new OpenAICompatibleProvider({
+    apiKey: config.AI_PROVIDER_API_KEY,
+    baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
+  });
 }

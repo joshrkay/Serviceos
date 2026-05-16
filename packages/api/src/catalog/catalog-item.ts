@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type CatalogCategory = 'Labor' | 'Parts' | 'Materials';
 export type CatalogUnit = 'each' | 'hour' | 'sq ft' | 'per lb' | 'per gal';
@@ -70,11 +71,44 @@ export function createCatalogItem(input: CreateCatalogItemInput): CatalogItem {
   };
 }
 
+// D2-1b: Persist + audit a new catalog item. Keeps `createCatalogItem`
+// pure for callers that only need the in-memory shape.
+export async function persistCatalogItem(
+  repo: CatalogItemRepository,
+  item: CatalogItem,
+  actor: { userId: string; role: string },
+  auditRepo?: AuditRepository
+): Promise<CatalogItem> {
+  const created = await repo.create(item);
+
+  if (auditRepo) {
+    const event = createAuditEvent({
+      tenantId: created.tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'catalog_item.created',
+      entityType: 'catalog_item',
+      entityId: created.id,
+      metadata: {
+        name: created.name,
+        category: created.category,
+        unit: created.unit,
+        unitPriceCents: created.unitPriceCents,
+      },
+    });
+    await auditRepo.create(event);
+  }
+
+  return created;
+}
+
 export async function updateCatalogItem(
   repo: CatalogItemRepository,
   tenantId: string,
   id: string,
-  updates: UpdateCatalogItemInput
+  updates: UpdateCatalogItemInput,
+  actor?: { userId: string; role: string },
+  auditRepo?: AuditRepository
 ): Promise<CatalogItem | null> {
   const patch: UpdateCatalogItemInput = {
     ...updates,
@@ -82,7 +116,47 @@ export async function updateCatalogItem(
     description: updates.description?.trim(),
   };
   const updated = await repo.update(tenantId, id, patch);
+
+  if (auditRepo && actor && updated) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'catalog_item.updated',
+      entityType: 'catalog_item',
+      entityId: id,
+      metadata: { changes: Object.keys(updates) },
+    });
+    await auditRepo.create(event);
+  }
+
   return updated;
+}
+
+// D2-1b: Soft-delete is "archive" in the repo. Emit catalog_item.archived.
+export async function archiveCatalogItem(
+  repo: CatalogItemRepository,
+  tenantId: string,
+  id: string,
+  actor?: { userId: string; role: string },
+  auditRepo?: AuditRepository
+): Promise<boolean> {
+  const archived = await repo.archive(tenantId, id);
+
+  if (archived && auditRepo && actor) {
+    const event = createAuditEvent({
+      tenantId,
+      actorId: actor.userId,
+      actorRole: actor.role,
+      eventType: 'catalog_item.archived',
+      entityType: 'catalog_item',
+      entityId: id,
+      metadata: {},
+    });
+    await auditRepo.create(event);
+  }
+
+  return archived;
 }
 
 export class InMemoryCatalogItemRepository implements CatalogItemRepository {

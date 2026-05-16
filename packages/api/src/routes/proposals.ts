@@ -6,6 +6,7 @@ import { validate } from '../shared/validation';
 import { Role } from '../auth/rbac';
 import { ProposalRepository } from '../proposals/proposal';
 import { AppointmentRepository } from '../appointments/appointment';
+import { AuditRepository } from '../audit/audit';
 import { ProposalFilter } from '../proposals/proposal-contracts';
 import { buildInboxPayload } from '../proposals/inbox';
 import { listProposals, getProposalDetail } from '../proposals/routes';
@@ -24,6 +25,7 @@ import {
 export function createProposalsRouter(
   proposalRepo: ProposalRepository,
   appointmentRepo?: AppointmentRepository,
+  auditRepo?: AuditRepository,
 ): Router {
   const router = Router();
 
@@ -104,7 +106,8 @@ export function createProposalsRouter(
           req.auth!.tenantId,
           req.params.id,
           req.auth!.userId,
-          req.auth!.role as Role
+          req.auth!.role as Role,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {
@@ -130,7 +133,8 @@ export function createProposalsRouter(
           req.auth!.role as Role,
           parsed.reason,
           parsed.details,
-          appointmentRepo
+          appointmentRepo,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {
@@ -152,7 +156,8 @@ export function createProposalsRouter(
           req.auth!.tenantId,
           req.params.id,
           req.auth!.userId,
-          req.auth!.role as Role
+          req.auth!.role as Role,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {
@@ -176,7 +181,8 @@ export function createProposalsRouter(
           req.params.id,
           req.auth!.userId,
           req.auth!.role as Role,
-          parsed.edits
+          parsed.edits,
+          auditRepo,
         );
         res.json(result);
       } catch (err) {

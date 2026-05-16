@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type ConversationStatus = 'open' | 'closed' | 'archived';
 export type MessageType = 'text' | 'transcript' | 'system_event' | 'note' | 'clarification' | 'proposal';
@@ -64,6 +65,33 @@ export function validateCreateConversation(input: CreateConversationInput): stri
   if (!input.tenantId) errors.push('tenantId is required');
   if (!input.createdBy) errors.push('createdBy is required');
   return errors;
+}
+
+export async function createConversationWithAudit(
+  input: CreateConversationInput,
+  repository: ConversationRepository,
+  auditRepo?: AuditRepository,
+  actorRole?: string,
+): Promise<Conversation> {
+  const created = await repository.createConversation(input);
+
+  if (auditRepo) {
+    const event = createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.createdBy,
+      actorRole: actorRole ?? 'unknown',
+      eventType: 'conversation.created',
+      entityType: 'conversation',
+      entityId: created.id,
+      metadata: {
+        entityType: created.entityType,
+        entityId: created.entityId,
+      },
+    });
+    await auditRepo.create(event);
+  }
+
+  return created;
 }
 
 export function validateCreateMessage(input: CreateMessageInput): string[] {

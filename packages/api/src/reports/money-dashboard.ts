@@ -15,7 +15,27 @@ import type { Expense } from '../expenses/expense';
  */
 export interface MoneyDashboardSummary {
   month: string;
+  /**
+   * NET revenue inside the window: gross payments received minus refunds
+   * dated by `refundedAt` inside the same window. This is the canonical
+   * "money you actually kept this month" number an owner reads. Kept
+   * named `revenueCents` for backward compatibility with existing
+   * consumers — pre-D2-4 there were no refunds so net == gross.
+   */
   revenueCents: number;
+  /**
+   * GROSS revenue inside the window: sum of completed payments received,
+   * independent of refunds. Useful when distinguishing "what we charged"
+   * from "what we kept". D2-4 added this field; before that, only the
+   * net figure was reported.
+   */
+  grossRevenueCents: number;
+  /**
+   * Refunds whose `refundedAt` falls inside the window. Equals
+   * `grossRevenueCents - revenueCents`. Exposed explicitly so the UI can
+   * label the gap rather than make the owner derive it.
+   */
+  refundsCents: number;
   priorMonthRevenueCents: number;
   revenueTrendCents: number;
   expensesCents: number;
@@ -63,12 +83,32 @@ export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyD
   const { start, end, priorStart, priorEnd } = resolveMonthWindow(input.month);
 
   const completed = input.payments.filter((p) => p.status === 'completed');
-  const revenueCents = completed
+
+  // D2-4 — refunds are NOT a status flip; they accumulate on the original
+  // payment's `refundedAmountCents` and carry a `refundedAt` timestamp.
+  // Bucket gross by `receivedAt` (when the cash arrived) and subtract
+  // refunds bucketed by `refundedAt` (when the cash left). A refund
+  // dated outside the window doesn't reduce THIS window's net even if
+  // the original payment is inside it — that's the whole point of
+  // tracking refunds as separate events.
+  function refundsInWindow(windowStart: Date, windowEnd: Date): number {
+    return completed
+      .filter((p) => (p.refundedAmountCents ?? 0) > 0 && p.refundedAt)
+      .filter((p) => inWindow(p.refundedAt!, windowStart, windowEnd))
+      .reduce((sum, p) => sum + (p.refundedAmountCents ?? 0), 0);
+  }
+
+  const grossRevenueCents = completed
     .filter((p) => inWindow(p.receivedAt, start, end))
     .reduce((sum, p) => sum + p.amountCents, 0);
-  const priorMonthRevenueCents = completed
+  const refundsCents = refundsInWindow(start, end);
+  const revenueCents = grossRevenueCents - refundsCents;
+
+  const priorGross = completed
     .filter((p) => inWindow(p.receivedAt, priorStart, priorEnd))
     .reduce((sum, p) => sum + p.amountCents, 0);
+  const priorRefunds = refundsInWindow(priorStart, priorEnd);
+  const priorMonthRevenueCents = priorGross - priorRefunds;
 
   const expensesCents = input.expenses
     .filter((e) => inWindow(e.spentAt, start, end))
@@ -85,6 +125,8 @@ export function computeMoneyDashboardSummary(input: MoneyDashboardInput): MoneyD
   return {
     month: input.month,
     revenueCents,
+    grossRevenueCents,
+    refundsCents,
     priorMonthRevenueCents,
     revenueTrendCents: revenueCents - priorMonthRevenueCents,
     expensesCents,
@@ -117,6 +159,8 @@ export class InMemoryMoneyDashboardRepository implements MoneyDashboardRepositor
     return {
       month,
       revenueCents: 0,
+      grossRevenueCents: 0,
+      refundsCents: 0,
       priorMonthRevenueCents: 0,
       revenueTrendCents: 0,
       expensesCents: 0,
