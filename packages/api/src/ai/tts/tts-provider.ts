@@ -39,8 +39,32 @@ export interface TtsSynthesizeResult {
   durationMs?: number;
 }
 
+export interface TtsStreamChunk {
+  /** PCM 16-bit signed little-endian @ 16 kHz mono. */
+  pcm: Buffer;
+  /** True on the final chunk; the iterator MUST yield one chunk with isFinal=true even if empty. */
+  isFinal: boolean;
+}
+
+export interface TtsSynthesizeStreamInput extends TtsSynthesizeInput {
+  /**
+   * Aborted by the caller when caller barges in mid-utterance. Stream
+   * iterators MUST stop yielding promptly when this fires.
+   */
+  signal?: AbortSignal;
+}
+
 export interface TtsProvider {
   synthesize(input: TtsSynthesizeInput): Promise<TtsSynthesizeResult>;
+  /**
+   * Optional WebSocket-backed streaming variant. When present, the
+   * media-streams adapter prefers it because it removes ~400-800ms of
+   * pre-first-frame buffering.
+   *
+   * Implementations MUST yield at least one chunk (even if empty) with
+   * isFinal=true so consumers can detect end-of-stream.
+   */
+  synthesizeStream?(input: TtsSynthesizeStreamInput): AsyncIterable<TtsStreamChunk>;
 }
 
 /**
