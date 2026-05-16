@@ -71,6 +71,22 @@ export function createWebhookSignature(payload: string, secret: string, timestam
   return `t=${ts},v1=${sig}`;
 }
 
+/**
+ * In-flight staleness threshold (ms). A `received` or `processing`
+ * webhook row whose `createdAt` is within this window is treated as a
+ * concurrent in-flight delivery and short-circuited as duplicate=true.
+ * Older rows are assumed to be from a crashed handler that died before
+ * marking the row 'failed' — retries are allowed to recover.
+ *
+ * 30 seconds covers our actual handler latencies (typically <5s for
+ * checkout.session.completed, <1s for charge.refunded) with a generous
+ * safety margin. Stripe's standard exponential-backoff retry cadence
+ * starts at ~1 hour so a real Stripe retry will never fall inside this
+ * window; the window only matters for manual retries from the Stripe
+ * dashboard or concurrent network-glitch redeliveries.
+ */
+const INFLIGHT_STALENESS_MS = 30_000;
+
 export async function handleWebhookEvent(
   source: string,
   eventType: string,
@@ -78,19 +94,38 @@ export async function handleWebhookEvent(
   idempotencyKey: string,
   repository: WebhookRepository
 ): Promise<{ event: WebhookEvent; duplicate: boolean }> {
-  // Codex P1 (PR #384) — only short-circuit as `duplicate` when the
-  // previous attempt actually succeeded (status='processed'). If the
-  // earlier attempt failed (status='failed') or never completed
-  // (status='received'/'processing'), the upstream retry must be
-  // allowed to re-execute the handler — otherwise Stripe's standard
-  // retry policy is silently disabled and any out-of-order webhook
-  // (e.g. charge.refunded before checkout.session.completed) is lost
-  // forever. Returning the existing row (instead of creating a new
-  // one) keeps the original event.id stable so audit / observability
-  // can correlate retries.
+  // Codex P1 (PR #384) — dedup semantics for the four `status` values:
+  //
+  //   processed → duplicate=true (handler ran cleanly; no re-run).
+  //
+  //   processing | received, age < INFLIGHT_STALENESS_MS
+  //               → duplicate=true (in-flight; concurrent delivery
+  //                 would double-apply non-idempotent side effects
+  //                 like deposit crediting).
+  //
+  //   processing | received, age ≥ INFLIGHT_STALENESS_MS
+  //               → duplicate=false (handler crashed before flipping
+  //                 status; let the retry recover).
+  //
+  //   failed     → duplicate=false (handler threw cleanly; retry to
+  //                 reconcile, e.g. charge.refunded arriving before
+  //                 checkout.session.completed).
+  //
+  // Returning the existing row (instead of creating a new one) keeps
+  // the original event.id stable so audit / observability correlates
+  // retries.
   const existing = await repository.findByIdempotencyKey(source, idempotencyKey);
   if (existing) {
-    return { event: existing, duplicate: existing.status === 'processed' };
+    if (existing.status === 'processed') {
+      return { event: existing, duplicate: true };
+    }
+    if (existing.status === 'failed') {
+      return { event: existing, duplicate: false };
+    }
+    // 'processing' or 'received' → block concurrent in-flight retries,
+    // permit stale-handler recovery.
+    const ageMs = Date.now() - existing.createdAt.getTime();
+    return { event: existing, duplicate: ageMs < INFLIGHT_STALENESS_MS };
   }
 
   const event: WebhookEvent = {

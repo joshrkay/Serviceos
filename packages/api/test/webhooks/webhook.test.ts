@@ -107,29 +107,63 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
     expect(second.duplicate).toBe(false);
   });
 
-  it('Codex P1 (PR #384) — handleWebhookEvent allows retry of RECEIVED event (handler crashed mid-flight)', async () => {
-    // If the handler crashed before updateStatus, the event is stuck
-    // at 'received'. A retry should re-execute.
+  it('Codex P1 (PR #384) — handleWebhookEvent BLOCKS recent in-flight RECEIVED (concurrent delivery)', async () => {
+    // If a second delivery of the same event arrives while the first
+    // handler is still running (row at 'received', recent createdAt),
+    // we must return duplicate=true to prevent double side effects
+    // (e.g. deposit crediting, payment-link mints).
     const repo = new InMemoryWebhookRepository();
     const first = await handleWebhookEvent(
       'stripe',
       'charge.refunded',
       { id: 're_2' },
-      'evt_crashed_retry',
+      'evt_inflight',
       repo,
     );
     expect(first.duplicate).toBe(false);
-    // status stays at 'received'
+    // status stays at 'received' AND createdAt is now (within staleness window)
 
     const second = await handleWebhookEvent(
       'stripe',
       'charge.refunded',
       { id: 're_2' },
-      'evt_crashed_retry',
+      'evt_inflight',
       repo,
     );
 
     expect(second.event.id).toBe(first.event.id);
+    // Concurrent delivery: blocked.
+    expect(second.duplicate).toBe(true);
+  });
+
+  it('Codex P1 (PR #384) — handleWebhookEvent ALLOWS retry of STALE RECEIVED (handler crashed > 30s ago)', async () => {
+    // If the handler crashed and the row is stuck at 'received' for
+    // longer than the in-flight staleness threshold, retries should
+    // re-execute to recover.
+    const repo = new InMemoryWebhookRepository();
+    const first = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_3' },
+      'evt_stale_crashed',
+      repo,
+    );
+    expect(first.duplicate).toBe(false);
+
+    // Backdate createdAt to 60s ago (past INFLIGHT_STALENESS_MS=30s).
+    const row = (repo as any).events.get(first.event.id);
+    row.createdAt = new Date(Date.now() - 60_000);
+
+    const second = await handleWebhookEvent(
+      'stripe',
+      'charge.refunded',
+      { id: 're_3' },
+      'evt_stale_crashed',
+      repo,
+    );
+
+    expect(second.event.id).toBe(first.event.id);
+    // Stale: allow retry.
     expect(second.duplicate).toBe(false);
   });
 
