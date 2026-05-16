@@ -34,7 +34,7 @@ running this sprint.
 - [ ] **D1-1** `/dispatch-story` — X1 Clerk webhook → `bootstrapTenant()` integration smoke (HMAC-signed `user.created` payload, asserts tenant row + RLS) — *owner:*
 - [ ] **D1-2** `/dispatch-story` — X2 LLM gateway bypasses: route `real-llm-gateway-factory.ts` + `app.ts` voice-transcription provider through `ai/gateway/factory.ts` — *owner:*
 - [ ] **D1-3** `/dispatch-story` — X4 add `helmet()` to `packages/api/src/app.ts` with explicit CSP (Clerk + Stripe + Twilio) — *owner:*
-- [ ] **D1-4** `/office-hours` — resolve the 4 product decisions in §2 — *owner:*
+- [x] **D1-4** product decisions resolved (see §2) — locked 2026-05-16
 - [ ] **D1-5** `/security-review` — cumulative diff for PRs #382 + #383 → report into `docs/quality/` — *owner:*
 
 ### Day 2 — Audit trail + revenue paths
@@ -55,7 +55,7 @@ running this sprint.
 ### Day 4 — Voice provider latency (Tier 2; gated on decision #3)
 
 - [ ] **D4-1** `/dispatch-story` — Tier 2 finish wiring `DeepgramStreamingProvider`; gate `STT_PROVIDER=deepgram`; staging smoke
-- [ ] **D4-2** `/dispatch-story` — Tier 2 implement `ElevenLabsTtsProvider`; gate `TTS_PROVIDER=elevenlabs`; staging smoke
+- [ ] ~~**D4-2** `/dispatch-story` — Tier 2 implement `ElevenLabsTtsProvider`~~ — **deferred to week 2 (decision #3)**
 - [ ] **D4-3** `/dispatch-story` + `/qa` — Run `scripts/voice-load-test.*` at 50 concurrent calls; report into `docs/quality/load-test-2026-05-19.md`
 
 ### Day 5 — Settings stubs + ops hardening
@@ -168,14 +168,15 @@ running this sprint.
 
 ---
 
-## Section 2 — Open Product Decisions (block dispatch)
+## Section 2 — Product Decisions (locked 2026-05-16)
 
-These need a human call **before** the relevant tickets dispatch:
+All 4 decisions resolved with sprint defaults. Override by editing this section
+and rolling forward to dependent tickets.
 
-1. **`sendInvoice` auto-issue?** (`docs/remaining-features.md` §6) — auto-call `issueInvoice()` to set `issuedAt`/`dueDate` on send, or keep two-step? Recommend **Option A (auto-issue)** for solo-operator UX.
-2. **Resilience-flag flip plan** — which of the 10 `gateway.*` / `ws.*` flags flip on at cutover vs. ride dark for week 1? Recommend: **enforce idempotency / quotas / breaker on day 1; WS gateway dark for week 1.**
-3. **Tier 2 voice provider upgrade — in scope this week?** Deepgram + ElevenLabs cut TTFA from ~800 ms → ~250 ms. Each is ~1-day integration + soak. Recommend: **ship Deepgram this week; defer ElevenLabs to week 2.**
-4. **Tenant TZ source** — pick from address vs. explicit settings field? Blocks X8 fix.
+1. **`sendInvoice` auto-issue:** **Option A — auto-issue on send.** `sendInvoice` on a draft auto-calls `issueInvoice()` first (sets `issuedAt` + `dueDate` from tenant payment-term days). Aligns with estimate-send behavior. → Affects D5-1 and any invoice-send code touched in D2-1.
+2. **Resilience-flag flip plan:** **Gateway flags ON at cutover; WS flags dark for week 1.** Flip `gateway.breaker_enforcement`, `gateway.retry_enabled`, `gateway.fallback_enabled`, `gateway.tenant_quota_enforced` during D6-3 rehearsal → ride to prod on D7. `ws.client_gateway_enabled` and the other 5 `ws.*` flags stay off through week 1. → Rolled into D6-3 + `docs/runbooks/rollback.md`.
+3. **Tier 2 voice provider scope:** **Ship Deepgram this week; defer ElevenLabs to week 2.** Streaming STT closes the larger latency gap (1-3 s → ~300 ms) and the scaffold already exists. ElevenLabs TTS is a separate week-2 ticket. → D4-1 keeps; D4-2 deferred (struck below).
+4. **Tenant TZ source:** **Explicit `tenant.timezone` (IANA) field in settings, defaulted from address inference at signup.** User can override. → D5-4 implements both: migration adds `timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles'`; onboarding identity step infers from address; settings page exposes it.
 
 ---
 
