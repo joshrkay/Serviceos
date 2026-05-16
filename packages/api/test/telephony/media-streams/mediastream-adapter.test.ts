@@ -409,15 +409,16 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
   it('streams outbound media as TTS chunks arrive (does not wait for full audio)', async () => {
     // Drive a fake streaming TTS provider that yields two chunks then closes.
-    let firstChunkEmitted = false;
+    // The second chunk is delayed 50ms to allow us to assert mid-stream delivery
+    // before it arrives.
+    let secondChunkYielded = false;
     const streamingProvider = {
       synthesize: vi.fn(),
       synthesizeStream: vi.fn(() => ({
         async *[Symbol.asyncIterator]() {
           yield { pcm: Buffer.alloc(640), isFinal: false };
-          firstChunkEmitted = true;
-          // Simulate ~50ms of "model thinking" between chunks.
           await new Promise((r) => setTimeout(r, 50));
+          secondChunkYielded = true;
           yield { pcm: Buffer.alloc(640), isFinal: true };
         },
       })),
@@ -427,13 +428,25 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     ws.inboundJson({ event: 'start', streamSid: 's1', start: { callSid: 'CA-stream', accountSid: 'a1', streamSid: 's1', tracks: ['inbound'] } });
     await flushMicrotasks();
 
-    // Directly invoke a tts_play side effect (bypass FSM for unit isolation).
-    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+    // Start emitSideEffects WITHOUT awaiting so the stream runs concurrently.
+    const promise = (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
       { type: 'tts_play', payload: { text: 'hello world' } },
     ]);
 
-    expect(firstChunkEmitted).toBe(true);
-    expect(streamingProvider.synthesizeStream).toHaveBeenCalledTimes(1);
+    // Yield a couple microtask turns so the first chunk gets emitted, but
+    // not long enough for the 50ms setTimeout in the generator to fire.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    // First chunk should already be on the wire — proves mid-stream delivery, not buffering.
     expect(ws.sent.filter((f: unknown) => (f as { event?: string }).event === 'media').length).toBeGreaterThanOrEqual(1);
+    // Second chunk should NOT have yielded yet — proves we're not buffering until the end.
+    expect(secondChunkYielded).toBe(false);
+
+    // Now let it complete.
+    await promise;
+    // After full await, both chunks have flowed.
+    expect(secondChunkYielded).toBe(true);
+    expect(streamingProvider.synthesizeStream).toHaveBeenCalledTimes(1);
   });
 });
