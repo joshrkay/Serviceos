@@ -27,6 +27,7 @@
     "launch-quality-check": "tsx scripts/launch-quality-check.ts"
   },
   "dependencies": {
+    "@ai-service-os/shared": "*",
     "@sentry/node": "^10.45.0",
     "cors": "^2.8.6",
     "express": "^4.18.0",
