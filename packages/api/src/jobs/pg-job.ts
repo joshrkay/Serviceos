@@ -6,6 +6,7 @@ import {
   JobListOptions,
   JobListResult,
   JobRepository,
+  JobMoneyState,
   DEFAULT_JOB_LIMIT,
   MAX_JOB_LIMIT,
 } from './job';
@@ -38,6 +39,8 @@ function mapRow(row: Record<string, unknown>): Job {
     // Tier 4 (Deposit rules — PR 3c). Migration 081.
     depositCreditedToInvoiceId:
       (row.deposit_credited_to_invoice_id as string | null) ?? undefined,
+    // §6 Time-to-Cash. Migration 095; DEFAULT 'no_estimate' for legacy rows.
+    moneyState: (row.money_state as JobMoneyState | null) ?? 'no_estimate',
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -220,6 +223,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         depositStripePaymentLinkUrl: 'deposit_stripe_payment_link_url',
         // Tier 4 (Deposit rules — PR 3c). Migration 081.
         depositCreditedToInvoiceId: 'deposit_credited_to_invoice_id',
+        // §6 Time-to-Cash. Migration 095.
+        moneyState: 'money_state',
         updatedAt: 'updated_at',
       };
 

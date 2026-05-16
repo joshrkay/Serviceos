@@ -6,6 +6,7 @@ import {
   validatePackInput,
   CreatePackInput,
 } from '../../src/shared/vertical-pack-registry';
+import { PgVerticalPackRegistry } from '../../src/shared/pg-vertical-pack-registry';
 
 describe('P4-001A — Canonical vertical pack registry model', () => {
   let registry: InMemoryVerticalPackRegistry;
@@ -117,7 +118,7 @@ describe('P4-001A — Canonical vertical pack registry model', () => {
     const errors = validatePackInput({
       packId: 'test',
       version: '1.0.0',
-      verticalType: 'electrical' as any,
+      verticalType: 'roofing' as any,
       displayName: 'Test',
     });
     expect(errors).toContain('Invalid verticalType');
@@ -174,5 +175,99 @@ describe('P4-001A — Canonical vertical pack registry model', () => {
     }, registry);
 
     expect(pack.metadata).toEqual({ region: 'US', tier: 'standard' });
+  });
+
+  it('does not replace a canonical in-memory pack with non-canonical input for the same packId', async () => {
+    const now = new Date('2026-05-15T00:00:00Z');
+    await registry.register({
+      id: 'canonical-hvac',
+      packId: 'hvac-v1',
+      version: '1.0.0',
+      verticalType: 'hvac',
+      status: 'active',
+      displayName: 'HVAC Canonical',
+      metadata: { canonical: true, seededBy: 'createApp', training_tier: 'first_class' },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await registry.register({
+      id: 'custom-hvac',
+      packId: 'hvac-v1',
+      version: '9.9.9',
+      verticalType: 'hvac',
+      status: 'active',
+      displayName: 'Tenant Custom HVAC',
+      metadata: { custom: true },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const found = await registry.getByPackId('hvac-v1');
+    expect(found!.id).toBe('canonical-hvac');
+    expect(found!.displayName).toBe('HVAC Canonical');
+    expect(found!.metadata).toMatchObject({ canonical: true, seededBy: 'createApp' });
+  });
+});
+
+describe('PgVerticalPackRegistry canonical conflict handling', () => {
+  it('updates existing canonical rows on type conflict without dumping metadata in SQL', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const now = new Date('2026-05-15T00:00:00Z');
+    const client = {
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params });
+        return {
+          rows: [
+            {
+              id: 'pack-1',
+              type: 'hvac-v1',
+              name: 'HVAC Professional',
+              version: '1.0.0',
+              description: 'Heating, ventilation, and air conditioning',
+              is_active: true,
+              terminology: {
+                _verticalType: 'hvac',
+                canonical: true,
+                seededBy: 'createApp',
+                training_tier: 'first_class',
+                training_assets: [],
+              },
+              created_at: now,
+              updated_at: now,
+            },
+          ],
+        };
+      },
+      release: () => undefined,
+    };
+    const pool = {
+      connect: async () => client,
+    };
+    const registry = new PgVerticalPackRegistry(pool as never);
+
+    await registry.register({
+      id: 'pack-1',
+      packId: 'hvac-v1',
+      version: '1.0.0',
+      verticalType: 'hvac',
+      status: 'active',
+      displayName: 'HVAC Professional',
+      metadata: {
+        canonical: true,
+        seededBy: 'createApp',
+        training_tier: 'first_class',
+        training_assets: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(calls[0].sql).toContain('ON CONFLICT (type) DO UPDATE');
+    expect(calls[0].sql).toContain("terminology->>'seededBy' = 'createApp'");
+    expect(calls[0].sql).toContain("EXCLUDED.terminology->>'seededBy' = 'createApp'");
+    expect(calls[0].sql).toContain('EXCLUDED.terminology @>');
+    expect(calls[0].sql).toContain('terminology = EXCLUDED.terminology');
+    expect(calls[0].sql).not.toContain('training_assets');
   });
 });

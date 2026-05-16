@@ -144,8 +144,8 @@ export function validateVerticalPack(pack: Partial<VerticalPack>): string[] {
   const errors: string[] = [];
   if (!pack.verticalType && !pack.type) errors.push('verticalType is required');
   const type = pack.verticalType || pack.type;
-  if (type && !['hvac', 'plumbing'].includes(type)) {
-    errors.push('verticalType must be hvac or plumbing');
+  if (type && !['hvac', 'plumbing', 'electrical'].includes(type)) {
+    errors.push('verticalType must be hvac, plumbing, or electrical');
   }
   if (!pack.displayName && !pack.name) errors.push('displayName is required');
   if (!pack.version) errors.push('version is required');

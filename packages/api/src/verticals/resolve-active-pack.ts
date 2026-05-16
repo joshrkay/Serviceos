@@ -25,13 +25,17 @@
  */
 
 import type { PackActivationRepository } from '../settings/pack-activation';
+import type { Logger } from '../logging/logger';
 import type { VerticalPackRegistry, VerticalPack as CanonicalVerticalPack } from '../shared/vertical-pack-registry';
 import { isValidVerticalType } from '../shared/vertical-types';
 import {
+  buildMergedVerticalVoicePrompt,
   formatVerticalForCallerPrompt,
   formatIntakeQuestionsForPrompt,
   formatObjectionScriptsForPrompt,
 } from './context-assembly';
+import type { TrainingAssetRepository } from './training-assets';
+import { MAX_PROMPT_ASSETS, buildTrainingAssetPromptSection } from './training-assets';
 import type {
   IntakeQuestionList,
   ObjectionScriptList,
@@ -43,6 +47,7 @@ import type {
 export interface ResolveActivePackDeps {
   packActivationRepo: PackActivationRepository;
   canonicalPackRegistry: VerticalPackRegistry;
+  trainingAssetRepo?: TrainingAssetRepository;
   /**
    * Cache TTL in milliseconds. Defaults to 5 minutes — short enough
    * that a pack change appears to admins within a normal feedback
@@ -58,6 +63,24 @@ export interface ResolveActivePackDeps {
   maxCacheEntries?: number;
   /** Injectable clock for tests. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * Optional structured logger. Used to surface failures fetching
+   * training assets — silent degradation in the privacy-sensitive
+   * read path would otherwise be indistinguishable from "tenant has
+   * no active assets."
+   */
+  logger?: Logger;
+}
+
+export interface VerticalPromptResolver {
+  (tenantId: string): Promise<string | undefined>;
+  /**
+   * Drop the cached prompt section for a tenant so the next resolve
+   * re-reads training assets and pack state. Called by the training-
+   * asset service after activate / archive so admins see changes
+   * without waiting for TTL.
+   */
+  invalidate(tenantId: string): void;
 }
 
 interface CacheEntry {
@@ -70,14 +93,23 @@ const DEFAULT_MAX_CACHE_ENTRIES = 1000;
 
 export function buildVerticalPromptResolver(
   deps: ResolveActivePackDeps,
-): (tenantId: string) => Promise<string | undefined> {
+): VerticalPromptResolver {
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const maxEntries = deps.maxCacheEntries ?? DEFAULT_MAX_CACHE_ENTRIES;
   const now = deps.now ?? Date.now;
   const cache = new Map<string, CacheEntry>();
+  const logger = deps.logger;
 
-  return async (tenantId: string): Promise<string | undefined> => {
-    if (ttlMs > 0) {
+  const resolve = async (tenantId: string): Promise<string | undefined> => {
+    // Cache is invalidated by the training-asset service on
+    // activate / archive (see `invalidate()` below + the
+    // `invalidatePromptCache` wiring in `app.ts`), so we can safely
+    // cache prompts that include training assets — admins still see
+    // lifecycle changes immediately, and the voice hot path avoids
+    // re-querying pack activation + canonical registry + training
+    // assets on every classifier turn.
+    const shouldUseCache = ttlMs > 0;
+    if (shouldUseCache) {
       const hit = cache.get(tenantId);
       if (hit && hit.expiresAt > now()) {
         // Bump to back of LRU on hit.
@@ -139,14 +171,40 @@ export function buildVerticalPromptResolver(
         const verticalBlock = formatVerticalForCallerPrompt(richPack);
         const intakeBlock = formatIntakeQuestionsForPrompt(richPack);
         const objectionBlock = formatObjectionScriptsForPrompt(richPack);
-        const formatted = [verticalBlock, intakeBlock, objectionBlock]
+        let trainingAssetPrompt = '';
+        if (deps.trainingAssetRepo) {
+          try {
+            const trainingAssets = await deps.trainingAssetRepo.listActiveByTenantAndVertical(
+              tenantId,
+              richPack.type,
+              MAX_PROMPT_ASSETS,
+            );
+            trainingAssetPrompt = buildTrainingAssetPromptSection(trainingAssets);
+          } catch (err) {
+            // Privacy-sensitive read path: a silent failure would let
+            // an outage or RLS regression look identical to "no assets
+            // configured." Log structured context so on-call can spot
+            // the regression in dashboards, then continue with the
+            // canonical pack rather than failing the turn.
+            trainingAssetPrompt = '';
+            logger?.warn('vertical_training_assets.resolve_failed', {
+              tenantId,
+              verticalType: richPack.type,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        const canonicalPrompt = [verticalBlock, intakeBlock, objectionBlock]
           .filter((s) => s.length > 0)
           .join('\n\n');
-        section = formatted.length > 0 ? formatted : undefined;
+        section = buildMergedVerticalVoicePrompt({
+          canonicalPrompt,
+          trainingAssetPrompt,
+        });
       }
     }
 
-    if (ttlMs > 0) {
+    if (shouldUseCache) {
       cache.delete(tenantId);
       cache.set(tenantId, { section, expiresAt: now() + ttlMs });
       while (cache.size > maxEntries) {
@@ -157,6 +215,12 @@ export function buildVerticalPromptResolver(
     }
     return section;
   };
+
+  const resolver = resolve as VerticalPromptResolver;
+  resolver.invalidate = (tenantId: string): void => {
+    cache.delete(tenantId);
+  };
+  return resolver;
 }
 
 /**

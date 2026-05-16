@@ -2500,6 +2500,70 @@ export const MIGRATIONS = {
       ON appointments(tenant_id, hold_expiry_at)
       WHERE hold_pending_approval = true;
   `,
+  '095_vertical_training_assets': `
+    CREATE TABLE IF NOT EXISTS privacy_audit (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      actor_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id UUID NOT NULL,
+      operation TEXT NOT NULL,
+      redaction_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      redactions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_privacy_audit_tenant_time
+      ON privacy_audit (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_privacy_audit_entity
+      ON privacy_audit (tenant_id, entity_type, entity_id);
+    ALTER TABLE privacy_audit ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE privacy_audit FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_privacy_audit ON privacy_audit;
+    CREATE POLICY tenant_isolation_privacy_audit ON privacy_audit
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS vertical_training_assets (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      vertical_type TEXT NOT NULL CHECK (vertical_type IN ('hvac', 'plumbing', 'electrical')),
+      asset_kind TEXT NOT NULL CHECK (
+        asset_kind IN (
+          'prompt_context',
+          'rag_seed',
+          'eval_scenario',
+          'labeled_call_example',
+          'intake_question',
+          'objection_script',
+          'emergency_rule',
+          'false_positive_guard'
+        )
+      ),
+      status TEXT NOT NULL CHECK (
+        status IN ('draft', 'redacted', 'quarantined', 'approved', 'active', 'archived')
+      ),
+      title TEXT NOT NULL,
+      raw_text TEXT,
+      scrubbed_text TEXT,
+      labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+      provenance JSONB NOT NULL,
+      redaction_summary JSONB,
+      created_by TEXT NOT NULL,
+      approved_by TEXT,
+      activated_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (status IN ('draft', 'quarantined') OR scrubbed_text IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS idx_vertical_training_assets_tenant_vertical_status
+      ON vertical_training_assets (tenant_id, vertical_type, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_vertical_training_assets_tenant_kind
+      ON vertical_training_assets (tenant_id, asset_kind, updated_at DESC);
+    ALTER TABLE vertical_training_assets ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE vertical_training_assets FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_vertical_training_assets ON vertical_training_assets;
+    CREATE POLICY tenant_isolation_vertical_training_assets ON vertical_training_assets
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
   '096_create_expenses': `
     CREATE TABLE IF NOT EXISTS expenses (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2522,7 +2586,14 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_expenses ON expenses
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
-  '097_add_tenant_hourly_rate': `
+  '097_vertical_training_assets_idempotency': `
+    ALTER TABLE vertical_training_assets
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vertical_training_assets_idempotency
+      ON vertical_training_assets (tenant_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+  `,
+  '098_add_tenant_hourly_rate': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS hourly_rate_cents INTEGER;
   `,

@@ -17,6 +17,8 @@ import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/pr
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
+import { EstimateRepository } from '../estimates/estimate';
+import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -35,6 +37,12 @@ export interface WebhookRouterDeps {
    * without the deposit flow keep working.
    */
   jobRepo?: JobRepository;
+  /**
+   * §6 Time-to-Cash. When wired alongside jobRepo + invoiceRepo, the
+   * Stripe checkout webhook rolls the linked job's money-state forward
+   * after recording the payment. Optional so legacy harnesses build.
+   */
+  estimateRepo?: EstimateRepository;
   /**
    * Tier 4 (Team members — PR 3). When wired, the Clerk user.created
    * webhook checks for a pending invitation by email — if one
@@ -698,6 +706,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           return res.status(500).json({ error: 'Payment processing not configured' });
         }
 
+        // §6 Time-to-Cash. Refresh deps for the post-payment job
+        // money-state rollup. Undefined unless all three repos are
+        // wired — recordPayment then skips the rollup cleanly.
+        const moneyStateDeps: RefreshJobMoneyStateDeps | undefined =
+          deps.jobRepo && deps.estimateRepo
+            ? {
+                jobRepo: deps.jobRepo,
+                estimateRepo: deps.estimateRepo,
+                invoiceRepo: deps.invoiceRepo,
+                auditRepo: deps.auditRepo,
+                logger,
+              }
+            : undefined;
+
         try {
           await recordPayment(
             {
@@ -710,6 +732,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             },
             deps.invoiceRepo,
             deps.paymentRepo,
+            moneyStateDeps,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
@@ -731,6 +754,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   },
                   deps.invoiceRepo,
                   deps.paymentRepo,
+                  moneyStateDeps,
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,

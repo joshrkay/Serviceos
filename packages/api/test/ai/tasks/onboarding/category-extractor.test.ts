@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createMockLLMGateway } from '../../../../src/ai/gateway/factory';
 import { CategoryExtractor } from '../../../../src/ai/tasks/onboarding/category-extractor';
 import { ExtractionContext } from '../../../../src/ai/tasks/onboarding/types';
+import { VerticalType } from '../../../../src/shared/vertical-types';
 import { MockLLMProvider } from '../../../../src/ai/providers/mock';
 import { LLMGateway } from '../../../../src/ai/gateway/gateway';
 import * as fs from 'fs';
@@ -13,7 +14,7 @@ function loadFixture(name: string): string {
   return fs.readFileSync(path.join(fixturesDir, name), 'utf-8');
 }
 
-function makeContext(transcript: string, verticals: Array<{ type: 'hvac' | 'plumbing'; confidence: number; sourceText: string }> = []): ExtractionContext {
+function makeContext(transcript: string, verticals: Array<{ type: VerticalType; confidence: number; sourceText: string }> = []): ExtractionContext {
   return {
     tenantId: 'tenant-001',
     transcript,
@@ -80,6 +81,23 @@ describe('P4-EXT-002 — Service category extraction from voice transcript', () 
 
     expect(result.data.categories).toHaveLength(3);
     expect(result.data.categories.every((c) => c.verticalType === 'plumbing')).toBe(true);
+  });
+
+  it('extracts basic electrical categories', async () => {
+    provider.setDefaultResponse(JSON.stringify({
+      categories: [
+        { vertical_type: 'electrical', category_id: 'panel', name: 'Panel', confidence: 0.9, source_text: 'panel work' },
+        { vertical_type: 'electrical', category_id: 'lighting', name: 'Lighting', confidence: 0.8, source_text: 'lighting installs' },
+      ],
+      confidence_score: 0.85,
+    }));
+
+    const electricalVerticals = [{ type: 'electrical' as const, confidence: 0.9, sourceText: 'electrical' }];
+    const result = await extractor.extract(makeContext('We do panel work and lighting installs', electricalVerticals));
+
+    expect(result.data.categories).toHaveLength(2);
+    expect(result.data.categories.every((c) => c.verticalType === 'electrical')).toBe(true);
+    expect(result.data.categories.map((c) => c.categoryId).sort()).toEqual(['lighting', 'panel']);
   });
 
   // T3-012: No hallucination — should not create plumbing categories from HVAC-only transcript
