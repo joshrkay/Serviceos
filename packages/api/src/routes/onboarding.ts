@@ -8,6 +8,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { v4 as uuidv4 } from 'uuid';
 import { loadOnboardingFacts } from '../onboarding/load-facts';
 import { deriveOnboardingStatus } from '../onboarding/derive-status';
+import { BusinessIdentityInputSchema } from '../onboarding/contracts';
 
 interface OnboardingConfigureBody {
   name: string;
@@ -154,6 +155,80 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         settings,
         activatedPacks: body.services.map(s => SERVICE_TO_PACK[s]).filter(Boolean),
       });
+    }
+  );
+
+  router.put(
+    '/identity',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Onboarding identity requires a database connection',
+          });
+          return;
+        }
+
+        const parsed = BusinessIdentityInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const v = parsed.data;
+
+        await pool.query(
+          `INSERT INTO tenant_settings (
+             id, tenant_id, business_name, service_area_text, service_area_radius,
+             business_hours, job_buffer_minutes, hourly_rate_cents,
+             timezone, estimate_prefix, invoice_prefix, next_estimate_number,
+             next_invoice_number, default_payment_term_days
+           )
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7,
+                   'America/New_York', 'EST-', 'INV-', 1001, 1001, 30)
+           ON CONFLICT (tenant_id) DO UPDATE SET
+             business_name        = EXCLUDED.business_name,
+             service_area_text    = EXCLUDED.service_area_text,
+             service_area_radius  = EXCLUDED.service_area_radius,
+             business_hours       = EXCLUDED.business_hours,
+             job_buffer_minutes   = EXCLUDED.job_buffer_minutes,
+             hourly_rate_cents    = EXCLUDED.hourly_rate_cents,
+             updated_at           = now()`,
+          [
+            tenantId,
+            v.businessName,
+            v.serviceAreaText ?? null,
+            v.serviceAreaRadius ?? null,
+            JSON.stringify(v.businessHours),
+            v.jobBufferMinutes,
+            v.hourlyRateCents,
+          ]
+        );
+
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'tenant.identity_set',
+            entityType: 'tenant_settings',
+            entityId: tenantId,
+            metadata: { businessName: v.businessName, hourlyRateCents: v.hourlyRateCents },
+          })
+        );
+
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'IDENTITY_SAVE_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to save business identity',
+        });
+      }
     }
   );
 
