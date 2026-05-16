@@ -44,6 +44,11 @@ export class IdempotencyGuard {
   /**
    * Finds the previously-executed proposal for the given (tenant, idempotencyKey).
    *
+   * Note: the returned `Proposal.resultEntityId` may be undefined if the
+   * original execution did not set it — callers should treat that case
+   * as a passthrough success (consistent with how the cache-hit branch
+   * in `checkAndExecute` works).
+   *
    * Looks up the `proposal_executions` row via the partial unique index
    * (`proposal_executions_tenant_idempotency_uniq`, migration 099), then
    * loads the parent proposal to read `resultEntityId` — which lives on

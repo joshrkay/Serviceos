@@ -54,7 +54,9 @@ describe('P2-011 — Execution idempotency controls', () => {
     proposal: Proposal,
   ): Promise<void> {
     await proposalRepo.create(proposal);
-    if (!proposal.idempotencyKey) return;
+    if (!proposal.idempotencyKey) {
+      throw new Error('persistExecuted: proposal must have an idempotencyKey to create an execution row');
+    }
     await executionRepo.recordExecution({
       tenantId: proposal.tenantId,
       proposalId: proposal.id,
