@@ -58,20 +58,9 @@ jobs:
     environment: dev
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: 'npm'
-      - run: npm ci
-      - name: Build API (for migration runner)
-        run: npm run build
-        working-directory: packages/api
       - name: Install Railway CLI
         run: npm install -g @railway/cli
-      - name: Run API migrations (Development)
-        run: railway run --service "@serviceos/api" --environment Development -- node packages/api/dist/src/db/migrate.js
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      # Migrations run inside Railway via `preDeployCommand` in railway.toml.
       - name: Deploy API to Railway (Development)
         run: railway up --service "@serviceos/api" --environment Development --detach
         env:
@@ -88,20 +77,8 @@ jobs:
     environment: prod
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: 'npm'
-      - run: npm ci
-      - name: Build API (for migration runner)
-        run: npm run build
-        working-directory: packages/api
       - name: Install Railway CLI
         run: npm install -g @railway/cli
-      - name: Run API migrations (production)
-        run: railway run --service "@serviceos/api" --environment production -- node packages/api/dist/src/db/migrate.js
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       - name: Deploy API to Railway (production)
         run: railway up --service "@serviceos/api" --environment production --detach
         env:
