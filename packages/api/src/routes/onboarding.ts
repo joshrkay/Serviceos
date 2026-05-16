@@ -8,7 +8,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { v4 as uuidv4 } from 'uuid';
 import { loadOnboardingFacts } from '../onboarding/load-facts';
 import { deriveOnboardingStatus } from '../onboarding/derive-status';
-import { BusinessIdentityInputSchema } from '../onboarding/contracts';
+import { BusinessIdentityInputSchema, PackPickInputSchema } from '../onboarding/contracts';
 
 interface OnboardingConfigureBody {
   name: string;
@@ -227,6 +227,135 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'IDENTITY_SAVE_FAILED',
           message: error instanceof Error ? error.message : 'Failed to save business identity',
+        });
+      }
+    }
+  );
+
+  router.post(
+    '/pack',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Onboarding pack requires a database connection',
+          });
+          return;
+        }
+
+        const parsed = PackPickInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', issues: parsed.error.issues });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const { packId } = parsed.data;
+
+        // Read current settings to get existing activeVerticalPacks
+        const existing = await settingsRepo.findByTenant(tenantId);
+        const currentPacks = existing?.activeVerticalPacks ?? [];
+        const newPacks = Array.from(new Set([...currentPacks, packId])); // Idempotent union
+
+        if (existing) {
+          // Update existing row
+          await settingsRepo.update(tenantId, { activeVerticalPacks: newPacks });
+        } else {
+          // Auto-create minimal settings row if tenant hasn't called /identity yet
+          await settingsRepo.create({
+            id: uuidv4(),
+            tenantId,
+            businessName: '', // Will remain empty until /identity is called
+            timezone: 'America/New_York',
+            estimatePrefix: 'EST-',
+            invoicePrefix: 'INV-',
+            nextEstimateNumber: 1001,
+            nextInvoiceNumber: 1001,
+            defaultPaymentTermDays: 30,
+            activeVerticalPacks: newPacks,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        }
+
+        // Emit audit event
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'tenant.pack_activated',
+            entityType: 'tenant_packs',
+            entityId: packId,
+            metadata: { packId },
+          })
+        );
+
+        res.json({ ok: true, packId });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'PACK_ACTIVATION_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to activate pack',
+        });
+      }
+    }
+  );
+
+  router.post(
+    '/test-call/skip',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Onboarding test-call skip requires a database connection',
+          });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+
+        // INSERT ... ON CONFLICT to mark test_call as skipped
+        await pool.query(
+          `INSERT INTO tenant_settings (id, tenant_id, timezone, estimate_prefix, invoice_prefix,
+             next_estimate_number, next_invoice_number, default_payment_term_days,
+             onboarding_test_call_skipped_at, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, 'America/New_York', 'EST-', 'INV-',
+                   1001, 1001, 30, now(), now(), now())
+           ON CONFLICT (tenant_id) DO UPDATE SET
+             onboarding_test_call_skipped_at = now(),
+             updated_at = now()`,
+          [tenantId]
+        );
+
+        // Emit audit event
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'tenant.test_call_skipped',
+            entityType: 'tenant_settings',
+            entityId: tenantId,
+            metadata: {},
+          })
+        );
+
+        // Return the freshly-derived status
+        const facts = await loadOnboardingFacts({ pool, settingsRepo }, tenantId);
+        const status = deriveOnboardingStatus(facts);
+        res.json(status);
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'TEST_CALL_SKIP_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to skip test call',
         });
       }
     }
