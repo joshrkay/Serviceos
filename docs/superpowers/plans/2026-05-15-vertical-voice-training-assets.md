@@ -995,8 +995,9 @@ export class PgTrainingAssetRepository extends PgBaseRepository implements Train
            provenance = EXCLUDED.provenance,
            redaction_summary = EXCLUDED.redaction_summary,
            approved_by = EXCLUDED.approved_by,
-           activated_at = EXCLUDED.activated_at,
-           updated_at = EXCLUDED.updated_at
+           activated_at = COALESCE($14, vertical_training_assets.activated_at),
+           updated_at = COALESCE($16, vertical_training_assets.updated_at)
+         WHERE vertical_training_assets.tenant_id = $2
          RETURNING *`,
         [
           asset.id,
