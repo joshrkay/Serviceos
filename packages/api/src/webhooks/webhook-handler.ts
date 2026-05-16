@@ -78,9 +78,19 @@ export async function handleWebhookEvent(
   idempotencyKey: string,
   repository: WebhookRepository
 ): Promise<{ event: WebhookEvent; duplicate: boolean }> {
+  // Codex P1 (PR #384) — only short-circuit as `duplicate` when the
+  // previous attempt actually succeeded (status='processed'). If the
+  // earlier attempt failed (status='failed') or never completed
+  // (status='received'/'processing'), the upstream retry must be
+  // allowed to re-execute the handler — otherwise Stripe's standard
+  // retry policy is silently disabled and any out-of-order webhook
+  // (e.g. charge.refunded before checkout.session.completed) is lost
+  // forever. Returning the existing row (instead of creating a new
+  // one) keeps the original event.id stable so audit / observability
+  // can correlate retries.
   const existing = await repository.findByIdempotencyKey(source, idempotencyKey);
   if (existing) {
-    return { event: existing, duplicate: true };
+    return { event: existing, duplicate: existing.status === 'processed' };
   }
 
   const event: WebhookEvent = {

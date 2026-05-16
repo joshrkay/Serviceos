@@ -148,14 +148,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const eventType = req.body.type as string;
     const payload = req.body as Record<string, unknown>;
 
+    // Declared outside the try so the catch can mark this row 'failed'
+    // (Codex P1 PR #384 — required for Stripe/Clerk retry to actually
+    // re-execute, see handleWebhookEvent's dedup logic).
+    let webhookEvent: { id: string } | undefined;
+
     try {
-      const { duplicate } = await handleWebhookEvent(
+      const result = await handleWebhookEvent(
         'clerk',
         eventType,
         payload,
         svixId,
         webhookRepo
       );
+      webhookEvent = result.event;
+      const { duplicate } = result;
 
       if (duplicate) {
         logger.info('Duplicate webhook event — skipping', { svixId, eventType });
@@ -324,7 +331,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 }));
               }
 
-              await webhookRepo.updateStatus(svixId, 'processed');
+              await webhookRepo.updateStatus(webhookEvent.id, 'processed');
               return res.status(200).json({ received: true, joined: pending.tenantId });
             } catch (joinErr) {
               logger.error('Invitee join failed; falling back to bootstrap', {
@@ -550,13 +557,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
-      await webhookRepo.updateStatus(svixId, 'processed');
+      await webhookRepo.updateStatus(webhookEvent.id, 'processed');
       return res.status(200).json({ received: true });
 
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       logger.error('Webhook processing failed', { svixId, eventType, error: message });
-      await webhookRepo.updateStatus(svixId, 'failed', message);
+      if (webhookEvent) {
+        await webhookRepo.updateStatus(webhookEvent.id, 'failed', message);
+      }
       return res.status(500).json({ error: 'Processing failed' });
     }
   });
