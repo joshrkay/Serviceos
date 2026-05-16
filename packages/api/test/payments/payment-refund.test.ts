@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { recordRefund } from '../../src/payments/payment-service';
 import { InMemoryPaymentRepository, Payment } from '../../src/invoices/payment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { ValidationError } from '../../src/shared/errors';
+import { NotFoundError, ValidationError } from '../../src/shared/errors';
 
 const TENANT_A = 'tenant-A';
 const TENANT_B = 'tenant-B';
@@ -138,13 +138,18 @@ describe('recordRefund (D2-4)', () => {
     const payment = makePayment({ tenantId: TENANT_A, amountCents: 50000 });
     await paymentRepo.create(payment);
 
+    // Codex P1 #3 (PR #384) — not-found / cross-tenant now surfaces as
+    // NotFoundError (retryable from the webhook handler) rather than
+    // ValidationError (terminal). Probing still can't distinguish
+    // "exists in another tenant" from "doesn't exist" — both produce
+    // the same error class + the same message shape.
     await expect(
       recordRefund(
         { tenantId: TENANT_B, paymentId: payment.id, refundCents: 1000 },
         paymentRepo,
         auditRepo,
       ),
-    ).rejects.toThrow(/not found/i);
+    ).rejects.toBeInstanceOf(NotFoundError);
 
     // The actual payment (tenant A) is untouched.
     const reread = await paymentRepo.findById(TENANT_A, payment.id);
@@ -212,14 +217,18 @@ describe('recordRefund (D2-4)', () => {
     expect(reread?.refundedAmountCents).toBe(0);
   });
 
-  it('missing paymentId returns the same not-found error as cross-tenant', async () => {
+  it('missing paymentId returns the same NotFoundError as cross-tenant', async () => {
+    // Codex P1 #3 (PR #384) — see cross-tenant test above. Missing and
+    // cross-tenant share the same error class so probing can't
+    // distinguish them, and NotFoundError is the retryable signal the
+    // webhook handler uses to let Stripe re-deliver.
     await expect(
       recordRefund(
         { tenantId: TENANT_A, paymentId: 'does-not-exist', refundCents: 100 },
         paymentRepo,
         auditRepo,
       ),
-    ).rejects.toThrow(/not found/i);
+    ).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it('audit event is optional (auditRepo undefined still completes the mutation)', async () => {

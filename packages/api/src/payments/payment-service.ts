@@ -15,7 +15,7 @@
  */
 import { PaymentRepository, Payment } from '../invoices/payment';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { ValidationError } from '../shared/errors';
+import { NotFoundError, ValidationError } from '../shared/errors';
 
 export interface RecordRefundInput {
   tenantId: string;
@@ -46,8 +46,14 @@ export interface RecordRefundResult {
  *   review on PR #384).
  * - On 0-row result, a diagnostic `findById` distinguishes the two
  *   failure modes so the caller sees a meaningful error:
- *     - row exists → `Refund exceeds original payment: …`
- *     - row missing / cross-tenant → `Payment not found`
+ *     - row exists → `ValidationError('Refund exceeds original payment: …')` (terminal)
+ *     - row missing / cross-tenant → `NotFoundError('Payment', id)` (retryable)
+ *   The error CLASS difference matters for the Stripe webhook handler
+ *   (Codex P1 #3 follow-up): Stripe delivery ordering is not
+ *   guaranteed, so `charge.refunded` can arrive BEFORE the
+ *   `checkout.session.completed` that created the payment row. The
+ *   webhook handler re-throws NotFoundError so Stripe gets a 5xx and
+ *   retries; ValidationError is terminal and ACKed.
  *   The diagnostic read is only on the error path; the happy path is
  *   one statement.
  * - Writes a `payment.refunded` audit event with the refund delta and
@@ -80,10 +86,13 @@ export async function recordRefund(
     // distinguish them so the caller gets a meaningful error.
     const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
     if (!existing) {
-      // Either missing or cross-tenant — surface the same error so
-      // probing can't distinguish "exists in another tenant" from
-      // "doesn't exist".
-      throw new ValidationError('Payment not found');
+      // Either missing or cross-tenant — throw NotFoundError (404) so
+      // the Stripe webhook handler can re-throw and let Stripe retry
+      // (webhook ordering may deliver charge.refunded before the
+      // checkout.session.completed that creates this row). The error
+      // surface is the same for missing vs cross-tenant so probing
+      // can't distinguish them. Codex P1 #3 (PR #384).
+      throw new NotFoundError('Payment', input.paymentId);
     }
     const attemptedTotal = (existing.refundedAmountCents ?? 0) + input.refundCents;
     throw new ValidationError(
