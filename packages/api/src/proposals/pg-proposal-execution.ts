@@ -152,4 +152,30 @@ export class PgProposalExecutionRepository
       return result.rows.map(rowToExecution);
     });
   }
+
+  async findByIdempotencyKey(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<ProposalExecution | null> {
+    // Indexed by proposal_executions_tenant_idempotency_uniq (partial
+    // unique index on (tenant_id, idempotency_key) WHERE idempotency_key
+    // IS NOT NULL, migration 099). The status='succeeded' filter is the
+    // contract — failed / undone rows do not block a retry. tenant_id
+    // explicit for defense-in-depth + index utilization, matching the
+    // rest of this repo's read methods.
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query<ProposalExecutionRow>(
+        `SELECT *
+           FROM proposal_executions
+          WHERE tenant_id = $1
+            AND idempotency_key = $2
+            AND status = 'succeeded'
+          ORDER BY executed_at DESC
+          LIMIT 1`,
+        [tenantId, idempotencyKey],
+      );
+      const row = result.rows[0];
+      return row ? rowToExecution(row) : null;
+    });
+  }
 }
