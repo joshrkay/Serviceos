@@ -6,6 +6,19 @@ import { buildOriginationMetadata } from '../leads/attribution-metadata';
 export type JobStatus = 'new' | 'scheduled' | 'in_progress' | 'completed' | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
 
+/**
+ * §6 Time-to-Cash. Denormalized rollup of where a job sits in the
+ * estimate → invoice → payment chain. Maintained by
+ * `refreshJobMoneyState` (jobs/job-money-state.ts).
+ */
+export type JobMoneyState =
+  | 'no_estimate'
+  | 'estimate_sent'
+  | 'estimate_accepted'
+  | 'invoiced'
+  | 'paid'
+  | 'overdue';
+
 export interface Job {
   id: string;
   tenantId: string;
@@ -54,6 +67,13 @@ export interface Job {
    * an already-consumed deposit.
    */
   depositCreditedToInvoiceId?: string;
+  /**
+   * §6 Time-to-Cash. Denormalized money-state rollup, maintained by
+   * `refreshJobMoneyState` on every estimate/invoice/payment mutation
+   * and by the overdue-invoice sweep. Optional in TS so legacy
+   * fixtures/tests can omit it; the Pg column DEFAULTs to 'no_estimate'.
+   */
+  moneyState?: JobMoneyState;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -193,6 +213,7 @@ export async function createJob(
     depositRequiredCents: 0,
     depositPaidCents: 0,
     depositStatus: 'not_required',
+    moneyState: 'no_estimate',
     createdBy: input.createdBy,
     createdAt: new Date(),
     updatedAt: new Date(),

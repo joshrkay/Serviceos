@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 
 export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
@@ -63,7 +64,8 @@ export function validatePaymentInput(input: RecordPaymentInput): string[] {
 export async function recordPayment(
   input: RecordPaymentInput,
   invoiceRepo: InvoiceRepository,
-  paymentRepo: PaymentRepository
+  paymentRepo: PaymentRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -114,6 +116,18 @@ export async function recordPayment(
     status: newStatus,
     updatedAt: new Date(),
   });
+
+  // §6 Time-to-Cash. Roll the job's money-state forward (best-effort —
+  // the payment + invoice writes already succeeded; a rollup failure
+  // must not bounce them). No-op when the caller didn't wire the deps.
+  if (updatedInvoice && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(
+      input.tenantId,
+      updatedInvoice.jobId,
+      input.processedBy,
+      moneyStateDeps,
+    );
+  }
 
   return { payment, invoice: updatedInvoice! };
 }

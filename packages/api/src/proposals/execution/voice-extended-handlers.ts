@@ -12,6 +12,7 @@ import {
   recordPayment,
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 
 /**
  * Execution handlers for the Stage-2 voice intents.
@@ -137,7 +138,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
 
   constructor(
     private readonly paymentRepo?: PaymentRepository,
-    private readonly invoiceRepo?: InvoiceRepository
+    private readonly invoiceRepo?: InvoiceRepository,
+    private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -175,7 +177,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
           processedBy: context.executedBy,
         },
         this.invoiceRepo,
-        this.paymentRepo
+        this.paymentRepo,
+        this.moneyStateDeps,
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {
