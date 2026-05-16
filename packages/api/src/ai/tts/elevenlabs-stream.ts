@@ -49,14 +49,14 @@ export class ElevenLabsStreamConnection {
     const ws = new WebSocket(url);
     const queue: TtsStreamChunk[] = [];
     let done = false;
-    let waiter: ((v: IteratorResult<TtsStreamChunk>) => void) | null = null;
+    let waiter: { resolve: (v: IteratorResult<TtsStreamChunk>) => void; reject: (err: Error) => void } | null = null;
     let errorState: Error | null = null;
 
     const push = (chunk: TtsStreamChunk): void => {
       if (waiter) {
         const w = waiter;
         waiter = null;
-        w({ value: chunk, done: false });
+        w.resolve({ value: chunk, done: false });
       } else {
         queue.push(chunk);
       }
@@ -68,7 +68,13 @@ export class ElevenLabsStreamConnection {
       if (waiter) {
         const w = waiter;
         waiter = null;
-        w({ value: undefined as unknown as TtsStreamChunk, done: true });
+        if (errorState) {
+          const e = errorState;
+          errorState = null;
+          w.reject(e);
+        } else {
+          w.resolve({ value: undefined as unknown as TtsStreamChunk, done: true });
+        }
       }
     };
 
@@ -128,8 +134,8 @@ export class ElevenLabsStreamConnection {
         const queued = queue.shift();
         if (queued) return Promise.resolve({ value: queued, done: false });
         if (done) return Promise.resolve({ value: undefined as unknown as TtsStreamChunk, done: true });
-        return new Promise((resolve) => {
-          waiter = resolve;
+        return new Promise((resolve, reject) => {
+          waiter = { resolve, reject };
         });
       },
       return: (): Promise<IteratorResult<TtsStreamChunk>> => {
