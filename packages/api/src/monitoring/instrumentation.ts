@@ -16,10 +16,8 @@ export interface InstrumentOptions<Args extends unknown[]> {
  * worker, voice-action-router, Media Streams handler) to feed structured
  * exceptions into Sentry alert rules — see docs/runbooks/alerting.md.
  *
- * Note: SentryClient.setTag is a global set, not scoped to a single event,
- * so tags persist across events on the underlying SDK. In practice the
- * next event almost always re-tags via its own instrument() wrapper, so
- * leakage is bounded. This is a deliberate tradeoff for the simpler API.
+ * Tags are scoped per-event via SentryClient.withScope so concurrent
+ * requests cannot leak tags into each other's captured events.
  */
 export function instrument<Args extends unknown[], R>(
   handler: (...args: Args) => Promise<R>,
@@ -30,15 +28,17 @@ export function instrument<Args extends unknown[], R>(
       return await handler(...args);
     } catch (err: unknown) {
       const client = getSentryClient();
-      client.setTag('path', options.path);
-      if (options.extractTags) {
-        const tags = options.extractTags(...args);
-        for (const [k, v] of Object.entries(tags)) {
-          if (v !== undefined) client.setTag(k, v);
-        }
-      }
       const error = err instanceof Error ? err : new Error(String(err));
-      client.captureException(error);
+      client.withScope((scope) => {
+        scope.setTag('path', options.path);
+        if (options.extractTags) {
+          const tags = options.extractTags(...args);
+          for (const [k, v] of Object.entries(tags)) {
+            if (v !== undefined) scope.setTag(k, v);
+          }
+        }
+        scope.captureException(error);
+      });
       throw err;
     }
   };

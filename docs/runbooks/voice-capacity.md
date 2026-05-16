@@ -18,7 +18,7 @@ dropped during the 5-minute hold.
 
 ```bash
 cd packages/api
-STAGING_WS_URL=wss://api.staging.serviceos.com/twilio/mediastream \
+STAGING_WS_URL=wss://api.staging.serviceos.com/api/telephony/stream \
   npx tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300
 ```
 

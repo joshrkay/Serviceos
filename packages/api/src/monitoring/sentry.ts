@@ -7,17 +7,33 @@ export interface SentryConfig {
   tracesSampleRate?: number;
 }
 
+export interface SentryScope {
+  setTag(key: string, value: string): void;
+  captureException(error: Error): string;
+}
+
 export interface SentryClient {
   captureException(error: Error, context?: Record<string, unknown>): string;
   captureMessage(message: string, level?: 'info' | 'warning' | 'error'): string;
   setTag(key: string, value: string): void;
   setUser(user: { id: string; email?: string }): void;
   startTransaction(name: string): SentryTransaction;
+  /**
+   * Run `cb` against an isolated scope. Tags set on the scope apply only
+   * to events captured within the callback — this prevents tag leakage
+   * between concurrent requests. Use this for per-event tagging.
+   */
+  withScope<T>(cb: (scope: SentryScope) => T): T;
 }
 
 export interface SentryTransaction {
   finish(): void;
   setStatus(status: string): void;
+}
+
+interface SentryRawScope {
+  setTag(key: string, value: unknown): void;
+  captureException(exception: unknown): string;
 }
 
 interface SentryModule {
@@ -27,6 +43,7 @@ interface SentryModule {
   captureMessage(message: string, captureContext?: string): string;
   setTag(key: string, value: unknown): void;
   setUser(user: unknown): void;
+  withScope(cb: (scope: SentryRawScope) => void): void;
 }
 
 let redactionProcessorsInstalled = false;
@@ -112,6 +129,14 @@ function createNoOpSentryClient(): SentryClient {
     setTag: () => {},
     setUser: () => {},
     startTransaction: () => noOpTransaction,
+    withScope<T>(cb: (scope: SentryScope) => T): T {
+      return cb({
+        setTag() {},
+        captureException() {
+          return 'noop';
+        },
+      });
+    },
   };
 }
 
@@ -134,6 +159,28 @@ function createRealSentryClient(sentry: SentryModule): SentryClient {
         finish() {},
         setStatus: () => {},
       };
+    },
+    withScope<T>(cb: (scope: SentryScope) => T): T {
+      // @sentry/node's withScope callback is void-typed; capture our cb's
+      // result via closure so per-scope tagging stays isolated to the event
+      // captured inside the callback.
+      let result: T;
+      let assigned = false;
+      sentry.withScope((rawScope: SentryRawScope) => {
+        result = cb({
+          setTag(key: string, value: string): void {
+            rawScope.setTag(key, value);
+          },
+          captureException(error: Error): string {
+            return rawScope.captureException(error);
+          },
+        });
+        assigned = true;
+      });
+      if (!assigned) {
+        throw new Error('Sentry withScope callback did not execute synchronously');
+      }
+      return result!;
     },
   };
 }

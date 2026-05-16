@@ -74,8 +74,5 @@ The daily real-call workflow (Task 16) needs these GitHub Actions secrets:
 
 ## Known limitations
 
-- `SentryClient.setTag` is global, not scoped per event. The next event almost
-  always re-tags via its own `instrument()` wrapper, so leakage is bounded —
-  but be aware when reading historical event tags in Sentry.
 - The queue-depth alert is deferred to tier 2 (requires emitting a metric;
   see `docs/runbooks/launch-quality-bar.md` for tier promotion).

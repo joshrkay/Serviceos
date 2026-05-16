@@ -4,6 +4,7 @@ import {
   setSentryClient,
   resetSentryClient,
   SentryClient,
+  SentryScope,
   SentryTransaction,
 } from '../../src/monitoring/sentry';
 
@@ -20,12 +21,23 @@ function makeFakeClient(): SentryClient & {
     captureMessage(_msg: string, _level?: 'info' | 'warning' | 'error'): string {
       return 'fake-event-id';
     },
-    setTag(key: string, value: string): void {
-      calls.tags.push([key, value]);
+    setTag(): void {
+      // Unused — per-event tagging now flows through withScope.
     },
     setUser(): void {},
     startTransaction(_name: string): SentryTransaction {
       return { finish() {}, setStatus() {} };
+    },
+    withScope<T>(cb: (scope: SentryScope) => T): T {
+      return cb({
+        setTag(key: string, value: string): void {
+          calls.tags.push([key, value]);
+        },
+        captureException(err: Error): string {
+          calls.captured.push(err);
+          return 'fake-event-id';
+        },
+      });
     },
   };
 }
