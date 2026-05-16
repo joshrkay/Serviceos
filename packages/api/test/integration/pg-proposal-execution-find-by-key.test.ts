@@ -116,9 +116,9 @@ async function createProposal(
   const id = crypto.randomUUID();
   await pool.query(
     `INSERT INTO proposals
-       (id, tenant_id, proposal_type, payload, idempotency_key, created_by)
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6)`,
-    [id, tenantId, 'test_proposal', '{}', idempotencyKey, 'test'],
+       (id, tenant_id, proposal_type, status, payload, idempotency_key, created_by)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+    [id, tenantId, 'test_proposal', 'draft', '{}', idempotencyKey, 'test'],
   );
   return id;
 }
