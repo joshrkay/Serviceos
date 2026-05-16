@@ -275,15 +275,16 @@ import { InMemoryProposalExecutionRepository } from './proposals/proposal-execut
 import { PgProposalExecutionRepository } from './proposals/pg-proposal-execution';
 import { PgCallTranscriptTurnRepository } from './voice/pg-call-transcript-turn';
 import { InMemoryCallTranscriptTurnRepository } from './voice/call-transcript-turn';
-import {
-  OpenAICompatibleProvider,
-  type EmbeddingProvider,
-} from './ai/providers/openai-compatible';
+import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import { createVoiceActionRouterWorker, VoiceActionRouterPayload } from './workers/voice-action-router';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { runExecutionSweep } from './workers/execution-worker';
-import { createLLMGateway, createMockLLMGateway } from './ai/gateway/factory';
+import {
+  createLLMGateway,
+  createMockLLMGateway,
+  createEmbeddingProvider,
+} from './ai/gateway/factory';
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
@@ -843,12 +844,8 @@ export function createApp(): express.Express {
   // doesn't apply to embeddings (`text-embedding-3-small` only). When
   // AI_PROVIDER_API_KEY is unset, embeddings are unavailable and the
   // ingestion workers stay un-registered — the rest of the app boots.
-  const embeddingProvider: EmbeddingProvider | null = config.AI_PROVIDER_API_KEY
-    ? new OpenAICompatibleProvider({
-        apiKey: config.AI_PROVIDER_API_KEY,
-        baseURL: config.AI_PROVIDER_BASE_URL ?? 'https://api.openai.com/v1',
-      })
-    : null;
+  const embeddingProvider: EmbeddingProvider | null =
+    createEmbeddingProvider(config);
 
   // Phase 4a-1 repositories — used by transcript-ingestion-worker and
   // proposal-correction-worker. All Pg-backed in production with
