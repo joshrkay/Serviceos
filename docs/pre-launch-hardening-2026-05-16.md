@@ -32,8 +32,8 @@ running this sprint.
 ### Day 1 (today) — P0 cutover blockers
 
 - [x] ~~**D1-1**~~ — **already shipped**. `packages/api/test/webhooks/clerk-webhook-integration.test.ts` (262 LOC, labeled EXP-3) covers happy path, idempotency, bad-sig, missing headers, missing secret, existing-tenant short-circuit, async response timing. Audit missed this; X1 is closed.
-- [ ] **D1-2** Agent `a6626e02147052f0d` (in flight) — X2 LLM gateway bypasses: add `createEmbeddingProvider()` to `ai/gateway/factory.ts`; move `real-llm-gateway-factory.ts` under `ai/gateway/` as `real-layer-two-factory.ts`
-- [ ] **D1-3** *(queued behind D1-2 — both modify `app.ts`)* X4 add `helmet()` to `packages/api/src/app.ts` with explicit CSP (Clerk + Stripe + Twilio)
+- [x] **D1-2** done (commit `7241c41`, merged `de886d6`) — `createEmbeddingProvider()` added; `real-llm-gateway-factory.ts` moved under `ai/gateway/` as `real-layer-two-factory.ts`; 59 gateway tests green; bypass grep returns 0
+- [ ] **D1-3** *(in flight)* X4 add `helmet()` to `packages/api/src/app.ts` with explicit CSP (Clerk + Stripe + Twilio)
 - [x] **D1-4** product decisions resolved (see §2) — locked 2026-05-16
 - [ ] **D1-5** `/security-review` — cumulative diff for PRs #382 + #383 → report into `docs/quality/` — *owner:*
 
