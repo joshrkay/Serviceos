@@ -153,16 +153,23 @@ export class PgProposalExecutionRepository
     });
   }
 
+  /**
+   * findByIdempotencyKey — returns the latest succeeded execution
+   * matching (tenant_id, idempotency_key), or null.
+   *
+   * Indexing: the partial unique index proposal_executions_tenant_idempotency_uniq
+   * (migration 099, on (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL)
+   * narrows the WHERE clause to at most one row. The status = 'succeeded' predicate
+   * is then applied as a heap-level filter on that single row. The index's primary
+   * job is uniqueness enforcement on insert; this lookup is a secondary beneficiary.
+   *
+   * Status filter: only 'succeeded' rows satisfy the idempotency contract.
+   * A 'failed' or 'undone' prior execution does not block a retry.
+   */
   async findByIdempotencyKey(
     tenantId: string,
     idempotencyKey: string,
   ): Promise<ProposalExecution | null> {
-    // Indexed by proposal_executions_tenant_idempotency_uniq (partial
-    // unique index on (tenant_id, idempotency_key) WHERE idempotency_key
-    // IS NOT NULL, migration 099). The status='succeeded' filter is the
-    // contract — failed / undone rows do not block a retry. tenant_id
-    // explicit for defense-in-depth + index utilization, matching the
-    // rest of this repo's read methods.
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query<ProposalExecutionRow>(
         `SELECT *

@@ -70,6 +70,11 @@ export interface ProposalExecutionRepository {
    *
    * Only rows with status='succeeded' satisfy the guard — a failed or
    * undone execution does not block a retry.
+   *
+   * Callers must supply idempotency keys that are unique per tenant, not
+   * merely per proposal — this lookup is not scoped by `proposalId`, so
+   * two different proposals sharing the same key would be ambiguous (the
+   * latest wins).
    */
   findByIdempotencyKey(
     tenantId: string,

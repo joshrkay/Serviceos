@@ -85,6 +85,21 @@ describe('PgProposalExecutionRepository.findByIdempotencyKey (§11 H1)', () => {
     const result = await repo.findByIdempotencyKey(tenant.tenantId, 'k-failed-only');
     expect(result).toBeNull();
   });
+
+  it('ignores undone executions (only returns succeeded)', async () => {
+    const tenant = await createTestTenant(pool);
+    const proposalId = await createProposal(pool, tenant.tenantId, 'prop-undone-only');
+    await repo.recordExecution({
+      tenantId: tenant.tenantId,
+      proposalId,
+      executedPayload: {},
+      executedBy: tenant.userId,
+      status: 'undone',
+      idempotencyKey: 'k-undone-only',
+    });
+    const result = await repo.findByIdempotencyKey(tenant.tenantId, 'k-undone-only');
+    expect(result).toBeNull();
+  });
 });
 
 /**
