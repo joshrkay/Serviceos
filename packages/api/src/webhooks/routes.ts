@@ -810,22 +810,40 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       // mirror Connect onboarding state onto the tenant's cached
       // columns. Stripe sends these out-of-band of any user request,
       // so the webhook is the only place we learn that KYC completed.
+      //
+      // D2-2: we now pass `requirements.disabled_reason` through to
+      // the service so it can distinguish 'restricted' (Stripe paused
+      // them — must contact support) from 'pending' (KYC still in
+      // progress). The boolean `deleted` flag short-circuits to
+      // 'disconnected' for accounts removed upstream.
       if (deps.connectService && event.type === 'account.updated') {
         const account = event.data.object as {
           id?: string;
+          deleted?: boolean;
           charges_enabled?: boolean;
           payouts_enabled?: boolean;
+          details_submitted?: boolean;
+          requirements?: {
+            disabled_reason?: string | null;
+            currently_due?: string[] | null;
+          } | null;
         };
         if (account.id) {
+          const disabledReason = account.requirements?.disabled_reason ?? null;
           const result = await deps.connectService.applyAccountUpdated({
             accountId: account.id,
             chargesEnabled: Boolean(account.charges_enabled),
             payoutsEnabled: Boolean(account.payouts_enabled),
+            detailsSubmitted: Boolean(account.details_submitted),
+            disabledReason,
+            deleted: Boolean(account.deleted),
           });
           logger.info('Connect account.updated mirrored', {
             accountId: account.id,
             chargesEnabled: account.charges_enabled,
             payoutsEnabled: account.payouts_enabled,
+            disabledReason,
+            deleted: account.deleted,
             updatedTenants: result.updatedTenants,
           });
         } else {
