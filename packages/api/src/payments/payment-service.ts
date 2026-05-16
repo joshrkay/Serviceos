@@ -37,15 +37,21 @@ export interface RecordRefundResult {
 /**
  * Record a partial (or full) refund against an existing payment.
  *
- * - Looks up the payment under the requested tenant; rejects if not found
- *   or owned by a different tenant.
- * - Validates `refundCents` is a positive integer and that the cumulative
- *   refunded magnitude doesn't exceed the original `amountCents`.
- * - Atomically (best-effort) increments `refundedAmountCents`, sets
- *   `refundedAt` to the supplied timestamp (defaults to `new Date()`) and
- *   stamps `lastRefundStripeId` if provided.
- * - Writes a `payment.refunded` audit event with the refund delta and the
- *   new cumulative total.
+ * - Validates `refundCents` is a positive integer.
+ * - Atomically increments `refundedAmountCents` via
+ *   `paymentRepo.incrementRefundAtomic`: a single UPDATE statement
+ *   with the over-refund guard inside the WHERE clause. Two concurrent
+ *   webhook deliveries for the same payment can therefore never both
+ *   pass validation (D2-4 race fix, addresses gemini-code-assist
+ *   review on PR #384).
+ * - On 0-row result, a diagnostic `findById` distinguishes the two
+ *   failure modes so the caller sees a meaningful error:
+ *     - row exists → `Refund exceeds original payment: …`
+ *     - row missing / cross-tenant → `Payment not found`
+ *   The diagnostic read is only on the error path; the happy path is
+ *   one statement.
+ * - Writes a `payment.refunded` audit event with the refund delta and
+ *   the new cumulative total.
  *
  * Returns the updated payment plus the refund delta and the new total.
  */
@@ -60,34 +66,32 @@ export async function recordRefund(
     throw new ValidationError('refundCents must be a positive integer');
   }
 
-  const payment = await paymentRepo.findById(input.tenantId, input.paymentId);
-  if (!payment) {
-    // Either missing or cross-tenant — surface the same error so probing
-    // can't distinguish "exists in another tenant" from "doesn't exist".
-    throw new ValidationError('Payment not found');
-  }
-
-  const previousRefunded = payment.refundedAmountCents ?? 0;
-  const totalRefundedCents = previousRefunded + input.refundCents;
-  if (totalRefundedCents > payment.amountCents) {
-    throw new ValidationError(
-      `Refund exceeds original payment: ${totalRefundedCents} > ${payment.amountCents}`,
-    );
-  }
-
   const refundedAt = input.refundedAt ?? new Date();
-  const updated = await paymentRepo.update(input.tenantId, input.paymentId, {
-    refundedAmountCents: totalRefundedCents,
+  const updated = await paymentRepo.incrementRefundAtomic(input.tenantId, input.paymentId, {
+    refundCents: input.refundCents,
     refundedAt,
-    lastRefundStripeId: input.stripeRefundId ?? payment.lastRefundStripeId ?? null,
-    updatedAt: new Date(),
+    stripeRefundId: input.stripeRefundId ?? null,
   });
 
   if (!updated) {
-    // Race: the row vanished between findById + update. Surface the same
-    // not-found error so callers don't have to special-case it.
-    throw new ValidationError('Payment not found');
+    // 0 rows came back from the atomic UPDATE. Two reasons that's
+    // possible: the row doesn't exist (or belongs to another tenant),
+    // or the over-refund guard rejected the write. Read once to
+    // distinguish them so the caller gets a meaningful error.
+    const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
+    if (!existing) {
+      // Either missing or cross-tenant — surface the same error so
+      // probing can't distinguish "exists in another tenant" from
+      // "doesn't exist".
+      throw new ValidationError('Payment not found');
+    }
+    const attemptedTotal = (existing.refundedAmountCents ?? 0) + input.refundCents;
+    throw new ValidationError(
+      `Refund exceeds original payment: ${attemptedTotal} > ${existing.amountCents}`,
+    );
   }
+
+  const totalRefundedCents = updated.refundedAmountCents;
 
   if (auditRepo) {
     await auditRepo.create(

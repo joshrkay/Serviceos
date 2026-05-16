@@ -55,12 +55,45 @@ export interface PaymentListOptions {
   to?: Date;
 }
 
+/**
+ * D2-4 — options for the atomic refund increment.
+ *
+ * Used by `incrementRefundAtomic` to apply a refund as a single
+ * compare-and-swap, closing the concurrent-webhook race where two
+ * read-validate-write callers could both pass the over-refund check
+ * against the same `refundedAmountCents` snapshot.
+ */
+export interface IncrementRefundOptions {
+  /** Positive integer cents delta to add to `refundedAmountCents`. */
+  refundCents: number;
+  /** Timestamp to stamp onto `refundedAt`. */
+  refundedAt: Date;
+  /** Stripe `re_*` id of this refund (preserved if null/undefined). */
+  stripeRefundId?: string | null;
+}
+
 export interface PaymentRepository {
   create(payment: Payment): Promise<Payment>;
   findById(tenantId: string, id: string): Promise<Payment | null>;
   findByInvoice(tenantId: string, invoiceId: string): Promise<Payment[]>;
   findByTenant(tenantId: string, options?: PaymentListOptions): Promise<Payment[]>;
   update(tenantId: string, id: string, updates: Partial<Payment>): Promise<Payment | null>;
+  /**
+   * D2-4 — atomically increment `refundedAmountCents` by `opts.refundCents`,
+   * but only if the result stays `<= amountCents`. Returns the updated
+   * payment on success, or `null` if the row does not exist OR the
+   * over-refund guard rejected the write. Callers must distinguish the
+   * two via a follow-up `findById` (see `recordRefund`).
+   *
+   * This is the only safe path under concurrent webhook delivery: a
+   * naive read-then-write lets two callers both pass validation against
+   * the same snapshot and then both UPDATE, over-refunding by up to 2x.
+   */
+  incrementRefundAtomic(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions,
+  ): Promise<Payment | null>;
 }
 
 export function validatePaymentInput(input: RecordPaymentInput): string[] {
@@ -192,6 +225,36 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     const p = this.payments.get(id);
     if (!p || p.tenantId !== tenantId) return null;
     const updated = { ...p, ...updates };
+    this.payments.set(id, updated);
+    return { ...updated };
+  }
+
+  /**
+   * D2-4 — mirror of the pg compare-and-swap. We yield to the microtask
+   * queue once before reading + writing so that two `Promise.all`
+   * callers actually interleave under the in-memory repo (otherwise
+   * Node's single-threaded sync `Map` ops would serialize trivially and
+   * the test couldn't observe the race). The read+check+write block
+   * itself runs synchronously, which matches the atomicity of the
+   * Postgres `UPDATE ... WHERE ... RETURNING` statement.
+   */
+  async incrementRefundAtomic(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions,
+  ): Promise<Payment | null> {
+    await Promise.resolve();
+    const p = this.payments.get(id);
+    if (!p || p.tenantId !== tenantId) return null;
+    const next = (p.refundedAmountCents ?? 0) + opts.refundCents;
+    if (next > p.amountCents) return null;
+    const updated: Payment = {
+      ...p,
+      refundedAmountCents: next,
+      refundedAt: opts.refundedAt,
+      lastRefundStripeId: opts.stripeRefundId ?? p.lastRefundStripeId ?? null,
+      updatedAt: new Date(),
+    };
     this.payments.set(id, updated);
     return { ...updated };
   }

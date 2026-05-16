@@ -1,6 +1,13 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { Payment, PaymentRepository, PaymentListOptions, PaymentMethod, PaymentStatus } from './payment';
+import {
+  Payment,
+  PaymentRepository,
+  PaymentListOptions,
+  PaymentMethod,
+  PaymentStatus,
+  IncrementRefundOptions,
+} from './payment';
 
 export class PgPaymentRepository extends PgBaseRepository implements PaymentRepository {
   constructor(pool: Pool) {
@@ -148,6 +155,43 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
         values,
       );
 
+      if (rows.length === 0) return null;
+      return this.mapRowToPayment(rows[0]);
+    });
+  }
+
+  /**
+   * D2-4 — atomic compare-and-swap refund increment. A single UPDATE
+   * statement performs the over-refund check inside the WHERE clause,
+   * so two concurrent webhook deliveries for the same payment can never
+   * both succeed: whichever statement commits second sees the new
+   * `refunded_amount_cents` and the predicate fails, returning 0 rows.
+   *
+   * `tenant_id` is included in the WHERE for defense-in-depth alongside
+   * the RLS policy on `payments` — a misconfigured session GUC must not
+   * silently fall back to "no rows" without the explicit guard.
+   *
+   * Returns `null` on 0 rows (either not-found OR would over-refund);
+   * the service distinguishes the two via a follow-up `findById`.
+   */
+  async incrementRefundAtomic(
+    tenantId: string,
+    id: string,
+    opts: IncrementRefundOptions,
+  ): Promise<Payment | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `UPDATE payments
+         SET refunded_amount_cents = refunded_amount_cents + $3,
+             refunded_at = $4,
+             last_refund_stripe_id = COALESCE($5, last_refund_stripe_id),
+             updated_at = now()
+         WHERE tenant_id = $1
+           AND id = $2
+           AND refunded_amount_cents + $3 <= amount_cents
+         RETURNING *`,
+        [tenantId, id, opts.refundCents, opts.refundedAt, opts.stripeRefundId ?? null],
+      );
       if (rows.length === 0) return null;
       return this.mapRowToPayment(rows[0]);
     });
