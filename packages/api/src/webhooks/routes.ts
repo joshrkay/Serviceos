@@ -6,6 +6,7 @@ import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { recordRefund } from '../payments/payment-service';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
 import { PendingInvitationRepository } from '../users/pending-invitation';
@@ -803,6 +804,105 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('customer.subscription.* missing fields', {
             eventId: event.id, type: event.type,
           });
+        }
+      }
+
+      // D2-4 — partial-refund tracking. Stripe fires `charge.refunded`
+      // each time a refund is issued (including partials). The event
+      // payload is a Charge with `refunds.data[]`; the MOST RECENT
+      // refund is data[0] (Stripe orders newest-first). We persist the
+      // refund magnitude onto the original payment row via the
+      // recordRefund() service, which enforces the over-refund guard
+      // and emits the `payment.refunded` audit event.
+      //
+      // Payment lookup precedence:
+      //   1. metadata.payment_id on the refund (set by our checkout flow)
+      //   2. metadata.payment_id on the parent charge
+      //   3. metadata.tenant_id + metadata.payment_id combinations
+      //
+      // Without an explicit payment_id metadata we can't safely resolve
+      // the internal payment row (the providerReference today is a
+      // generic literal "stripe_checkout", not the payment_intent id);
+      // we log + skip rather than guess and mis-credit a refund.
+      if (event.type === 'charge.refunded') {
+        const charge = event.data.object as {
+          id?: string;
+          payment_intent?: string;
+          metadata?: { tenant_id?: string; payment_id?: string };
+          refunds?: {
+            data?: Array<{
+              id?: string;
+              amount?: number;
+              created?: number;
+              metadata?: { tenant_id?: string; payment_id?: string };
+            }>;
+          };
+        };
+
+        if (!deps.paymentRepo) {
+          logger.error('Payment repo not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Refund processing not configured' });
+        }
+
+        const refund = charge.refunds?.data?.[0];
+        if (!refund || !refund.amount || refund.amount <= 0) {
+          logger.warn('charge.refunded missing or zero refund amount', {
+            eventId: event.id, chargeId: charge.id,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        const tenantId =
+          refund.metadata?.tenant_id ?? charge.metadata?.tenant_id;
+        const paymentId =
+          refund.metadata?.payment_id ?? charge.metadata?.payment_id;
+
+        if (!tenantId || !paymentId) {
+          logger.warn('charge.refunded missing tenant_id/payment_id metadata — cannot resolve payment', {
+            eventId: event.id, chargeId: charge.id, refundId: refund.id,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        // Stripe's `created` is a unix-seconds epoch; convert to JS Date.
+        const refundedAt = refund.created
+          ? new Date(refund.created * 1000)
+          : new Date();
+
+        try {
+          const result = await recordRefund(
+            {
+              tenantId,
+              paymentId,
+              refundCents: refund.amount,
+              stripeRefundId: refund.id ?? null,
+              refundedAt,
+              actorId: 'system:stripe_webhook',
+              actorRole: 'system',
+            },
+            deps.paymentRepo,
+            deps.auditRepo,
+          );
+          logger.info('Stripe refund recorded', {
+            tenantId, paymentId,
+            refundCents: result.refundCents,
+            totalRefundedCents: result.totalRefundedCents,
+            refundId: refund.id,
+          });
+        } catch (refundErr) {
+          if (refundErr instanceof ValidationError) {
+            // Over-refund / missing payment is a data condition the
+            // webhook can't fix by retrying; log + ack to stop Stripe
+            // from hammering us. Manual reconciliation required.
+            logger.warn('charge.refunded validation failed; skipping', {
+              tenantId, paymentId, refundId: refund.id,
+              error: refundErr.message,
+            });
+          } else {
+            throw refundErr;
+          }
         }
       }
 

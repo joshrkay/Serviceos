@@ -13,8 +13,9 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
         `INSERT INTO payments (
           id, tenant_id, invoice_id, amount_cents, status,
           payment_method, reference_number, notes,
-          paid_at, created_by, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          paid_at, created_by, created_at, updated_at,
+          refunded_amount_cents, refunded_at, last_refund_stripe_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
         [
           payment.id,
           payment.tenantId,
@@ -28,6 +29,9 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
           payment.processedBy,
           payment.createdAt,
           payment.updatedAt,
+          payment.refundedAmountCents ?? 0,
+          payment.refundedAt ?? null,
+          payment.lastRefundStripeId ?? null,
         ],
       );
 
@@ -119,6 +123,18 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
         setClauses.push(`updated_at = $${paramIndex++}`);
         values.push(updates.updatedAt);
       }
+      if (updates.refundedAmountCents !== undefined) {
+        setClauses.push(`refunded_amount_cents = $${paramIndex++}`);
+        values.push(updates.refundedAmountCents);
+      }
+      if (updates.refundedAt !== undefined) {
+        setClauses.push(`refunded_at = $${paramIndex++}`);
+        values.push(updates.refundedAt);
+      }
+      if (updates.lastRefundStripeId !== undefined) {
+        setClauses.push(`last_refund_stripe_id = $${paramIndex++}`);
+        values.push(updates.lastRefundStripeId);
+      }
 
       if (setClauses.length === 0) {
         return this.findById(tenantId, id);
@@ -151,6 +167,13 @@ export class PgPaymentRepository extends PgBaseRepository implements PaymentRepo
       processedBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
+      // D2-4 — refund tracking columns added in migration 100. Older
+      // payment rows written before the migration ran will have the
+      // DB default (0/NULL/NULL), so the coalesce + Number() defends
+      // against undefined when a stale test fixture is read back.
+      refundedAmountCents: row.refunded_amount_cents != null ? Number(row.refunded_amount_cents) : 0,
+      refundedAt: row.refunded_at ? new Date(row.refunded_at) : null,
+      lastRefundStripeId: row.last_refund_stripe_id ?? null,
     };
   }
 }

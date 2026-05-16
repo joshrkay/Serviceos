@@ -19,6 +19,22 @@ export interface Payment {
   processedBy: string;
   createdAt: Date;
   updatedAt: Date;
+  /**
+   * D2-4 — cumulative refunded magnitude on this payment. A refund is
+   * NOT a status flip; the original row keeps its full `amountCents`
+   * and this column accumulates each partial. Invariant enforced by
+   * `recordRefund`: `refundedAmountCents <= amountCents`.
+   *
+   * Default 0 (no refund). Use `recordRefund(...)` in
+   * `packages/api/src/payments/payment-service.ts` to mutate this
+   * field — direct writes bypass the over-refund guard and the
+   * audit-event emission.
+   */
+  refundedAmountCents: number;
+  /** Timestamp of the most recent partial refund, or null if none. */
+  refundedAt: Date | null;
+  /** Stripe `re_*` id of the most recent refund, or null. */
+  lastRefundStripeId: string | null;
 }
 
 export interface RecordPaymentInput {
@@ -95,6 +111,9 @@ export async function recordPayment(
     processedBy: input.processedBy,
     createdAt: new Date(),
     updatedAt: new Date(),
+    refundedAmountCents: 0,
+    refundedAt: null,
+    lastRefundStripeId: null,
   };
 
   await paymentRepo.create(payment);
