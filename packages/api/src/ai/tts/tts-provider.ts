@@ -1,3 +1,5 @@
+import { ElevenLabsStreamConnection } from './elevenlabs-stream';
+
 /**
  * Text-to-speech provider interface for hands-free voice readback.
  *
@@ -161,6 +163,17 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       contentType: 'audio/mpeg',
       provider: 'elevenlabs',
     };
+  }
+
+  synthesizeStream(input: TtsSynthesizeStreamInput): AsyncIterable<TtsStreamChunk> {
+    const modelId =
+      input.language === 'es' ? 'eleven_multilingual_v2' : this.modelId;
+    const conn = new ElevenLabsStreamConnection({
+      apiKey: this.apiKey,
+      voiceId: this.voiceId,
+      modelId,
+    });
+    return conn.synthesize(input);
   }
 }
 
