@@ -23,6 +23,15 @@ import { SendService } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
+import { JobRepository } from '../jobs/job';
+import { InvoiceRepository } from '../invoices/invoice';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { createLogger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'estimates-route',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 /**
  * Optional AI dependencies. When provided, mounts POST /suggest, which
@@ -42,9 +51,24 @@ export function createEstimateRouter(
   auditRepo: AuditRepository,
   ownership: TenantOwnership,
   sendService?: SendService,
-  aiDeps?: EstimateAIDeps
+  aiDeps?: EstimateAIDeps,
+  // §6 Time-to-Cash. Optional so legacy harnesses still build; the
+  // money-state rollup fires only when both repos are wired.
+  moneyStateDeps?: { jobRepo: JobRepository; invoiceRepo: InvoiceRepository },
 ): Router {
   const router = Router();
+
+  // §6 Time-to-Cash. estimateRepo + auditRepo are already in scope;
+  // the caller supplies the job + invoice repos.
+  const refreshDeps: RefreshJobMoneyStateDeps | undefined = moneyStateDeps
+    ? {
+        jobRepo: moneyStateDeps.jobRepo,
+        estimateRepo,
+        invoiceRepo: moneyStateDeps.invoiceRepo,
+        auditRepo,
+        logger,
+      }
+    : undefined;
 
   router.post(
     '/',
@@ -213,7 +237,13 @@ export function createEstimateRouter(
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'status is required' });
           return;
         }
-        const result = await transitionEstimateStatus(req.auth!.tenantId, req.params.id, status, estimateRepo);
+        const result = await transitionEstimateStatus(
+          req.auth!.tenantId,
+          req.params.id,
+          status,
+          estimateRepo,
+          refreshDeps,
+        );
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
           return;
@@ -343,6 +373,20 @@ export function createEstimateRouter(
           estimateId: req.params.id,
           ...parsed.data,
         });
+        // §6 Time-to-Cash. sendEstimate transitions the estimate to
+        // 'sent' inside SendService (not via transitionEstimateStatus),
+        // so the rollup is triggered explicitly here. Best-effort.
+        if (refreshDeps) {
+          const sent = await estimateRepo.findById(req.auth!.tenantId, req.params.id);
+          if (sent) {
+            await refreshJobMoneyStateSafe(
+              req.auth!.tenantId,
+              sent.jobId,
+              req.auth!.userId,
+              refreshDeps,
+            );
+          }
+        }
         res.status(202).json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

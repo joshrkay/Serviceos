@@ -152,6 +152,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['092_voice_session_transcript', 'f06ebad750ef6b1a8540d27aa14516f6db350b6debda0ec5cc444ad3a6e37f48'],
   ['093_users_deleted_at', '7d2ed611ca7751641c8cff049b55617e4af203b43257528e7c46c15bd80c127f'],
   ['094_add_held_appointment_fields', 'e71d08dc59d35a7c70c245572de551d7a4f48d4b7a5fcfd9164d39705a6f6607'],
+  ['095_jobs_money_state', 'c5e881fafd5d46f9f6185bf76c6e5c321e48ff46679608df2db33548528972d3'],
   ['096_create_expenses', '66dfd938628d33c4e65f25037c59d52fbed2848fa43123a94fb92f59b6d1a73e'],
 ];
 

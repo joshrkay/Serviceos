@@ -2500,6 +2500,19 @@ export const MIGRATIONS = {
       ON appointments(tenant_id, hold_expiry_at)
       WHERE hold_pending_approval = true;
   `,
+  '095_jobs_money_state': `
+    -- §6 Time-to-Cash. Denormalized money-state rollup for each job:
+    -- no_estimate -> estimate_sent -> estimate_accepted -> invoiced ->
+    -- paid, with overdue as an escalation of invoiced. Maintained by
+    -- refreshJobMoneyState (app layer) on every estimate/invoice/payment
+    -- mutation and by the overdue-invoice sweep. Idempotent: NOT NULL
+    -- DEFAULT so legacy rows backfill to 'no_estimate'. The index serves
+    -- the §8 money dashboard's per-state rollups.
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS money_state TEXT NOT NULL DEFAULT 'no_estimate';
+    CREATE INDEX IF NOT EXISTS idx_jobs_money_state
+      ON jobs(tenant_id, money_state);
+  `,
   '096_create_expenses': `
     CREATE TABLE IF NOT EXISTS expenses (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
