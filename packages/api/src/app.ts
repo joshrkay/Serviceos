@@ -100,6 +100,7 @@ import {
 import { PgMoneyDashboardRepository } from './reports/pg-money-dashboard';
 import { createFeedbackResponsesRouter } from './routes/feedback';
 import { createInteractionsRouter } from './routes/interactions';
+import { initSentry, setSentryClient } from './monitoring/sentry';
 
 // In-memory repositories (fallback for dev without DATABASE_URL)
 import { InMemoryCustomerRepository } from './customers/customer';
@@ -419,6 +420,19 @@ class InMemoryWebhookEventRepository {
 }
 
 export function createApp(): express.Express {
+  // §11 H3: Initialize Sentry FIRST so any error thrown during startup
+  // or in handler construction below is captured. initSentry() is a no-op
+  // when SENTRY_DSN is unset (dev/test), so this is safe in every env.
+  // The instrument() wrappers on the four critical paths read the registered
+  // client via getSentryClient() — without setSentryClient() they fall back
+  // to the no-op client and exceptions are silently swallowed by the monitor.
+  const sentryClient = initSentry({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    release: process.env.GIT_SHA ?? process.env.RAILWAY_GIT_COMMIT_SHA,
+  });
+  setSentryClient(sentryClient);
+
   const app = express();
 
   // Behind Railway / Cloudflare / any reverse proxy: trust the immediate
