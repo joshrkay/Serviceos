@@ -1006,6 +1006,132 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         }
       }
 
+      // Codex P1 (PR #384) — `charge.refund.updated` handler.
+      //
+      // Stripe fires `charge.refund.updated` for refund status
+      // transitions (e.g. ACH/bank-transfer `pending -> succeeded`).
+      // It does NOT re-fire `charge.refunded`, so without this
+      // handler any refund that started non-`succeeded` (deferred
+      // above) would never be recorded — revenue/tax stays
+      // permanently understated.
+      //
+      // The payload here is the Refund object directly, not a Charge
+      // with a nested refunds[]. Tenant resolution prefers metadata
+      // (rare — set only by manual API refunds), then falls back to a
+      // cross-tenant lookup by payment_intent because the event
+      // payload doesn't carry the parent charge's metadata.tenant_id.
+      //
+      // Per-refund idempotency is in recordRefund() itself: when
+      // payment.lastRefundStripeId === refund.id, recordRefund
+      // short-circuits — so receiving the same refund via both
+      // charge.refunded AND charge.refund.updated does NOT double-count.
+      if (event.type === 'charge.refund.updated') {
+        const refund = event.data.object as {
+          id?: string;
+          amount?: number;
+          created?: number;
+          status?: string;
+          payment_intent?: string | { id?: string };
+          metadata?: { tenant_id?: string; payment_id?: string };
+        };
+
+        if (!deps.paymentRepo) {
+          logger.error('Payment repo not wired to Stripe webhook handler');
+          return res.status(500).json({ error: 'Refund processing not configured' });
+        }
+
+        // Only react to terminal-success transitions. pending/failed/canceled
+        // need no state change on our end (the original charge.refunded
+        // either deferred them or never recorded them).
+        if (refund.status !== 'succeeded') {
+          logger.info('charge.refund.updated with non-succeeded status — skipping', {
+            eventId: event.id, refundId: refund.id, refundStatus: refund.status,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        if (!refund.amount || refund.amount <= 0) {
+          logger.warn('charge.refund.updated missing or zero refund amount', {
+            eventId: event.id, refundId: refund.id,
+          });
+          await webhookRepo.updateStatus(event.id, 'processed');
+          return res.status(200).json({ received: true, skipped: true });
+        }
+
+        // Tenant resolution: metadata first, then cross-tenant lookup by
+        // payment_intent -> reference_number.
+        let tenantId = refund.metadata?.tenant_id;
+        let paymentId = refund.metadata?.payment_id;
+
+        if (!tenantId || !paymentId) {
+          const pi = refund.payment_intent;
+          const piId =
+            typeof pi === 'string'
+              ? pi
+              : (typeof pi === 'object' && pi !== null && typeof pi.id === 'string')
+                ? pi.id
+                : undefined;
+          if (piId) {
+            const found = await deps.paymentRepo.findByProviderReferenceCrossTenant(piId);
+            if (found) {
+              tenantId = found.tenantId;
+              paymentId = found.id;
+            }
+          }
+        }
+
+        if (!tenantId || !paymentId) {
+          logger.warn('charge.refund.updated cannot resolve payment — letting Stripe retry', {
+            eventId: event.id, refundId: refund.id,
+          });
+          // Throw so the outer catch returns 500 -> Stripe retries.
+          // findByProviderReferenceCrossTenant may miss because the
+          // checkout.session.completed payment row hasn't been written
+          // yet (out-of-order delivery).
+          throw new NotFoundError('Payment', refund.id ?? 'unknown');
+        }
+
+        const refundedAt = refund.created ? new Date(refund.created * 1000) : new Date();
+
+        try {
+          const result = await recordRefund(
+            {
+              tenantId,
+              paymentId,
+              refundCents: refund.amount,
+              stripeRefundId: refund.id ?? null,
+              refundedAt,
+              actorId: 'system:stripe_webhook',
+              actorRole: 'system',
+            },
+            deps.paymentRepo,
+            deps.auditRepo,
+          );
+          logger.info('Stripe refund recorded via charge.refund.updated', {
+            tenantId, paymentId,
+            refundCents: result.refundCents,
+            totalRefundedCents: result.totalRefundedCents,
+            refundId: refund.id,
+          });
+        } catch (refundErr) {
+          if (refundErr instanceof NotFoundError) {
+            logger.warn('charge.refund.updated for unknown payment — letting Stripe retry', {
+              tenantId, paymentId, refundId: refund.id,
+            });
+            throw refundErr;
+          }
+          if (refundErr instanceof ValidationError) {
+            logger.warn('charge.refund.updated validation failed; skipping', {
+              tenantId, paymentId, refundId: refund.id,
+              error: refundErr.message,
+            });
+          } else {
+            throw refundErr;
+          }
+        }
+      }
+
       // Tier 4 (Payment methods — PR 1). account.updated events
       // mirror Connect onboarding state onto the tenant's cached
       // columns. Stripe sends these out-of-band of any user request,

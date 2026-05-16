@@ -72,6 +72,26 @@ export async function recordRefund(
     throw new ValidationError('refundCents must be a positive integer');
   }
 
+  // Codex P1 (PR #384) — per-refund idempotency. Same Stripe refund.id
+  // can arrive via both charge.refunded AND charge.refund.updated; the
+  // webhook-event-id dedup doesn't help because the two events have
+  // different ids. Short-circuit here so we don't double-count.
+  //
+  // Limitation: only catches the LATEST refund on this payment. For
+  // multi-partial-refunds where an earlier refund's event re-fires
+  // after a later one has been recorded, we can't deduplicate without
+  // the payment_refunds child table (D2-4a follow-up in TODOS.md).
+  if (input.stripeRefundId) {
+    const existing = await paymentRepo.findById(input.tenantId, input.paymentId);
+    if (existing && existing.lastRefundStripeId === input.stripeRefundId) {
+      return {
+        payment: existing,
+        refundCents: 0,
+        totalRefundedCents: existing.refundedAmountCents ?? 0,
+      };
+    }
+  }
+
   const refundedAt = input.refundedAt ?? new Date();
   const updated = await paymentRepo.incrementRefundAtomic(input.tenantId, input.paymentId, {
     refundCents: input.refundCents,
