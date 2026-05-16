@@ -1387,7 +1387,10 @@ export function createApp(): express.Express {
   });
 
   // Public feedback routes are mounted before /api auth middleware.
-  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo));
+  // D2-1d: auditRepo wired so the public feedback submission emits
+  // `feedback_response.submitted` with the synthetic public:<tokenHash>
+  // actor required by CLAUDE.md "all mutations emit audit events".
+  app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo, auditRepo));
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
@@ -1423,6 +1426,9 @@ export function createApp(): express.Express {
     stripeConfig: process.env.STRIPE_SECRET_KEY
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : null,
+    // D2-1d: emit public_estimate.{approved,declined} with the
+    // synthetic public:<tokenHash> actor on every public approve/decline.
+    auditRepo,
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
@@ -1442,6 +1448,9 @@ export function createApp(): express.Express {
       ? { apiKey: process.env.STRIPE_SECRET_KEY }
       : undefined,
     paymentRepo,
+    // D2-1d: emit public_invoice.checkout_created on first link mint.
+    // Subsequent idempotent calls (cached URL) DO NOT re-emit.
+    auditRepo,
     connectAccountResolver: connectService
       ? {
           resolveTenantConnectAccount: async (tenantId: string) => {
@@ -1541,6 +1550,11 @@ export function createApp(): express.Express {
     // separate (googleApiUrl). 5173 is the Vite dev default; matches
     // publicBaseUrl elsewhere in this file.
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
+    // D2-1d: emit calendar_integration.{connected,disconnected,
+    // callback_consumed} for the per-user Google OAuth lifecycle. The
+    // callback uses `system:google-oauth-callback` because there is no
+    // Clerk session in flight when Google redirects the browser back.
+    auditRepo,
   };
   app.use(
     '/api/calendar-integrations',
@@ -2019,7 +2033,9 @@ export function createApp(): express.Express {
   // the link points at this same deployment.
   app.use(
     '/api/portal-sessions',
-    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo }),
+    // D2-1d: portal tokens are bearer credentials; both mint and
+    // revoke emit portal_session.{created,revoked} via auditRepo.
+    createPortalRouter({ portalRepo: portalSessionRepo, customerRepo, auditRepo }),
   );
   app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));

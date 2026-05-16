@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { toErrorResponse, ValidationError, NotFoundError } from '../shared/errors';
+import { extractIp } from '../shared/extract-ip';
 import {
   CalendarIntegrationRepository,
   OAuthStateRepository,
@@ -13,6 +14,7 @@ import {
   exchangeAuthorizationCode,
 } from '../integrations/google-calendar';
 import { CalendarSyncService } from '../integrations/calendar-sync';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 /**
  * Tier 4 (Calendar sync — PR 1). Per-user Google Calendar OAuth
@@ -44,6 +46,12 @@ export interface CalendarIntegrationsRouteDeps {
    * calendar. Optional so legacy harnesses still build the router.
    */
   syncService?: CalendarSyncService;
+  /**
+   * D2-1d — audit logging for the calendar OAuth lifecycle
+   * (connect intent, callback consume, disconnect). Optional so older
+   * harnesses still build.
+   */
+  auditRepo?: AuditRepository;
 }
 
 /**
@@ -105,7 +113,7 @@ export function createCalendarOAuthCallbackRouter(
         deps.googleFetch ?? fetch,
       );
 
-      await deps.integrationRepo.upsert({
+      const upserted = await deps.integrationRepo.upsert({
         tenantId: consumed.tenantId,
         userId: consumed.userId,
         provider: 'google',
@@ -114,6 +122,30 @@ export function createCalendarOAuthCallbackRouter(
         accessTokenExpiresAt: tokens.expiresAt,
         externalAccountEmail: tokens.email,
       });
+
+      if (deps.auditRepo) {
+        // D2-1d — the callback has no Clerk session, so the actor falls
+        // back to the documented `system:google-oauth-callback` sentinel.
+        // The originating user is recorded in metadata so ops can still
+        // attribute the connection back to the tenant operator.
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: consumed.tenantId,
+            actorId: `system:google-oauth-callback`,
+            actorRole: 'system',
+            eventType: 'calendar_integration.callback_consumed',
+            entityType: 'calendar_integration',
+            entityId: upserted.id,
+            metadata: {
+              provider: 'google',
+              originatingUserId: consumed.userId,
+              externalAccountEmail: upserted.externalAccountEmail,
+              ipAddress: extractIp(req),
+              userAgent: req.headers['user-agent'],
+            },
+          }),
+        );
+      }
 
       // Default redirect to Settings; honor a custom redirectAfter
       // ONLY when it's a same-origin relative path. See
@@ -199,6 +231,29 @@ export function createCalendarIntegrationsRouter(
           redirectAfter,
         });
         const url = buildGoogleAuthUrl(deps.googleConfig, stateId);
+
+        if (deps.auditRepo) {
+          // D2-1d — operator opted into the OAuth flow. The actor is
+          // the Clerk-authenticated user; the row's entity id is the
+          // oauth_state nonce so callback_consumed can be correlated.
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'calendar_integration.connected',
+              entityType: 'oauth_state',
+              entityId: stateId,
+              metadata: {
+                provider: 'google',
+                redirectAfter,
+                ipAddress: extractIp(req),
+                userAgent: req.headers['user-agent'],
+              },
+            }),
+          );
+        }
+
         res.json({ url });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -221,6 +276,28 @@ export function createCalendarIntegrationsRouter(
         if (!ok) {
           throw new NotFoundError('Calendar integration', 'google');
         }
+
+        if (deps.auditRepo) {
+          // D2-1d — disconnect is a credential-invalidation event. The
+          // entity id falls back to the (tenant,user,provider) tuple
+          // because revoke() returns only a boolean.
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId: req.auth!.tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'calendar_integration.disconnected',
+              entityType: 'calendar_integration',
+              entityId: `${req.auth!.tenantId}:${req.auth!.userId}:google`,
+              metadata: {
+                provider: 'google',
+                ipAddress: extractIp(req),
+                userAgent: req.headers['user-agent'],
+              },
+            }),
+          );
+        }
+
         res.json({ revoked: true });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
