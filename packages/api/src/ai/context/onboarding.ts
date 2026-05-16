@@ -18,6 +18,7 @@ export function buildOnboardingContext(
   const verticalTaxonomy: Record<VerticalType, string[]> = {
     hvac: getServiceCategories('hvac').map(String),
     plumbing: getServiceCategories('plumbing').map(String),
+    electrical: getServiceCategories('electrical').map(String),
   };
 
   return {

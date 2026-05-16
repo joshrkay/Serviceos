@@ -9,6 +9,7 @@ import { leads } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
+import { TimeGivenBackCard } from './TimeGivenBackCard';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -299,6 +300,9 @@ export function HomePage() {
             ))}
           </div>
         </div>
+
+        {/* ── Time given back ── */}
+        <TimeGivenBackCard />
 
         {/* ── Two-column layout ── */}
         <div className="flex flex-col md:grid md:grid-cols-[1fr_320px] md:items-start divide-y md:divide-y-0 md:divide-x divide-slate-100">

@@ -181,8 +181,34 @@ const HVAC_OBJECTION_SCRIPTS: readonly ObjectionScript[] = [
   },
 ];
 
+const HVAC_TRAINING_ASSETS = [
+  {
+    assetKind: 'emergency_rule',
+    title: 'No heat extreme weather escalation',
+    scrubbedText:
+      'If the caller has no heat during freezing weather, treat the call as urgent and escalate to the on-call dispatcher.',
+    labels: {
+      intent: 'emergency_dispatch',
+      urgencyTier: 'emergency',
+      expectedNextAction: 'escalate_to_oncall',
+      shouldEscalate: true,
+    },
+    provenance: { source: 'synthetic_default', sourceVersion: '2026-05-15' },
+  },
+  {
+    assetKind: 'eval_scenario',
+    title: 'Heating versus cooling disambiguation',
+    scrubbedText:
+      'When a caller says the system is not working, ask whether the issue is heating, cooling, or airflow before scheduling.',
+    labels: {
+      expectedNextQuestion: 'Is this for heating, cooling, or airflow?',
+    },
+    provenance: { source: 'synthetic_default', sourceVersion: '2026-05-15' },
+  },
+];
+
 export function createHvacPack(): VerticalPack {
-  return createVerticalPack(
+  const pack = createVerticalPack(
     'hvac',
     'HVAC Professional',
     '1.0.0',
@@ -192,6 +218,12 @@ export function createHvacPack(): VerticalPack {
     HVAC_INTAKE_QUESTIONS,
     HVAC_OBJECTION_SCRIPTS
   );
+  pack.metadata = {
+    ...pack.metadata,
+    training_tier: 'first_class',
+    training_assets: HVAC_TRAINING_ASSETS,
+  };
+  return pack;
 }
 
 export const HVAC_LINE_ITEM_DEFAULTS = {

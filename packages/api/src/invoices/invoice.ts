@@ -4,6 +4,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
+import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void' | 'canceled';
 
@@ -313,7 +314,8 @@ export async function issueInvoice(
   tenantId: string,
   id: string,
   paymentTermDays: number,
-  repository: InvoiceRepository
+  repository: InvoiceRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -325,19 +327,27 @@ export async function issueInvoice(
   const issuedAt = new Date();
   const dueDate = calculateDueDate(issuedAt, paymentTermDays);
 
-  return repository.update(tenantId, id, {
+  const updated = await repository.update(tenantId, id, {
     status: 'open',
     issuedAt,
     dueDate,
     updatedAt: new Date(),
   });
+
+  // §6 Time-to-Cash. Best-effort job money-state rollup.
+  if (updated && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(tenantId, updated.jobId, 'system', moneyStateDeps);
+  }
+
+  return updated;
 }
 
 export async function transitionInvoiceStatus(
   tenantId: string,
   id: string,
   newStatus: InvoiceStatus,
-  repository: InvoiceRepository
+  repository: InvoiceRepository,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
 ): Promise<Invoice | null> {
   const invoice = await repository.findById(tenantId, id);
   if (!invoice) return null;
@@ -346,7 +356,17 @@ export async function transitionInvoiceStatus(
     throw new ValidationError(`Invalid transition from ${invoice.status} to ${newStatus}`);
   }
 
-  return repository.update(tenantId, id, { status: newStatus, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, id, {
+    status: newStatus,
+    updatedAt: new Date(),
+  });
+
+  // §6 Time-to-Cash. Best-effort job money-state rollup.
+  if (updated && moneyStateDeps) {
+    await refreshJobMoneyStateSafe(tenantId, updated.jobId, 'system', moneyStateDeps);
+  }
+
+  return updated;
 }
 
 export class InMemoryInvoiceRepository implements InvoiceRepository {

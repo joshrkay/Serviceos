@@ -137,12 +137,12 @@ describe('P4-EXT-001 — Business profile extraction from voice transcript', () 
     expect(result.needsClarification).toBe(true);
   });
 
-  it('filters out invalid vertical types from LLM response', async () => {
+  it('accepts electrical as a basic supported vertical from LLM response', async () => {
     provider.setDefaultResponse(JSON.stringify({
       business_name: 'Test Co',
       verticals: [
         { type: 'hvac', confidence: 0.9, source_text: 'AC' },
-        { type: 'electrical', confidence: 0.8, source_text: 'wiring' }, // invalid
+        { type: 'electrical', confidence: 0.8, source_text: 'wiring' },
       ],
       service_descriptions: [],
       confidence_score: 0.8,
@@ -150,7 +150,8 @@ describe('P4-EXT-001 — Business profile extraction from voice transcript', () 
 
     const result = await extractor.extract(makeContext('We do HVAC and electrical'));
 
-    expect(result.data.verticalPacks).toHaveLength(1);
+    expect(result.data.verticalPacks).toHaveLength(2);
     expect(result.data.verticalPacks[0].type).toBe('hvac');
+    expect(result.data.verticalPacks[1].type).toBe('electrical');
   });
 });

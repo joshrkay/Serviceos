@@ -70,6 +70,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // the safe pre-existing flow.
     depositTimingPolicy:
       (row.deposit_timing_policy as 'before_approval' | 'after_approval' | null) ?? undefined,
+    // §9 — migration 098. Owner's hourly rate (integer cents).
+    hourlyRateCents: (row.hourly_rate_cents as number | null) ?? undefined,
     // B1 — migration 088. NULL from DB → undefined in TS (same
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
@@ -203,6 +205,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         depositRequiredAboveCents: 'deposit_required_above_cents',
         // Tier 4 — migration 079.
         depositTimingPolicy: 'deposit_timing_policy',
+        // §9 — migration 098.
+        hourlyRateCents: 'hourly_rate_cents',
         // B1 — migration 088.
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',

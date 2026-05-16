@@ -18,6 +18,8 @@ import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository } from '../../audit/audit';
+import { JobRepository } from '../../jobs/job';
+import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
@@ -207,7 +209,25 @@ export function createExecutionHandlerRegistry(deps?: {
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
+  jobRepo?: JobRepository;
 }): Map<ProposalType, ExecutionHandler> {
+  // §6 Time-to-Cash. Built once; passed to the handlers that call the
+  // widened money-mutation domain functions (recordPayment, issueInvoice).
+  // `logger` is intentionally omitted — the registry has no ambient logger
+  // in scope, so rollup failures from AI-driven payment/invoice paths are
+  // silently swallowed here. Route-layer call sites in Task 5 + Task 6
+  // include a logger; the registry can adopt one when a Logger param is
+  // threaded through createExecutionHandlerRegistry's deps.
+  const moneyStateDeps: RefreshJobMoneyStateDeps | undefined =
+    deps?.jobRepo && deps?.estimateRepo && deps?.invoiceRepo
+      ? {
+          jobRepo: deps.jobRepo,
+          estimateRepo: deps.estimateRepo,
+          invoiceRepo: deps.invoiceRepo,
+          auditRepo: deps.auditRepo,
+        }
+      : undefined;
+
   const handlers: ExecutionHandler[] = [
     new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(),
@@ -225,7 +245,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
-    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo),
+    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo, moneyStateDeps),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
   ];
 
@@ -234,7 +254,7 @@ export function createExecutionHandlerRegistry(deps?: {
   // touch these don't have to provide the dep.
   if (deps?.invoiceRepo) {
     handlers.push(new UpdateInvoiceExecutionHandler(deps.invoiceRepo));
-    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo));
+    handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
   }
   if (deps?.estimateRepo) {
     handlers.push(new UpdateEstimateExecutionHandler(deps.estimateRepo));

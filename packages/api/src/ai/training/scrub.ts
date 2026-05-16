@@ -196,6 +196,13 @@ const DIGIT_RUN_REGEX = /[0-9]{7,}/g;
  */
 const ALL_CAPS_NAME_REGEX = /\b[A-Z]{2,}\s+[A-Z]{2,}\s+[A-Z]{2,}\b/g;
 
+function testRegex(re: RegExp, text: string): boolean {
+  re.lastIndex = 0;
+  const matched = re.test(text);
+  re.lastIndex = 0;
+  return matched;
+}
+
 function detectResidualPii(scrubbed: string): string[] {
   const signals: string[] = [];
 
@@ -204,20 +211,20 @@ function detectResidualPii(scrubbed: string): string[] {
   // bracketed literals.
   const placeholderless = scrubbed.replace(/\[[A-Z_]+\]/g, '');
 
-  if (DIGIT_RUN_REGEX.test(placeholderless)) {
+  if (testRegex(DIGIT_RUN_REGEX, placeholderless)) {
     signals.push('digit_run_ge_7');
   }
-  if (ALL_CAPS_NAME_REGEX.test(placeholderless)) {
+  if (testRegex(ALL_CAPS_NAME_REGEX, placeholderless)) {
     signals.push('all_caps_name_run');
   }
-  if (PHONE_REGEX.test(placeholderless)) {
+  if (testRegex(PHONE_REGEX, placeholderless)) {
     signals.push('residual_phone_match');
   }
-  if (EMAIL_REGEX.test(placeholderless)) {
+  if (testRegex(EMAIL_REGEX, placeholderless)) {
     signals.push('residual_email_match');
   }
   // ADDRESS_REGEX runs after the entity pass — anything caught here is a real residual.
-  if (ADDRESS_REGEX.test(placeholderless)) {
+  if (testRegex(ADDRESS_REGEX, placeholderless)) {
     signals.push('residual_address_match');
   }
 
