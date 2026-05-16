@@ -1,0 +1,52 @@
+import { z } from 'zod';
+
+const TimeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM');
+const DayHours = z.object({ open: TimeOfDay, close: TimeOfDay }).nullable();
+
+export const BusinessHoursSchema = z
+  .object({
+    mon: DayHours.optional(),
+    tue: DayHours.optional(),
+    wed: DayHours.optional(),
+    thu: DayHours.optional(),
+    fri: DayHours.optional(),
+    sat: DayHours.optional(),
+    sun: DayHours.optional(),
+  })
+  .default({});
+
+export const BusinessIdentityInputSchema = z.object({
+  businessName: z.string().min(1).max(120),
+  serviceAreaText: z.string().max(200).optional(),
+  serviceAreaRadius: z.number().int().min(1).max(500).optional(),
+  businessHours: BusinessHoursSchema,
+  jobBufferMinutes: z.number().int().min(0).max(240),
+  hourlyRateCents: z.number().int().min(100).max(100_000),
+});
+export type BusinessIdentityInput = z.infer<typeof BusinessIdentityInputSchema>;
+
+export const PackPickInputSchema = z.object({
+  packId: z.enum(['hvac', 'plumbing']),
+});
+export type PackPickInput = z.infer<typeof PackPickInputSchema>;
+
+export const OnboardingStepIdSchema = z.enum(['signup', 'identity', 'pack', 'phone', 'billing', 'test_call']);
+export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;
+
+export const OnboardingStepStatusSchema = z.enum(['done', 'current', 'pending', 'error', 'skipped']);
+export type OnboardingStepStatus = z.infer<typeof OnboardingStepStatusSchema>;
+
+export const OnboardingStepSchema = z.object({
+  id: OnboardingStepIdSchema,
+  status: OnboardingStepStatusSchema,
+  blockers: z.array(z.string()).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
+
+export const OnboardingStatusResponseSchema = z.object({
+  steps: z.array(OnboardingStepSchema).length(6),
+  currentStep: OnboardingStepIdSchema.nullable(),
+  isComplete: z.boolean(),
+});
+export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;
