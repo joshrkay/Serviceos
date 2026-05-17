@@ -89,7 +89,7 @@ export class CachingGatewayWrapper {
       return this.gateway.complete(request);
     }
 
-    const cacheKey = createCacheKey(request, this.tenantId);
+    const cacheKey = createCacheKey(request, request.tenantId ?? this.tenantId);
     const cached = await this.cacheStore.get(cacheKey);
 
     if (cached) {

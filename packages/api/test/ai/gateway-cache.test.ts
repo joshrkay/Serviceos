@@ -348,6 +348,76 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     expect(await getHits()).toBe(hitsBefore + 1);
   });
 
+  it('isolates cache entries per-request tenantId when constructed with a system-level wrapper', async () => {
+    // Mirrors production wiring: ONE CachingGatewayWrapper with tenantId='system'.
+    // Each request carries its own tenantId on request.tenantId.
+    // Tenant-B's request must NOT get tenant-A's cached response.
+    let callCount = 0;
+
+    const trackingProvider: LLMProvider = {
+      name: 'stub',
+      async complete(req) {
+        callCount++;
+        const tenantId = req.tenantId ?? 'unknown';
+        return {
+          content: `response-for-${tenantId}-call-${callCount}`,
+          model: 'test-model',
+          provider: 'stub',
+          tokenUsage: { input: 10, output: 5, total: 15 },
+          latencyMs: 1,
+        };
+      },
+      async isAvailable() { return true; },
+    };
+
+    const providers = new Map<string, LLMProvider>();
+    providers.set('stub', trackingProvider);
+    const gateway = new LLMGateway(
+      { defaultProvider: 'stub', defaultModel: 'test-model' },
+      providers,
+    );
+
+    const sharedCacheStore = new InMemoryCacheStore();
+    const config = makeCacheConfig({ deterministicTaskTypes: ['intent_classification'] });
+
+    // ONE wrapper with tenantId='system' — mirroring the factory.
+    const systemWrapper = new CachingGatewayWrapper(gateway, sharedCacheStore, config, 'system');
+
+    const identicalMessages = [{ role: 'user' as const, content: 'classify this please' }];
+
+    const req1: LLMRequest = {
+      taskType: 'intent_classification',
+      messages: identicalMessages,
+      model: 'test-model',
+      tenantId: 'tenant-A',
+    };
+
+    const req2: LLMRequest = {
+      taskType: 'intent_classification',
+      messages: identicalMessages,
+      model: 'test-model',
+      tenantId: 'tenant-B',
+    };
+
+    // First call: tenant-A, cache miss — provider called once
+    const resultA1 = await systemWrapper.complete(req1);
+    expect(resultA1.content).toBe('response-for-tenant-A-call-1');
+    expect(resultA1.cached).toBeUndefined();
+    expect(callCount).toBe(1);
+
+    // Second call: tenant-B, MUST be a cache miss — provider called again (not tenant-A's cache)
+    const resultB = await systemWrapper.complete(req2);
+    expect(resultB.content).toBe('response-for-tenant-B-call-2');
+    expect(resultB.cached).toBeUndefined();
+    expect(callCount).toBe(2); // Must be 2, not 1 (cache miss for tenant-B)
+
+    // Third call: tenant-A again — MUST get cached response (no new provider call)
+    const resultA2 = await systemWrapper.complete(req1);
+    expect(resultA2.content).toBe('response-for-tenant-A-call-1'); // cached value
+    expect(resultA2.cached).toBe(true);
+    expect(callCount).toBe(2); // Still 2 — cache hit
+  });
+
   it('non-deterministic task type does NOT write to cache', async () => {
     const stub = new StubProvider('stub');
     stub.setResponse({ content: 'Non-det response' });

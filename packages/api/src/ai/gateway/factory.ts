@@ -1,5 +1,5 @@
 import { LLMGateway, SYSTEM_TENANT_ID } from './gateway';
-import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger, IGateway } from './gateway';
+import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
 import type { EmbeddingProvider } from '../providers/openai-compatible';
 import { MockLLMProvider } from '../providers/mock';
@@ -195,8 +195,14 @@ function maybeBuildCacheWrapper(
       if (redisStore) {
         wrapper.cacheStore = redisStore;
       }
-    }).catch(() => {
-      // Redis unavailable — stay on InMemory silently
+    }).catch((err: unknown) => {
+      // TODO(P2-031): LLMGatewayLogger lacks a .warn() method. Once the logger
+      // interface is extended with warn(), replace this with:
+      //   opts.logger?.warn('Redis cache store failed to connect; staying on in-memory store', { error: ... })
+      // For now, surface the failure via .error() so operators can see it in logs.
+      opts.logger?.error('Redis cache store failed to connect; staying on in-memory store', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     return wrapper as unknown as LLMGateway;

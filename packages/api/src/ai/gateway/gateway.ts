@@ -82,15 +82,6 @@ export interface LLMGatewayLogger {
   error(message: string, meta?: Record<string, unknown>): void;
 }
 
-/**
- * Minimal gateway interface — any object that can serve LLM completions.
- * Both `LLMGateway` and `CachingGatewayWrapper` satisfy this interface.
- * P2-031: added so the factory can return either without breaking downstream callers.
- */
-export interface IGateway {
-  complete(request: LLMRequest): Promise<LLMResponse>;
-}
-
 /** Sentinel tenant ID used when a request carries no tenantId. */
 export const SYSTEM_TENANT_ID = 'system';
 

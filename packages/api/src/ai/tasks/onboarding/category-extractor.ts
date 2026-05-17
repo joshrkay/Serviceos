@@ -85,6 +85,7 @@ export class CategoryExtractor implements OnboardingExtractor<ServiceCategoryExt
           { role: 'user', content: userMessage },
         ],
         responseFormat: 'json',
+        tenantId: context.tenantId,
       });
       parsed = tryParseJson(response.content);
     } catch {
