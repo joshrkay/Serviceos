@@ -174,4 +174,32 @@ describe('RedisCacheStore', () => {
     const result = await store.get('corrupt-key');
     expect(result).toBeNull();
   });
+
+  it('Fix 6 — set is a no-op when ttlMs is 0', async () => {
+    const entry = makeEntry({ ttlMs: 0 });
+    await store.set('zero-ttl', entry);
+    // Nothing should have been written to Redis
+    expect(redis.store.has('zero-ttl')).toBe(false);
+  });
+
+  it('Fix 6 — set is a no-op when ttlMs is negative', async () => {
+    const entry = makeEntry({ ttlMs: -100 });
+    await store.set('neg-ttl', entry);
+    expect(redis.store.has('neg-ttl')).toBe(false);
+  });
+
+  it('Fix 1 — quit() calls redis.quit() for graceful shutdown', async () => {
+    let quitCalled = false;
+    const mockRedisWithQuit = {
+      ...redis,
+      async quit(): Promise<'OK'> {
+        quitCalled = true;
+        return 'OK';
+      },
+    } as unknown as Parameters<typeof makeMockRedis>[0] & typeof redis;
+
+    const storeWithQuit = new RedisCacheStore(mockRedisWithQuit as unknown as import('ioredis').Redis);
+    await storeWithQuit.quit();
+    expect(quitCalled).toBe(true);
+  });
 });

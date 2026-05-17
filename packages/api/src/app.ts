@@ -286,6 +286,7 @@ import {
   createLLMGateway,
   createMockLLMGateway,
   createEmbeddingProvider,
+  shutdownCacheStores,
 } from './ai/gateway/factory';
 import * as gatewayFactory from './ai/gateway/factory';
 import { createAiHealthRouter } from './routes/ai-health';
@@ -2576,6 +2577,9 @@ export function createApp(): express.Express {
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Disconnect Redis cache store(s) before draining the DB pool so Railway
+      // shutdown is not slowed by lingering Redis connections.
+      await shutdownCacheStores();
       if (pool) {
         await Promise.race([
           pool.end(),

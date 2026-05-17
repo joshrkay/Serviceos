@@ -18,6 +18,8 @@ export interface CacheStore {
   get(key: string): Promise<CacheEntry | null>;
   set(key: string, entry: CacheEntry): Promise<void>;
   delete(key: string): Promise<void>;
+  /** Optional — disconnect the underlying store connection (e.g. Redis). */
+  quit?(): Promise<void>;
 }
 
 export interface CacheConfig {
@@ -47,6 +49,10 @@ export class InMemoryCacheStore implements CacheStore {
   }
 
   async set(key: string, entry: CacheEntry): Promise<void> {
+    if (entry.ttlMs <= 0) {
+      // No-op: zero/negative TTL would expire immediately — consistent with RedisCacheStore.
+      return;
+    }
     this.store.set(key, entry);
   }
 
@@ -84,12 +90,14 @@ export class CachingGatewayWrapper {
       this.config.deterministicTaskTypes.includes(request.taskType);
 
     if (!isDeterministic) {
-      this.misses++;
-      gatewayCacheMissesTotal.inc({ taskType: request.taskType });
+      // Non-deterministic tasks bypass the cache entirely and must NOT
+      // contribute to the miss counter (help text: "deterministic tasks not found in cache").
       return this.gateway.complete(request);
     }
 
-    const cacheKey = createCacheKey(request, request.tenantId ?? this.tenantId);
+    // Use || so an empty-string tenantId also falls back to the wrapper's tenantId.
+    const effectiveTenantId = request.tenantId || this.tenantId;
+    const cacheKey = createCacheKey(request, effectiveTenantId);
     const cached = await this.cacheStore.get(cacheKey);
 
     if (cached) {
@@ -101,7 +109,8 @@ export class CachingGatewayWrapper {
         gatewayCacheHitsTotal.inc({ taskType: request.taskType });
 
         // Write AiRun row for cache hit so audit is never blind (best-effort).
-        await this.writeAiRunForCacheHit(request, cached.response);
+        // Fire-and-forget: the function has internal try/catch so a void call is safe.
+        void this.writeAiRunForCacheHit(request, cached.response);
 
         return { ...cached.response, cached: true };
       }

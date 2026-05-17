@@ -26,6 +26,10 @@ export class RedisCacheStore implements CacheStore {
   }
 
   async set(key: string, entry: CacheEntry): Promise<void> {
+    if (entry.ttlMs <= 0) {
+      // No-op: zero/negative TTL would expire immediately or error in Redis.
+      return;
+    }
     try {
       const serialized = JSON.stringify(entry);
       await this.redis.set(key, serialized, 'PX', entry.ttlMs);
@@ -40,6 +44,10 @@ export class RedisCacheStore implements CacheStore {
     } catch {
       // Best-effort — swallow Redis errors silently
     }
+  }
+
+  async quit(): Promise<void> {
+    await this.redis.quit();
   }
 }
 

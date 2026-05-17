@@ -70,6 +70,21 @@ export interface CreateLLMGatewayOptions {
  */
 export let sharedBreakerRegistry: CircuitBreakerRegistry | undefined;
 
+/**
+ * Module-level list of cache stores that need to be disconnected on shutdown.
+ * Populated by maybeBuildCacheWrapper when a Redis store is wired.
+ * Call shutdownCacheStores() in the SIGTERM handler to prevent connection leaks.
+ */
+const _cacheStoresToShutdown: Array<{ quit(): Promise<void> }> = [];
+
+/**
+ * Disconnect all active Redis cache store connections.
+ * Call this from the app's SIGTERM/SIGINT shutdown handler before draining the DB pool.
+ */
+export async function shutdownCacheStores(): Promise<void> {
+  await Promise.allSettled(_cacheStoresToShutdown.map((s) => s.quit()));
+}
+
 export function createLLMGateway(
   config: AppConfig,
   loggerOrOpts?: LLMGatewayLogger | CreateLLMGatewayOptions
@@ -194,12 +209,12 @@ function maybeBuildCacheWrapper(
     createRedisCacheStore(redisUrl).then((redisStore) => {
       if (redisStore) {
         wrapper.cacheStore = redisStore;
+        _cacheStoresToShutdown.push(redisStore);
+        opts.logger?.info('Redis cache store connected — upgraded from in-memory', {});
+      } else {
+        opts.logger?.info('Redis cache store unavailable — staying on in-memory store', {});
       }
     }).catch((err: unknown) => {
-      // TODO(P2-031): LLMGatewayLogger lacks a .warn() method. Once the logger
-      // interface is extended with warn(), replace this with:
-      //   opts.logger?.warn('Redis cache store failed to connect; staying on in-memory store', { error: ... })
-      // For now, surface the failure via .error() so operators can see it in logs.
       opts.logger?.error('Redis cache store failed to connect; staying on in-memory store', {
         error: err instanceof Error ? err.message : String(err),
       });

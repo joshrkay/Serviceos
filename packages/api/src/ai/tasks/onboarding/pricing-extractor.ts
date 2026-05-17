@@ -73,6 +73,7 @@ export class PricingExtractor implements OnboardingExtractor<PricingExtraction> 
           { role: 'user', content: userMessage },
         ],
         responseFormat: 'json',
+        tenantId: context.tenantId,
       });
       parsed = tryParseJson(response.content);
     } catch {
