@@ -1,6 +1,6 @@
 # Phase 7 — Integrations + Beta Hardening: Launch Readiness Gaps
 
-> **7 stories** | Continues from P7-018
+> **8 stories** | Continues from P7-018
 
 ---
 
@@ -228,3 +228,37 @@ npm run load-test -- --env staging
 - [ ] RLS overhead < 10ms per query
 - [ ] No connection pool exhaustion
 - [ ] Dispatch board query < 1s with 200 appointments
+
+---
+
+### P7-026 — Google Business review monitoring + draft response
+
+> **Size:** M | **Layer:** Reputation | **AI Build:** Medium | **Human Review:** Heavy | **Wave:** 2 (Wave-C1)
+
+> **PRD codename:** N-006 (PRD v2 §9)
+> **Day-in-the-life moments:** Mike bad-day 5:00pm (1-star review from Mrs. Donovan after Carlos no-show; system drafts public response + private apology + service credit within the hour).
+
+**Dependencies:** P0-014 (webhook base), P2-034 (SMS dispatcher), P2-002 (proposal contracts), P4-015 (brand voice)
+
+**Allowed files:** `packages/api/src/reputation/**`, `packages/api/src/workers/google-reviews.ts`, `packages/api/src/proposals/execution/review-response-handler.ts`, `packages/api/src/proposals/proposal.ts` (additive `ProposalType` only), `packages/api/src/db/schema.ts`, `packages/shared/src/contracts/review-response-proposal.ts`
+
+**Build prompt:** Poll Google Business Profile API for new reviews on a 15-minute interval per connected tenant. For each new review, classify into `praise` / `specific_complaint` / `vague_complaint` / `wrong_business`. For non-praise reviews, attempt to match the reviewer to an existing customer (name, recent visit date). Draft a public response in the locked brand voice (P4-015) that addresses the specific complaint where possible. If the customer is matched, also draft a private apology SMS or email and propose an optional service credit amount ($25 / $50 / $100 tiers). Create a `review_response_proposal` containing the public draft, private draft, and credit suggestion; route to owner. Owner can approve, edit, or reject each component independently. Service credit issuance is tracked in a `service_credits` table (migration 107) so the 12-month $100 cap is enforced before each draft. **Split into 3 PRs:** (a) poll + model (migrations 105+106, google-business-client, classifier-stub, worker with 429 backoff); (b) classifier + match (real classifier, conservative match, content-level PII redactor); (c) proposal + credit + execution (migration 107, credit-tier with cap, build-proposal, drafts, handler, ProposalType enum addition).
+
+**Review prompt:** Verify polling backs off on Google API limits. Verify customer matching is conservative (flag uncertain matches rather than guess). Verify public response cannot leak private customer data (e.g., addresses, phone numbers) even if the AI is tempted to include them. Verify brand voice is enforced (P4-015). Verify service credit amount is bounded ($100 max in V1 to limit blast radius). Verify the content-level PII redactor is separate from `packages/api/src/logging/redact.ts` (key-pattern infra-redactor).
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P7-026"
+```
+
+**Required tests:**
+- [ ] New review detected within 30 minutes of posting (mocked API)
+- [ ] Classifier accuracy >85% on labeled fixture set
+- [ ] Customer matching — high-confidence match attaches private draft; low-confidence flags as unverified
+- [ ] Public response does not include PII (no address, phone, last name)
+- [ ] Brand voice applied (golden examples)
+- [ ] Credit suggestion capped at $100
+- [ ] Owner can approve public, private, credit independently
+
+**Non-goals:** Yelp, Facebook, Nextdoor monitoring (Wave 3); proactive review-request sending (Wave 3); automatic credit application (always owner-approved).

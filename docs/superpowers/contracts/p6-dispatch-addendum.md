@@ -85,6 +85,81 @@ cd /home/user/Serviceos && \
 
 ---
 
+## P6-028 — Tech "I'm out today" SMS
+
+**Wave:** 6-Wave-C1 (depends on Wave-C blockers B1 = P4-015, B2 = P2-035, B3 = P2-034, B4 = P1-022)
+**Migration numbers reserved:**
+- `103_tech_unavailable_blocks` — PG-backed equivalent of the existing in-memory `availability/unavailable-block.ts`
+- `104_tech_status_today` — daily idempotency key
+
+**Forbidden files:**
+- `packages/api/src/users/**` (P1-022 owns the `mobile_number` column and `findByMobileNumber()`)
+- `packages/api/src/webhooks/routes.ts` (P2-034 owns the inbound-SMS dispatch edit)
+- `packages/api/src/proposals/actions.ts` (P2-035 owns the batch-approve edit)
+- `packages/api/src/ai/prompt-registry.ts` (P4-015 owns the brand-voice prompt registration)
+- `packages/api/src/availability/unavailable-block.ts` (the in-memory implementation stays for tests — extend, do not refactor)
+- `packages/api/src/proposals/contracts/reschedule.ts` (the contract already exists — reuse, do not redefine)
+- `packages/shared/**` (except `packages/shared/src/contracts/tech-status-event.ts` — the one new shared contract)
+- `packages/api/src/notifications/**` (outbound SMS is reused, not modified)
+
+**Allowed files (concrete list):**
+- `packages/api/src/sms/tech-status/keyword-router.ts` (new — registers `OUT|SICK|UNAVAILABLE` with P2-034's dispatcher)
+- `packages/api/src/sms/tech-status/handler.ts` (new — resolve tech, check idempotency, write block, walk appointments, fire proposals)
+- `packages/api/src/sms/tech-status/idempotency.ts` (new — short-circuit on existing `tech_status_today` row)
+- `packages/api/src/sms/tech-status/index.ts` (new — module init: call `registerKeywordHandler`)
+- `packages/api/src/sms/tech-status/**.test.ts` (new)
+- `packages/api/src/scheduling/reschedule/from-tech-out.ts` (new — find remaining appointments, create proposals)
+- `packages/api/src/scheduling/reschedule/customer-message-draft.ts` (new — composes per-proposal SMS via P4-015 composer)
+- `packages/api/src/scheduling/reschedule/**.test.ts` (new)
+- `packages/api/src/availability/pg-unavailable-block.ts` (new — PG-backed implementation; in-memory stays)
+- `packages/api/src/availability/pg-unavailable-block.test.ts` (new)
+- `packages/api/src/db/schema.ts` (modify — add keys 103 + 104)
+- `packages/shared/src/contracts/tech-status-event.ts` (new)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P6-028|tech-status|tech_out|reschedule_from_tech"
+```
+
+**Pre-flight:** all six Wave-C blockers have merged on `main`:
+- P4-015 (brand voice composer)
+- P1-022 (users.mobile_number)
+- P0-037 (LinkableEntityType — not strictly required for this story but Wave-C convention)
+- P2-034 (inbound SMS dispatcher)
+- P2-035 (APPROVE ALL endpoint)
+
+**Risk note:**
+- **Anti-spoofing.** Inbound `OUT` from the OWNER's mobile must not mark Carlos out. The handler resolves the inbound mobile to a user via `findByMobileNumber(tenantId, fromE164)`. If the resolved user's role is not `'technician'`, drop + audit. Do NOT trust the body content for identity.
+- **Tenant-local midnight.** "Today" is the technician's tenant-local date. Use `tenants.timezone` to compute the `local_date` for the idempotency key and the start/end of the `unavailable_blocks` row. Do NOT use server-local time.
+- **Atomic propagation.** Each reschedule proposal is created with `sourceContext.draftSms` already populated. APPROVE ALL via P2-035 then approves each individually — each `approveProposal()` call fires the `execute` handler which sends the customer SMS. The handler must be idempotent so a retry doesn't double-send.
+- **3+ proposal threshold is client-side only.** The backend just creates N proposals; the inbox UI decides when to show APPROVE ALL. Do NOT enforce a server-side threshold.
+- **Midnight clear is implicit.** The daily `tech_status_today` key uses `local_date` as part of the PK. A new day → no row → idempotency passes → status is "fresh". No cron needed.
+
+**Implementation hints:**
+1. Read `packages/api/src/sms/inbound-dispatch.ts` (P2-034) BEFORE writing `keyword-router.ts` — use its `registerKeywordHandler()` API.
+2. The handler resolves tech via `await users.findByMobileNumber(tenantId, fromE164)`; null → audit `tech_status.unverified_mobile` + return `{handled: false, reason: 'unknown_mobile'}` (truthful — Twilio's seen this message; do not return `handled: true` for unknown).
+3. The idempotency check is a `SELECT ... FOR UPDATE` on `tech_status_today (tenant_id, technician_id, local_date)`; if a row exists → return early. Otherwise insert and proceed.
+4. The `unavailable_blocks` row spans today: `start_time = tenant_local_midnight`, `end_time = tenant_local_midnight + 24h`, `reason = body.trim().toLowerCase()`.
+5. Reschedule walk: `appointments.findUpcomingForTechnician(tenantId, technicianId, fromTime: NOW(), toTime: tenant_local_midnight + 24h)`. For each, create a `reschedule_appointment` proposal with `sourceContext.draftSms = await composeBrandVoiceMessage({intent: 'tech_reschedule_customer_sms', context: {customerName, appointmentTime}, maxChars: 160})`.
+6. **Migration 104 body** (final form):
+   ```sql
+   CREATE TABLE tech_status_today (
+     tenant_id UUID NOT NULL REFERENCES tenants(id),
+     technician_id UUID NOT NULL REFERENCES users(id),
+     local_date DATE NOT NULL,
+     status TEXT NOT NULL CHECK (status IN ('out','sick','unavailable')),
+     source_message_sid TEXT NOT NULL,
+     recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+     PRIMARY KEY (tenant_id, technician_id, local_date)
+   );
+   ALTER TABLE tech_status_today ENABLE ROW LEVEL SECURITY;
+   -- standard tenant policy
+   ```
+
+---
+
 ## Universal pre-flight checks
 
 Same as `p0-dispatch-addendum.md` § Universal pre-flight checks. Apply to every Phase 6 story before launching the dispatch agent.
