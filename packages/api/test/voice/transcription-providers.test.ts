@@ -12,6 +12,7 @@ import {
   WhisperClientError,
   WHISPER_MAX_BYTES,
   createWhisperTranscriptionProvider,
+  DeepgramStreamingProvider,
 } from '../../src/voice/transcription-providers';
 
 function audioResponse(ok = true, status = 200, sizeBytes = 1024): Response {
@@ -154,5 +155,37 @@ describe('createWhisperTranscriptionProvider', () => {
     );
     expect(provider).not.toBeInstanceOf(DevNoopTranscriptionProvider);
     expect(warnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('DeepgramStreamingProvider URL builder', () => {
+  const provider = new DeepgramStreamingProvider('test-key');
+
+  it('uses default 600ms endpointing when no override is supplied', () => {
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en');
+    expect(url).toContain('endpointing=600');
+  });
+
+  it('honors a custom endpointing override', () => {
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { endpointingMs: 450 });
+    expect(url).toContain('endpointing=450');
+  });
+
+  it('appends URL-encoded keywords when provided', () => {
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
+    expect(url).toContain('keywords=heat%20pump%3A3,P-trap%3A3');
+  });
+
+  it('omits the keywords parameter when the list is empty', () => {
+    const url = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl('en', { keywords: [] });
+    expect(url).not.toContain('keywords=');
   });
 });
