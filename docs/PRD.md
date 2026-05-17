@@ -39,7 +39,7 @@ read first.
 
 ### The pitch (one sentence)
 
-> **You learned the trade. We run the business.**
+> **You learned the trade. We'll run the business.**
 > AI answers your phone, books your jobs, sends your estimates, and chases
 > your invoices. You approve what matters in 30 seconds a day.
 > Built for the shop with 2 trucks and no office.
