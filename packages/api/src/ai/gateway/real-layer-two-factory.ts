@@ -43,7 +43,7 @@
  */
 import OpenAI from 'openai';
 
-import { LLMGateway } from './gateway';
+import { LLMGateway, SYSTEM_TENANT_ID } from './gateway';
 import type {
   LLMProvider,
   LLMRequest,
@@ -135,7 +135,7 @@ export function createRealLayerTwoGateway(
   const gatewayConfig: LLMGatewayConfig = {
     defaultProvider: provider.name,
     tenantOverrides: {
-      system: {
+      [SYSTEM_TENANT_ID]: {
         tiers: {
           lightweight: { model, provider: provider.name },
           standard: { model, provider: provider.name },

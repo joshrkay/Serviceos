@@ -1,4 +1,4 @@
-import { LLMGateway } from './gateway';
+import { LLMGateway, SYSTEM_TENANT_ID } from './gateway';
 import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
 import type { EmbeddingProvider } from '../providers/openai-compatible';
@@ -84,11 +84,75 @@ export function createLLMGateway(
   const provider: LLMProvider = maybeWrapWithShadow(primaryProvider, opts.shadowStore);
 
   const providers = new Map<string, LLMProvider>([[provider.name, provider]]);
-  const gatewayConfig: LLMGatewayConfig = {
-    defaultProvider: provider.name,
-    defaultModel: config.AI_DEFAULT_MODEL,
-  };
+  const gatewayConfig: LLMGatewayConfig = buildGatewayConfig(
+    provider.name,
+    config.AI_DEFAULT_MODEL,
+    opts.logger,
+  );
   return new LLMGateway(gatewayConfig, providers, opts.logger, opts.aiRunRepo);
+}
+
+/**
+ * Build the LLMGatewayConfig, wiring AI_DEFAULT_MODEL as a system-tenant
+ * fallback when per-tier env vars are not all explicitly set.
+ *
+ * Precedence:
+ * 1. Per-tier env vars (AI_LIGHTWEIGHT_MODEL, AI_STANDARD_MODEL, AI_COMPLEX_MODEL)
+ *    — take full precedence when all three are explicitly set.
+ * 2. AI_DEFAULT_MODEL — applies to all tiers via tenantOverrides[SYSTEM_TENANT_ID]
+ *    when set and NOT all per-tier env vars are provided.
+ * 3. Built-in defaults in DEFAULT_AI_ROUTING_CONFIG.
+ *
+ * A one-time INFO log is emitted at construction time describing what was wired.
+ */
+function buildGatewayConfig(
+  providerName: string,
+  defaultModel: string | undefined,
+  logger?: LLMGatewayLogger,
+): LLMGatewayConfig {
+  const hasDefaultModel = Boolean(defaultModel);
+  const hasLightweight = Boolean(process.env.AI_LIGHTWEIGHT_MODEL);
+  const hasStandard = Boolean(process.env.AI_STANDARD_MODEL);
+  const hasComplex = Boolean(process.env.AI_COMPLEX_MODEL);
+  const allPerTierSet = hasLightweight && hasStandard && hasComplex;
+
+  if (hasDefaultModel && !allPerTierSet) {
+    // Operator set AI_DEFAULT_MODEL without specifying all per-tier models.
+    // Preserve backward-compatible behaviour: use the default model for all tiers.
+    logger?.info(`Using AI_DEFAULT_MODEL=${defaultModel} for all tiers`, {
+      AI_DEFAULT_MODEL: defaultModel,
+      hasLightweight,
+      hasStandard,
+      hasComplex,
+    });
+    return {
+      defaultProvider: providerName,
+      tenantOverrides: {
+        [SYSTEM_TENANT_ID]: {
+          tiers: {
+            lightweight: { model: defaultModel!, provider: providerName },
+            standard: { model: defaultModel!, provider: providerName },
+            complex: { model: defaultModel!, provider: providerName },
+          },
+        },
+      },
+    };
+  }
+
+  if (hasDefaultModel && allPerTierSet) {
+    // Per-tier env vars win; AI_DEFAULT_MODEL is effectively ignored.
+    logger?.info(
+      `AI_DEFAULT_MODEL is set but overridden by per-tier env vars (AI_LIGHTWEIGHT_MODEL, AI_STANDARD_MODEL, AI_COMPLEX_MODEL)`,
+      {
+        AI_DEFAULT_MODEL: defaultModel,
+        AI_LIGHTWEIGHT_MODEL: process.env.AI_LIGHTWEIGHT_MODEL,
+        AI_STANDARD_MODEL: process.env.AI_STANDARD_MODEL,
+        AI_COMPLEX_MODEL: process.env.AI_COMPLEX_MODEL,
+      },
+    );
+  }
+
+  return { defaultProvider: providerName };
 }
 
 function maybeWrapWithShadow(

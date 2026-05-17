@@ -11,11 +11,10 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
-import { AIRoutingConfig, DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
+import { AIRoutingConfig } from '../../config/ai-routing';
 import {
   resolveRouting,
   shouldWarnForUnmappedTaskType,
-  mergeTenantRouting,
 } from './router';
 
 export interface LLMMessage {
@@ -83,6 +82,9 @@ export interface LLMGatewayLogger {
   error(message: string, meta?: Record<string, unknown>): void;
 }
 
+/** Sentinel tenant ID used when a request carries no tenantId. */
+export const SYSTEM_TENANT_ID = 'system';
+
 export function validateLLMRequest(request: LLMRequest): string[] {
   const errors: string[] = [];
   if (!request.taskType) errors.push('taskType is required');
@@ -131,33 +133,29 @@ export class LLMGateway {
       throw new AppError('PROVIDER_NOT_FOUND', `Provider not found: ${providerName}`, 500);
     }
 
-    // Warn once per process when a taskType has no tier mapping
-    const tenantId = request.tenantId ?? 'system';
+    const tenantId = request.tenantId ?? SYSTEM_TENANT_ID;
     const tenantOverride = this.config.tenantOverrides
       ? this.config.tenantOverrides[tenantId]
       : undefined;
 
+    // resolveRouting merges tenant config exactly once and also sets wasUnmapped
+    // so the caller doesn't need to re-merge to check the task tier mapping.
     const routingDecision = resolveRouting(request, tenantOverride);
     const resolvedModel = routingDecision.resolvedModel;
     const resolvedRequest: LLMRequest = {
       ...request,
       model: resolvedModel,
-      maxTokens: request.maxTokens ?? routingDecision.maxTokens,
-      temperature: request.temperature ?? routingDecision.temperature,
+      maxTokens: routingDecision.maxTokens,
+      temperature: routingDecision.temperature,
     };
 
     // Warn once per process when taskType is not in the active tier mapping
-    const activeConfig = tenantOverride
-      ? mergeTenantRouting(DEFAULT_AI_ROUTING_CONFIG, tenantOverride)
-      : DEFAULT_AI_ROUTING_CONFIG;
-    if (!(request.taskType in activeConfig.taskTierMapping)) {
-      if (shouldWarnForUnmappedTaskType(request.taskType)) {
-        this.logger?.info(`unmapped taskType "${request.taskType}" — defaulting to standard tier`, {
-          taskType: request.taskType,
-          resolvedTier: 'standard',
-          level: 'warn',
-        });
-      }
+    if (routingDecision.wasUnmapped && shouldWarnForUnmappedTaskType(request.taskType)) {
+      this.logger?.info(`unmapped taskType "${request.taskType}" — defaulting to standard tier`, {
+        taskType: request.taskType,
+        resolvedTier: 'standard',
+        level: 'warn',
+      });
     }
 
     // Emit structured routing decision log

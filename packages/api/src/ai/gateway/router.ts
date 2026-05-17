@@ -1,12 +1,17 @@
 import { AIRoutingConfig, ModelTier, TierConfig, DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
 import { LLMRequest } from './gateway';
 
-/** Tracks which unmapped taskTypes have already logged a warning (warn-once per process). */
+/**
+ * Module-level Set tracks taskTypes we've already warned about, ensuring
+ * one warn-once log per process per unmapped taskType. Safe under Node's
+ * single-process / no-worker-threads model; reset between tests via
+ * clearUnmappedTaskTypeWarnings().
+ */
 const warnedTaskTypes = new Set<string>();
 
 /**
- * Reset the warn-once tracker. Exposed for test isolation — call in beforeEach
- * when testing unmapped-taskType warning behaviour.
+ * @internal Test-only export. Resets the warn-once Set so tests don't
+ * leak state across describe blocks.
  */
 export function clearUnmappedTaskTypeWarnings(): void {
   warnedTaskTypes.clear();
@@ -49,6 +54,8 @@ export interface RoutingDecision {
   overrideSource: 'request' | 'tenant' | 'default';
   maxTokens?: number;
   temperature?: number;
+  /** True when the taskType had no explicit tier mapping (defaulted to 'standard'). */
+  wasUnmapped: boolean;
 }
 
 /**
@@ -58,6 +65,10 @@ export interface RoutingDecision {
  * 1. Caller-supplied `request.model` → overrideSource = 'request'
  * 2. Tenant override config         → overrideSource = 'tenant'
  * 3. DEFAULT_AI_ROUTING_CONFIG      → overrideSource = 'default'
+ *
+ * The returned `wasUnmapped` flag is true when the taskType had no explicit
+ * tier mapping. Callers can use it together with `shouldWarnForUnmappedTaskType`
+ * to emit a single warn-once log without re-merging the config.
  */
 export function resolveRouting(
   request: LLMRequest,
@@ -67,6 +78,7 @@ export function resolveRouting(
     ? mergeTenantRouting(DEFAULT_AI_ROUTING_CONFIG, tenantRoutingConfig)
     : DEFAULT_AI_ROUTING_CONFIG;
 
+  const wasUnmapped = !(request.taskType in activeConfig.taskTierMapping);
   const tier = getTaskTier(request.taskType, activeConfig);
   const tierConfig = activeConfig.tiers[tier];
 
@@ -78,6 +90,7 @@ export function resolveRouting(
       overrideSource: 'request',
       maxTokens: request.maxTokens ?? tierConfig.maxTokens,
       temperature: request.temperature ?? tierConfig.temperature,
+      wasUnmapped,
     };
   }
 
@@ -89,6 +102,7 @@ export function resolveRouting(
     overrideSource: source,
     maxTokens: request.maxTokens ?? tierConfig.maxTokens,
     temperature: request.temperature ?? tierConfig.temperature,
+    wasUnmapped,
   };
 }
 

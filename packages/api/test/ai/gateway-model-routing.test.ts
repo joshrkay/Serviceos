@@ -202,14 +202,14 @@ describe('P2-028 — gateway model routing integration', () => {
     );
   });
 
-  it('tenant override: only specified tiers are overridden, others fall through to default', async () => {
+  it('tenant tier overrides replace default tier configs at the tier level', async () => {
     const providers = makeStubProviders();
     const stub = providers.get('stub') as StubProvider;
     const gateway = makeGateway(providers, {
       tenantOverrides: {
         'tenant-partial': {
           tiers: {
-            // Only override complex; lightweight and standard use defaults
+            // All three tiers required by AIRoutingConfig.tiers type — override complex only
             complex: { model: 'tenant-complex-model', provider: 'default', maxTokens: 16384, temperature: 0.7 },
             lightweight: { model: process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001', provider: 'default' },
             standard: { model: process.env.AI_STANDARD_MODEL ?? 'claude-sonnet-4-6', provider: 'default' },
@@ -222,6 +222,32 @@ describe('P2-028 — gateway model routing integration', () => {
 
     const lastRequest = stub.getLastRequest();
     expect(lastRequest?.model).toBe('tenant-complex-model');
+  });
+
+  it('partial tenant tier override: unoverridden tiers use default models', async () => {
+    const providers = makeStubProviders();
+    const stub = providers.get('stub') as StubProvider;
+    // AIRoutingConfig.tiers is typed Record<ModelTier, TierConfig> (requires all 3 keys).
+    // Cast to Partial<AIRoutingConfig> so we can supply only the complex tier,
+    // exercising mergeTenantRouting's merge behaviour for the unspecified tiers.
+    const gateway = makeGateway(providers, {
+      tenantOverrides: {
+        'tenant-partial-only-complex': {
+          tiers: { complex: { model: 'partial-complex-model', provider: 'default' } },
+        } as Partial<import('../../src/config/ai-routing').AIRoutingConfig>,
+      },
+    });
+
+    // draft_estimate → complex tier → should use tenant's overridden complex model
+    await gateway.complete(makeRequest({ taskType: 'draft_estimate', tenantId: 'tenant-partial-only-complex' }));
+    expect(stub.getLastRequest()?.model).toBe('partial-complex-model');
+
+    // intent_classification → lightweight tier → tenant did NOT override lightweight,
+    // so the DEFAULT lightweight model should be used.
+    await gateway.complete(makeRequest({ taskType: 'intent_classification', tenantId: 'tenant-partial-only-complex' }));
+    expect(stub.getLastRequest()?.model).toBe(
+      process.env.AI_LIGHTWEIGHT_MODEL ?? 'claude-haiku-4-5-20251001'
+    );
   });
 
   // -------------------------------------------------------------------------
