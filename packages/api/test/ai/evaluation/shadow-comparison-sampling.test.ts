@@ -82,7 +82,7 @@ describe('P2-030 — Sampling rate statistical test', () => {
     expect(results[0].shadowResponse).toBeUndefined();
   });
 
-  it('comparison result links to tenantId when supplied via request', async () => {
+  it('comparison result links to tenantId and aiRunId when supplied via request', async () => {
     const config: ShadowComparisonConfig = {
       enabled: true,
       samplingRate: 1.0,
@@ -97,5 +97,7 @@ describe('P2-030 — Sampling rate statistical test', () => {
     expect(results.length).toBe(1);
     // tenantId is passed through from request
     expect(results[0].tenantId).toBe('tenant-xyz');
+    // aiRunId linkage: run-abc comes from makeRequest's metadata.aiRunId
+    expect(results[0].aiRunId).toBe('run-abc');
   });
 });

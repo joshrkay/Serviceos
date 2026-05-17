@@ -59,7 +59,7 @@ export function createEvaluationRouter(deps: EvaluationRouterDeps): Router {
         shadowLatencyMs: c.shadowResponse?.latencyMs ?? null,
         primaryTokenUsage: c.primaryResponse.tokenUsage,
         shadowTokenUsage: c.shadowResponse?.tokenUsage ?? null,
-        divergenceScore: null, // written by P2-020
+        divergenceScore: c.divergenceScore ?? null,
         createdAt: c.sampledAt.toISOString(),
       }));
 

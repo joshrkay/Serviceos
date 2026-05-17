@@ -2,7 +2,7 @@
  * P2-030 — GET /api/evaluation/shadow-comparisons route tests.
  *
  * Verifies:
- *   - Auth: 401 without auth, 403 for non-owner/non-admin role (technician).
+ *   - Auth: 403 for non-owner/non-admin role (technician/dispatcher).
  *   - Returns comparisons for the authenticated tenant.
  *   - Tenant isolation: comparisons from other tenants not returned.
  *   - Query params: limit, taskType filter.
@@ -166,5 +166,26 @@ describe('GET /api/evaluation/shadow-comparisons', () => {
     expect(res.status).toBe(200);
     // We only have 5 items, so all returned even with limit capped at 200
     expect(res.body.comparisons.length).toBeLessThanOrEqual(200);
+  });
+
+  it('exposes divergenceScore from the stored result', async () => {
+    // Store a comparison with a divergenceScore set
+    await store.save(makeComparison({ divergenceScore: 0.42 }));
+    const app = buildApp('owner', TENANT_A, store);
+
+    const res = await request(app).get('/api/evaluation/shadow-comparisons');
+
+    expect(res.status).toBe(200);
+    expect(res.body.comparisons[0].divergenceScore).toBe(0.42);
+  });
+
+  it('exposes divergenceScore as null when not set', async () => {
+    await store.save(makeComparison({ divergenceScore: null }));
+    const app = buildApp('owner', TENANT_A, store);
+
+    const res = await request(app).get('/api/evaluation/shadow-comparisons');
+
+    expect(res.status).toBe(200);
+    expect(res.body.comparisons[0].divergenceScore).toBeNull();
   });
 });

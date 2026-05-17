@@ -79,11 +79,17 @@ function makeResult(overrides: Partial<ShadowComparisonResult> = {}): ShadowComp
   };
 }
 
-function rowFor(r: ShadowComparisonResult): Record<string, unknown> {
+function rowFor(
+  r: ShadowComparisonResult,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     id: r.id,
     tenant_id: r.tenantId,
     ai_run_id: r.aiRunId ?? null,
+    comparison_group_id: r.comparisonGroupId ?? null,
+    task_type: r.taskType ?? null,
+    primary_model: r.primaryResponse.model ?? null,
     shadow_model: r.shadowResponse?.model ?? r.primaryResponse.model,
     primary_response_text: r.primaryResponse.content,
     shadow_response_text: r.shadowResponse?.content ?? null,
@@ -93,6 +99,7 @@ function rowFor(r: ShadowComparisonResult): Record<string, unknown> {
     shadow_token_usage: r.shadowResponse?.tokenUsage ?? null,
     divergence_score: null,
     created_at: r.sampledAt.toISOString(),
+    ...overrides,
   };
 }
 
@@ -273,5 +280,92 @@ describe('P2-030 PgShadowComparisonStore tenant isolation invariants', () => {
     for (const c of businessQueries) {
       expect(c.sql).not.toContain(TENANT_A);
     }
+  });
+});
+
+describe('P2-030 PgShadowComparisonStore — primary_model round-trip', () => {
+  it('persists primary_model and mapRow reads it into primaryResponse.model', async () => {
+    const result = makeResult();
+    // Row returned by RETURNING * must have primary_model
+    const row = rowFor(result);
+
+    const { pool, calls } = makeMockPool([undefined, [row]]);
+    const store = new PgShadowComparisonStore(pool);
+    const saved = await store.save(result);
+
+    // INSERT params: $6 is primary_model (0-indexed: id, tenantId, aiRunId, comparisonGroupId, taskType, primaryModel, ...)
+    expect(calls[1].params[5]).toBe('gpt-4o-mini');
+
+    // mapRow should produce primaryResponse.model = primary_model (not shadow_model)
+    expect(saved.primaryResponse.model).toBe('gpt-4o-mini');
+    // shadowResponse.model should be shadow_model
+    expect(saved.shadowResponse?.model).toBe('claude-3-haiku');
+  });
+
+  it('falls back to shadow_model for primaryResponse.model when primary_model is null', async () => {
+    const result = makeResult();
+    // Simulate a legacy row without primary_model
+    const row = rowFor(result, { primary_model: null });
+
+    const { pool } = makeMockPool([undefined, [row]]);
+    const store = new PgShadowComparisonStore(pool);
+    const saved = await store.save(result);
+
+    // Falls back to shadow_model
+    expect(saved.primaryResponse.model).toBe('claude-3-haiku');
+  });
+});
+
+describe('P2-030 PgShadowComparisonStore — divergenceScore plumbing', () => {
+  it('mapRow converts numeric divergence_score string to number', async () => {
+    const result = makeResult();
+    // Postgres NUMERIC comes back as string from the pg driver
+    const row = rowFor(result, { divergence_score: '0.42' });
+
+    const { pool } = makeMockPool([undefined, [row]]);
+    const store = new PgShadowComparisonStore(pool);
+    const saved = await store.save(result);
+
+    expect(saved.divergenceScore).toBe(0.42);
+  });
+
+  it('mapRow leaves divergenceScore null when column is null', async () => {
+    const result = makeResult();
+    const row = rowFor(result, { divergence_score: null });
+
+    const { pool } = makeMockPool([undefined, [row]]);
+    const store = new PgShadowComparisonStore(pool);
+    const saved = await store.save(result);
+
+    expect(saved.divergenceScore).toBeNull();
+  });
+});
+
+describe('P2-030 PgShadowComparisonStore — taskType filter SQL', () => {
+  it('includes task_type = $N condition when taskType option is provided', async () => {
+    const result = makeResult();
+    const { pool, calls } = makeMockPool([undefined, [rowFor(result)]]);
+
+    const store = new PgShadowComparisonStore(pool);
+    await store.listForTenant(TENANT_A, { taskType: 'draft_estimate' });
+
+    // The SELECT query (calls[1]) should contain task_type = $2 param
+    const selectCall = calls[1];
+    expect(selectCall.sql).toContain('task_type');
+    // taskType value should be in the params
+    expect(selectCall.params).toContain('draft_estimate');
+    // Must be parameterized — not inlined
+    expect(selectCall.sql).not.toContain('draft_estimate');
+  });
+
+  it('omits task_type condition when taskType option is not provided', async () => {
+    const result = makeResult();
+    const { pool, calls } = makeMockPool([undefined, [rowFor(result)]]);
+
+    const store = new PgShadowComparisonStore(pool);
+    await store.listForTenant(TENANT_A);
+
+    const selectCall = calls[1];
+    expect(selectCall.sql).not.toContain('task_type');
   });
 });

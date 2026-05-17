@@ -46,9 +46,11 @@ function mapRow(row: Record<string, unknown>): ShadowComparisonResult {
   const shadowText = row.shadow_response_text as string | null;
   const shadowModel = row.shadow_model as string;
 
+  const primaryModel = (row.primary_model as string | null) ?? shadowModel;
+
   const primaryResponse: LLMResponse = {
     content: (row.primary_response_text as string | null) ?? '',
-    model: shadowModel, // primary model not stored separately; shadow_model is the shadow's model
+    model: primaryModel,
     provider: '',
     tokenUsage: {
       input: primaryTokenUsage.input ?? 0,
@@ -73,12 +75,17 @@ function mapRow(row: Record<string, unknown>): ShadowComparisonResult {
         }
       : undefined;
 
+  const rawDivergence = row.divergence_score;
+  const divergenceScore =
+    rawDivergence != null ? Number(rawDivergence) : null;
+
   return {
     id: row.id as string,
     comparisonGroupId: (row.comparison_group_id as string | null) ?? (row.id as string),
     taskType: (row.task_type as string | null) ?? '',
     primaryResponse,
     shadowResponse,
+    divergenceScore,
     sampledAt: new Date(row.created_at as string),
     tenantId: row.tenant_id as string,
     aiRunId: (row.ai_run_id as string | null) ?? undefined,
@@ -122,18 +129,22 @@ export class PgShadowComparisonStore extends PgBaseRepository implements ShadowC
     return this.withTenant(tenantId, async (client) => {
       const qResult = await client.query(
         `INSERT INTO shadow_comparisons
-           (id, tenant_id, ai_run_id, shadow_model,
+           (id, tenant_id, ai_run_id, comparison_group_id, task_type,
+            primary_model, shadow_model,
             primary_response_text, shadow_response_text,
             primary_latency_ms, shadow_latency_ms,
             primary_token_usage, shadow_token_usage,
             divergence_score, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          ON CONFLICT (id) DO NOTHING
          RETURNING *`,
         [
           result.id,
           tenantId,
           result.aiRunId ?? null,
+          result.comparisonGroupId ?? null,
+          result.taskType ?? null,
+          result.primaryResponse.model ?? null,
           shadowModel,
           primaryText,
           shadowText,

@@ -8,6 +8,8 @@ export interface ShadowComparisonResult {
   primaryResponse: LLMResponse;
   shadowResponse?: LLMResponse;
   shadowError?: string;
+  /** P2-030: divergence score computed by P2-020; nullable until scored. */
+  divergenceScore?: number | null;
   sampledAt: Date;
   /** P2-030: tenant owning this comparison (required for durable Pg storage). */
   tenantId?: string;

@@ -2643,6 +2643,9 @@ export const MIGRATIONS = {
       id UUID PRIMARY KEY,
       tenant_id UUID NOT NULL,
       ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      comparison_group_id UUID,
+      task_type TEXT,
+      primary_model TEXT,
       shadow_model TEXT NOT NULL,
       primary_response_text TEXT,
       shadow_response_text TEXT,
@@ -2655,6 +2658,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_run ON shadow_comparisons(tenant_id, ai_run_id);
     CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_created ON shadow_comparisons(tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_group ON shadow_comparisons(comparison_group_id);
     ALTER TABLE shadow_comparisons ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_shadow_comparisons ON shadow_comparisons;
     CREATE POLICY tenant_isolation_shadow_comparisons ON shadow_comparisons
