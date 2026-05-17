@@ -46,7 +46,7 @@ export const gatewayRequestLatencyMs = new Histogram({
 export const gatewayRetryAttemptsTotal = new Counter({
   name: 'gateway_retry_attempts_total',
   help: 'Retry attempts issued by the gateway',
-  labelNames: ['provider', 'reason'],
+  labelNames: ['provider', 'taskType', 'outcome'],
   registers: [metricsRegistry],
 });
 
@@ -106,6 +106,19 @@ export const breakerState = new Gauge({
   name: 'breaker_state',
   help: 'Circuit breaker state (0=closed, 1=half-open, 2=open)',
   labelNames: ['key'],
+  registers: [metricsRegistry],
+});
+
+/**
+ * P2-029 spec-compliant breaker state gauge.
+ * Set to 1 for the current state, 0 for others.
+ * Labels: provider (string), state ('closed'|'open'|'half_open').
+ * Note: half-open is spelled with underscore here to match Prometheus label conventions.
+ */
+export const gatewayBreakerState = new Gauge({
+  name: 'gateway_breaker_state',
+  help: 'Circuit breaker state per provider (1=active, 0=inactive)',
+  labelNames: ['provider', 'state'],
   registers: [metricsRegistry],
 });
 

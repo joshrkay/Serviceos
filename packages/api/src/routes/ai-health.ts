@@ -17,6 +17,8 @@ export interface ProviderHealthEntry {
   name: string;
   available: boolean;
   breakerState: 'closed' | 'open' | 'half-open';
+  lastError?: string;
+  lastSuccessAt?: string;
 }
 
 /**
@@ -56,7 +58,20 @@ export function createAiHealthRouter(
         const cell = breakerRegistry.cell(keyParts);
         const breakerState = cell.getState();
         const available = await p.isAvailable().catch(() => false);
-        return { name: p.name, available, breakerState };
+
+        const entry: ProviderHealthEntry = { name: p.name, available, breakerState };
+
+        const lastError = cell.getLastError();
+        if (lastError !== undefined) {
+          entry.lastError = lastError;
+        }
+
+        const lastSuccessAt = cell.getLastSuccessAt();
+        if (lastSuccessAt !== undefined) {
+          entry.lastSuccessAt = lastSuccessAt.toISOString();
+        }
+
+        return entry;
       }),
     );
 

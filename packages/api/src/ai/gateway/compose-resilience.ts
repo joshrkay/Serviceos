@@ -102,6 +102,7 @@ export class ProviderRetryDeadlineWrapper implements LLMProvider {
           policy: this.retryPolicy,
           deadline,
           provider: this.inner.name,
+          taskType: request.taskType,
         },
       );
     } finally {

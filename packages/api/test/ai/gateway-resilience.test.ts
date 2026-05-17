@@ -12,12 +12,13 @@
  *   8. Full stack composed: provider → retry → deadline → breaker → failover → tenant-quota.
  *   9. LLM_PROVIDER_UNAVAILABLE returned only on full failover exhaustion.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   CircuitBreakerRegistry,
   BreakerOpenError,
   DEFAULT_BREAKER,
 } from '../../src/ai/gateway/breaker';
+import { metricsRegistry } from '../../src/monitoring/metrics';
 import {
   TenantQuotaRegistry,
   TenantConcurrencyExceededError,
@@ -529,5 +530,211 @@ describe('composeResilienceStack', () => {
     const err = await composed.complete(makeRequest()).catch((e: unknown) => e);
     // Should be the original 4xx error, not LLM_PROVIDER_UNAVAILABLE
     expect((err as AppError).code).not.toBe('LLM_PROVIDER_UNAVAILABLE');
+  });
+});
+
+// ─── Spec gap 1: gateway_breaker_state{provider, state} emitted on transitions ──
+
+describe('gateway_breaker_state metric (spec gap 1)', () => {
+  afterEach(async () => {
+    // Clear the metric between tests to avoid cross-test state leakage
+    metricsRegistry.resetMetrics();
+  });
+
+  it('emits gateway_breaker_state for all three states on transitions', async () => {
+    const failErr = Object.assign(new Error('boom'), { status: 503 });
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 20,
+      halfOpenProbeCount: 1,
+      halfOpenSuccessRatio: 1.0,
+    });
+
+    // Get a cell — the constructor initialises gateway_breaker_state to closed=1, open=0, half_open=0
+    const parts = { provider: 'test-gsb', modelFamily: 'default' };
+    const cell = reg.cell(parts);
+
+    // Verify initial (closed) state
+    const initialMetrics = await metricsRegistry.metrics();
+    expect(initialMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="closed"\} 1/);
+    expect(initialMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="open"\} 0/);
+    expect(initialMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="half_open"\} 0/);
+
+    // Trip to open
+    for (let i = 0; i < 2; i++) {
+      await reg.run(parts, async () => { throw failErr; }).catch(() => {});
+    }
+    const openMetrics = await metricsRegistry.metrics();
+    expect(openMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="closed"\} 0/);
+    expect(openMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="open"\} 1/);
+    expect(openMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="half_open"\} 0/);
+
+    // Wait for cooldown → half-open
+    await new Promise((r) => setTimeout(r, 30));
+    cell.getState(); // triggers refreshState() which transitions to half-open
+
+    const halfOpenMetrics = await metricsRegistry.metrics();
+    expect(halfOpenMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="closed"\} 0/);
+    expect(halfOpenMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="open"\} 0/);
+    expect(halfOpenMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb",state="half_open"\} 1/);
+
+    // Succeed the probe → closed
+    await reg.run(parts, async () => ({} as never)).catch(() => {});
+    // Actually provide a valid result
+    const successParts = { provider: 'test-gsb', modelFamily: 'default' };
+    const newReg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 2,
+      countThreshold: 100,
+      cooldownMs: 20,
+      halfOpenProbeCount: 1,
+      halfOpenSuccessRatio: 1.0,
+    });
+    // Trip and recover with a fresh registry so we can control the provider-key uniquely
+    const recParts = { provider: 'test-gsb-recover', modelFamily: 'default' };
+    for (let i = 0; i < 2; i++) {
+      await newReg.run(recParts, async () => { throw failErr; }).catch(() => {});
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    newReg.cell(recParts).getState(); // trigger half-open transition
+    await newReg.run(recParts, async () => ({ dummy: true } as never));
+
+    const closedMetrics = await metricsRegistry.metrics();
+    expect(closedMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb-recover",state="closed"\} 1/);
+    expect(closedMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb-recover",state="open"\} 0/);
+    expect(closedMetrics).toMatch(/gateway_breaker_state\{provider="test-gsb-recover",state="half_open"\} 0/);
+  });
+
+  it('existing breaker_state{key} metric still emits alongside gateway_breaker_state', async () => {
+    const reg = new CircuitBreakerRegistry(DEFAULT_BREAKER);
+    const parts = { provider: 'test-legacy', modelFamily: 'model1' };
+    reg.cell(parts); // create the cell
+
+    const m = await metricsRegistry.metrics();
+    expect(m).toMatch(/breaker_state\{key="test-legacy\|model1\|default\|default"\}/);
+    expect(m).toMatch(/gateway_breaker_state\{provider="test-legacy"/);
+  });
+});
+
+// ─── Spec gap 2: gateway_retry_attempts_total has taskType + outcome labels ────
+
+describe('gateway_retry_attempts_total labels (spec gap 2)', () => {
+  it('increments with provider, taskType, and outcome labels on retry', async () => {
+    let calls = 0;
+    await expect(
+      runWithRetry(
+        async () => {
+          calls++;
+          const err = Object.assign(new Error('transient'), { status: 503 });
+          throw err;
+        },
+        {
+          policy: { ...DEFAULT_RETRY, maxAttempts: 2 },
+          sleep: async () => {},
+          rng: () => 0,
+          provider: 'test-provider-retry',
+          taskType: 'quote_generation',
+        },
+      ),
+    ).rejects.toThrow('transient');
+
+    const m = await metricsRegistry.metrics();
+    expect(m).toMatch(
+      /gateway_retry_attempts_total\{provider="test-provider-retry",taskType="quote_generation",outcome="transient"\}/,
+    );
+  });
+
+  it('uses outcome=rate_limited for 429 errors', async () => {
+    await expect(
+      runWithRetry(
+        async () => {
+          const err = Object.assign(new Error('rate limited'), { status: 429 });
+          throw err;
+        },
+        {
+          policy: { ...DEFAULT_RETRY, maxAttempts: 2 },
+          sleep: async () => {},
+          rng: () => 0,
+          provider: 'test-provider-rl',
+          taskType: 'estimate',
+        },
+      ),
+    ).rejects.toThrow();
+
+    const m = await metricsRegistry.metrics();
+    expect(m).toMatch(
+      /gateway_retry_attempts_total\{provider="test-provider-rl",taskType="estimate",outcome="rate_limited"\}/,
+    );
+  });
+});
+
+// ─── Spec gap 3: /api/health/ai includes lastError and lastSuccessAt ──────────
+
+describe('GET /api/health/ai — lastError and lastSuccessAt (spec gap 3)', () => {
+  it('includes lastError after a recorded failure', async () => {
+    const reg = new CircuitBreakerRegistry({
+      ...DEFAULT_BREAKER,
+      consecutiveFailureThreshold: 100, // don't trip
+      countThreshold: 100,
+    });
+    const parts = { provider: 'prov-lasterr', modelFamily: 'default' };
+
+    // Record a failure via run()
+    await reg.run(parts, async () => { throw Object.assign(new Error('test failure message'), { status: 503 }); }).catch(() => {});
+
+    const app = express();
+    app.use('/api/health', createAiHealthRouter(reg, [
+      { name: 'prov-lasterr', isAvailable: async () => false, breakerKeyParts: parts },
+    ]));
+
+    const res = await request(app).get('/api/health/ai');
+    expect(res.status).toBe(200);
+    const provider = res.body.providers.find((p: { name: string }) => p.name === 'prov-lasterr');
+    expect(provider).toBeDefined();
+    expect(provider.lastError).toBe('test failure message');
+    expect(provider.lastSuccessAt).toBeUndefined();
+  });
+
+  it('includes lastSuccessAt after a recorded success', async () => {
+    const reg = new CircuitBreakerRegistry(DEFAULT_BREAKER);
+    const parts = { provider: 'prov-lastsuc', modelFamily: 'default' };
+
+    // Record a success via run()
+    await reg.run(parts, async () => ({ dummy: true } as never));
+
+    const app = express();
+    app.use('/api/health', createAiHealthRouter(reg, [
+      { name: 'prov-lastsuc', isAvailable: async () => true, breakerKeyParts: parts },
+    ]));
+
+    const res = await request(app).get('/api/health/ai');
+    expect(res.status).toBe(200);
+    const provider = res.body.providers.find((p: { name: string }) => p.name === 'prov-lastsuc');
+    expect(provider).toBeDefined();
+    expect(provider.lastSuccessAt).toBeDefined();
+    // Should be a valid ISO 8601 string
+    expect(() => new Date(provider.lastSuccessAt)).not.toThrow();
+    expect(new Date(provider.lastSuccessAt).getFullYear()).toBeGreaterThan(2020);
+    expect(provider.lastError).toBeUndefined();
+  });
+
+  it('omits both fields when no activity recorded', async () => {
+    const reg = new CircuitBreakerRegistry(DEFAULT_BREAKER);
+    const parts = { provider: 'prov-pristine', modelFamily: 'default' };
+    reg.cell(parts); // create cell without any activity
+
+    const app = express();
+    app.use('/api/health', createAiHealthRouter(reg, [
+      { name: 'prov-pristine', isAvailable: async () => true, breakerKeyParts: parts },
+    ]));
+
+    const res = await request(app).get('/api/health/ai');
+    expect(res.status).toBe(200);
+    const provider = res.body.providers.find((p: { name: string }) => p.name === 'prov-pristine');
+    expect(provider).toBeDefined();
+    expect(provider.lastError).toBeUndefined();
+    expect(provider.lastSuccessAt).toBeUndefined();
   });
 });
