@@ -43,6 +43,9 @@ export const gatewayRequestLatencyMs = new Histogram({
   registers: [metricsRegistry],
 });
 
+// BREAKING CHANGE (P2-029): labels changed from {provider, reason} to
+// {provider, taskType, outcome}. Update any dashboards or alerts that
+// reference the old 'reason' label.
 export const gatewayRetryAttemptsTotal = new Counter({
   name: 'gateway_retry_attempts_total',
   help: 'Retry attempts issued by the gateway',

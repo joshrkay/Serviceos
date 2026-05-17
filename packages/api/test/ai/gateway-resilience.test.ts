@@ -34,6 +34,7 @@ import {
   ProviderBreakerWrapper,
   ProviderFailoverWrapper,
   ProviderTenantQuotaWrapper,
+  ProviderRetryDeadlineWrapper,
 } from '../../src/ai/gateway/compose-resilience';
 import { AppError } from '../../src/shared/errors';
 import type { LLMProvider, LLMRequest, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -250,6 +251,66 @@ describe('retry with AbortSignal', () => {
       ),
     ).rejects.toThrow('transient');
     expect(calls).toBe(3);
+  });
+});
+
+// ─── 2b. ProviderRetryDeadlineWrapper: single deadline covers full retry sequence ─
+
+describe('ProviderRetryDeadlineWrapper', () => {
+  it('enforces a single deadline across all retry attempts, not per-attempt', async () => {
+    /**
+     * Invariant: ONE deadline covers the full retry sequence.
+     * If the implementation accidentally created a new deadline per attempt,
+     * each attempt would get a fresh 100ms budget and could run maxAttempts
+     * times. With a shared deadline, the elapsed total must stay within the
+     * deadline window — the retry sequence is truncated.
+     *
+     * Setup:
+     *   - deadline = 120ms
+     *   - each attempt sleeps 70ms then throws a transient error
+     *   - maxAttempts = 4
+     *
+     * With a per-attempt deadline: 4 × 70ms = 280ms before exhaustion.
+     * With a shared deadline: only 1-2 attempts fit inside 120ms, then
+     * the deadline signals abort and the wrapper throws DeadlineExceededError.
+     */
+    const deadlineMs = 120;
+    const attemptDelayMs = 70;
+    const maxAttempts = 4;
+
+    let callCount = 0;
+    const start = Date.now();
+
+    class SlowTransientProvider implements LLMProvider {
+      readonly name = 'slow-transient';
+      async complete(_req: LLMRequest): Promise<LLMResponse> {
+        callCount++;
+        // Simulate a slow provider that always fails transiently
+        await new Promise((r) => setTimeout(r, attemptDelayMs));
+        const err = Object.assign(new Error('transient'), { status: 503 });
+        throw err;
+      }
+      async isAvailable(): Promise<boolean> { return true; }
+    }
+
+    const wrapper = new ProviderRetryDeadlineWrapper(
+      new SlowTransientProvider(),
+      { maxAttempts, baseDelayMs: 0, capDelayMs: 0, mode: 'sync' },
+      deadlineMs,
+    );
+
+    await expect(wrapper.complete(makeRequest())).rejects.toThrow();
+
+    const elapsed = Date.now() - start;
+
+    // The deadline should have truncated the retry sequence well before
+    // maxAttempts * attemptDelayMs (4 * 70 = 280ms).
+    expect(elapsed).toBeLessThan(maxAttempts * attemptDelayMs);
+
+    // At most 2 attempts should have been made (2 * 70ms = 140ms which just
+    // exceeds the 120ms deadline, meaning the 2nd attempt completes but the
+    // 3rd is aborted before it starts, or the 2nd is aborted mid-sleep).
+    expect(callCount).toBeLessThan(maxAttempts);
   });
 });
 

@@ -4,7 +4,13 @@
  * Provides LLMProvider-level wrappers for each resilience module plus a
  * factory helper that wires them in the canonical order:
  *
- *   primary → BreakerProvider → RetryProvider → FailoverProvider → TenantQuotaProvider
+ *   primary (optionally shadow-wrapped)
+ *     → ProviderRetryDeadlineWrapper   (innermost: retries inside one deadline)
+ *     → ProviderBreakerWrapper          (per-provider circuit breaker)
+ *   [breaker-wrapped providers array]
+ *     → ProviderFailoverWrapper         (advances on 5xx/network; not on 4xx)
+ *     → ProviderTenantQuotaWrapper      (outermost: enforce per-tenant tier limits)
+ *     → LLMGateway
  *
  * Note on composition order vs. task spec:
  *   The spec says innermost-to-outermost:

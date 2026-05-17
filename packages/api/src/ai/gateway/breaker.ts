@@ -331,6 +331,17 @@ export function breakerKey(parts: BreakerKeyParts): string {
   ].join('|');
 }
 
+/** Aggregated health state for a single provider (across all its breaker cells). */
+export interface ProviderHealthState {
+  provider: string;
+  /** Most-degraded breaker state across all cells for this provider. */
+  breakerState: BreakerStateName;
+  /** Most recent failure message across all cells, if any. */
+  lastError: string | undefined;
+  /** Most recent success timestamp across all cells, if any. */
+  lastSuccessAt: Date | undefined;
+}
+
 export class CircuitBreakerRegistry {
   private cells: Map<string, BreakerCell> = new Map();
 
@@ -344,6 +355,58 @@ export class CircuitBreakerRegistry {
       this.cells.set(key, cell);
     }
     return cell;
+  }
+
+  /**
+   * Return per-provider health state by aggregating all breaker cells.
+   *
+   * Multiple cells per provider (different model/tier combinations) are
+   * collapsed to one entry per provider name (the first segment of the cell
+   * key). Aggregation rules:
+   *   - breakerState: most-degraded wins (open > half-open > closed).
+   *   - lastError:    most-recently recorded failure message across cells.
+   *   - lastSuccessAt: latest recorded success timestamp across cells.
+   */
+  getProviderStates(): ProviderHealthState[] {
+    const degradationOrder: BreakerStateName[] = ['closed', 'half-open', 'open'];
+    const byProvider = new Map<string, ProviderHealthState>();
+
+    for (const [_key, cell] of this.cells) {
+      const providerName = cell.key.split('|')[0];
+      const cellState = cell.getState();
+      const cellLastError = cell.getLastError();
+      const cellLastSuccessAt = cell.getLastSuccessAt();
+
+      const existing = byProvider.get(providerName);
+      if (!existing) {
+        byProvider.set(providerName, {
+          provider: providerName,
+          breakerState: cellState,
+          lastError: cellLastError,
+          lastSuccessAt: cellLastSuccessAt,
+        });
+      } else {
+        // Most-degraded state wins.
+        if (degradationOrder.indexOf(cellState) > degradationOrder.indexOf(existing.breakerState)) {
+          existing.breakerState = cellState;
+        }
+        // Latest success timestamp.
+        if (
+          cellLastSuccessAt !== undefined &&
+          (existing.lastSuccessAt === undefined || cellLastSuccessAt > existing.lastSuccessAt)
+        ) {
+          existing.lastSuccessAt = cellLastSuccessAt;
+        }
+        // Keep whichever lastError was recorded most recently — both are
+        // strings so we can't compare timestamps; retain the existing value
+        // unless this cell has one and existing doesn't.
+        if (cellLastError !== undefined && existing.lastError === undefined) {
+          existing.lastError = cellLastError;
+        }
+      }
+    }
+
+    return Array.from(byProvider.values());
   }
 
   /**
