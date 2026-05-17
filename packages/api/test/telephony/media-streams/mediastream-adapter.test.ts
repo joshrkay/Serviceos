@@ -339,17 +339,37 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
   // ─── Helpers for streaming tests ───────────────────────────────────────────
 
+  function makeFakeFillerCache(ids: string[]): {
+    get: (id: string) => Buffer | undefined;
+    has: (id: string) => boolean;
+    size: () => number;
+  } {
+    const m = new Map<string, Buffer>();
+    for (const id of ids) m.set(id, Buffer.alloc(320));
+    return {
+      get: (id) => m.get(id),
+      has: (id) => m.has(id),
+      size: () => m.size,
+    };
+  }
+
   function setupAdapter(opts: {
     ttsProvider?: TtsProvider;
     streamingProvider?: StreamingTranscriptionProvider;
     terminologyProvider?: { getKeywords(tenantId: string): Promise<ReadonlyArray<string>> };
+    fillerCache?: { get: (id: string) => Buffer | undefined; has?: (id: string) => boolean; size?: () => number };
+    fillerEngine?: { selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined };
+    fillerDelayMs?: number;
+    callSid?: string;
   } = {}): {
     adapter: TwilioMediaStreamAdapter;
     ws: FakeWs;
+    streamingProviderHandle?: ReturnType<typeof makeStreamingProvider>['handle'];
   } {
-    store.create('t', 'telephony', { callSid: 'CA-stream' });
+    const callSid = opts.callSid ?? 'CA-stream';
+    store.create('t', 'telephony', { callSid });
     const ws = new FakeWs();
-    const { provider: defaultProvider } = makeStreamingProvider();
+    const { provider: defaultProvider, handle } = makeStreamingProvider();
     const adapter = new TwilioMediaStreamAdapter(
       {
         store,
@@ -357,11 +377,14 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         speechTurn: async () => [],
         ttsProvider: opts.ttsProvider,
         terminologyProvider: opts.terminologyProvider,
+        fillerCache: opts.fillerCache,
+        fillerEngine: opts.fillerEngine,
+        fillerDelayMs: opts.fillerDelayMs,
       },
       ws,
     );
     adapter.start();
-    return { adapter, ws };
+    return { adapter, ws, streamingProviderHandle: handle };
   }
 
   async function flushMicrotasks(): Promise<void> {
@@ -469,6 +492,111 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     expect(openSessionSpy).toHaveBeenCalled();
     // 5th arg should be undefined when keywords list is empty
     expect(openSessionSpy.mock.calls[0][4]).toBeUndefined();
+  });
+
+  // ─── Filler engine race tests ───────────────────────────────────────────────
+
+  describe('mediastream-adapter filler engine', () => {
+    it('plays a filler when TTS does not start within 250ms', async () => {
+      // The TTS stream deliberately delays 400ms before yielding its first
+      // chunk. The filler timer fires at 250ms (default) and should have
+      // sent at least one media frame before the real TTS arrives.
+      let ttsStarted = false;
+      const slowStreamingProvider = {
+        synthesize: vi.fn(),
+        synthesizeStream: vi.fn(() => ({
+          async *[Symbol.asyncIterator]() {
+            await new Promise((r) => setTimeout(r, 400));
+            ttsStarted = true;
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        })),
+      };
+      const fillerCache = makeFakeFillerCache(['okay', 'got-it']);
+      const fillerEngine = {
+        selectNext: () => ({ id: 'okay', text: 'Okay.', approxDurationMs: 260 }),
+      };
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: slowStreamingProvider,
+        fillerCache,
+        fillerEngine,
+        fillerDelayMs: 50, // use short delay to keep the test fast
+        callSid: 'CA-filler-slow',
+      });
+
+      // Send start frame so streamSid is set.
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-filler-slow',
+        start: { callSid: 'CA-filler-slow', accountSid: 'AC', streamSid: 'MZ-filler-slow', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Drive a tts_play effect directly.
+      const promise = (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Long response...' } },
+      ]);
+
+      // Wait long enough for filler timer (50ms) but shorter than TTS delay (400ms).
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Filler media frames should have been sent.
+      const mediaFrames = ws.sent.filter((f) => (f as Record<string, unknown>).event === 'media');
+      expect(mediaFrames.length).toBeGreaterThan(0);
+
+      // Now let the whole thing complete.
+      await promise;
+      expect(ttsStarted).toBe(true);
+    });
+
+    it('does NOT play a filler when TTS starts within 250ms', async () => {
+      const fastStreamingProvider = {
+        synthesize: vi.fn(),
+        synthesizeStream: vi.fn(() => ({
+          async *[Symbol.asyncIterator]() {
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        })),
+      };
+      const fillerCache = makeFakeFillerCache(['okay']);
+      let fillerFetched = false;
+      const wrappedCache = {
+        ...fillerCache,
+        get: (id: string) => { fillerFetched = true; return fillerCache.get(id); },
+        has: (id: string) => fillerCache.has(id),
+        size: () => fillerCache.size(),
+      };
+      const fillerEngine = {
+        selectNext: () => ({ id: 'okay', text: 'Okay.', approxDurationMs: 260 }),
+      };
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: fastStreamingProvider,
+        fillerCache: wrappedCache,
+        fillerEngine,
+        fillerDelayMs: 200, // filler delay is 200ms but TTS yields immediately
+        callSid: 'CA-filler-fast',
+      });
+
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-filler-fast',
+        start: { callSid: 'CA-filler-fast', accountSid: 'AC', streamSid: 'MZ-filler-fast', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Quick response' } },
+      ]);
+
+      // Give any pending timer callbacks a chance to fire (they shouldn't).
+      await new Promise((r) => setTimeout(r, 10));
+
+      // The filler cache.get should never have been called — real TTS was fast.
+      expect(fillerFetched).toBe(false);
+    });
+
+    it.todo('cancel filler cleanly mid-flight — needs jitter-buffered cancellation logic');
   });
 
   it('streams outbound media as TTS chunks arrive (does not wait for full audio)', async () => {

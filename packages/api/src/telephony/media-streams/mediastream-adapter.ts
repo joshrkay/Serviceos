@@ -47,6 +47,7 @@ import {
   transcriptReceivedEvent,
   audioFrameEmittedEvent,
   repairTemplateFiredEvent,
+  fillerFiredEvent,
 } from '../../ai/voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 
@@ -164,6 +165,20 @@ export interface MediaStreamAdapterDeps {
   terminologyProvider?: {
     getKeywords(tenantId: string): Promise<ReadonlyArray<string>>;
   };
+  /**
+   * Optional filler engine + cache. When both are present, the adapter
+   * wraps each `tts_play` turn with a 250ms timer: if the real TTS has
+   * not started streaming by then, it plays one filler clip from the
+   * cache. Omitting either turns the feature off entirely.
+   */
+  fillerEngine?: {
+    selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined;
+  };
+  fillerCache?: {
+    get(id: string): Buffer | undefined;
+  };
+  /** Override for the 250ms filler threshold (ms). Default 250. */
+  fillerDelayMs?: number;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -567,46 +582,104 @@ export class TwilioMediaStreamAdapter {
       if (!text) continue;
       const turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
-      const controller = new AbortController();
       try {
-        if (typeof ttsProvider.synthesizeStream === 'function') {
-          this.state.ttsController = controller;
-          const stream = ttsProvider.synthesizeStream({
-            text,
-            tenantId: this.state.tenantId ?? undefined,
-            signal: controller.signal,
-          });
-          for await (const chunk of stream) {
-            if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-              controller.abort();
-              break;
-            }
-            if (chunk.pcm.length > 0) {
-              await this.streamPcmAsMedia(chunk.pcm, turnId);
-            }
-            if (chunk.isFinal) break;
-          }
-        } else {
-          const result = await ttsProvider.synthesize({
-            text,
-            tenantId: this.state.tenantId ?? undefined,
-          });
-          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-            continue;
-          }
-          await this.streamPcmAsMedia(result.audio, turnId);
-        }
+        await this.runTurnWithFiller(ttsProvider, text, turnId);
       } catch (err) {
-        logger.warn('mediastream: TTS synthesize failed', {
+        logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       } finally {
-        if (this.state.ttsController === controller) {
-          this.state.ttsController = null;
-        }
         if (turnId === this.state.outboundTurnId) {
           this.state.agentSpeaking = false;
         }
+      }
+    }
+  }
+
+  /**
+   * Run a single TTS turn, optionally preceded by a filler clip if the
+   * real TTS has not started streaming within `fillerDelayMs` (default 250ms).
+   *
+   * The filler is fired in a best-effort setTimeout. If real audio starts
+   * before the timer fires, it is cancelled. If it fires while real audio is
+   * already in-flight (e.g. buffered provider), the timer is a no-op because
+   * `realStarted` will be true. The existing barge-in machinery (bargeIn())
+   * cancels both filler and real audio together when the caller speaks.
+   */
+  private async runTurnWithFiller(
+    ttsProvider: TtsProvider,
+    text: string,
+    turnId: number,
+  ): Promise<void> {
+    const delayMs = this.deps.fillerDelayMs ?? 250;
+    const engine = this.deps.fillerEngine;
+    const cache = this.deps.fillerCache;
+
+    let realStarted = false;
+    const controller = new AbortController();
+    this.state.ttsController = controller;
+
+    // Schedule a filler if both engine and cache are wired.
+    const fillerTimer = engine && cache
+      ? setTimeout(() => {
+          if (realStarted || turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            return;
+          }
+          const filler = engine.selectNext();
+          if (!filler) return;
+          const pcm = cache.get(filler.id);
+          if (!pcm) return;
+          // Best-effort emission — do not await; if real audio arrives
+          // mid-filler, the existing barge-in path is the cancellation.
+          void this.streamPcmAsMedia(pcm, turnId).catch(() => undefined);
+          if (this.state.session) {
+            this.state.session.events.emit(
+              VOICE_EVENT_CHANNEL,
+              fillerFiredEvent({ fillerText: filler.text }),
+            );
+          }
+        }, delayMs)
+      : null;
+    if (fillerTimer && typeof fillerTimer.unref === 'function') fillerTimer.unref();
+
+    try {
+      if (typeof ttsProvider.synthesizeStream === 'function') {
+        const stream = ttsProvider.synthesizeStream({
+          text,
+          tenantId: this.state.tenantId ?? undefined,
+          signal: controller.signal,
+        });
+        let first = true;
+        for await (const chunk of stream) {
+          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            controller.abort();
+            break;
+          }
+          if (first && chunk.pcm.length > 0) {
+            realStarted = true;
+            if (fillerTimer) clearTimeout(fillerTimer);
+            first = false;
+          }
+          if (chunk.pcm.length > 0) {
+            await this.streamPcmAsMedia(chunk.pcm, turnId);
+          }
+          if (chunk.isFinal) break;
+        }
+      } else {
+        const result = await ttsProvider.synthesize({
+          text,
+          tenantId: this.state.tenantId ?? undefined,
+        });
+        realStarted = true;
+        if (fillerTimer) clearTimeout(fillerTimer);
+        if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+          await this.streamPcmAsMedia(result.audio, turnId);
+        }
+      }
+    } finally {
+      if (fillerTimer) clearTimeout(fillerTimer);
+      if (this.state.ttsController === controller) {
+        this.state.ttsController = null;
       }
     }
   }
