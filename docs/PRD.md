@@ -572,9 +572,17 @@ Per the audit (`docs/strategy/roadmap-audit.md`), the following stories
 are new or amended in v2. **Stories from v1's execution catalog that are
 not listed here are unchanged.**
 
+> The full dispatchable story specs (with Allowed Files, Build Prompts,
+> Review Prompts, Automated Checks, and Required Tests) for the eleven
+> new stories below live at
+> `docs/stories/wave-2-strategic-stories.md`. The PRD §9 summary you are
+> reading is the strategic spec; the story file is the engineering
+> execution artifact. Use `/dispatch-story <ID>` (e.g.
+> `/dispatch-story P2-034`) to send a story to an isolated build agent.
+
 ### NEW stories
 
-#### N-001 — SMS-Approval-Transport `[S]`
+#### N-001 / **P2-034** — SMS-Approval-Transport `[S]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -603,7 +611,7 @@ supports), and approval state on the proposal.
 **Non-goals**: Rich-media approval cards (deferred); MMS attachments in
 proposal SMS (deferred); group-SMS approval (out of scope).
 
-#### N-002 — Confidence-Surfacing-Spec `[S]`
+#### N-002 / **P2-035** — Confidence-Surfacing-Spec `[S]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -632,7 +640,7 @@ No "X% confident" badges anywhere in the product.
 **Non-goals**: Global confidence percentage display; user-configurable
 thresholds in V1.
 
-#### N-003 — Negotiation-Guardrail-Handler `[S]`
+#### N-003 / **P2-036** — Negotiation-Guardrail-Handler `[S]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -660,7 +668,7 @@ who will come back; offer $100 courtesy + Friday slot instead").
 **Non-goals**: Negotiation playbooks per tenant (V2); price-floor
 configuration (V2 — V1 just blocks discounts).
 
-#### N-004 — Supervisor Agent Review Pass `[M]`
+#### N-004 / **P2-037** — Supervisor Agent Review Pass `[M]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -696,7 +704,7 @@ direct owner alert is sent.
 **Non-goals**: Supervisor agent for SMS-only conversations (V2);
 custom rules per tenant (V2).
 
-#### N-005 — End-of-Day Digest Generator `[M]`
+#### N-005 / **P5-020** — End-of-Day Digest Generator `[M]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -728,7 +736,7 @@ and 9pm in tenant timezone. Content:
 **Non-goals**: Weekly digest in V1 (Wave 3); email digest (Wave 3);
 per-user customization of digest contents (V2).
 
-#### N-006 — Google Review Monitoring + Draft Response `[M]`
+#### N-006 / **P7-026** — Google Review Monitoring + Draft Response `[M]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -756,7 +764,7 @@ suggestion. Owner approves via SMS.
 **Non-goals**: Yelp, Facebook, Nextdoor monitoring (Wave 3); proactive
 review-request sending (Wave 3).
 
-#### N-007 — Dropped-Call SMS Recovery `[S]`
+#### N-007 / **P8-015** — Dropped-Call SMS Recovery `[S]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -782,7 +790,7 @@ dropped call).
 **Non-goals**: Outbound voice callback (V2); recovery for SMS-initiated
 conversations (different problem).
 
-#### N-008 — Vulnerability-Aware Emergency Triage `[S]`
+#### N-008 / **P8-016** — Vulnerability-Aware Emergency Triage `[S]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -815,7 +823,7 @@ high-priority booking, owner notified.
 **Non-goals**: Real-time vital monitoring (not our domain); medical
 priority routing (we don't claim medical authority).
 
-#### N-009 — Correction-Loop UX `[M]`
+#### N-009 / **P2-038** — Correction-Loop UX `[M]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -844,7 +852,7 @@ correction is auditable and reversible.
 **Non-goals**: Cross-tenant learning (privacy concern); model fine-
 tuning from corrections (V2 — this is prompt-level adjustment only).
 
-#### N-010 — Tech "I'm Out" One-Tap Status `[XS]`
+#### N-010 / **P6-028** — Tech "I'm Out" One-Tap Status `[XS]`
 
 | Attribute | Value |
 |-----------|-------|
@@ -867,7 +875,7 @@ proposals to owner). Prevents the Carlos-no-show scenario from §4.
 **Non-goals**: Multi-day out status (V2 — V1 is same-day only); partial
 day (e.g., out for the afternoon).
 
-#### N-011 — Brand-Voice Configurator `[S]`
+#### N-011 / **P4-015** — Brand-Voice Configurator `[S]`
 
 | Attribute | Value |
 |-----------|-------|
