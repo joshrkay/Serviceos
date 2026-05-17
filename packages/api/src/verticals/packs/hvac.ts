@@ -223,6 +223,20 @@ export function createHvacPack(): VerticalPack {
     training_tier: 'first_class',
     training_assets: HVAC_TRAINING_ASSETS,
   };
+  pack.sttKeywords = [
+    'furnace:3',
+    'compressor:3',
+    'condenser:3',
+    'thermostat:3',
+    'heat pump:3',
+    'mini split:3',
+    'ductless:3',
+    'evaporator:3',
+    'blower motor:3',
+    'refrigerant:3',
+    'capacitor:3',
+    'condensate:3',
+  ];
   return pack;
 }
 

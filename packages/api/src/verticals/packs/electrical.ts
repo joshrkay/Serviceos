@@ -108,5 +108,17 @@ export function createElectricalPack(): VerticalPack {
     training_tier: 'second_class',
     training_assets: ELECTRICAL_TRAINING_ASSETS,
   };
+  pack.sttKeywords = [
+    'breaker:3',
+    'panel:3',
+    'GFCI:3',
+    'sub-panel:3',
+    'amperage:3',
+    'voltage:3',
+    'arc fault:3',
+    'romex:3',
+    'conduit:3',
+    'service entrance:3',
+  ];
   return pack;
 }
