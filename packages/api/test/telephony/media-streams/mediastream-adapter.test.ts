@@ -339,19 +339,24 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
 
   // ─── Helpers for streaming tests ───────────────────────────────────────────
 
-  function setupAdapter(opts: { ttsProvider?: TtsProvider } = {}): {
+  function setupAdapter(opts: {
+    ttsProvider?: TtsProvider;
+    streamingProvider?: StreamingTranscriptionProvider;
+    terminologyProvider?: { getKeywords(tenantId: string): Promise<ReadonlyArray<string>> };
+  } = {}): {
     adapter: TwilioMediaStreamAdapter;
     ws: FakeWs;
   } {
     store.create('t', 'telephony', { callSid: 'CA-stream' });
     const ws = new FakeWs();
-    const { provider } = makeStreamingProvider();
+    const { provider: defaultProvider } = makeStreamingProvider();
     const adapter = new TwilioMediaStreamAdapter(
       {
         store,
-        streamingProvider: provider,
+        streamingProvider: opts.streamingProvider ?? defaultProvider,
         speechTurn: async () => [],
         ttsProvider: opts.ttsProvider,
+        terminologyProvider: opts.terminologyProvider,
       },
       ws,
     );
@@ -405,6 +410,65 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     // TTS never resolved, so no media frames should have been sent after barge-in.
     const mediaFrames = ws.sent.filter((m) => (m as Record<string, unknown>).event === 'media');
     expect(mediaFrames.length).toBe(0);
+  });
+
+  it('passes vertical keywords to Deepgram openSession when terminologyProvider yields them', async () => {
+    const openSessionSpy = vi.fn(async () => ({
+      send: vi.fn(),
+      finish: vi.fn(),
+      destroy: vi.fn(),
+    }));
+    const streamingProvider = { openSession: openSessionSpy };
+    const terminologyProvider = {
+      getKeywords: vi.fn(async () => ['furnace:3', 'compressor:3']),
+    };
+    const { ws } = setupAdapter({
+      streamingProvider,
+      terminologyProvider,
+    });
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 's1',
+      start: {
+        callSid: 'CA-stream',
+        accountSid: 'a1',
+        streamSid: 's1',
+        tracks: ['inbound'],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(terminologyProvider.getKeywords).toHaveBeenCalledWith(expect.any(String));
+    expect(openSessionSpy).toHaveBeenCalled();
+    const callArgs = openSessionSpy.mock.calls[0];
+    // 5th argument should be { keywords: [...] }
+    expect(callArgs[4]).toEqual({ keywords: ['furnace:3', 'compressor:3'] });
+  });
+
+  it('does not pass keywords to openSession when terminologyProvider returns empty', async () => {
+    const openSessionSpy = vi.fn(async () => ({
+      send: vi.fn(),
+      finish: vi.fn(),
+      destroy: vi.fn(),
+    }));
+    const streamingProvider = { openSession: openSessionSpy };
+    const terminologyProvider = { getKeywords: vi.fn(async () => []) };
+    const { ws } = setupAdapter({ streamingProvider, terminologyProvider });
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 's1',
+      start: {
+        callSid: 'CA-stream',
+        accountSid: 'a1',
+        streamSid: 's1',
+        tracks: ['inbound'],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(openSessionSpy).toHaveBeenCalled();
+    // 5th arg should be undefined when keywords list is empty
+    expect(openSessionSpy.mock.calls[0][4]).toBeUndefined();
   });
 
   it('streams outbound media as TTS chunks arrive (does not wait for full audio)', async () => {
