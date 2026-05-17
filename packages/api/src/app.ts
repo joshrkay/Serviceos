@@ -158,6 +158,8 @@ import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
+import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
@@ -1928,6 +1930,16 @@ export function createApp(): express.Express {
         },
       });
 
+      // P2-1: Filler engine + cache. One engine instance is shared across
+      // calls — callers don't hear each other's prior fillers, so per-call
+      // non-repeat tracking is not required. The cache loads all PCM files
+      // from disk once at boot; missing files are logged (warn) and skipped.
+      const fillerCache = new FillerAudioCache(
+        require('path').resolve(__dirname, 'ai/agents/customer-calling/fillers'),
+      );
+      fillerCache.load();
+      const fillerEngine = new FillerEngine();
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -1942,6 +1954,8 @@ export function createApp(): express.Express {
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
+            fillerEngine,
+            fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
