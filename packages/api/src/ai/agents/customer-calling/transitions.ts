@@ -443,7 +443,6 @@ function transitionIntentCapture(
             confidence: event.confidence,
             retryCount: newRetryCount,
           }),
-          ttsPlay(repromptText),
           {
             type: 'emit_quality_event',
             payload: {
@@ -452,6 +451,7 @@ function transitionIntentCapture(
               text: repromptText,
             },
           },
+          ttsPlay(repromptText),
         ],
         updatedContext: { ...context, retryCount: newRetryCount },
       };
@@ -501,7 +501,6 @@ function transitionIntentCapture(
             retryCount: newRetryCount,
             repromptCount: newRepromptCount,
           }),
-          ttsPlay(repromptText),
           {
             type: 'emit_quality_event',
             payload: {
@@ -510,6 +509,7 @@ function transitionIntentCapture(
               text: repromptText,
             },
           },
+          ttsPlay(repromptText),
         ],
         updatedContext: {
           ...context,

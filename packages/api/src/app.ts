@@ -1931,9 +1931,11 @@ export function createApp(): express.Express {
       });
 
       // P2-1: Filler engine + cache. One engine instance is shared across
-      // calls — callers don't hear each other's prior fillers, so per-call
-      // non-repeat tracking is not required. The cache loads all PCM files
-      // from disk once at boot; missing files are logged (warn) and skipped.
+      // calls. Cross-call state sharing means the no-repeat guarantee is
+      // process-wide, not per-call — acceptable because callers can't hear
+      // each other's audio, and round-robin over 8 fillers means no caller
+      // hears the same filler back-to-back regardless. The cache loads all
+      // PCM files from disk once at boot; missing files are logged (warn).
       const fillerCache = new FillerAudioCache(
         require('path').resolve(__dirname, 'ai/agents/customer-calling/fillers'),
       );
