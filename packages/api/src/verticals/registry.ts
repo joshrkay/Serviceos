@@ -68,6 +68,19 @@ export interface ObjectionScript {
 
 export type ObjectionScriptList = readonly ObjectionScript[];
 
+/**
+ * §P2-3 — Vertical-specific conversational repair templates. When the
+ * FSM's intent-capture state encounters low confidence, it picks the
+ * matching template and speaks it instead of a generic "say that again?"
+ * reprompt. Four trigger types cover the most common failure modes.
+ */
+export interface RepairTemplate {
+  /** When the FSM low-confidence signal matches this trigger, pick this template. */
+  trigger: 'low_intent_confidence' | 'low_audio_confidence' | 'ambiguous_service_type' | 'ambiguous_entity';
+  /** TTS text spoken to the caller. Use plain English; no SSML for now. */
+  text: string;
+}
+
 export interface VerticalPack extends CanonicalVerticalPack {
   type: VerticalType;
   name: string;
@@ -88,6 +101,13 @@ export interface VerticalPack extends CanonicalVerticalPack {
    * Example: ['furnace:3', 'compressor:3', 'condenser:3'].
    */
   sttKeywords?: ReadonlyArray<string>;
+  /**
+   * §P2-3 — Vertical-aware repair templates for low-confidence reprompts.
+   * Sourced directly from the rich pack (like sttKeywords) — NOT stored
+   * in canonical registry metadata and therefore must be read from the
+   * in-memory pack factory, not round-tripped through adaptToCanonical.
+   */
+  repairTemplates?: ReadonlyArray<RepairTemplate>;
 }
 
 export interface VerticalPackRepository {
