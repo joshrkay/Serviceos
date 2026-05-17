@@ -2710,6 +2710,39 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_google_reviews ON google_reviews
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P7-026 — Service-credit issuance ledger. Used by the 12-month-per-customer
+  // cap query in credit-tier.ts: `SUM(amount_cents) WHERE customer_id = $1
+  // AND issued_at > now() - interval '12 months'`. Per CLAUDE.md money rule,
+  // amount_cents is integer cents (never a float). The partial index on
+  // (tenant_id, customer_id, issued_at) makes that cap query cheap.
+  //
+  // source_review_id is nullable because a credit might be issued outside
+  // the review-response flow (a goodwill credit for a different reason);
+  // for P7-026 the proposal handler always sets it to the originating review.
+  '103_create_service_credits': `
+    CREATE TABLE IF NOT EXISTS service_credits (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      issued_by_user_id TEXT NOT NULL,
+      source_review_id UUID REFERENCES google_reviews(id) ON DELETE SET NULL,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_credits_cap_query
+      ON service_credits(tenant_id, customer_id, issued_at);
+    CREATE INDEX IF NOT EXISTS idx_service_credits_review
+      ON service_credits(tenant_id, source_review_id)
+      WHERE source_review_id IS NOT NULL;
+    ALTER TABLE service_credits ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_credits FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_credits ON service_credits;
+    CREATE POLICY tenant_isolation_service_credits ON service_credits
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

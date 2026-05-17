@@ -14,6 +14,10 @@ import {
   InvoiceDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
+import {
+  ReviewResponseExecutionHandler,
+  type ReviewResponseHandlerDeps,
+} from './review-response-handler';
 import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
@@ -210,6 +214,10 @@ export function createExecutionHandlerRegistry(deps?: {
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
   jobRepo?: JobRepository;
+  /** P7-026 — optional review-response handler deps. When omitted, the
+   * handler is still registered but each sub-action runs in synthetic
+   * mode (executes without provider side-effects, for tests). */
+  reviewResponse?: ReviewResponseHandlerDeps;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -247,6 +255,13 @@ export function createExecutionHandlerRegistry(deps?: {
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo, moneyStateDeps),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    // P7-026 — review-response handler. Registered unconditionally so
+    // a pending proposal can be executed in test/dev (synthetic mode)
+    // without requiring full provider wiring.
+    new ReviewResponseExecutionHandler({
+      ...(deps?.reviewResponse ?? {}),
+      auditRepo: deps?.reviewResponse?.auditRepo ?? deps?.auditRepo,
+    }),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

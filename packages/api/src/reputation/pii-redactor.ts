@@ -64,7 +64,11 @@ const STREET_RE = new RegExp(
 
 const SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/g;
 const CREDIT_CARD_RE = /\b(?:\d{4}[\s-]?){3}\d{4}\b/g;
-const INTERNAL_ID_RE = /\b(?:CUST|JOB|INV|APPT|EST)-[A-Z0-9]{4,}\b/gi;
+// Internal IDs match `<PREFIX>-<TOKEN>(-<TOKEN>)*` where each token is
+// 3+ alphanumeric chars. Catches `JOB-001-ABCD`, `CUST-AB12CD`,
+// `INV-2024-0042`, etc. The minimum-3 token length plus the `\b`
+// boundary keeps false positives down.
+const INTERNAL_ID_RE = /\b(?:CUST|JOB|INV|APPT|EST)-[A-Z0-9]{3,}(?:-[A-Z0-9]{3,})*\b/gi;
 
 const REDACTED_TOKEN = '[redacted]';
 
