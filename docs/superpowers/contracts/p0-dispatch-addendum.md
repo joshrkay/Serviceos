@@ -443,6 +443,78 @@ cd /home/user/Serviceos && \
 
 ---
 
+## P0-036 — Per-caller (phone) rate-limit utility
+
+**Wave:** Wave-C blocker B5 (see `docs/superpowers/plans/2026-05-17-wave-c-bad-day-recovery.md`)
+**Migration number reserved:** `102_phone_rate_limits`
+**Forbidden files:**
+- `packages/api/src/app.ts` (do not wire — callers import directly)
+- `packages/api/src/sms/recovery/**` (P8-015 owns the dropped-call rate-limit caller)
+- `packages/shared/**`
+- Any pre-existing rate-limit middleware (`express-rate-limit`) — this is a separate domain-rate-limit
+
+**Allowed files (concrete list):**
+- `packages/api/src/shared/rate-limit/phone-rate-limit.ts` (new)
+- `packages/api/src/shared/rate-limit/phone-rate-limit.test.ts` (new)
+- `packages/api/src/db/schema.ts` (modify — add key `102_phone_rate_limits`)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P0-036|phone-rate-limit"
+```
+
+**Pre-flight:** none.
+
+**Risk note:**
+- **Sliding window, not fixed bucket.** A fixed-bucket implementation lets a caller send 1 SMS at 4:59 and another at 5:00 and pass the "1 per 5 min" rule. Use windowed counts: `SUM(count) WHERE window_start > NOW() - windowMs`.
+- **Concurrency.** Two simultaneous `tryConsume()` calls on the same `(tenant_id, scope, key)` must not both succeed past the limit. Use `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING count` so the database serializes; assert with a 10-parallel test.
+- **Generic, not story-specific.** The `scope` parameter exists so future features can reuse this table — do NOT hardcode `'sms_recovery'` anywhere in this story's code.
+
+**Implementation hints:**
+1. Window strategy: bucket by `floor(NOW() / windowMs) * windowMs` so all writes within the same window collide on the same `window_start` row. Sum across the last N windows where N = `windowMs / bucketSize`.
+2. Cleanup is lazy: a daily worker job (out of scope for this story) DELETEs rows older than 30 days. For V1, the table grows; the index keeps lookups fast.
+3. RLS: enable on `phone_rate_limits` with the standard tenant policy. Defense-in-depth alongside the explicit `tenant_id` filter in queries.
+
+---
+
+## P0-037 — Expand `LinkableEntityType` for voice and SMS conversations
+
+**Wave:** Wave-C blocker B6
+**Migration number reserved:** none (`entity_type` is `TEXT`, no DB-level check constraint)
+**Forbidden files:**
+- `packages/api/src/voice/**` (consumer — does not modify the linkage source)
+- `packages/api/src/sms/**` (consumer)
+- `packages/shared/**`
+- `packages/api/src/db/**`
+
+**Allowed files (concrete list):**
+- `packages/api/src/conversations/linkage.ts` (modify — extend the union and the validator)
+- `packages/api/src/conversations/pg-conversation-link.ts` (modify — if any hardcoded list)
+- `packages/api/src/conversations/linkage.test.ts` (modify — add new entity-type round-trips)
+- `packages/api/src/conversations/pg-conversation-link.test.ts` (modify if applicable)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P0-037|linkage|conversation-link"
+```
+
+**Pre-flight:** none.
+
+**Risk note:**
+- **Exhaustive switches.** TypeScript should fail any switch that doesn't handle the new entity types. Fix the failing switches — do not cast or `never`-assert past them. If a switch is intentionally partial (e.g., a UI renderer that only knows certain types), it should have an explicit `default:` that no-ops rather than asserting exhaustive.
+- **Validator must accept the new types.** Some validators are written with `z.enum([...])` — extend the array. Others are written with `z.literal('customer') | z.literal('job') | ...` — extend the union.
+
+**Implementation hints:**
+1. Run `grep -rn "LinkableEntityType\|entity_type" packages/api/src/conversations/` first to find all sites.
+2. The repo's `pg-conversation-link.ts` likely has the union TYPED as `LinkableEntityType` (re-imported) — extending the source extends the typing automatically. If there's a hardcoded list (e.g., in a CHECK constraint comment), update the comment.
+3. No data migration — existing rows are not affected.
+
+---
+
 ## Universal pre-flight checks (run by `/dispatch-story` before launching any agent)
 
 1. `git fetch origin && git rev-parse origin/main` — confirms fresh main.

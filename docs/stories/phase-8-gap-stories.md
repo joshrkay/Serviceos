@@ -1,6 +1,6 @@
 # Phase 8 — Customer Voice Agents: Wave 8C Gap Stories
 
-> **3 stories** | Continues from P8-011
+> **5 stories** | Continues from P8-011
 
 ---
 
@@ -130,3 +130,78 @@ cd /home/user/Serviceos && \
 - [ ] Idempotency: second webhook with same RecordingSid is a no-op
 - [ ] Tenant scoping: row tenant matches the resolved session tenant, not Twilio's payload
 - [ ] Auth token not leaked in error messages
+
+---
+
+### P8-015 — Dropped-call SMS recovery
+
+> **Size:** S | **Layer:** Intake | **AI Build:** Medium | **Human Review:** Heavy | **Wave:** 2 (Wave-C1)
+
+> **PRD codename:** N-007 (PRD v2 §9)
+> **Day-in-the-life moments:** Mike bad-day 1:30pm (caller hangs up after 11 seconds; SMS goes out within 60s).
+
+**Dependencies:** P8-001 (inbound calling agent), P7-001 (Twilio), P0-036 (phone rate-limit), P0-037 (LinkableEntityType), P4-015 (brand voice)
+
+**Allowed files:** `packages/api/src/voice/recovery/**`, `packages/api/src/sms/recovery/**`, `packages/api/src/workers/dropped-call-worker.ts`, `packages/api/src/ai/agents/customer-calling/inapp-adapter.ts` (dep-injection edit only), `packages/api/src/voice/voice-service.ts` (mirror edit only), `packages/api/src/db/schema.ts`, `packages/shared/src/contracts/dropped-call-event.ts`
+
+**Build prompt:** Detect when an inbound voice session ends without a resolved outcome (caller hung up before booking or transfer, audio quality failure, system error mid-call) and, within 60 seconds, send an SMS to the caller in the shop's brand voice (P4-015). The SMS includes a generic apology + a context cue if a partial transcript exists ("Sounds like you were calling about your AC — want to text or call back? We're here."). The dropped-call event is threaded to the original intake using P0-037's expanded `LinkableEntityType` so a subsequent SMS reply continues the same conversation. Recovery is suppressed if the call resulted in a successful booking or owner transfer. Rate-limited per caller (P0-036, scope=`sms_recovery`, limit=1, window=5min). The trigger site is `finalizeTerminalOutcome` in `packages/api/src/ai/agents/customer-calling/inapp-adapter.ts` (after `session.terminalOutcome` is set) — inject a `droppedCallScheduler` and fire when outcome ∈ {`dropped`, `failed`}.
+
+**Review prompt:** Verify drop detection within 5 seconds of session end. Verify SMS within 60s P95. Verify the SMS does not go out for successful or transferred calls. Verify partial transcript context is sanitized (no PII leak in the SMS body). Verify recovery is rate-limited per caller (no SMS spam if the caller keeps dropping). Confirm the 60s deferred-send uses the existing queue infra with `runAfter`, not a `setTimeout`.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P8-015"
+```
+
+**Required tests:**
+- [ ] Hangup before booking → SMS sent within 60s
+- [ ] Successful booking → no SMS
+- [ ] Audio failure mid-call → SMS sent
+- [ ] Partial transcript context included when available
+- [ ] No transcript → generic SMS
+- [ ] Threaded — subsequent reply belongs to same intake conversation
+- [ ] Rate-limited — same caller within 5 min gets one SMS, not multiple
+
+**Non-goals:** Outbound voice callback (V2); recovery for SMS-initiated conversations (different problem); recovery for owner-cell patches that fail (V2).
+
+---
+
+### P8-016 — Vulnerability-aware emergency triage
+
+> **Size:** S | **Layer:** Intake | **AI Build:** Medium | **Human Review:** Heavy | **Wave:** 2 (Wave-C1)
+
+> **PRD codename:** N-008 (PRD v2 §9)
+> **Day-in-the-life moments:** Mike 4:30pm (elderly woman with mom on oxygen, 104°F); Mike bad-day 11:00am (flat-voice elderly caller; supervisor agent catches what the primary missed).
+
+**Dependencies:** P8-001 (inbound calling agent), P1-001 (customer entity), P1-022 (users.mobile_number for owner-cell paging)
+
+**Allowed files:** `packages/api/src/voice/triage/**`, `packages/api/src/ai/vulnerability/**`, `packages/api/src/integrations/weather/**`, `packages/api/src/customers/customer.ts` (additive fields only), `packages/api/src/customers/pg-customer.ts` (additive fields only), `packages/api/src/ai/skills/escalate-to-human.ts` (extend with new EscalationReason + owner-cell + fallback), `packages/api/src/ai/agents/customer-calling/state-machine.ts` (call triage-decision at escalation site), `packages/api/src/db/schema.ts`, `packages/shared/src/contracts/vulnerability-signal.ts`
+
+**Build prompt:** Extend the inbound calling agent's escalation skill to weigh four vulnerability signals in urgency classification:
+- **Age**: caller mentions age >65, or matched customer record indicates
+- **Weather**: tenant locale has temperature >100°F or <20°F in the last 24h (fetch from weather provider, cached per locale per hour)
+- **Medical**: caller utterance mentions oxygen, dialysis, breathing trouble, illness, infant, elderly relative
+- **Property type**: known B2B account flagged as occupied (e.g., property manager reporting on residents)
+
+Signals combine into a vulnerability score. **Vulnerability + urgency** (e.g., no AC + summer heat + age >65) → patch to owner's cell (via P1-022's `mobile_number`) with a 5-second context preface ("Medical priority, no AC, elderly, your customer since 2024. Putting them through.") rather than booking. **Vulnerability alone** (no immediate urgency) → high-priority booking with owner notification, not auto-booked into normal flow. If the owner is unreachable for 60 seconds, fall back to high-priority booking and SMS the owner what happened. Add migration 109 for `customers.date_of_birth + account_type`, migration 110 for `weather_cache`, migration 111 for `vulnerability_signals` (analytics). The 5s preface is deterministic-template — NOT LLM (5s is too tight for a model round-trip + TTS).
+
+**Review prompt:** Verify signals are extracted from utterance content, customer record, **and** weather API independently. Verify combination logic does not bias against legitimate non-emergency calls (high specificity). Verify the 5-second context preface is concise and non-PII-leaky. Verify the fallback when owner is unreachable is sane. Verify the system does not claim medical authority (the brand voice must not say "you have a medical emergency" — just escalate the call). Verify weather-API failure does not block the call — degrade to age + medical signals.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P8-016"
+```
+
+**Required tests:**
+- [ ] Age + urgency + weather → patches owner
+- [ ] Medical mention + urgency → patches owner
+- [ ] Age alone → high-priority booking, owner notified
+- [ ] No vulnerability → normal flow
+- [ ] Weather API failure → fall back to age + medical only
+- [ ] Owner unreachable → high-priority booking + owner SMS
+- [ ] Context preface excludes PII (no full address)
+- [ ] Correct-escalation rate >95% on labeled fixture set
+
+**Non-goals:** Real-time vital monitoring (not our domain); medical priority routing to first responders (we do not claim authority); self-reported disability status as a signal (privacy, regulatory).
