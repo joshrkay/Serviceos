@@ -187,15 +187,24 @@ describe('P2-030 PgShadowComparisonStore.save', () => {
     const store = new PgShadowComparisonStore(pool);
     await store.save(result);
 
-    const insertedPrimary = calls[1].params[4] as string;
-    const insertedShadow = calls[1].params[5] as string;
+    // INSERT param order (0-indexed):
+    // [0] id, [1] tenantId, [2] aiRunId, [3] comparisonGroupId,
+    // [4] taskType, [5] primaryModel, [6] shadowModel,
+    // [7] primaryResponseText (PII-redacted), [8] shadowResponseText (PII-redacted)
+    const insertedPrimary = calls[1].params[7] as string;
+    const insertedShadow = calls[1].params[8] as string;
 
-    // Email should be redacted
+    // Email should be redacted (negative)
     expect(insertedPrimary).not.toContain('john@example.com');
-    // Phone should be redacted
+    // Phone should be redacted (negative)
     expect(insertedPrimary).not.toContain('555-867-5309');
-    // Shadow text should also be redacted
+    // Shadow text email should be redacted (negative)
     expect(insertedShadow).not.toContain('john@example.com');
+
+    // Positive assertions: scrubPii replaces emails with [EMAIL] and phones with [PHONE]
+    expect(insertedPrimary).toContain('[EMAIL]');
+    expect(insertedPrimary).toContain('[PHONE]');
+    expect(insertedShadow).toContain('[EMAIL]');
   });
 });
 

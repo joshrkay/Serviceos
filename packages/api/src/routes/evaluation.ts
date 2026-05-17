@@ -43,6 +43,14 @@ export function createEvaluationRouter(deps: EvaluationRouterDeps): Router {
       const cursor =
         typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
 
+      if (cursor !== undefined) {
+        const ts = Date.parse(cursor);
+        if (!Number.isFinite(ts)) {
+          res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid cursor' });
+          return;
+        }
+      }
+
       const page = await deps.shadowStore.listForTenant(tenantId, {
         taskType,
         limit,
@@ -52,6 +60,7 @@ export function createEvaluationRouter(deps: EvaluationRouterDeps): Router {
       const comparisons = page.comparisons.map((c) => ({
         id: c.id,
         aiRunId: c.aiRunId ?? null,
+        taskType: c.taskType ?? null,
         shadowModel: c.shadowResponse?.model ?? c.primaryResponse.model,
         primaryResponseText: c.primaryResponse.content,
         shadowResponseText: c.shadowResponse?.content ?? null,

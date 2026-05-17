@@ -2660,6 +2660,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_created ON shadow_comparisons(tenant_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_group ON shadow_comparisons(comparison_group_id);
     ALTER TABLE shadow_comparisons ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE shadow_comparisons FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_shadow_comparisons ON shadow_comparisons;
     CREATE POLICY tenant_isolation_shadow_comparisons ON shadow_comparisons
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);

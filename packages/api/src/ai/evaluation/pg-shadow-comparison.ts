@@ -169,10 +169,18 @@ export class PgShadowComparisonStore extends PgBaseRepository implements ShadowC
     });
   }
 
+  /**
+   * @internal TEST / MAINTENANCE USE ONLY — do NOT call from production code paths.
+   *
+   * Uses `withClient` without tenant context, so RLS is enforced by FORCE ROW LEVEL SECURITY
+   * (which will error at the DB level when `app.current_tenant_id` is unset) rather than
+   * silently scoping to the right tenant. In production, use `listForTenant` instead.
+   */
   async findByGroup(groupId: string): Promise<ShadowComparisonResult[]> {
-    // group-based lookup requires a tenant to scope the RLS context;
-    // without it we use a no-tenant client. This method is mainly used
-    // by the in-memory store; for Pg, listForTenant is the primary read path.
+    console.warn(
+      '[PgShadowComparisonStore] findByGroup() called without tenant context — ' +
+        'this method is test/maintenance-only. Use listForTenant() in production.'
+    );
     return this.withClient(async (client) => {
       const result = await client.query(
         `SELECT * FROM shadow_comparisons
@@ -184,7 +192,18 @@ export class PgShadowComparisonStore extends PgBaseRepository implements ShadowC
     });
   }
 
+  /**
+   * @internal TEST / MAINTENANCE USE ONLY — do NOT call from production code paths.
+   *
+   * Uses `withClient` without tenant context. With FORCE ROW LEVEL SECURITY enabled,
+   * this will throw at the DB level when `app.current_tenant_id` is unset, rather than
+   * silently leaking cross-tenant data. In production, use `listForTenant` instead.
+   */
   async getAll(): Promise<ShadowComparisonResult[]> {
+    console.warn(
+      '[PgShadowComparisonStore] getAll() called without tenant context — ' +
+        'this method is test/maintenance-only. Use listForTenant() in production.'
+    );
     return this.withClient(async (client) => {
       const result = await client.query(
         `SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT 1000`

@@ -93,6 +93,7 @@ describe('GET /api/evaluation/shadow-comparisons', () => {
     expect(res.status).toBe(200);
     const cmp = res.body.comparisons[0];
     expect(typeof cmp.id).toBe('string');
+    expect(typeof cmp.taskType).toBe('string');
     expect(typeof cmp.shadowModel).toBe('string');
     expect(typeof cmp.primaryResponseText).toBe('string');
     expect(typeof cmp.primaryLatencyMs).toBe('number');
@@ -101,6 +102,18 @@ describe('GET /api/evaluation/shadow-comparisons', () => {
     expect(cmp.shadowTokenUsage).toBeDefined();
     expect(typeof cmp.createdAt).toBe('string');
     expect('nextCursor' in res.body).toBe(true);
+  });
+
+  it('returns 400 for malformed cursor', async () => {
+    const app = buildApp('owner', TENANT_A, store);
+
+    const res = await request(app)
+      .get('/api/evaluation/shadow-comparisons')
+      .query({ cursor: 'garbage' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(typeof res.body.message).toBe('string');
   });
 
   it('returns 403 for technician role', async () => {
