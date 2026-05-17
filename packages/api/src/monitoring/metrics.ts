@@ -146,6 +146,26 @@ export const breakerHalfOpenProbeSuccessRatio = new Gauge({
   registers: [metricsRegistry],
 });
 
+// ---------- Cache ----------
+
+/**
+ * P2-031 — response cache hit/miss counters.
+ * Partitioned by taskType so operators can see which task types benefit most.
+ */
+export const gatewayCacheHitsTotal = new Counter({
+  name: 'gateway_cache_hits_total',
+  help: 'LLM gateway cache hits (deterministic tasks served from cache)',
+  labelNames: ['taskType'],
+  registers: [metricsRegistry],
+});
+
+export const gatewayCacheMissesTotal = new Counter({
+  name: 'gateway_cache_misses_total',
+  help: 'LLM gateway cache misses (deterministic tasks not found in cache)',
+  labelNames: ['taskType'],
+  registers: [metricsRegistry],
+});
+
 // ---------- WebSocket ----------
 
 export const wsConnections = new Gauge({

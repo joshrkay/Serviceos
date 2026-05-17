@@ -1,5 +1,5 @@
 import { LLMGateway, SYSTEM_TENANT_ID } from './gateway';
-import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger } from './gateway';
+import type { LLMProvider, LLMGatewayConfig, LLMGatewayLogger, IGateway } from './gateway';
 import { OpenAICompatibleProvider } from '../providers/openai-compatible';
 import type { EmbeddingProvider } from '../providers/openai-compatible';
 import { MockLLMProvider } from '../providers/mock';
@@ -13,6 +13,12 @@ import type { AiRunRepository } from '../ai-run';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
 import { TenantQuotaRegistry, DEFAULT_TIER_CONFIG } from './tenant-quota';
 import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
+import {
+  CachingGatewayWrapper,
+  InMemoryCacheStore,
+  type CacheConfig,
+} from './cache';
+import { createRedisCacheStore } from './redis-cache-store';
 
 /**
  * Create the LLM gateway from application config.
@@ -127,7 +133,82 @@ export function createLLMGateway(
     config.AI_DEFAULT_MODEL,
     opts.logger,
   );
-  return new LLMGateway(gatewayConfig, providers, opts.logger, opts.aiRunRepo);
+  const bareGateway = new LLMGateway(gatewayConfig, providers, opts.logger, opts.aiRunRepo);
+
+  // P2-031 — optional response cache. Opt in with AI_CACHE_ENABLED=true.
+  // Cache sits OUTSIDE the resilience stack so a hit never burns breaker budget.
+  // When disabled (default), zero overhead — no wrapper is created.
+  if (process.env.AI_CACHE_ENABLED !== 'true') {
+    return bareGateway;
+  }
+
+  return maybeBuildCacheWrapper(bareGateway, opts);
+}
+
+/** Default cache-eligible task types for P2-031. */
+const DEFAULT_DETERMINISTIC_TASK_TYPES: readonly string[] = [
+  'intent_classification',
+  'entity_extraction',
+  'transcript_normalization',
+  'extract_categories',
+];
+
+/**
+ * Build a CachingGatewayWrapper around the assembled gateway.
+ * When REDIS_URL is set, uses RedisCacheStore; otherwise falls back to InMemoryCacheStore.
+ * This function intentionally returns synchronously using InMemory by default,
+ * and upgrades to Redis in the background. The sync return path means the factory
+ * remains synchronous for the common case.
+ *
+ * NOTE: When REDIS_URL is set, the Redis connection attempt is made synchronously
+ * via createRedisCacheStore. If Redis is unavailable, we fall back to InMemory.
+ */
+function maybeBuildCacheWrapper(
+  gateway: LLMGateway,
+  opts: CreateLLMGatewayOptions,
+): LLMGateway {
+  const cacheConfig: CacheConfig = {
+    enabled: true,
+    defaultTtlMs: 3_600_000, // 1 hour default
+    deterministicTaskTypes: [...DEFAULT_DETERMINISTIC_TASK_TYPES],
+  };
+
+  // For Redis: we use a synchronous wrapper that initialises the store lazily.
+  // If REDIS_URL is set, we construct with a placeholder InMemory store,
+  // then swap it out asynchronously. The simpler approach: use InMemory if Redis
+  // URL is set but unavailable, and document that Redis is best-effort.
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    // Build with InMemory fallback first (synchronous), then asynchronously
+    // upgrade to Redis. This keeps the factory synchronous — callers don't
+    // need to await. Cache failures are silent (best-effort).
+    const inMemoryFallback = new InMemoryCacheStore();
+    const wrapper = new CachingGatewayWrapper(
+      gateway,
+      inMemoryFallback,
+      cacheConfig,
+      'system',
+      opts.aiRunRepo,
+    );
+
+    createRedisCacheStore(redisUrl).then((redisStore) => {
+      if (redisStore) {
+        wrapper.cacheStore = redisStore;
+      }
+    }).catch(() => {
+      // Redis unavailable — stay on InMemory silently
+    });
+
+    return wrapper as unknown as LLMGateway;
+  }
+
+  return new CachingGatewayWrapper(
+    gateway,
+    new InMemoryCacheStore(),
+    cacheConfig,
+    'system',
+    opts.aiRunRepo,
+  ) as unknown as LLMGateway;
 }
 
 /**

@@ -1,5 +1,12 @@
 import { createHash } from 'crypto';
-import { LLMRequest, LLMResponse, LLMGateway, LLMGatewayConfig, LLMProvider } from './gateway';
+import { v4 as uuidv4 } from 'uuid';
+import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
+import type { AiRunRepository } from '../ai-run';
+import { createAiRun } from '../ai-run';
+import {
+  gatewayCacheHitsTotal,
+  gatewayCacheMissesTotal,
+} from '../../monitoring/metrics';
 
 export interface CacheEntry {
   response: LLMResponse;
@@ -49,18 +56,27 @@ export class InMemoryCacheStore implements CacheStore {
 }
 
 export class CachingGatewayWrapper {
+  readonly config: CacheConfig;
+  /** Exposed so the factory can asynchronously swap InMemory → Redis post-construction. */
+  cacheStore: CacheStore;
   private readonly gateway: LLMGateway;
-  private readonly cacheStore: CacheStore;
-  private readonly config: CacheConfig;
   private readonly tenantId: string;
+  private readonly aiRunRepo?: AiRunRepository;
   private hits = 0;
   private misses = 0;
 
-  constructor(gateway: LLMGateway, cacheStore: CacheStore, config: CacheConfig, tenantId: string) {
+  constructor(
+    gateway: LLMGateway,
+    cacheStore: CacheStore,
+    config: CacheConfig,
+    tenantId: string,
+    aiRunRepo?: AiRunRepository,
+  ) {
     this.gateway = gateway;
     this.cacheStore = cacheStore;
     this.config = config;
     this.tenantId = tenantId;
+    this.aiRunRepo = aiRunRepo;
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -69,6 +85,7 @@ export class CachingGatewayWrapper {
 
     if (!isDeterministic) {
       this.misses++;
+      gatewayCacheMissesTotal.inc({ taskType: request.taskType });
       return this.gateway.complete(request);
     }
 
@@ -81,11 +98,17 @@ export class CachingGatewayWrapper {
 
       if (!isExpired) {
         this.hits++;
+        gatewayCacheHitsTotal.inc({ taskType: request.taskType });
+
+        // Write AiRun row for cache hit so audit is never blind (best-effort).
+        await this.writeAiRunForCacheHit(request, cached.response);
+
         return { ...cached.response, cached: true };
       }
     }
 
     this.misses++;
+    gatewayCacheMissesTotal.inc({ taskType: request.taskType });
 
     const response = await this.gateway.complete(request);
 
@@ -102,5 +125,59 @@ export class CachingGatewayWrapper {
 
   getStats(): { hits: number; misses: number } {
     return { hits: this.hits, misses: this.misses };
+  }
+
+  /**
+   * Write a completed AiRun row for a cache hit.
+   * This ensures the audit trail is never blind even when the LLM is not called.
+   * Best-effort: failures are swallowed so cache hits are never blocked.
+   */
+  private async writeAiRunForCacheHit(
+    request: LLMRequest,
+    cachedResponse: LLMResponse,
+  ): Promise<void> {
+    if (!this.aiRunRepo) return;
+
+    try {
+      const tenantId = request.tenantId ?? this.tenantId;
+      const correlationId =
+        (request.metadata?.correlationId as string | undefined) ?? uuidv4();
+      const promptVersionId = request.metadata?.promptVersionId as string | undefined;
+      const now = new Date();
+
+      const pendingRun = createAiRun({
+        tenantId,
+        taskType: request.taskType,
+        model: cachedResponse.model,
+        promptVersionId,
+        inputSnapshot: {
+          messages: request.messages,
+          temperature: request.temperature,
+          maxTokens: request.maxTokens,
+        },
+        createdBy: 'gateway-cache',
+        correlationId,
+      });
+
+      const runWithTiming = {
+        ...pendingRun,
+        startedAt: now,
+      };
+
+      const aiRun = await this.aiRunRepo.create(runWithTiming);
+
+      await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'completed', {
+        outputSnapshot: {
+          content: cachedResponse.content,
+          provider: cachedResponse.provider,
+          cached: true,
+        },
+        tokenUsage: cachedResponse.tokenUsage,
+        completedAt: new Date(),
+        durationMs: 0,
+      });
+    } catch {
+      // Best-effort — audit failure must not block the cached response
+    }
   }
 }
