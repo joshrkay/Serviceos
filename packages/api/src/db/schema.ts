@@ -2633,6 +2633,33 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_payments_refunded_at
       ON payments(refunded_at) WHERE refunded_at IS NOT NULL;
   `,
+
+  // P2-030 — durable storage for shadow-comparison results.
+  // The shadow gateway samples a configurable fraction of LLM calls, replays
+  // them against a shadow model, and persists both responses here.
+  // divergence_score is written by a later job (P2-020) and is nullable on insert.
+  '101_create_shadow_comparisons': `
+    CREATE TABLE IF NOT EXISTS shadow_comparisons (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL,
+      ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      shadow_model TEXT NOT NULL,
+      primary_response_text TEXT,
+      shadow_response_text TEXT,
+      primary_latency_ms INTEGER,
+      shadow_latency_ms INTEGER,
+      primary_token_usage JSONB,
+      shadow_token_usage JSONB,
+      divergence_score NUMERIC,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_run ON shadow_comparisons(tenant_id, ai_run_id);
+    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_created ON shadow_comparisons(tenant_id, created_at DESC);
+    ALTER TABLE shadow_comparisons ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_shadow_comparisons ON shadow_comparisons;
+    CREATE POLICY tenant_isolation_shadow_comparisons ON shadow_comparisons
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

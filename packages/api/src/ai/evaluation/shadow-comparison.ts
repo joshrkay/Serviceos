@@ -9,6 +9,10 @@ export interface ShadowComparisonResult {
   shadowResponse?: LLMResponse;
   shadowError?: string;
   sampledAt: Date;
+  /** P2-030: tenant owning this comparison (required for durable Pg storage). */
+  tenantId?: string;
+  /** P2-030: ai_run_id of the primary call that triggered this comparison. */
+  aiRunId?: string;
 }
 
 export interface ShadowComparisonConfig {
@@ -18,10 +22,23 @@ export interface ShadowComparisonConfig {
   sampleFn?: () => number;
 }
 
+export interface ShadowComparisonListOptions {
+  taskType?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface ShadowComparisonPage {
+  comparisons: ShadowComparisonResult[];
+  nextCursor: string | null;
+}
+
 export interface ShadowComparisonStore {
   save(result: ShadowComparisonResult): Promise<ShadowComparisonResult>;
   findByGroup(groupId: string): Promise<ShadowComparisonResult[]>;
   getAll(): Promise<ShadowComparisonResult[]>;
+  /** P2-030: paginated tenant-scoped read for the admin API. */
+  listForTenant(tenantId: string, opts?: ShadowComparisonListOptions): Promise<ShadowComparisonPage>;
 }
 
 export class InMemoryShadowComparisonStore implements ShadowComparisonStore {
@@ -41,6 +58,30 @@ export class InMemoryShadowComparisonStore implements ShadowComparisonStore {
 
   async getAll(): Promise<ShadowComparisonResult[]> {
     return this.results.map((r) => ({ ...r }));
+  }
+
+  async listForTenant(
+    tenantId: string,
+    opts: ShadowComparisonListOptions = {}
+  ): Promise<ShadowComparisonPage> {
+    const limit = Math.min(opts.limit ?? 50, 200);
+    let rows = this.results
+      .filter((r) => r.tenantId === tenantId)
+      .filter((r) => !opts.taskType || r.taskType === opts.taskType)
+      .sort((a, b) => b.sampledAt.getTime() - a.sampledAt.getTime());
+
+    if (opts.cursor) {
+      const cursorTime = new Date(opts.cursor).getTime();
+      rows = rows.filter((r) => r.sampledAt.getTime() < cursorTime);
+    }
+
+    const page = rows.slice(0, limit);
+    const nextCursor =
+      page.length === limit && rows.length > limit
+        ? page[page.length - 1].sampledAt.toISOString()
+        : null;
+
+    return { comparisons: page.map((r) => ({ ...r })), nextCursor };
   }
 }
 
@@ -85,6 +126,9 @@ export class ShadowComparisonGateway implements LLMProvider {
         shadowError = err instanceof Error ? err.message : String(err);
       }
 
+      // Extract aiRunId from request metadata if present (set by gateway.ts P2-027).
+      const aiRunId = request.metadata?.aiRunId as string | undefined;
+
       const result: ShadowComparisonResult = {
         id: uuidv4(),
         comparisonGroupId,
@@ -93,6 +137,8 @@ export class ShadowComparisonGateway implements LLMProvider {
         shadowResponse,
         shadowError,
         sampledAt: new Date(),
+        tenantId: request.tenantId,
+        aiRunId,
       };
 
       await this.store.save(result);
