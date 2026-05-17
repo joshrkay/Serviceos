@@ -27,6 +27,7 @@ import type {
 import type { TtsProvider, TtsSynthesizeResult } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
+import { VOICE_EVENT_CHANNEL } from '../../../src/ai/voice-quality/event-bus';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -596,7 +597,65 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       expect(fillerFetched).toBe(false);
     });
 
-    it.todo('cancel filler cleanly mid-flight — needs jitter-buffered cancellation logic');
+    it('cancels the filler cleanly when the real response arrives mid-filler', async () => {
+      // Filler with multiple chunks of audio (~640 bytes each) to simulate
+      // a real filler clip mid-playback when the real TTS arrives.
+      const fillerPcm = Buffer.alloc(640 * 5); // 5 frames worth
+      const fillerCache = {
+        get: (id: string) => (id === 'okay' || id === 'mm-hmm' ? fillerPcm : undefined),
+        has: () => true,
+        size: () => 8,
+      };
+      const fillerEngine = {
+        selectNext: () => ({ id: 'okay', text: 'Okay.', approxDurationMs: 260 }),
+      };
+
+      // Real TTS provider: yields nothing for 100ms (filler fires at delayMs=50),
+      // then yields a real chunk. Filler should be canceled mid-flight.
+      const realTtsProvider = {
+        synthesize: vi.fn(),
+        synthesizeStream: vi.fn(() => ({
+          async *[Symbol.asyncIterator]() {
+            await new Promise((r) => setTimeout(r, 100));
+            yield { pcm: Buffer.alloc(640), isFinal: false };
+            yield { pcm: Buffer.alloc(640), isFinal: true };
+          },
+        })),
+      };
+
+      const fillerCancelled: string[] = [];
+      const callSid = 'CA-filler-cancel';
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: realTtsProvider,
+        fillerEngine,
+        fillerCache,
+        fillerDelayMs: 50,
+        callSid,
+      });
+
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 's-cancel',
+        start: { callSid, accountSid: 'a1', streamSid: 's-cancel', tracks: ['inbound'] },
+      });
+      await flushMicrotasks();
+
+      // Subscribe to filler_cancelled events on this session.
+      const session = store.findByCallSid(callSid);
+      if (session) {
+        session.events.on(VOICE_EVENT_CHANNEL, (evt: { type: string; fillerText?: string }) => {
+          if (evt.type === 'filler_cancelled') fillerCancelled.push(evt.fillerText ?? '');
+        });
+      }
+
+      const promise = (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'real response' } },
+      ]);
+      await promise;
+
+      // After the turn completes: filler should have started and then been cancelled.
+      expect(fillerCancelled.length).toBeGreaterThanOrEqual(1);
+    });
   });
 
   it('streams outbound media as TTS chunks arrive (does not wait for full audio)', async () => {
