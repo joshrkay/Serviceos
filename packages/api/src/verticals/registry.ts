@@ -78,6 +78,16 @@ export interface VerticalPack extends CanonicalVerticalPack {
   intakeQuestions?: IntakeQuestionList;
   /** §3E — Optional. Packs without objection scripts still load. */
   objectionScripts?: ObjectionScriptList;
+  /**
+   * Tokens to boost in the Deepgram streaming STT URL via the
+   * `keywords` query parameter. Each entry is `term:weight` where
+   * weight is 1-10. Boosting raises Deepgram's prior probability for
+   * the term so HVAC/plumbing jargon does not get mis-transcribed
+   * or clipped at endpoint detection.
+   *
+   * Example: ['furnace:3', 'compressor:3', 'condenser:3'].
+   */
+  sttKeywords?: ReadonlyArray<string>;
 }
 
 export interface VerticalPackRepository {
