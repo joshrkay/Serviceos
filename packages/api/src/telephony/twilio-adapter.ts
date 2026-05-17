@@ -233,13 +233,17 @@ export function buildTelephonyGreeting(
   disclosureText: string,
   persona?: VoicePersona | null
 ): string {
+  let greeting: string;
   if (persona?.greeting) {
-    return `${persona.greeting} ${disclosureText}`;
+    greeting = disclosureText ? `${persona.greeting} ${disclosureText}` : persona.greeting;
+  } else {
+    const opener = persona?.agentName
+      ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
+      : `Thank you for calling ${businessName}.`;
+    greeting = `${opener} ${disclosureText} How can I help you today?`;
   }
-  const opener = persona?.agentName
-    ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
-    : `Thank you for calling ${businessName}.`;
-  return `${opener} ${disclosureText} How can I help you today?`;
+  const trimmed = greeting.trim();
+  return trimmed.endsWith('?') ? trimmed : `${trimmed} What can I help you with today?`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {

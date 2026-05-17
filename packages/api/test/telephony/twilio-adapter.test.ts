@@ -974,3 +974,26 @@ describe('B2 — voiceSessionRepo outcome stamping (Twilio adapter)', () => {
     ).resolves.toBeDefined();
   });
 });
+
+// ─── buildTelephonyGreeting ───────────────────────────────────────────────────
+
+describe('buildTelephonyGreeting', () => {
+  it('ends with a question prompt cue when persona greeting does not end with a question', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      'This call may be recorded for quality.',
+      { greeting: 'Hi, this is Sarah.', agentName: 'Sarah' },
+    );
+    expect(result.trim().endsWith('?')).toBe(true);
+  });
+
+  it('does not double up a prompt cue when greeting already ends with a question', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      '',
+      { greeting: 'Hi, this is Sarah. What can I help you with today?', agentName: 'Sarah' },
+    );
+    // Only one question mark in the result
+    expect((result.match(/\?/g) ?? []).length).toBe(1);
+  });
+});
