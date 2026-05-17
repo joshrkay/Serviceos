@@ -156,6 +156,13 @@ export interface MediaStreamAdapterDeps {
     reason: string,
     sideEffects: ReadonlyArray<SideEffect>,
   ) => void;
+  /**
+   * Resolves Deepgram keyword-boost tokens for the tenant. Optional —
+   * when omitted, Deepgram opens without keyword boost.
+   */
+  terminologyProvider?: {
+    getKeywords(tenantId: string): Promise<ReadonlyArray<string>>;
+  };
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -397,6 +404,10 @@ export class TwilioMediaStreamAdapter {
     this.state.session = session;
     this.state.tenantId = session.tenantId;
 
+    const keywords = this.deps.terminologyProvider
+      ? await this.deps.terminologyProvider.getKeywords(session.tenantId).catch(() => [])
+      : [];
+
     try {
       this.state.deepgram = await this.deps.streamingProvider.openSession(
         (event) => {
@@ -413,6 +424,8 @@ export class TwilioMediaStreamAdapter {
           // Deepgram closed independently — we can still drain Twilio
           // until it sends `stop`. No-op.
         },
+        undefined, // language defaults
+        keywords.length > 0 ? { keywords } : undefined
       );
     } catch (err) {
       logger.error('mediastream: failed to open Deepgram session', {
