@@ -226,32 +226,42 @@ export interface TwilioAdapterDeps {
 /**
  * Build the full telephony greeting.
  *
- * When `persona.greeting` is set the tenant owns the entire opening
- * line — no extra CTA is appended. `disclosureText` (recording notice)
- * is always appended afterward regardless of which branch is taken,
- * since disclosure is a compliance requirement that cannot be opted out.
+ * `disclosureText` (recording notice) is always appended after the
+ * greeting when present — it is a compliance requirement that cannot
+ * be opted out.
  *
  * Branch priority:
- *   1. Custom greeting → `${greeting} ${disclosureText}`
- *   2. Agent name only → `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
- *   3. Neither         → `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *   1. Custom greeting (`persona.greeting` set):
+ *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
+ *        The tenant owns the entire opening line — NO CTA is appended.
+ *        The result is returned as-is so the tenant's chosen wording
+ *        is preserved verbatim.
+ *   2. Agent name only (`persona.agentName` set, no custom greeting):
+ *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
+ *   3. Neither:
+ *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
  */
 export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
   persona?: VoicePersona | null
 ): string {
-  let greeting: string;
+  const disclosure = disclosureText.trim();
+
+  // Branch 1 — tenant owns the entire opening line. Return without CTA append.
   if (persona?.greeting) {
-    greeting = disclosureText ? `${persona.greeting} ${disclosureText}` : persona.greeting;
-  } else {
-    const opener = persona?.agentName
-      ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
-      : `Thank you for calling ${businessName}.`;
-    greeting = `${opener} ${disclosureText} How can I help you today?`;
+    const greeting = persona.greeting.trim();
+    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
   }
-  const trimmed = greeting.trim();
-  return trimmed.endsWith('?') ? trimmed : `${trimmed} What can I help you with today?`;
+
+  // Branch 2 / 3 — assemble a default greeting, then ensure it ends with a CTA.
+  const opener = persona?.agentName
+    ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
+    : `Thank you for calling ${businessName}.`;
+  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  return assembled.endsWith('?') ? assembled : `${assembled} How can I help you today?`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {

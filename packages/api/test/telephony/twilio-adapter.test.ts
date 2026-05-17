@@ -978,22 +978,49 @@ describe('B2 — voiceSessionRepo outcome stamping (Twilio adapter)', () => {
 // ─── buildTelephonyGreeting ───────────────────────────────────────────────────
 
 describe('buildTelephonyGreeting', () => {
-  it('ends with a question prompt cue when persona greeting does not end with a question', () => {
+  it('respects custom persona greetings — does not append CTA', () => {
+    // Tenant's persona ends with a question; disclosure follows.
+    // Old code would append "What can I help you with today?" because the
+    // assembled string ends with "." not "?". New code must leave persona alone.
     const result = buildTelephonyGreeting(
       'Joes HVAC',
       'This call may be recorded for quality.',
-      { greeting: 'Hi, this is Sarah.', agentName: 'Sarah' },
+      { greeting: 'Hi, this is Sarah. What can I help you with today?', agentName: 'Sarah' },
     );
-    expect(result.trim().endsWith('?')).toBe(true);
+    // Exactly one '?' — the tenant's own.
+    expect((result.match(/\?/g) ?? []).length).toBe(1);
+    // Tenant's CTA is preserved verbatim
+    expect(result).toContain('What can I help you with today?');
+    // Default CTA "How can I help you today?" is NOT appended
+    expect(result).not.toContain('How can I help you today?');
   });
 
-  it('does not double up a prompt cue when greeting already ends with a question', () => {
+  it('appends default CTA only when no persona is set', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      'This call may be recorded for quality.',
+      // No persona
+    );
+    expect(result.trim().endsWith('?')).toBe(true);
+    expect(result).toContain('How can I help you today?');
+  });
+
+  it('on default branch does not double up when disclosure already ends with ?', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      'This call may be recorded for quality, ok?',
+    );
+    // Disclosure ends with '?' so no CTA append
+    expect((result.match(/\?/g) ?? []).length).toBe(1);
+  });
+
+  it('persona greeting without disclosure is returned unchanged', () => {
     const result = buildTelephonyGreeting(
       'Joes HVAC',
       '',
       { greeting: 'Hi, this is Sarah. What can I help you with today?', agentName: 'Sarah' },
     );
-    // Only one question mark in the result
+    expect(result).toBe('Hi, this is Sarah. What can I help you with today?');
     expect((result.match(/\?/g) ?? []).length).toBe(1);
   });
 });
