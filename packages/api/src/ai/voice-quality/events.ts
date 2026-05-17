@@ -119,6 +119,50 @@ export const audioFrameEmittedEvent = (
 /** Convenience alias for the new variant constructor below. */
 export type SpeechOutboundEvent = Extract<VoiceSessionEvent, { type: 'speech_outbound' }>;
 
+// ─── Section 5 — Filler / Repair telemetry events ────────────────────────────
+
+export interface FillerFiredEvent {
+  type: 'filler_fired';
+  fillerText: string;
+  ts: number;
+}
+
+export interface FillerCancelledEvent {
+  type: 'filler_cancelled';
+  fillerText: string;
+  ts: number;
+}
+
+export interface RepairTemplateFiredEvent {
+  type: 'repair_template_fired';
+  trigger: string;
+  text: string;
+  ts: number;
+}
+
+export const fillerFiredEvent = (opts: { fillerText: string; ts?: number }): FillerFiredEvent => ({
+  type: 'filler_fired',
+  fillerText: opts.fillerText,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const fillerCancelledEvent = (opts: { fillerText: string; ts?: number }): FillerCancelledEvent => ({
+  type: 'filler_cancelled',
+  fillerText: opts.fillerText,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const repairTemplateFiredEvent = (opts: {
+  trigger: string;
+  text: string;
+  ts?: number;
+}): RepairTemplateFiredEvent => ({
+  type: 'repair_template_fired',
+  trigger: opts.trigger,
+  text: opts.text,
+  ts: opts.ts ?? Date.now(),
+});
+
 /**
  * VQ2-followup: emitted by the agent driver after each turn's outbound
  * speech has been finalized. Layer 2 emits the Whisper-recovered

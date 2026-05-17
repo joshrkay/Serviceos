@@ -103,7 +103,13 @@ export type VoiceSessionEvent =
       /** Zero-indexed turn within the session. */
       turnIndex: number;
       ts: number;
-    };
+    }
+  /** P2-1 / Section 5: a pre-rendered filler clip started playing. */
+  | { type: 'filler_fired'; fillerText: string; ts: number }
+  /** P2-1 / Section 5: an in-flight filler was cancelled by a real response. */
+  | { type: 'filler_cancelled'; fillerText: string; ts: number }
+  /** P2-3 / Section 5: the FSM fired a vertical-specific repair template. */
+  | { type: 'repair_template_fired'; trigger: string; text: string; ts: number };
 
 export interface TranscriptEntry {
   speaker: 'caller' | 'agent';
