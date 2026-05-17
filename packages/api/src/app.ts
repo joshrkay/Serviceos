@@ -157,6 +157,11 @@ import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
+import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { createHvacPack } from './verticals/packs/hvac';
+import { createPlumbingPack } from './verticals/packs/plumbing';
+import { createElectricalPack } from './verticals/packs/electrical';
+import { isValidVerticalType } from './shared/vertical-types';
 import {
   buildCallerPlanContext,
   formatCallerPlanForPrompt,
@@ -1873,6 +1878,33 @@ export function createApp(): express.Express {
       ? new DeepgramStreamingProvider(deepgramKey)
       : null;
     if (streamingProvider) {
+      // Build a static in-process lookup for rich packs (sttKeywords lives on
+      // the rich pack, not in the canonical registry metadata). The lookup
+      // is synchronous-after-construction; no DB round-trip needed.
+      const richPackByType = new Map([
+        ['hvac', createHvacPack()],
+        ['plumbing', createPlumbingPack()],
+        ['electrical', createElectricalPack()],
+      ]);
+      const terminologyProvider = new VerticalTerminologyProvider({
+        repo: {
+          findByType: async (type) => richPackByType.get(type) ?? null,
+        },
+        lookupVertical: async (tenantId: string) => {
+          const activations = await packActivationRepo.findByTenant(tenantId);
+          const active = activations
+            .filter((a) => a.status === 'active')
+            .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+          if (!active) return null;
+          // Activation packId is conventionally the verticalType ('hvac',
+          // 'plumbing', 'electrical') or a versioned packId like 'hvac-v1'.
+          // Strip the suffix and validate.
+          const packId = active.packId;
+          const base = packId.replace(/-v\d+$/, '');
+          return isValidVerticalType(base) ? base : null;
+        },
+      });
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -1886,6 +1918,7 @@ export function createApp(): express.Express {
             store: voiceSessionStore,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            terminologyProvider,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
