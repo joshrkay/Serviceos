@@ -179,7 +179,10 @@ describe('DeepgramStreamingProvider URL builder', () => {
     const url = (provider as unknown as {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en', { keywords: ['heat pump:3', 'P-trap:3'] });
-    expect(url).toContain('keywords=heat%20pump%3A3,P-trap%3A3');
+    expect(url).toContain('keywords=heat%20pump%3A3');
+    expect(url).toContain('keywords=P-trap%3A3');
+    // Both should appear as separate query params (joined by &)
+    expect(url).toMatch(/keywords=heat%20pump%3A3&keywords=P-trap%3A3|keywords=P-trap%3A3&keywords=heat%20pump%3A3/);
   });
 
   it('omits the keywords parameter when the list is empty', () => {

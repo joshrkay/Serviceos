@@ -279,8 +279,10 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       `?model=nova-3&language=${language}&encoding=linear16&sample_rate=16000` +
       `&channels=1&interim_results=true&smart_format=true&endpointing=${endpointing}`;
     if (options.keywords && options.keywords.length > 0) {
-      const enc = options.keywords.map((k) => encodeURIComponent(k)).join(',');
-      url += `&keywords=${enc}`;
+      const params = options.keywords
+        .map((k) => `keywords=${encodeURIComponent(k)}`)
+        .join('&');
+      url += `&${params}`;
     }
     return url;
   }
