@@ -24,6 +24,7 @@
     "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
     "smoke-test": "ts-node scripts/smoke-test.ts",
     "lint:log-safety": "node scripts/check-log-safety.js",
+    "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
     "launch-quality-check": "tsx scripts/launch-quality-check.ts"
   },
   "dependencies": {

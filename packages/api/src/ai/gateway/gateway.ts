@@ -4,6 +4,14 @@ import {
   gatewayRequestLatencyMs,
   gatewayRequestsTotal,
 } from '../../monitoring/metrics';
+import {
+  AiRunRepository,
+  createAiRun,
+  startAiRun,
+  completeAiRun,
+  failAiRun,
+  AiRun,
+} from '../ai-run';
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
@@ -85,15 +93,18 @@ export class LLMGateway {
   private readonly config: LLMGatewayConfig;
   private readonly providers: Map<string, LLMProvider>;
   private readonly logger?: LLMGatewayLogger;
+  private readonly aiRunRepo?: AiRunRepository;
 
   constructor(
     config: LLMGatewayConfig,
     providers: Map<string, LLMProvider>,
-    logger?: LLMGatewayLogger
+    logger?: LLMGatewayLogger,
+    aiRunRepo?: AiRunRepository
   ) {
     this.config = config;
     this.providers = providers;
     this.logger = logger;
+    this.aiRunRepo = aiRunRepo;
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
@@ -112,8 +123,46 @@ export class LLMGateway {
     const resolvedRequest: LLMRequest = { ...request, model: resolvedModel };
 
     const startTime = Date.now();
-
     const tier = request.tenantTier ?? 'standard';
+
+    // Resolve correlation ID: prefer metadata.correlationId, otherwise generate one
+    const correlationId =
+      (request.metadata?.correlationId as string | undefined) ?? uuidv4();
+    const tenantId = request.tenantId ?? 'system';
+    const promptVersionId = request.metadata?.promptVersionId as string | undefined;
+
+    // Create the ai_runs row (best-effort — failure must not abort the LLM call)
+    // We create it in 'pending' status and immediately transition to 'running'
+    // by storing the running version (with startedAt set) via the repository.
+    let aiRun: AiRun | undefined;
+    if (this.aiRunRepo) {
+      try {
+        const pendingRun = createAiRun({
+          tenantId,
+          taskType: request.taskType,
+          model: resolvedModel,
+          promptVersionId,
+          inputSnapshot: {
+            messages: request.messages,
+            temperature: request.temperature,
+            maxTokens: request.maxTokens,
+          },
+          createdBy: 'gateway',
+          correlationId,
+        });
+        await this.aiRunRepo.create(pendingRun);
+        // Transition to running: produces a new immutable value with startedAt set
+        const runningRun = startAiRun(pendingRun);
+        // Persist the running state by re-creating (upsert via create on the running run)
+        // The repository create() stores by id, so writing the running run replaces the pending one
+        aiRun = await this.aiRunRepo.create(runningRun);
+      } catch (repoErr) {
+        this.logger?.error('AI-run logging failed (best-effort, LLM call continues)', {
+          error: repoErr instanceof Error ? repoErr.message : String(repoErr),
+        });
+        aiRun = undefined;
+      }
+    }
 
     try {
       const response = await provider.complete(resolvedRequest);
@@ -144,6 +193,25 @@ export class LLMGateway {
         providerPath: result.providerPath,
       });
 
+      // Persist completed ai_run (best-effort)
+      if (this.aiRunRepo && aiRun) {
+        try {
+          const completedRun = completeAiRun(
+            aiRun,
+            { content: result.content, provider: result.provider },
+            result.tokenUsage
+          );
+          await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'completed', {
+            outputSnapshot: completedRun.outputSnapshot,
+            tokenUsage: result.tokenUsage,
+          });
+        } catch (repoErr) {
+          this.logger?.error('AI-run completion logging failed (best-effort)', {
+            error: repoErr instanceof Error ? repoErr.message : String(repoErr),
+          });
+        }
+      }
+
       return result;
     } catch (err) {
       const latencyMs = Date.now() - startTime;
@@ -169,6 +237,20 @@ export class LLMGateway {
         latencyMs,
         error: err instanceof Error ? err.message : String(err),
       });
+
+      // Persist failed ai_run (best-effort)
+      if (this.aiRunRepo && aiRun) {
+        try {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'failed', {
+            error: errorMessage,
+          });
+        } catch (repoErr) {
+          this.logger?.error('AI-run failure logging failed (best-effort)', {
+            error: repoErr instanceof Error ? repoErr.message : String(repoErr),
+          });
+        }
+      }
 
       if (err instanceof AppError) {
         throw err;

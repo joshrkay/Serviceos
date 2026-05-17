@@ -9,6 +9,7 @@ import {
   ShadowComparisonStore,
 } from '../evaluation/shadow-comparison';
 import type { AppConfig } from '../../shared/config';
+import type { AiRunRepository } from '../ai-run';
 
 /**
  * Create the LLM gateway from application config.
@@ -36,6 +37,12 @@ export interface CreateLLMGatewayOptions {
    */
   shadowStore?: ShadowComparisonStore;
   logger?: LLMGatewayLogger;
+  /**
+   * Optional AI-run repository. When supplied, every gateway.complete() call
+   * writes a row to ai_runs tracking the lifecycle: pending → running → completed/failed.
+   * P2-027 Gap 1.
+   */
+  aiRunRepo?: AiRunRepository;
 }
 
 export function createLLMGateway(
@@ -51,7 +58,8 @@ export function createLLMGateway(
   const opts: CreateLLMGatewayOptions = !loggerOrOpts
     ? {}
     : 'shadowStore' in (loggerOrOpts as CreateLLMGatewayOptions) ||
-        'logger' in (loggerOrOpts as CreateLLMGatewayOptions)
+        'logger' in (loggerOrOpts as CreateLLMGatewayOptions) ||
+        'aiRunRepo' in (loggerOrOpts as CreateLLMGatewayOptions)
       ? (loggerOrOpts as CreateLLMGatewayOptions)
       : { logger: loggerOrOpts as LLMGatewayLogger };
 
@@ -80,7 +88,7 @@ export function createLLMGateway(
     defaultProvider: provider.name,
     defaultModel: config.AI_DEFAULT_MODEL,
   };
-  return new LLMGateway(gatewayConfig, providers, opts.logger);
+  return new LLMGateway(gatewayConfig, providers, opts.logger, opts.aiRunRepo);
 }
 
 function maybeWrapWithShadow(
