@@ -237,6 +237,12 @@ export function createPlumbingPack(): VerticalPack {
     'snaking:3',
     'rooter:3',
   ];
+  pack.repairTemplates = [
+    { trigger: 'ambiguous_service_type', text: 'Is this an emergency, like flooding or a burst pipe, or can we schedule a visit?' },
+    { trigger: 'low_intent_confidence', text: 'Are you reporting a problem with water, drains, or your water heater?' },
+    { trigger: 'low_audio_confidence', text: "I'm having trouble hearing you — could you say that one more time?" },
+    { trigger: 'ambiguous_entity', text: 'Just to make sure I have the right name — could you spell that for me?' },
+  ];
   return pack;
 }
 

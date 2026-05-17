@@ -237,6 +237,12 @@ export function createHvacPack(): VerticalPack {
     'capacitor:3',
     'condensate:3',
   ];
+  pack.repairTemplates = [
+    { trigger: 'ambiguous_service_type', text: 'Is this for your heating or your cooling?' },
+    { trigger: 'low_intent_confidence', text: 'Is this about scheduling a visit, or is something not working right now?' },
+    { trigger: 'low_audio_confidence', text: "I'm having trouble hearing you — could you say that one more time?" },
+    { trigger: 'ambiguous_entity', text: 'Just to make sure I have the right name — could you spell that for me?' },
+  ];
   return pack;
 }
 
