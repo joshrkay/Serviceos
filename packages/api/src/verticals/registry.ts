@@ -72,7 +72,18 @@ export type ObjectionScriptList = readonly ObjectionScript[];
  * §P2-3 — Vertical-specific conversational repair templates. When the
  * FSM's intent-capture state encounters low confidence, it picks the
  * matching template and speaks it instead of a generic "say that again?"
- * reprompt. Four trigger types cover the most common failure modes.
+ * reprompt.
+ *
+ * Currently wired in the FSM:
+ *   - low_intent_confidence — used when intent classifier confidence < TAU_INT
+ *   - low_audio_confidence  — used on Deepgram confidence_low event
+ *
+ * Reserved for future work (Theme B in the Sound Human spec):
+ *   - ambiguous_service_type — when intent is clear but specifics are not
+ *   - ambiguous_entity       — when a name/number was partially captured
+ *
+ * The unused triggers are still populated in vertical packs so the data
+ * is ready when the wiring lands; they are not dead data.
  */
 export interface RepairTemplate {
   /** When the FSM low-confidence signal matches this trigger, pick this template. */
