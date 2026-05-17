@@ -10,6 +10,9 @@ import {
 } from '../evaluation/shadow-comparison';
 import type { AppConfig } from '../../shared/config';
 import type { AiRunRepository } from '../ai-run';
+import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
+import { TenantQuotaRegistry, DEFAULT_TIER_CONFIG } from './tenant-quota';
+import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
 
 /**
  * Create the LLM gateway from application config.
@@ -43,7 +46,23 @@ export interface CreateLLMGatewayOptions {
    * P2-027 Gap 1.
    */
   aiRunRepo?: AiRunRepository;
+  /**
+   * P2-029 resilience stack overrides.
+   * When not supplied the defaults in composeResilienceStack() are used.
+   */
+  resilience?: ResilienceStackOptions;
 }
+
+/**
+ * Shared circuit breaker registry created by createLLMGateway().
+ * Exposed so the AI health endpoint can read per-cell state without
+ * coupling app.ts to gateway internals.
+ *
+ * Set to the live registry when createLLMGateway() is called. Starts
+ * undefined so the health endpoint can gracefully handle the case where
+ * the gateway has not yet been created.
+ */
+export let sharedBreakerRegistry: CircuitBreakerRegistry | undefined;
 
 export function createLLMGateway(
   config: AppConfig,
@@ -81,11 +100,30 @@ export function createLLMGateway(
   // SHADOW_LLM_ENABLED=true + SHADOW_LLM_API_KEY (+ optional
   // SHADOW_LLM_BASE_URL, SHADOW_LLM_MODEL, SHADOW_LLM_SAMPLING_RATE).
   // When disabled, the primary provider is used as-is — zero overhead.
-  const provider: LLMProvider = maybeWrapWithShadow(primaryProvider, opts.shadowStore);
+  // Shadow wrapping is the innermost layer — it wraps the raw provider
+  // before the resilience stack so shadow calls are transparent to breakers/retry.
+  const shadowWrappedProvider: LLMProvider = maybeWrapWithShadow(primaryProvider, opts.shadowStore);
 
-  const providers = new Map<string, LLMProvider>([[provider.name, provider]]);
+  // P2-029 — resilience stack composition.
+  // Order (innermost → outermost):
+  //   shadow(primary) → retry+deadline+breaker (per provider) → failover → tenant-quota
+  // The breaker registry is shared and exported for the /api/health/ai endpoint.
+  const breakerRegistry = opts.resilience?.breakers ??
+    new CircuitBreakerRegistry(opts.resilience?.breakerConfig ?? DEFAULT_BREAKER);
+  const quotaRegistry = opts.resilience?.quota ?? new TenantQuotaRegistry(DEFAULT_TIER_CONFIG);
+
+  // Publish the breaker registry for the health endpoint.
+  sharedBreakerRegistry = breakerRegistry;
+
+  const resilientProvider = composeResilienceStack(shadowWrappedProvider, {
+    ...opts.resilience,
+    breakers: breakerRegistry,
+    quota: quotaRegistry,
+  });
+
+  const providers = new Map<string, LLMProvider>([[resilientProvider.name, resilientProvider]]);
   const gatewayConfig: LLMGatewayConfig = buildGatewayConfig(
-    provider.name,
+    resilientProvider.name,
     config.AI_DEFAULT_MODEL,
     opts.logger,
   );

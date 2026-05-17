@@ -57,6 +57,18 @@ export const gatewayFallbackActivationsTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * P2-029 — provider-level failover counter.
+ * Incremented each time ProviderFailoverWrapper advances from one provider
+ * to the next (from_provider → to_provider).
+ */
+export const gatewayFailoverTotal = new Counter({
+  name: 'gateway_failover_total',
+  help: 'Provider-level failover events',
+  labelNames: ['from_provider', 'to_provider'],
+  registers: [metricsRegistry],
+});
+
 export const gatewayDeadlineExceededTotal = new Counter({
   name: 'gateway_deadline_exceeded_total',
   help: 'Requests aborted because the deadline elapsed',

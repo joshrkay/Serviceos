@@ -7,7 +7,7 @@
  * 2. When AI_DEFAULT_MODEL is set and all per-tier env vars ARE explicitly set,
  *    the per-tier env vars win (AI_DEFAULT_MODEL is effectively ignored).
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AppConfig } from '../../../src/shared/config';
 import type { LLMGatewayLogger } from '../../../src/ai/gateway/gateway';
 import { SYSTEM_TENANT_ID } from '../../../src/ai/gateway/gateway';

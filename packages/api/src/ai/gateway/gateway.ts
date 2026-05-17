@@ -236,11 +236,19 @@ export class LLMGateway {
       // Persist completed ai_run (best-effort).
       // Use completeAiRun to compute completedAt/durationMs so the DB values
       // match the Prometheus latency recorded above.
+      // P2-029: include providerPath in outputSnapshot for postmortems.
       if (this.aiRunRepo && aiRun) {
         try {
+          const outputFields: Record<string, unknown> = {
+            content: result.content,
+            provider: result.provider,
+          };
+          if (result.providerPath && result.providerPath.length > 0) {
+            outputFields.providerPath = result.providerPath;
+          }
           const completedRun = completeAiRun(
             aiRun,
-            { content: result.content, provider: result.provider },
+            outputFields,
             result.tokenUsage
           );
           await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'completed', {

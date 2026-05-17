@@ -287,6 +287,8 @@ import {
   createMockLLMGateway,
   createEmbeddingProvider,
 } from './ai/gateway/factory';
+import * as gatewayFactory from './ai/gateway/factory';
+import { createAiHealthRouter } from './routes/ai-health';
 import { InMemoryAiRunRepository } from './ai/ai-run';
 import { PgAiRunRepository } from './ai/pg-ai-run';
 import { createTtsProvider } from './ai/tts/tts-provider';
@@ -621,6 +623,25 @@ export function createApp(): express.Express {
   }
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
+
+  // P2-029 — AI provider health endpoint. Public, no auth required.
+  // Uses the shared breaker registry populated by createLLMGateway().
+  // Reading gatewayFactory.sharedBreakerRegistry at request time (not at
+  // mount time) ensures the registry is populated after createLLMGateway()
+  // is called later in the boot sequence.
+  app.use('/api/health', (req, res, next) => {
+    const registry = gatewayFactory.sharedBreakerRegistry;
+    if (!registry) {
+      // Gateway not yet initialised (e.g. mock mode without AI_PROVIDER_API_KEY)
+      if (req.path === '/ai') {
+        res.status(200).json({ providers: [] });
+        return;
+      }
+      next();
+      return;
+    }
+    createAiHealthRouter(registry)(req, res, next);
+  });
 
   // Prometheus metrics. Mounted on the public surface deliberately —
   // production should rely on network-level allowlist (ingress / VPC).
