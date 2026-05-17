@@ -46,6 +46,9 @@ import {
 import {
   transcriptReceivedEvent,
   audioFrameEmittedEvent,
+  repairTemplateFiredEvent,
+  fillerFiredEvent,
+  fillerCancelledEvent,
 } from '../../ai/voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 
@@ -156,6 +159,27 @@ export interface MediaStreamAdapterDeps {
     reason: string,
     sideEffects: ReadonlyArray<SideEffect>,
   ) => void;
+  /**
+   * Resolves Deepgram keyword-boost tokens for the tenant. Optional —
+   * when omitted, Deepgram opens without keyword boost.
+   */
+  terminologyProvider?: {
+    getKeywords(tenantId: string): Promise<ReadonlyArray<string>>;
+  };
+  /**
+   * Optional filler engine + cache. When both are present, the adapter
+   * wraps each `tts_play` turn with a 250ms timer: if the real TTS has
+   * not started streaming by then, it plays one filler clip from the
+   * cache. Omitting either turns the feature off entirely.
+   */
+  fillerEngine?: {
+    selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined;
+  };
+  fillerCache?: {
+    get(id: string): Buffer | undefined;
+  };
+  /** Override for the 250ms filler threshold (ms). Default 250. */
+  fillerDelayMs?: number;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -180,6 +204,8 @@ interface RuntimeState {
    * of overlapping the next caller turn.
    */
   outboundTurnId: number;
+  /** Active TTS turn's AbortController so barge-in can immediately cancel a pending WS read. */
+  ttsController: AbortController | null;
   closed: boolean;
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
@@ -212,6 +238,12 @@ interface RuntimeState {
    * because the lifecycle is strictly bound to this WS connection.
    */
   awaitingFirstAudioFrame: boolean;
+  /**
+   * True while a filler clip is actively streaming. Cleared when real
+   * TTS preempts it or when barge-in kills it. Used to gate
+   * TTFA emission and to coordinate filler/real-TTS cancellation.
+   */
+  fillerActive: boolean;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -278,6 +310,7 @@ export class TwilioMediaStreamAdapter {
       deepgram: null,
       agentSpeaking: false,
       outboundTurnId: 0,
+      ttsController: null,
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
@@ -294,6 +327,7 @@ export class TwilioMediaStreamAdapter {
       wsCloseInitiated: false,
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
+      fillerActive: false,
     };
   }
 
@@ -394,6 +428,10 @@ export class TwilioMediaStreamAdapter {
     this.state.session = session;
     this.state.tenantId = session.tenantId;
 
+    const keywords = this.deps.terminologyProvider
+      ? await this.deps.terminologyProvider.getKeywords(session.tenantId).catch(() => [])
+      : [];
+
     try {
       this.state.deepgram = await this.deps.streamingProvider.openSession(
         (event) => {
@@ -410,6 +448,8 @@ export class TwilioMediaStreamAdapter {
           // Deepgram closed independently — we can still drain Twilio
           // until it sends `stop`. No-op.
         },
+        undefined, // language defaults
+        keywords.length > 0 ? { keywords } : undefined
       );
     } catch (err) {
       logger.error('mediastream: failed to open Deepgram session', {
@@ -535,24 +575,27 @@ export class TwilioMediaStreamAdapter {
     const ttsProvider = this.deps.ttsProvider;
     if (!ttsProvider) return;
     for (const fx of sideEffects) {
+      if (fx.type === 'emit_quality_event' && this.state.session) {
+        const eventType = String((fx.payload as { eventType?: string }).eventType ?? '');
+        if (eventType === 'repair_template_fired') {
+          this.state.session.events.emit(VOICE_EVENT_CHANNEL, repairTemplateFiredEvent({
+            trigger: String((fx.payload as { trigger?: string }).trigger ?? ''),
+            text: String((fx.payload as { text?: string }).text ?? ''),
+          }));
+        }
+        continue;
+      }
       if (fx.type !== 'tts_play') continue;
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
       if (!text) continue;
-      const turnId = ++this.state.outboundTurnId;
+      let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
       try {
-        const result = await ttsProvider.synthesize({
-          text,
-          tenantId: this.state.tenantId ?? undefined,
-        });
-        // If the caller barged in while we were synthesizing, drop this
-        // chunk so we don't speak over them.
-        if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-          continue;
-        }
-        await this.streamPcmAsMedia(result.audio, turnId);
+        // runTurnWithFiller returns the final turnId — it may have been
+        // bumped if a filler was preempted by the real TTS arrival.
+        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId);
       } catch (err) {
-        logger.warn('mediastream: TTS synthesize failed', {
+        logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       } finally {
@@ -561,6 +604,125 @@ export class TwilioMediaStreamAdapter {
         }
       }
     }
+  }
+
+  /**
+   * Run a single TTS turn, optionally preceded by a filler clip if the
+   * real TTS has not started streaming within `fillerDelayMs` (default 250ms).
+   *
+   * The filler is fired in a best-effort setTimeout. If real audio starts
+   * before the timer fires, it is cancelled. If it fires while real audio is
+   * already in-flight (e.g. buffered provider), the timer is a no-op because
+   * `realStarted` will be true. The existing barge-in machinery (bargeIn())
+   * cancels both filler and real audio together when the caller speaks.
+   */
+  private async runTurnWithFiller(
+    ttsProvider: TtsProvider,
+    text: string,
+    turnIdIn: number,
+  ): Promise<number> {
+    const delayMs = this.deps.fillerDelayMs ?? 250;
+    const engine = this.deps.fillerEngine;
+    const cache = this.deps.fillerCache;
+
+    // Mutable local copy so we can rebind after filler-cancellation bump.
+    let turnId = turnIdIn;
+    let realStarted = false;
+    const controller = new AbortController();
+    this.state.ttsController = controller;
+
+    // Helper: cancel an in-flight filler by bumping the turn id so its
+    // streamPcmAsMedia loop exits on the next iteration, then rebind our
+    // local turnId so subsequent real-TTS writes land under the new turn.
+    const cancelActiveFiller = () => {
+      if (this.state.fillerActive) {
+        this.state.outboundTurnId++;
+        turnId = this.state.outboundTurnId;
+        this.state.fillerActive = false;
+        if (this.state.session) {
+          this.state.session.events.emit(
+            VOICE_EVENT_CHANNEL,
+            fillerCancelledEvent({ fillerText: '' }),
+          );
+        }
+      }
+    };
+
+    // Schedule a filler if both engine and cache are wired.
+    const fillerTimer = engine && cache
+      ? setTimeout(() => {
+          if (realStarted || turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            return;
+          }
+          const filler = engine.selectNext();
+          if (!filler) return;
+          const pcm = cache.get(filler.id);
+          if (!pcm) return;
+          // Mark filler as active BEFORE starting the stream so that the
+          // real-TTS first-chunk handler can see the flag synchronously.
+          this.state.fillerActive = true;
+          // Best-effort emission — do not await; cancellation is handled
+          // by cancelActiveFiller() when real audio arrives.
+          void this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true).catch(() => undefined);
+          if (this.state.session) {
+            this.state.session.events.emit(
+              VOICE_EVENT_CHANNEL,
+              fillerFiredEvent({ fillerText: filler.text }),
+            );
+          }
+        }, delayMs)
+      : null;
+    if (fillerTimer && typeof fillerTimer.unref === 'function') fillerTimer.unref();
+
+    try {
+      if (typeof ttsProvider.synthesizeStream === 'function') {
+        const stream = ttsProvider.synthesizeStream({
+          text,
+          tenantId: this.state.tenantId ?? undefined,
+          signal: controller.signal,
+        });
+        let first = true;
+        for await (const chunk of stream) {
+          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            controller.abort();
+            break;
+          }
+          if (first && chunk.pcm.length > 0) {
+            realStarted = true;
+            if (fillerTimer) clearTimeout(fillerTimer);
+            // If a filler clip is mid-stream, terminate it cleanly by
+            // bumping outboundTurnId (exits its streamPcmAsMedia loop)
+            // and rebinding our local turnId to the new value.
+            cancelActiveFiller();
+            first = false;
+          }
+          if (chunk.pcm.length > 0) {
+            await this.streamPcmAsMedia(chunk.pcm, turnId);
+          }
+          if (chunk.isFinal) break;
+        }
+      } else {
+        const result = await ttsProvider.synthesize({
+          text,
+          tenantId: this.state.tenantId ?? undefined,
+        });
+        realStarted = true;
+        if (fillerTimer) clearTimeout(fillerTimer);
+        // Same cancellation logic for buffered (non-streaming) TTS.
+        cancelActiveFiller();
+        if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+          await this.streamPcmAsMedia(result.audio, turnId);
+        }
+      }
+    } finally {
+      if (fillerTimer) clearTimeout(fillerTimer);
+      if (this.state.ttsController === controller) {
+        this.state.ttsController = null;
+      }
+    }
+    // Return the (possibly rebounded) turnId so emitSideEffects can
+    // compare it against outboundTurnId for the agentSpeaking reset.
+    return turnId;
   }
 
   /**
@@ -573,7 +735,7 @@ export class TwilioMediaStreamAdapter {
    * Pacing: when ≥ TWILIO_MAX_UNACKED_MARKS marks are unacked, we yield
    * to give Twilio a chance to ack before pushing more audio.
    */
-  private async streamPcmAsMedia(pcm: Buffer, turnId: number): Promise<void> {
+  private async streamPcmAsMedia(pcm: Buffer, turnId: number, isFiller = false): Promise<void> {
     if (!this.state.streamSid) return;
     const FRAME_BYTES_16K = 640; // 20 ms @ 16 kHz, 16-bit mono
     const MARK_EVERY_N_FRAMES = 25; // ~500ms at 20ms/frame
@@ -602,7 +764,9 @@ export class TwilioMediaStreamAdapter {
       // on the first chunk that lands on the queue. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks
       // in the same turn (and barge-in `clear` events) don't re-emit.
-      if (this.state.awaitingFirstAudioFrame && this.state.session) {
+      // Skip when this chunk is a filler — filler audio fills the LLM
+      // thinking gap and would otherwise poison the TTFA metric.
+      if (!isFiller && this.state.awaitingFirstAudioFrame && this.state.session) {
         this.state.awaitingFirstAudioFrame = false;
         this.state.session.events.emit(
           VOICE_EVENT_CHANNEL,
@@ -657,6 +821,18 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    this.state.ttsController?.abort();
+    // If a filler clip was mid-stream when barge-in fires, emit the
+    // cancellation event and clear the flag before bumping the turn.
+    if (this.state.fillerActive) {
+      this.state.fillerActive = false;
+      if (this.state.session) {
+        this.state.session.events.emit(
+          VOICE_EVENT_CHANNEL,
+          fillerCancelledEvent({ fillerText: '' }),
+        );
+      }
+    }
     if (!this.state.streamSid) return;
     this.state.outboundTurnId++;
     this.state.agentSpeaking = false;

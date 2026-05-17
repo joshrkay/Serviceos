@@ -77,6 +77,7 @@ import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { RepairTemplate } from '../verticals/registry';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -213,33 +214,54 @@ export interface TwilioAdapterDeps {
    * the nudge check.
    */
   onSessionEnded?: (event: { tenantId: string; callSid?: string }) => Promise<void>;
+  /**
+   * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
+   * When present, the templates are threaded into the FSM context at
+   * session creation so low-confidence reprompts use vertical-aware copy.
+   * When absent, the FSM falls back to the generic "say that again" prompt.
+   */
+  repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
 }
 
 /**
  * Build the full telephony greeting.
  *
- * When `persona.greeting` is set the tenant owns the entire opening
- * line — no extra CTA is appended. `disclosureText` (recording notice)
- * is always appended afterward regardless of which branch is taken,
- * since disclosure is a compliance requirement that cannot be opted out.
+ * `disclosureText` (recording notice) is always appended after the
+ * greeting when present — it is a compliance requirement that cannot
+ * be opted out.
  *
  * Branch priority:
- *   1. Custom greeting → `${greeting} ${disclosureText}`
- *   2. Agent name only → `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
- *   3. Neither         → `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *   1. Custom greeting (`persona.greeting` set):
+ *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
+ *        The tenant owns the entire opening line — NO CTA is appended.
+ *        The result is returned as-is so the tenant's chosen wording
+ *        is preserved verbatim.
+ *   2. Agent name only (`persona.agentName` set, no custom greeting):
+ *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
+ *   3. Neither:
+ *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
  */
 export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
   persona?: VoicePersona | null
 ): string {
+  const disclosure = disclosureText.trim();
+
+  // Branch 1 — tenant owns the entire opening line. Return without CTA append.
   if (persona?.greeting) {
-    return `${persona.greeting} ${disclosureText}`;
+    const greeting = persona.greeting.trim();
+    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
   }
+
+  // Branch 2 / 3 — assemble a default greeting, then ensure it ends with a CTA.
   const opener = persona?.agentName
     ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
     : `Thank you for calling ${businessName}.`;
-  return `${opener} ${disclosureText} How can I help you today?`;
+  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  return assembled.endsWith('?') ? assembled : `${assembled} How can I help you today?`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -381,7 +403,9 @@ export function buildTwiML(
         payload: fx.payload,
       });
     }
-    // audit_log / create_proposal / start_transcription → no TwiML
+    // audit_log / create_proposal / start_transcription / emit_quality_event
+    // → no TwiML (Gather path has no event bus; telemetry only fires when
+    // Media Streams is active).
   }
 
   if (!ended) {
@@ -485,8 +509,12 @@ export class TwilioGatherAdapter {
     if (existing && existing.tenantId === opts.tenantId) {
       return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
     }
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -730,8 +758,12 @@ export class TwilioGatherAdapter {
       );
     }
 
+    const repairTemplatesForInbound = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 

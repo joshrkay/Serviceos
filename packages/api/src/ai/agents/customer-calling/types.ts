@@ -5,6 +5,8 @@
  * all side effects are returned as data and executed by callers/adapters.
  */
 
+import type { RepairTemplate } from '../../../verticals/registry';
+
 // ─── States ──────────────────────────────────────────────────────────────────
 
 export type CallingAgentState =
@@ -85,6 +87,12 @@ export interface CallingAgentContext {
   repromptCount: number;
   escalationReason?: string;
   startedAt: number; // Date.now()
+  /**
+   * §P2-3 — Vertical-specific repair templates, sourced from the rich
+   * pack at FSM construction time. Optional: when absent, the FSM falls
+   * back to the generic "say that again" reprompt.
+   */
+  repairTemplates?: ReadonlyArray<RepairTemplate>;
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────
@@ -95,7 +103,8 @@ export type SideEffectType =
   | 'create_proposal'
   | 'notify_oncall'
   | 'start_transcription'
-  | 'end_session';
+  | 'end_session'
+  | 'emit_quality_event';
 
 export interface SideEffect {
   type: SideEffectType;
