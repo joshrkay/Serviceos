@@ -2633,6 +2633,83 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_payments_refunded_at
       ON payments(refunded_at) WHERE refunded_at IS NOT NULL;
   `,
+
+  // P7-026 — Per-tenant Google Business Profile OAuth connections. One row
+  // per tenant per connected location. Mirrors the encrypted-token pattern
+  // used by user_calendar_integrations (migration 084) — never store plaintext
+  // tokens; encrypt with TENANT_ENCRYPTION_KEY via the integrations/crypto.ts
+  // AES-256-GCM helper. The 15-minute poll worker uses access_token_expires_at
+  // to decide whether a refresh is needed before each tenant's poll.
+  '101_create_google_business_connections': `
+    CREATE TABLE IF NOT EXISTS google_business_connections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      location_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      access_token_encrypted TEXT NOT NULL,
+      refresh_token_encrypted TEXT NOT NULL,
+      access_token_expires_at TIMESTAMPTZ NOT NULL,
+      external_account_email TEXT,
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'expired', 'revoked')),
+      last_polled_at TIMESTAMPTZ,
+      backoff_until TIMESTAMPTZ,
+      backoff_attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, location_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_gbc_tenant
+      ON google_business_connections(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_gbc_poll_candidates
+      ON google_business_connections(status, backoff_until)
+      WHERE status = 'active';
+    ALTER TABLE google_business_connections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE google_business_connections FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_gbc ON google_business_connections;
+    CREATE POLICY tenant_isolation_gbc ON google_business_connections
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P7-026 — Polled Google review snapshot. One row per (tenant_id,
+  // google_review_id); the worker uses ON CONFLICT DO NOTHING so re-polls
+  // never duplicate rows. `comment_text` is the raw text from Google; the
+  // public-draft builder MUST run the content-level PII redactor before
+  // quoting any of it back in a public response (see reputation/pii-redactor.ts).
+  // `classification` and `matched_customer_id` are populated by the classifier
+  // and customer matcher in PR-b; `proposal_id` is set when PR-c's
+  // build-proposal creates a review_response_proposal for this review.
+  '102_create_google_reviews': `
+    CREATE TABLE IF NOT EXISTS google_reviews (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      connection_id UUID NOT NULL REFERENCES google_business_connections(id) ON DELETE CASCADE,
+      google_review_id TEXT NOT NULL,
+      reviewer_name TEXT NOT NULL,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment_text TEXT NOT NULL DEFAULT '',
+      posted_at TIMESTAMPTZ NOT NULL,
+      classification TEXT
+        CHECK (classification IN ('praise', 'specific_complaint', 'vague_complaint', 'wrong_business')),
+      matched_customer_id UUID REFERENCES customers(id) ON DELETE SET NULL,
+      match_confidence TEXT
+        CHECK (match_confidence IN ('high', 'low', 'none')),
+      proposal_id UUID,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, google_review_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_posted
+      ON google_reviews(tenant_id, posted_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_unprocessed
+      ON google_reviews(tenant_id, created_at)
+      WHERE proposal_id IS NULL AND classification IS NULL;
+    ALTER TABLE google_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE google_reviews FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_google_reviews ON google_reviews;
+    CREATE POLICY tenant_isolation_google_reviews ON google_reviews
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
