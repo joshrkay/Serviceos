@@ -43,6 +43,7 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
+import type { RepairTemplate } from '../../../verticals/registry';
 
 export interface InAppAdapterDeps {
   store: VoiceSessionStore;
@@ -104,6 +105,13 @@ export interface InAppAdapterDeps {
    * lookup failure.
    */
   voicePersonaResolver?: VoicePersonaResolver;
+  /**
+   * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
+   * When present, the templates are threaded into the FSM context at
+   * session creation so low-confidence reprompts use vertical-aware copy.
+   * When absent, the FSM falls back to the generic "say that again" prompt.
+   */
+  repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
 }
 
 export interface StartSessionResult {
@@ -225,7 +233,12 @@ export class InAppVoiceAdapter {
    * (consent is captured at account creation; see disclose_recording).
    */
   async startSession(tenantId: string, userId: string, conversationId?: string): Promise<StartSessionResult> {
-    const session = this.deps.store.create(tenantId, 'inapp');
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(tenantId).catch(() => [])
+      : [];
+    const session = this.deps.store.create(tenantId, 'inapp', {
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+    });
     const convId = conversationId ?? session.id;
 
     // B2: persist a voice_sessions row at session start. Fire-and-forget

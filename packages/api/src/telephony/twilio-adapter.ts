@@ -77,6 +77,7 @@ import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { RepairTemplate } from '../verticals/registry';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -213,6 +214,13 @@ export interface TwilioAdapterDeps {
    * the nudge check.
    */
   onSessionEnded?: (event: { tenantId: string; callSid?: string }) => Promise<void>;
+  /**
+   * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
+   * When present, the templates are threaded into the FSM context at
+   * session creation so low-confidence reprompts use vertical-aware copy.
+   * When absent, the FSM falls back to the generic "say that again" prompt.
+   */
+  repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
 }
 
 /**
@@ -489,8 +497,12 @@ export class TwilioGatherAdapter {
     if (existing && existing.tenantId === opts.tenantId) {
       return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
     }
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -734,8 +746,12 @@ export class TwilioGatherAdapter {
       );
     }
 
+    const repairTemplatesForInbound = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 

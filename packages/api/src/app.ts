@@ -1603,6 +1603,25 @@ export function createApp(): express.Express {
     const section = formatCallerPlanForPrompt(ctx);
     return section.length > 0 ? section : undefined;
   };
+  // §P2-3 — Build a shared in-memory map for rich pack fields (sttKeywords,
+  // repairTemplates) that are NOT round-tripped through the canonical registry.
+  // This is the same Map used by the streaming terminologyProvider; creating it
+  // here ensures it is also available to the non-streaming twilio/inapp adapters.
+  const sharedRichPackByType = new Map([
+    ['hvac', createHvacPack()],
+    ['plumbing', createPlumbingPack()],
+    ['electrical', createElectricalPack()],
+  ]);
+  const repairTemplatesResolver = async (tenantId: string): Promise<ReadonlyArray<import('./verticals/registry').RepairTemplate>> => {
+    const activations = await packActivationRepo.findByTenant(tenantId);
+    const active = activations
+      .filter((a) => a.status === 'active')
+      .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+    if (!active) return [];
+    const base = active.packId.replace(/-v\d+$/, '');
+    if (!isValidVerticalType(base)) return [];
+    return sharedRichPackByType.get(base)?.repairTemplates ?? [];
+  };
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1631,6 +1650,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
@@ -1878,17 +1898,11 @@ export function createApp(): express.Express {
       ? new DeepgramStreamingProvider(deepgramKey)
       : null;
     if (streamingProvider) {
-      // Build a static in-process lookup for rich packs (sttKeywords lives on
-      // the rich pack, not in the canonical registry metadata). The lookup
-      // is synchronous-after-construction; no DB round-trip needed.
-      const richPackByType = new Map([
-        ['hvac', createHvacPack()],
-        ['plumbing', createPlumbingPack()],
-        ['electrical', createElectricalPack()],
-      ]);
+      // Reuse sharedRichPackByType (already built above for repairTemplatesResolver)
+      // so sttKeywords + repairTemplates come from the same in-memory pack instances.
       const terminologyProvider = new VerticalTerminologyProvider({
         repo: {
-          findByType: async (type) => richPackByType.get(type) ?? null,
+          findByType: async (type) => sharedRichPackByType.get(type) ?? null,
         },
         lookupVertical: async (tenantId: string) => {
           const activations = await packActivationRepo.findByTenant(tenantId);
@@ -2500,6 +2514,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
   });

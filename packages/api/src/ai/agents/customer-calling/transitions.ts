@@ -14,6 +14,7 @@ import type {
   TransitionResult,
   SideEffect,
 } from './types';
+import { selectRepairTemplate } from './repair-templates';
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -430,17 +431,23 @@ function transitionIntentCapture(
     }
 
     // Reprompt
-    return {
-      nextState: 'intent_capture',
-      sideEffects: [
-        auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
-          confidence: event.confidence,
-          retryCount: newRetryCount,
-        }),
-        ttsPlay("I want to make sure I got that right — can you say that again?"),
-      ],
-      updatedContext: { ...context, retryCount: newRetryCount },
-    };
+    {
+      const repair = selectRepairTemplate(context.repairTemplates ?? [], {
+        trigger: 'low_intent_confidence',
+      });
+      const repromptText = repair?.text ?? "I want to make sure I got that right — can you say that again?";
+      return {
+        nextState: 'intent_capture',
+        sideEffects: [
+          auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
+            confidence: event.confidence,
+            retryCount: newRetryCount,
+          }),
+          ttsPlay(repromptText),
+        ],
+        updatedContext: { ...context, retryCount: newRetryCount },
+      };
+    }
   }
 
   // confidence_low internal event (alternative path)
@@ -472,23 +479,29 @@ function transitionIntentCapture(
       };
     }
 
-    return {
-      nextState: 'intent_capture',
-      sideEffects: [
-        auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
-          threshold: event.threshold,
-          score: event.score,
+    {
+      const repair = selectRepairTemplate(context.repairTemplates ?? [], {
+        trigger: 'low_audio_confidence',
+      });
+      const repromptText = repair?.text ?? "I want to make sure I got that right — can you say that again?";
+      return {
+        nextState: 'intent_capture',
+        sideEffects: [
+          auditLog(context, 'intent_capture', 'intent_capture', 'reprompt', {
+            threshold: event.threshold,
+            score: event.score,
+            retryCount: newRetryCount,
+            repromptCount: newRepromptCount,
+          }),
+          ttsPlay(repromptText),
+        ],
+        updatedContext: {
+          ...context,
           retryCount: newRetryCount,
           repromptCount: newRepromptCount,
-        }),
-        ttsPlay("I want to make sure I got that right — can you say that again?"),
-      ],
-      updatedContext: {
-        ...context,
-        retryCount: newRetryCount,
-        repromptCount: newRepromptCount,
-      },
-    };
+        },
+      };
+    }
   }
 
   return ignoredTransition('intent_capture', event, context);
