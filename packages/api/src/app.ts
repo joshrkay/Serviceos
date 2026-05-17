@@ -1901,7 +1901,16 @@ export function createApp(): express.Express {
           // Strip the suffix and validate.
           const packId = active.packId;
           const base = packId.replace(/-v\d+$/, '');
-          return isValidVerticalType(base) ? base : null;
+          if (!isValidVerticalType(base)) {
+            verticalPromptResolverLogger.debug('vertical lookup returned null', {
+              tenantId,
+              packId,
+              derivedBase: base,
+              reason: 'invalid_vertical_type',
+            });
+            return null;
+          }
+          return base;
         },
       });
 
