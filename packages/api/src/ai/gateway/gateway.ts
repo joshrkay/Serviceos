@@ -7,7 +7,6 @@ import {
 import {
   AiRunRepository,
   createAiRun,
-  startAiRun,
   completeAiRun,
   failAiRun,
   AiRun,
@@ -131,9 +130,9 @@ export class LLMGateway {
     const tenantId = request.tenantId ?? 'system';
     const promptVersionId = request.metadata?.promptVersionId as string | undefined;
 
-    // Create the ai_runs row (best-effort — failure must not abort the LLM call)
-    // We create it in 'pending' status and immediately transition to 'running'
-    // by storing the running version (with startedAt set) via the repository.
+    // Create the ai_runs row (best-effort — failure must not abort the LLM call).
+    // A single create() writes the run with status 'pending' and startedAt already
+    // set, reflecting that we are about to dispatch the provider call immediately.
     let aiRun: AiRun | undefined;
     if (this.aiRunRepo) {
       try {
@@ -150,12 +149,9 @@ export class LLMGateway {
           createdBy: 'gateway',
           correlationId,
         });
-        await this.aiRunRepo.create(pendingRun);
-        // Transition to running: produces a new immutable value with startedAt set
-        const runningRun = startAiRun(pendingRun);
-        // Persist the running state by re-creating (upsert via create on the running run)
-        // The repository create() stores by id, so writing the running run replaces the pending one
-        aiRun = await this.aiRunRepo.create(runningRun);
+        // Set startedAt at creation time so the single DB write captures timing origin.
+        const runAtCreation: AiRun = { ...pendingRun, startedAt: new Date(startTime) };
+        aiRun = await this.aiRunRepo.create(runAtCreation);
       } catch (repoErr) {
         this.logger?.error('AI-run logging failed (best-effort, LLM call continues)', {
           error: repoErr instanceof Error ? repoErr.message : String(repoErr),
@@ -193,7 +189,9 @@ export class LLMGateway {
         providerPath: result.providerPath,
       });
 
-      // Persist completed ai_run (best-effort)
+      // Persist completed ai_run (best-effort).
+      // Use completeAiRun to compute completedAt/durationMs so the DB values
+      // match the Prometheus latency recorded above.
       if (this.aiRunRepo && aiRun) {
         try {
           const completedRun = completeAiRun(
@@ -204,6 +202,8 @@ export class LLMGateway {
           await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'completed', {
             outputSnapshot: completedRun.outputSnapshot,
             tokenUsage: result.tokenUsage,
+            completedAt: completedRun.completedAt,
+            durationMs: completedRun.durationMs,
           });
         } catch (repoErr) {
           this.logger?.error('AI-run completion logging failed (best-effort)', {
@@ -238,12 +238,17 @@ export class LLMGateway {
         error: err instanceof Error ? err.message : String(err),
       });
 
-      // Persist failed ai_run (best-effort)
+      // Persist failed ai_run (best-effort).
+      // Use failAiRun to compute completedAt/durationMs consistently with the
+      // success path so both match the Prometheus latency observation.
       if (this.aiRunRepo && aiRun) {
         try {
           const errorMessage = err instanceof Error ? err.message : String(err);
+          const failedRun = failAiRun(aiRun, errorMessage);
           await this.aiRunRepo.updateStatus(tenantId, aiRun.id, 'failed', {
             error: errorMessage,
+            completedAt: failedRun.completedAt,
+            durationMs: failedRun.durationMs,
           });
         } catch (repoErr) {
           this.logger?.error('AI-run failure logging failed (best-effort)', {

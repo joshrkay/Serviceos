@@ -101,12 +101,15 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
   it('records the resolved model (not request override placeholder) on AiRun', async () => {
     const aiRunRepo = new InMemoryAiRunRepository();
     const stub = new StubProvider('stub');
-    stub.setResponse({ content: 'ok', model: 'resolved-model' });
+    // Provider echoes a DIFFERENT model string from the gateway config's defaultModel.
+    // This makes the test discriminating: if the code mistakenly records the
+    // provider-echoed value instead of the gateway-resolved value the assertion fails.
+    stub.setResponse({ content: 'ok', model: 'provider-echoed-model' });
     const providers = new Map<string, LLMProvider>();
     providers.set('stub', stub);
     const gateway = makeGateway(
       providers,
-      { defaultModel: 'resolved-model' },
+      { defaultModel: 'gateway-resolved-model' },
       aiRunRepo
     );
 
@@ -114,8 +117,8 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
 
     const runs = await aiRunRepo.findByTaskType('tenant-4', 'summarize');
     expect(runs).toHaveLength(1);
-    // Should record the resolved model (defaultModel when no override), not undefined
-    expect(runs[0].model).toBe('resolved-model');
+    // Must record the gateway-resolved model, NOT the provider-echoed value
+    expect(runs[0].model).toBe('gateway-resolved-model');
   });
 
   it('does not fail the LLM call if AiRun repository write fails', async () => {
@@ -134,6 +137,33 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
     // Should NOT throw despite the repo being broken
     const response = await gateway.complete(makeRequest({ tenantId: 'tenant-5' }));
     expect(response.content).toBe('still works');
+  });
+
+  it('propagates provider error even when repo updateStatus also throws', async () => {
+    const aiRunRepo = new InMemoryAiRunRepository();
+    // Make updateStatus throw to simulate a DB failure during error handling
+    (aiRunRepo as any).updateStatus = async () => {
+      throw new Error('DB down');
+    };
+
+    const failingProvider: LLMProvider = {
+      name: 'failing',
+      async complete() {
+        throw new Error('upstream 503');
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+
+    const providers = new Map<string, LLMProvider>();
+    providers.set('failing', failingProvider);
+    const gateway = makeGateway(providers, { defaultProvider: 'failing' }, aiRunRepo);
+
+    // The LLM provider error must propagate; the repo's DB error must not mask it
+    await expect(
+      gateway.complete(makeRequest({ taskType: 'summarize', tenantId: 'tenant-6' }))
+    ).rejects.toThrow(/upstream 503/);
   });
 
   it('works without an aiRunRepo (backward compat — no 4th arg)', async () => {

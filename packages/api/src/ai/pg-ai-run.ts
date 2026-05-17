@@ -117,11 +117,19 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
       outputSnapshot?: Record<string, unknown>;
       error?: string;
       tokenUsage?: { input?: number; output?: number; total?: number };
+      completedAt?: Date;
+      durationMs?: number;
     }
   ): Promise<AiRun | null> {
     return this.withTenant(tenantId, async (client) => {
-      const now = new Date();
       const isTerminal = status === 'completed' || status === 'failed';
+
+      // Use caller-supplied timing when present (gateway is the source of truth);
+      // fall back to DB-computed values for backward compat with other callers.
+      const completedAt = isTerminal
+        ? (result?.completedAt ?? new Date())
+        : null;
+      const hasDurationMs = isTerminal && result?.durationMs !== undefined;
 
       const queryResult = await client.query(
         `UPDATE ai_runs
@@ -132,6 +140,7 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
            error_message = COALESCE($7, error_message),
            token_usage = COALESCE($8::jsonb, token_usage),
            duration_ms = CASE
+             WHEN $4 AND $9 THEN $10
              WHEN $4 AND started_at IS NOT NULL THEN
                EXTRACT(EPOCH FROM ($5::timestamptz - started_at)) * 1000
              ELSE duration_ms
@@ -143,10 +152,12 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
           id,
           status,
           isTerminal,
-          isTerminal ? now : null,
+          completedAt,
           result?.outputSnapshot ? JSON.stringify(result.outputSnapshot) : null,
           result?.error ?? null,
           result?.tokenUsage ? JSON.stringify(result.tokenUsage) : null,
+          hasDurationMs,
+          hasDurationMs ? result!.durationMs : null,
         ]
       );
 

@@ -34,7 +34,13 @@ FIXED_PATTERNS=(
 
 # Extended-regex patterns that indicate a direct provider call
 REGEX_PATTERNS=(
-  'client\.chat\.completions\.create'
+  '[a-zA-Z_$][a-zA-Z0-9_$]*\.chat\.completions\.create'
+)
+
+# Extended-regex patterns for direct openai package imports outside gateway/providers
+IMPORT_REGEX_PATTERNS=(
+  "from 'openai'"
+  'from "openai"'
 )
 
 # Collect search paths: always search src/, plus any extra dirs passed as args
@@ -64,6 +70,13 @@ for search_path in "${SEARCH_PATHS[@]}"; do
       if grep -qE "${pattern}" "${file}" 2>/dev/null; then
         rel="${file#${SCRIPT_DIR}/../}"
         OFFENDERS+=("${rel}: matches pattern '${pattern}'")
+      fi
+    done
+
+    for pattern in "${IMPORT_REGEX_PATTERNS[@]}"; do
+      if grep -qF "${pattern}" "${file}" 2>/dev/null; then
+        rel="${file#${SCRIPT_DIR}/../}"
+        OFFENDERS+=("${rel}: direct openai import '${pattern}'")
       fi
     done
   done < <(find "${search_path}" \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" \) -print0 2>/dev/null)
