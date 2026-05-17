@@ -444,6 +444,14 @@ function transitionIntentCapture(
             retryCount: newRetryCount,
           }),
           ttsPlay(repromptText),
+          {
+            type: 'emit_quality_event',
+            payload: {
+              eventType: 'repair_template_fired',
+              trigger: 'low_intent_confidence',
+              text: repromptText,
+            },
+          },
         ],
         updatedContext: { ...context, retryCount: newRetryCount },
       };
@@ -494,6 +502,14 @@ function transitionIntentCapture(
             repromptCount: newRepromptCount,
           }),
           ttsPlay(repromptText),
+          {
+            type: 'emit_quality_event',
+            payload: {
+              eventType: 'repair_template_fired',
+              trigger: 'low_audio_confidence',
+              text: repromptText,
+            },
+          },
         ],
         updatedContext: {
           ...context,

@@ -46,6 +46,7 @@ import {
 import {
   transcriptReceivedEvent,
   audioFrameEmittedEvent,
+  repairTemplateFiredEvent,
 } from '../../ai/voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 
@@ -551,6 +552,16 @@ export class TwilioMediaStreamAdapter {
     const ttsProvider = this.deps.ttsProvider;
     if (!ttsProvider) return;
     for (const fx of sideEffects) {
+      if (fx.type === 'emit_quality_event' && this.state.session) {
+        const eventType = String((fx.payload as { eventType?: string }).eventType ?? '');
+        if (eventType === 'repair_template_fired') {
+          this.state.session.events.emit(VOICE_EVENT_CHANNEL, repairTemplateFiredEvent({
+            trigger: String((fx.payload as { trigger?: string }).trigger ?? ''),
+            text: String((fx.payload as { text?: string }).text ?? ''),
+          }));
+        }
+        continue;
+      }
       if (fx.type !== 'tts_play') continue;
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
       if (!text) continue;

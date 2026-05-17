@@ -640,6 +640,11 @@ export class InAppVoiceAdapter {
           // Telephony-only; ignored on the in-app channel (P8-012 will
           // wire mic-streaming).
           break;
+        case 'emit_quality_event':
+          // Quality telemetry events are no-ops on the in-app channel;
+          // the event bus is telephony-specific. Handled here to satisfy
+          // the exhaustiveness guard.
+          break;
         default: {
           // Exhaustiveness guard: future SideEffectType additions
           // surface as a typecheck error here.

@@ -103,7 +103,8 @@ export type SideEffectType =
   | 'create_proposal'
   | 'notify_oncall'
   | 'start_transcription'
-  | 'end_session';
+  | 'end_session'
+  | 'emit_quality_event';
 
 export interface SideEffect {
   type: SideEffectType;
