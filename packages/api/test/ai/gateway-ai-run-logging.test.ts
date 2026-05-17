@@ -98,27 +98,26 @@ describe('P2-027 Gap 1 — gateway AI-run logging', () => {
     expect(runs[0].correlationId).toBe(correlationId);
   });
 
-  it('records the resolved model (not request override placeholder) on AiRun', async () => {
+  it('records the resolved model (not provider-echoed model) on AiRun', async () => {
     const aiRunRepo = new InMemoryAiRunRepository();
     const stub = new StubProvider('stub');
-    // Provider echoes a DIFFERENT model string from the gateway config's defaultModel.
-    // This makes the test discriminating: if the code mistakenly records the
-    // provider-echoed value instead of the gateway-resolved value the assertion fails.
+    // Provider echoes a DIFFERENT model string from the one the caller specified.
+    // With P2-028, caller-supplied request.model wins over tier routing.
+    // This test verifies that the AiRun row records the caller-resolved model,
+    // NOT the provider-echoed value.
     stub.setResponse({ content: 'ok', model: 'provider-echoed-model' });
     const providers = new Map<string, LLMProvider>();
     providers.set('stub', stub);
-    const gateway = makeGateway(
-      providers,
-      { defaultModel: 'gateway-resolved-model' },
-      aiRunRepo
-    );
+    const gateway = makeGateway(providers, {}, aiRunRepo);
 
-    await gateway.complete(makeRequest({ taskType: 'summarize', tenantId: 'tenant-4' }));
+    await gateway.complete(
+      makeRequest({ taskType: 'summarize', tenantId: 'tenant-4', model: 'caller-resolved-model' })
+    );
 
     const runs = await aiRunRepo.findByTaskType('tenant-4', 'summarize');
     expect(runs).toHaveLength(1);
     // Must record the gateway-resolved model, NOT the provider-echoed value
-    expect(runs[0].model).toBe('gateway-resolved-model');
+    expect(runs[0].model).toBe('caller-resolved-model');
   });
 
   it('does not fail the LLM call if AiRun repository write fails', async () => {

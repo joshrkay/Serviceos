@@ -11,6 +11,12 @@ import {
   failAiRun,
   AiRun,
 } from '../ai-run';
+import { AIRoutingConfig, DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
+import {
+  resolveRouting,
+  shouldWarnForUnmappedTaskType,
+  mergeTenantRouting,
+} from './router';
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
@@ -63,6 +69,13 @@ export interface LLMGatewayConfig {
   taskRouting?: Record<string, string>; // taskType -> providerName
   defaultModel?: string;
   taskModels?: Record<string, string>; // taskType -> model
+  /**
+   * Per-tenant routing config overrides.
+   * Keys are tenantIds; values are partial AIRoutingConfig merged over the
+   * DEFAULT_AI_ROUTING_CONFIG before resolving model/tier.
+   * P2-028: tenant-level model tier overrides.
+   */
+  tenantOverrides?: Record<string, Partial<AIRoutingConfig>>;
 }
 
 export interface LLMGatewayLogger {
@@ -118,8 +131,42 @@ export class LLMGateway {
       throw new AppError('PROVIDER_NOT_FOUND', `Provider not found: ${providerName}`, 500);
     }
 
-    const resolvedModel = this.resolveModel(request);
-    const resolvedRequest: LLMRequest = { ...request, model: resolvedModel };
+    // Warn once per process when a taskType has no tier mapping
+    const tenantId = request.tenantId ?? 'system';
+    const tenantOverride = this.config.tenantOverrides
+      ? this.config.tenantOverrides[tenantId]
+      : undefined;
+
+    const routingDecision = resolveRouting(request, tenantOverride);
+    const resolvedModel = routingDecision.resolvedModel;
+    const resolvedRequest: LLMRequest = {
+      ...request,
+      model: resolvedModel,
+      maxTokens: request.maxTokens ?? routingDecision.maxTokens,
+      temperature: request.temperature ?? routingDecision.temperature,
+    };
+
+    // Warn once per process when taskType is not in the active tier mapping
+    const activeConfig = tenantOverride
+      ? mergeTenantRouting(DEFAULT_AI_ROUTING_CONFIG, tenantOverride)
+      : DEFAULT_AI_ROUTING_CONFIG;
+    if (!(request.taskType in activeConfig.taskTierMapping)) {
+      if (shouldWarnForUnmappedTaskType(request.taskType)) {
+        this.logger?.info(`unmapped taskType "${request.taskType}" — defaulting to standard tier`, {
+          taskType: request.taskType,
+          resolvedTier: 'standard',
+          level: 'warn',
+        });
+      }
+    }
+
+    // Emit structured routing decision log
+    this.logger?.info('model_routing_decision', {
+      taskType: request.taskType,
+      resolvedTier: routingDecision.resolvedTier,
+      resolvedModel,
+      overrideSource: routingDecision.overrideSource,
+    });
 
     const startTime = Date.now();
     const tier = request.tenantTier ?? 'standard';
@@ -127,7 +174,6 @@ export class LLMGateway {
     // Resolve correlation ID: prefer metadata.correlationId, otherwise generate one
     const correlationId =
       (request.metadata?.correlationId as string | undefined) ?? uuidv4();
-    const tenantId = request.tenantId ?? 'system';
     const promptVersionId = request.metadata?.promptVersionId as string | undefined;
 
     // Create the ai_runs row (best-effort — failure must not abort the LLM call).
@@ -277,11 +323,4 @@ export class LLMGateway {
     return this.config.defaultProvider;
   }
 
-  private resolveModel(request: LLMRequest): string {
-    if (request.model) return request.model;
-    if (this.config.taskModels && this.config.taskModels[request.taskType]) {
-      return this.config.taskModels[request.taskType];
-    }
-    return this.config.defaultModel || 'default';
-  }
 }
