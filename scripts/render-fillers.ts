@@ -31,6 +31,13 @@ async function main(): Promise<void> {
   if (!apiKey) {
     throw new Error('ELEVENLABS_API_KEY is required. Set it before running this script.');
   }
+  // Guard against malformed voice IDs that would silently produce 404s
+  // (or worse, hit an unintended ElevenLabs path segment).
+  if (!/^[A-Za-z0-9_-]{10,64}$/.test(ELEVENLABS_VOICE_ID)) {
+    throw new Error(
+      `ELEVENLABS_VOICE_ID must be 10-64 alphanumerics / dashes / underscores; got: ${JSON.stringify(ELEVENLABS_VOICE_ID)}`,
+    );
+  }
 
   const outDir = resolve(
     __dirname,

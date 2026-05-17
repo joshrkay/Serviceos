@@ -403,7 +403,9 @@ export function buildTwiML(
         payload: fx.payload,
       });
     }
-    // audit_log / create_proposal / start_transcription → no TwiML
+    // audit_log / create_proposal / start_transcription / emit_quality_event
+    // → no TwiML (Gather path has no event bus; telemetry only fires when
+    // Media Streams is active).
   }
 
   if (!ended) {
