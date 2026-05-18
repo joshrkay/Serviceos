@@ -8,7 +8,7 @@
  */
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -182,5 +182,99 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     expect(res.body?.message?.proposal ?? null).toBeNull();
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
     expect(persisted).toHaveLength(0);
+  });
+});
+
+// ─── P20-005: Accurate AI failure messaging + server logging ──────────────────
+
+describe('P20-005 — degraded path: server logging and accurate user-facing copy', () => {
+  let proposalRepo: InMemoryProposalRepository;
+  let logErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    proposalRepo = new InMemoryProposalRepository();
+    // Spy on the createLogger factory so we can capture logger.error calls.
+    // The assistant route creates its logger at module scope via createLogger;
+    // we spy on process.stderr.write (the output sink) to observe error logs.
+    logErrorSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function failingGateway(): LLMGateway {
+    return {
+      complete: vi.fn(async () => {
+        throw new Error('Provider auth failed: invalid API key');
+      }),
+    } as unknown as LLMGateway;
+  }
+
+  it('P20-005: returns HTTP 200 with degraded:true when the LLM gateway throws', async () => {
+    const gateway = failingGateway();
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What jobs are overdue?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(true);
+  });
+
+  it('P20-005: degraded response preserves the correct JSON shape (fallbackStage, message.role)', async () => {
+    const gateway = failingGateway();
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Any overdue invoices?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      degraded: true,
+      fallbackStage: 'error-envelope',
+      message: {
+        role: 'assistant',
+      },
+    });
+  });
+
+  it('P20-005: degraded content does not claim the AI backend is unbuilt or "not connected"', async () => {
+    const gateway = failingGateway();
+    const app = buildApp(gateway, proposalRepo);
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Schedule a job for tomorrow' }] });
+
+    expect(res.status).toBe(200);
+    const content: string = res.body?.message?.content ?? '';
+    expect(content).not.toMatch(/not connected/i);
+    expect(content).not.toMatch(/AI backend is not connected/i);
+    expect(content).not.toMatch(/AI_PROVIDER_API_KEY/i);
+    // Should still be a helpful, non-empty string
+    expect(content.length).toBeGreaterThan(0);
+  });
+
+  it('P20-005: logger.error is called with the real error when LLM gateway fails', async () => {
+    const gateway = failingGateway();
+    const app = buildApp(gateway, proposalRepo);
+
+    await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create an invoice' }] });
+
+    // The shared logger writes JSON to process.stderr on error level.
+    // Verify that stderr received at least one write containing the
+    // assistant route's error message and error level.
+    const stderrCalls = logErrorSpy.mock.calls.map((call) => String(call[0]));
+    const hasErrorLog = stderrCalls.some(
+      (line) =>
+        line.includes('assistant/chat') &&
+        line.includes('"level":"error"')
+    );
+    expect(hasErrorLog).toBe(true);
   });
 });
