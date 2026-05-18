@@ -119,4 +119,15 @@ export class PgReviewRepository
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });
   }
+
+  async findById(tenantId: string, reviewId: string): Promise<Review | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query<ReviewRow>(
+        `SELECT * FROM google_reviews
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, reviewId],
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
 }

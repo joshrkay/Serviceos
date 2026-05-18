@@ -2730,6 +2730,26 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_service_credits ON service_credits
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P7-026 final wiring — service_credits.review_id FK with ON DELETE
+  // SET NULL. The original 103_service_credits migration left review_id
+  // as a NULLable column with no FK so PR c could land independently
+  // of any FK ordering concerns. The cross-PR review flagged this: a
+  // credit row with a non-null review_id should be guaranteed to point
+  // at a real google_reviews row, and the rare case where a review row
+  // is later deleted (manual ops cleanup; never an automated path)
+  // should NULL out the credit's reference rather than orphan a
+  // dangling id — the credit row itself is part of the financial ledger
+  // and must be preserved for audit.
+  //
+  // `IF NOT EXISTS` is not supported on ADD CONSTRAINT, so the schema
+  // runner's `DROP CONSTRAINT IF EXISTS` rewriter in `getMigrationSQL`
+  // makes re-runs safe.
+  '104_service_credits_review_fk': `
+    ALTER TABLE service_credits
+      ADD CONSTRAINT service_credits_review_id_fkey
+      FOREIGN KEY (review_id) REFERENCES google_reviews(id) ON DELETE SET NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

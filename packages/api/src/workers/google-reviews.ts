@@ -47,9 +47,42 @@ import {
   ReviewPollStateRepository,
   isThrottled,
 } from '../reputation/poll-state';
+import {
+  ProposalRepository,
+  createProposal,
+} from '../proposals/proposal';
+import {
+  BuildReviewResponseProposalDeps,
+  buildReviewResponseProposal,
+} from '../reputation/build-proposal';
 
 /** Hard cap on pages walked per tenant per tick — defense against runaway pagination. */
 const MAX_PAGES_PER_TENANT = 20;
+
+/**
+ * Optional deps for the ingestion → proposal bridge. When ALL of them
+ * are present, every newly-inserted review (i.e. `inserted: true` from
+ * the upsert) immediately produces a draft `review_response_proposal`
+ * via `buildReviewResponseProposal` + `proposalRepo.create`. When any
+ * are missing, the worker still ingests reviews but skips emission —
+ * a startup log at the call site flags "ingestion only, no proposals"
+ * so ops can detect the partial-wiring case.
+ *
+ * Why inline (rather than a downstream worker reading new rows): keeps
+ * the bridge stateless. The upsert's `inserted` flag is the natural
+ * once-only signal — re-runs of the sweep are no-ops for already-seen
+ * reviews. Known limitation: if the upsert succeeds but
+ * `buildReviewResponseProposal` throws (LLM down, etc.), the review
+ * row exists with no associated proposal, and the next sweep will see
+ * `inserted: false` and skip emission. A proper fix tracks emission
+ * status per review (a `proposal_created_at` column). Flagged as a
+ * follow-up gap; outside this fix's scope.
+ */
+export interface GoogleReviewsProposalEmissionDeps {
+  proposalRepo: ProposalRepository;
+  /** Everything `buildReviewResponseProposal` needs except the review itself. */
+  buildProposalDeps: BuildReviewResponseProposalDeps;
+}
 
 export interface GoogleReviewsWorkerDeps {
   reviewRepo: ReviewRepository;
@@ -74,6 +107,14 @@ export interface GoogleReviewsWorkerDeps {
    * credentialResolver itself is the DB-dependent piece.
    */
   enabled?: boolean;
+  /**
+   * Optional proposal-emission bridge. When supplied, newly-inserted
+   * reviews immediately produce a draft `review_response_proposal`.
+   * When absent, the worker still ingests but no proposals are
+   * created. See `GoogleReviewsProposalEmissionDeps` for the partial-
+   * failure semantics.
+   */
+  proposalEmission?: GoogleReviewsProposalEmissionDeps;
 }
 
 export interface GoogleReviewsSweepResult {
@@ -82,6 +123,15 @@ export interface GoogleReviewsSweepResult {
   persisted: number;
   throttled: number;
   failed: number;
+  /** Number of `review_response_proposal` drafts created this sweep. */
+  proposalsEmitted: number;
+  /**
+   * Number of `buildReviewResponseProposal` failures that were caught
+   * and logged rather than aborting the loop. A non-zero value here
+   * means some reviews ingested but never produced a draft proposal —
+   * see the known-limitation note on `GoogleReviewsProposalEmissionDeps`.
+   */
+  proposalEmissionFailed: number;
 }
 
 /**
@@ -108,7 +158,15 @@ export async function runGoogleReviewsSweep(
   const enabled = deps.enabled ?? true;
 
   if (!enabled || !deps.credentialResolver) {
-    return { tenants: 0, fetched: 0, persisted: 0, throttled: 0, failed: 0 };
+    return {
+      tenants: 0,
+      fetched: 0,
+      persisted: 0,
+      throttled: 0,
+      failed: 0,
+      proposalsEmitted: 0,
+      proposalEmissionFailed: 0,
+    };
   }
 
   let tenantIds: string[];
@@ -118,13 +176,23 @@ export async function runGoogleReviewsSweep(
     deps.logger.error('Google reviews sweep: failed to list tenants', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { tenants: 0, fetched: 0, persisted: 0, throttled: 0, failed: 0 };
+    return {
+      tenants: 0,
+      fetched: 0,
+      persisted: 0,
+      throttled: 0,
+      failed: 0,
+      proposalsEmitted: 0,
+      proposalEmissionFailed: 0,
+    };
   }
 
   let fetched = 0;
   let persisted = 0;
   let throttled = 0;
   let failed = 0;
+  let proposalsEmitted = 0;
+  let proposalEmissionFailed = 0;
 
   const fetchFn = deps.fetchFn ?? fetch;
   const encKey = process.env.TENANT_ENCRYPTION_KEY;
@@ -202,8 +270,55 @@ export async function runGoogleReviewsSweep(
             stopPaginating = true;
             break;
           }
-          const { inserted } = await deps.reviewRepo.upsert(review);
-          if (inserted) tenantPersisted++;
+          const { review: persistedReview, inserted } =
+            await deps.reviewRepo.upsert(review);
+          if (inserted) {
+            tenantPersisted++;
+            // Ingestion → proposal bridge. Only fires on a FRESH insert
+            // so re-runs of the sweep don't double-emit. When emission
+            // deps aren't wired we silently skip (the startup-time
+            // wiring site logs a one-shot "ingestion-only" warning).
+            if (deps.proposalEmission) {
+              try {
+                const payload = await buildReviewResponseProposal(
+                  persistedReview,
+                  deps.proposalEmission.buildProposalDeps,
+                );
+                const proposal = createProposal({
+                  tenantId: persistedReview.tenantId,
+                  proposalType: 'review_response_proposal',
+                  payload: payload as unknown as Record<string, unknown>,
+                  summary: summarizeReviewProposal(persistedReview),
+                  createdBy: 'system:google-reviews-worker',
+                  targetEntityType: 'review',
+                  targetEntityId: persistedReview.id,
+                  // Idempotency: a single review can only ever produce
+                  // one draft proposal. If the worker crashes after
+                  // upsert succeeded but before create returned, the
+                  // next sweep sees `inserted: false` and skips
+                  // emission entirely — so this key is belt-and-
+                  // suspenders against duplicate proposal creation
+                  // via any future retry path.
+                  idempotencyKey: `review-response:${persistedReview.id}`,
+                });
+                await deps.proposalEmission.proposalRepo.create(proposal);
+                proposalsEmitted++;
+              } catch (emitErr) {
+                proposalEmissionFailed++;
+                deps.logger.warn(
+                  'Google reviews sweep: failed to emit proposal for new review; will NOT retry on next sweep (inserted=false on re-upsert)',
+                  {
+                    tenantId: persistedReview.tenantId,
+                    reviewId: persistedReview.id,
+                    error:
+                      emitErr instanceof Error
+                        ? emitErr.message
+                        : String(emitErr),
+                  },
+                );
+              }
+            }
+          }
           if (review.updateTime && review.updateTime > newestUpdateTime) {
             newestUpdateTime = review.updateTime;
           } else if (!review.updateTime && review.createTime > newestUpdateTime) {
@@ -263,6 +378,8 @@ export async function runGoogleReviewsSweep(
     persisted,
     throttled,
     failed,
+    proposalsEmitted,
+    proposalEmissionFailed,
   });
 
   return {
@@ -271,7 +388,24 @@ export async function runGoogleReviewsSweep(
     persisted,
     throttled,
     failed,
+    proposalsEmitted,
+    proposalEmissionFailed,
   };
+}
+
+/**
+ * Concise human-readable summary for the proposal review queue.
+ * Shape mirrors how other proposal types describe their target entity
+ * (single-line, no internal newlines, ≲100 chars). Truncates the
+ * comment to keep the queue scannable.
+ */
+function summarizeReviewProposal(review: Review): string {
+  const reviewer = review.reviewerDisplayName ?? 'anonymous reviewer';
+  const stars = `${review.rating}★`;
+  const snippet = (review.commentText ?? '').trim().slice(0, 60);
+  return snippet
+    ? `Respond to ${stars} review from ${reviewer}: "${snippet}${snippet.length === 60 ? '…' : ''}"`
+    : `Respond to ${stars} review from ${reviewer}`;
 }
 
 /**

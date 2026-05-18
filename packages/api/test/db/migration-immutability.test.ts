@@ -161,6 +161,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['101_google_reviews', 'ee39147f5eb59b0455ea40290a3592f70068907e13fa0d2c392ba4a3acd6d8f8'],
   ['102_review_poll_state', 'b069f6a315219c16ac432f1854b1865d337efa6a8fa66a12efc6c89d18ebb207'],
   ['103_service_credits', 'd4a6951eb9a1afe53bc92e1b81b7594e8f084d48765580ecae3065325198e102'],
+  ['104_service_credits_review_fk', '3774d608685bc1c9fa21706ec1905be65a0fc9496c49aeac7b938422371ef97c'],
 ];
 
 function hashMigration(value: string): string {

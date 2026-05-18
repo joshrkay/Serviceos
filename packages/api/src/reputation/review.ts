@@ -71,6 +71,17 @@ export interface ReviewRepository {
     tenantId: string,
     externalReviewId: string,
   ): Promise<Review | null>;
+
+  /**
+   * Read-back by primary key, scoped to a tenant. Used by
+   * `PgGoogleBusinessReplyResolver` (P7-026 final wiring) to look up
+   * the persisted review row when an operator approves a
+   * `review_response_proposal`. Returns null when the id is unknown
+   * (e.g., the review row was deleted out-of-band between proposal
+   * creation and approval) or when the row does not belong to the
+   * supplied tenant.
+   */
+  findById(tenantId: string, reviewId: string): Promise<Review | null>;
 }
 
 /**
@@ -114,6 +125,15 @@ export class InMemoryReviewRepository implements ReviewRepository {
     externalReviewId: string,
   ): Promise<Review | null> {
     return this.store.get(this.key(tenantId, externalReviewId)) ?? null;
+  }
+
+  async findById(tenantId: string, reviewId: string): Promise<Review | null> {
+    for (const review of this.store.values()) {
+      if (review.id === reviewId && review.tenantId === tenantId) {
+        return review;
+      }
+    }
+    return null;
   }
 
   /** Test-only helper. */

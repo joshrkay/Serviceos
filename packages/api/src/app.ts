@@ -242,6 +242,11 @@ import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { PgReviewRepository } from './reputation/pg-review';
 import { PgReviewPollStateRepository } from './reputation/poll-state';
+import { PgServiceCreditRepository } from './reputation/pg-service-credit';
+import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
+import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
+import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
@@ -1142,6 +1147,33 @@ export function createApp(): express.Express {
         dispatchRepo,
       })
     : undefined;
+  // P7-026 — wire the review-response execution handler's three
+  // optional deps so an approved review_response_proposal actually
+  // mutates state instead of falling through the handler's "no dep
+  // wired" guards. Hoisted ahead of the createExecutionHandlerRegistry
+  // call (the polling worker, registered later, reuses these
+  // instances).
+  const googleReviewsReviewRepo = pool ? new PgReviewRepository(pool) : null;
+  const googleReviewsPollStateRepo = pool
+    ? new PgReviewPollStateRepository(pool)
+    : null;
+  const googleReviewsCredResolver = pool
+    ? createCredentialResolver({ pool })
+    : null;
+  const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
+  const googleReplyResolver =
+    googleReviewsReviewRepo && googleReviewsCredResolver
+      ? new PgGoogleBusinessReplyResolver(
+          googleReviewsReviewRepo,
+          googleReviewsCredResolver,
+        )
+      : undefined;
+  const reviewPrivateMessageSender = messageDelivery
+    ? new MessageDeliveryReviewPrivateMessageSender(
+        messageDelivery,
+        customerRepo,
+      )
+    : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
@@ -1156,6 +1188,9 @@ export function createApp(): express.Express {
     expenseRepo,
     auditRepo,
     jobRepo,
+    ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
+    ...(googleReplyResolver ? { googleReplyResolver } : {}),
+    ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
@@ -2458,13 +2493,36 @@ export function createApp(): express.Express {
     service: 'google-reviews-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  const googleReviewsReviewRepo = pool ? new PgReviewRepository(pool) : null;
-  const googleReviewsPollStateRepo = pool
-    ? new PgReviewPollStateRepository(pool)
-    : null;
-  const googleReviewsCredResolver = pool
-    ? createCredentialResolver({ pool })
-    : null;
+  // P7-026 final wiring — ingestion → proposal bridge. When all the
+  // build-proposal deps are available (LLM gateway + customer loader +
+  // brand voice + service-credit repo), newly-inserted reviews
+  // immediately produce a draft review_response_proposal. When any are
+  // missing, we log a one-shot warning so ops can see "ingestion only,
+  // no proposals being created" without grepping the per-tick logs.
+  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
+  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  const googleReviewsProposalEmission =
+    serviceCreditRepo && googleReviewsCustomerLoader
+      ? {
+          proposalRepo,
+          buildProposalDeps: {
+            llmGateway,
+            customerLoader: googleReviewsCustomerLoader,
+            brandVoiceLoader: googleReviewsBrandVoiceLoader,
+            serviceCreditRepo,
+          },
+        }
+      : undefined;
+  if (!googleReviewsProposalEmission) {
+    googleReviewsLogger.warn(
+      'Google reviews worker: proposal emission deps incomplete — ' +
+        'ingestion will run but no review_response_proposal drafts will be created',
+      {
+        hasServiceCreditRepo: Boolean(serviceCreditRepo),
+        hasCustomerLoader: Boolean(googleReviewsCustomerLoader),
+      },
+    );
+  }
   setInterval(async () => {
     if (
       !googleReviewsReviewRepo ||
@@ -2484,6 +2542,9 @@ export function createApp(): express.Express {
           return r.rows.map((row: { id: string }) => row.id);
         },
         logger: googleReviewsLogger,
+        ...(googleReviewsProposalEmission
+          ? { proposalEmission: googleReviewsProposalEmission }
+          : {}),
       });
     } catch (err) {
       googleReviewsLogger.error('Google reviews sweep failed', {
