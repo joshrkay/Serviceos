@@ -48,7 +48,13 @@ export async function classifyTurnSentiment(
     deps.sessionCostCapCents != null &&
     deps.maxSentimentBudgetRatio != null
   ) {
-    const ratio = deps.costTracker.totals.costCents / deps.sessionCostCapCents;
+    const cap = deps.sessionCostCapCents;
+    if (cap <= 0) {
+      // Zero or negative cap means no budget at all — skip LLM call.
+      return { frustrationScore: 0 };
+    }
+    const costCents = deps.costTracker.totals.costCents ?? 0;
+    const ratio = costCents / cap;
     if (ratio >= deps.maxSentimentBudgetRatio) {
       return { frustrationScore: 0 };
     }

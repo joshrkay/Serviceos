@@ -235,9 +235,10 @@ export interface MediaStreamAdapterDeps {
    */
   sentimentClassifier?: (input: SentimentInput) => Promise<SentimentResult>;
   /**
-   * F6c + F8 — per-tenant escalation settings resolved before the WS
-   * session starts (or refreshed per-turn if needed). Used to gate
-   * `trigger_llm_sentiment` and read `llm_sentiment_threshold`.
+   * Per-tenant escalation settings, resolved once at adapter construction
+   * (i.e. per WebSocket connection lifetime). Changes made to the tenant's
+   * escalationSettings during an active call are NOT reflected in the
+   * current connection — they apply only to subsequent connections.
    * Optional — when absent, LLM sentiment is disabled.
    */
   escalationSettings?: EscalationSettings;
@@ -630,7 +631,14 @@ export class TwilioMediaStreamAdapter {
 
     // B3.3 — async LLM sentiment classifier. Gated by per-tenant settings.
     // Fire-and-forget so it never blocks the audio response path.
-    if (this.deps.sentimentClassifier && this.deps.escalationSettings?.trigger_llm_sentiment) {
+    // Skip when the current turn already emits end_session — the WS will be
+    // torn down below, and dispatching into a closing session produces noise.
+    const alreadyEnding = sideEffects.some((fx) => fx.type === 'end_session');
+    if (
+      !alreadyEnding &&
+      this.deps.sentimentClassifier &&
+      this.deps.escalationSettings?.trigger_llm_sentiment
+    ) {
       void this.runSentimentCheckAndMaybeEscalate(session, event.transcript, sideEffects).catch(
         (err) =>
           logger.warn('sentiment check failed', {
@@ -674,11 +682,21 @@ export class TwilioMediaStreamAdapter {
 
     const threshold = this.deps.escalationSettings!.llm_sentiment_threshold;
     if (result.frustrationScore >= threshold) {
-      const newEffects = session.machine.dispatch({
-        type: 'frustration_detected',
-        source: 'llm_sentiment',
-        detail: result.frustrationScore.toFixed(2),
-      });
+      // Serialize dispatch+emit against any concurrent turn handler.
+      // The LLM call above may take 200–2000 ms; without the lock the FSM
+      // could advance (e.g. to `confirming`) between the LLM returning and
+      // our dispatch. withSessionLock queues us behind the current turn so
+      // the FSM idempotency guard at transitions.ts:212 is the only arbiter
+      // of whether frustration_detected is still actionable.
+      const newEffects = await this.deps.store.withSessionLock(session.id, () =>
+        Promise.resolve(
+          session.machine.dispatch({
+            type: 'frustration_detected',
+            source: 'llm_sentiment',
+            detail: result.frustrationScore.toFixed(2),
+          }),
+        ),
+      );
       await this.emitSideEffects(newEffects);
     }
   }
