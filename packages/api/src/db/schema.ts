@@ -2634,36 +2634,121 @@ export const MIGRATIONS = {
       ON payments(refunded_at) WHERE refunded_at IS NOT NULL;
   `,
 
-  // P2-030 — durable storage for shadow-comparison results.
-  // The shadow gateway samples a configurable fraction of LLM calls, replays
-  // them against a shadow model, and persists both responses here.
-  // divergence_score is written by a later job (P2-020) and is nullable on insert.
-  '101_create_shadow_comparisons': `
-    CREATE TABLE IF NOT EXISTS shadow_comparisons (
+  // P7-026 PR a — Google Business reviews monitoring foundation.
+  // Mirror of upstream review rows; the worker polls every 15 minutes
+  // and upserts on (tenant_id, external_review_id). PR b adds PII
+  // redaction (separate column for redacted_text) and PR c hangs the
+  // proposal pipeline off inserts. Indexed for "recent reviews per
+  // tenant" + "freshly fetched" queries that the UI and reporting
+  // will run.
+  '101_google_reviews': `
+    CREATE TABLE IF NOT EXISTS google_reviews (
       id UUID PRIMARY KEY,
-      tenant_id UUID NOT NULL,
-      ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
-      comparison_group_id UUID,
-      task_type TEXT,
-      primary_model TEXT,
-      shadow_model TEXT NOT NULL,
-      primary_response_text TEXT,
-      shadow_response_text TEXT,
-      primary_latency_ms INTEGER,
-      shadow_latency_ms INTEGER,
-      primary_token_usage JSONB,
-      shadow_token_usage JSONB,
-      divergence_score NUMERIC,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      external_review_id TEXT NOT NULL,
+      location_id TEXT NOT NULL,
+      reviewer_display_name TEXT,
+      reviewer_profile_url TEXT,
+      rating SMALLINT NOT NULL CHECK (rating BETWEEN 0 AND 5),
+      comment_text TEXT,
+      review_create_time TIMESTAMPTZ NOT NULL,
+      review_update_time TIMESTAMPTZ,
+      -- first_fetched_at is set at insert and NEVER updated — the row's
+      -- "first seen" moment. Useful for admin "when did we discover
+      -- this review?" views.
+      first_fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- last_fetched_at advances on every upsert — useful for ops
+      -- monitoring ("when did we last confirm this review still
+      -- exists?"). Both default to now() on insert; ON CONFLICT
+      -- updates last_fetched_at only.
+      last_fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, external_review_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_run ON shadow_comparisons(tenant_id, ai_run_id);
-    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_created ON shadow_comparisons(tenant_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_group ON shadow_comparisons(comparison_group_id);
-    ALTER TABLE shadow_comparisons ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE shadow_comparisons FORCE ROW LEVEL SECURITY;
-    DROP POLICY IF EXISTS tenant_isolation_shadow_comparisons ON shadow_comparisons;
-    CREATE POLICY tenant_isolation_shadow_comparisons ON shadow_comparisons
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_create_time
+      ON google_reviews(tenant_id, review_create_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_first_fetched_at
+      ON google_reviews(tenant_id, first_fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_last_fetched_at
+      ON google_reviews(tenant_id, last_fetched_at DESC);
+    ALTER TABLE google_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE google_reviews FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_google_reviews ON google_reviews;
+    CREATE POLICY tenant_isolation_google_reviews ON google_reviews
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P7-026 PR a — per-tenant poll watermark + 429 exponential backoff.
+  // Single row per tenant. `cursor` is the ISO timestamp of the
+  // newest review.updateTime we've persisted (the watermark). When
+  // `backoff_until` is in the future, the worker skips this tenant
+  // entirely. `consecutive_429_count` resets on the first successful
+  // poll. The exponential math lives in reputation/poll-state.ts;
+  // recordQuotaError() mirrors it in SQL so the increment is
+  // race-free.
+  '102_review_poll_state': `
+    CREATE TABLE IF NOT EXISTS review_poll_state (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id),
+      cursor TEXT,
+      last_successful_poll_at TIMESTAMPTZ,
+      backoff_until TIMESTAMPTZ,
+      consecutive_429_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_review_poll_state_backoff
+      ON review_poll_state(backoff_until)
+      WHERE backoff_until IS NOT NULL;
+    ALTER TABLE review_poll_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE review_poll_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_review_poll_state ON review_poll_state;
+    CREATE POLICY tenant_isolation_review_poll_state ON review_poll_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P7-026 PR c — service_credits ledger. One row per credit issued.
+  // `amount_cents` is BIGINT (matches the established money-column
+  // shape across the schema) and constrained > 0 (the in-memory repo
+  // enforces the same — see service-credit.ts). `review_id` is
+  // nullable because credits may originate from non-review flows in
+  // the future. Indexed for the rolling-12-month sum query
+  // (tenant_id + customer_id + issued_at) that the cap check uses.
+  '103_service_credits': `
+    CREATE TABLE IF NOT EXISTS service_credits (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      review_id UUID NULL,
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_credits_tenant_customer_issued
+      ON service_credits(tenant_id, customer_id, issued_at DESC);
+    ALTER TABLE service_credits ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_credits FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_credits ON service_credits;
+    CREATE POLICY tenant_isolation_service_credits ON service_credits
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P7-026 final wiring — service_credits.review_id FK with ON DELETE
+  // SET NULL. The original 103_service_credits migration left review_id
+  // as a NULLable column with no FK so PR c could land independently
+  // of any FK ordering concerns. The cross-PR review flagged this: a
+  // credit row with a non-null review_id should be guaranteed to point
+  // at a real google_reviews row, and the rare case where a review row
+  // is later deleted (manual ops cleanup; never an automated path)
+  // should NULL out the credit's reference rather than orphan a
+  // dangling id — the credit row itself is part of the financial ledger
+  // and must be preserved for audit.
+  //
+  // `IF NOT EXISTS` is not supported on ADD CONSTRAINT, so the schema
+  // runner's `DROP CONSTRAINT IF EXISTS` rewriter in `getMigrationSQL`
+  // makes re-runs safe.
+  '104_service_credits_review_fk': `
+    ALTER TABLE service_credits
+      ADD CONSTRAINT service_credits_review_id_fkey
+      FOREIGN KEY (review_id) REFERENCES google_reviews(id) ON DELETE SET NULL;
   `,
 };
 
