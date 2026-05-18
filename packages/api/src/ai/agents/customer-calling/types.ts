@@ -138,15 +138,30 @@ export const escalateWithContextPayloadSchema = z.object({
     whisper: z.string(),
     sms: z.string(),
     panel: z.object({
-      header: z.record(z.string(), z.unknown()),
-      customer: z.record(z.string(), z.unknown()),
+      header: z.object({
+        title: z.string(),
+        callerName: z.string(),
+        callerPhone: z.string(),
+      }),
+      customer: z.object({
+        name: z.string(),
+        phone: z.string(),
+        tags: z.array(z.string()),
+      }),
       lastInteraction: z.union([z.string(), z.null()]),
-      intent: z.record(z.string(), z.unknown()),
+      intent: z.object({
+        summary: z.string(),
+        entities: z.array(z.object({ key: z.string(), value: z.string() })),
+      }),
       reason: z.object({
         code: z.string(),
-        humanReadable: z.string().optional(),
+        humanReadable: z.string(),
       }),
-      transcriptSnapshot: z.array(z.unknown()),
+      transcriptSnapshot: z.array(z.object({
+        role: z.union([z.literal('caller'), z.literal('ai')]),
+        text: z.string(),
+        ts: z.number(),
+      })),
     }),
   }),
   dispatcher: z.object({

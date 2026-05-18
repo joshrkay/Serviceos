@@ -8,14 +8,7 @@ interface EscalationPanelProps {
 
 export function EscalationPanel({ event, onDismiss, onOutcome }: EscalationPanelProps) {
   // event.panel is provided by backend serialization; default to safe empties.
-  const panel = (event.panel ?? {}) as {
-    header?: { title: string; callerName: string; callerPhone: string };
-    customer?: { name: string; phone: string; tags?: string[] };
-    lastInteraction?: string | null;
-    intent?: { summary: string; entities?: Array<{ key: string; value: string }> };
-    reason?: { code: string; humanReadable: string };
-    transcriptSnapshot?: Array<{ role: 'caller' | 'ai'; text: string; ts: number }>;
-  };
+  const panel = event.panel ?? {};
 
   return (
     <div

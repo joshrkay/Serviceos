@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 
+export interface EscalationPanelData {
+  header?: { title: string; callerName: string; callerPhone: string };
+  customer?: { name: string; phone: string; tags?: string[] };
+  lastInteraction?: string | null;
+  intent?: { summary: string; entities?: Array<{ key: string; value: string }> };
+  reason?: { code: string; humanReadable: string };
+  transcriptSnapshot?: Array<{ role: 'caller' | 'ai'; text: string; ts: number }>;
+}
+
 export interface EscalationEvent {
   type: 'escalation_started';
   escalationId: string;
   reason: string;
   dispatcherUserId: string;
   ts: number;
-  panel?: unknown;
+  panel?: EscalationPanelData;
 }
 
 export interface UseEscalationStream {

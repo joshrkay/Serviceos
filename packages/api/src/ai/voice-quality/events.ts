@@ -19,6 +19,7 @@
 import type { VoiceSessionEvent } from '../agents/customer-calling/voice-session-store';
 import { estimateCostCents } from '../skills/session-cost-tracker';
 import type { IntentClassification } from '../orchestration/intent-classifier';
+import type { PanelData } from '../agents/customer-calling/escalation-summary-builder';
 
 /**
  * Build an `intent_classified` event from a classifier result.
@@ -189,6 +190,7 @@ export interface EscalationStartedEvent {
   reason: string;
   dispatcherUserId: string;
   tenantId: string;
+  panel: PanelData;
   ts: number;
 }
 
@@ -231,6 +233,7 @@ export const escalationStartedEvent = (opts: {
   reason: string;
   dispatcherUserId: string;
   tenantId: string;
+  panel: PanelData;
   ts?: number;
 }): EscalationStartedEvent => ({
   type: 'escalation_started',
@@ -238,6 +241,7 @@ export const escalationStartedEvent = (opts: {
   reason: opts.reason,
   dispatcherUserId: opts.dispatcherUserId,
   tenantId: opts.tenantId,
+  panel: opts.panel,
   ts: opts.ts ?? Date.now(),
 });
 

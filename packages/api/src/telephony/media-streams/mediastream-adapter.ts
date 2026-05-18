@@ -59,6 +59,7 @@ import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
 import type { EscalationSettings } from '../../settings/settings';
 import type { SentimentInput, SentimentResult } from '../../ai/agents/customer-calling/sentiment-classifier';
+import type { PanelData } from '../../ai/agents/customer-calling/escalation-summary-builder';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -240,8 +241,20 @@ export interface MediaStreamAdapterDeps {
    * escalationSettings during an active call are NOT reflected in the
    * current connection — they apply only to subsequent connections.
    * Optional — when absent, LLM sentiment is disabled.
+   *
+   * @deprecated Use `resolveEscalationSettings` for per-tenant resolution at
+   * session start. This static field is kept as a fallback for tests.
    */
   escalationSettings?: EscalationSettings;
+  /**
+   * F6c (per-tenant) — async resolver for escalation settings. Called once
+   * per WS session after the tenantId is known (in handleStart). The resolved
+   * settings are stored on RuntimeState and used to gate the LLM sentiment
+   * classifier. Preferred over the static `escalationSettings` field.
+   * Optional — when absent and `escalationSettings` is also absent, LLM
+   * sentiment is disabled.
+   */
+  resolveEscalationSettings?: (tenantId: string) => Promise<EscalationSettings>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -313,6 +326,13 @@ interface RuntimeState {
    * log target when `deps.setPendingTransferTwiml` is not wired.
    */
   pendingTransferTwiml: string | null;
+  /**
+   * F6c (per-tenant) — escalation settings resolved at session start
+   * (after tenantId is known in handleStart). Null when resolution
+   * failed or `deps.resolveEscalationSettings` is absent. Falls back
+   * to `deps.escalationSettings` when null.
+   */
+  resolvedEscalationSettings: EscalationSettings | null;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -398,6 +418,7 @@ export class TwilioMediaStreamAdapter {
       awaitingFirstAudioFrame: false,
       fillerActive: false,
       pendingTransferTwiml: null,
+      resolvedEscalationSettings: null,
     };
   }
 
@@ -497,6 +518,21 @@ export class TwilioMediaStreamAdapter {
     this.state.callSid = callSid;
     this.state.session = session;
     this.state.tenantId = session.tenantId;
+
+    // F6c (per-tenant) — resolve escalation settings now that tenantId is known.
+    // Stored on RuntimeState so the sentiment gating check reads a live value
+    // rather than the static dep (which was always undefined in production).
+    if (this.deps.resolveEscalationSettings) {
+      try {
+        this.state.resolvedEscalationSettings = await this.deps.resolveEscalationSettings(session.tenantId);
+      } catch (err) {
+        logger.warn('mediastream: failed to resolve escalation settings, using defaults', {
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.state.resolvedEscalationSettings = null;
+      }
+    }
 
     const keywords = this.deps.terminologyProvider
       ? await this.deps.terminologyProvider.getKeywords(session.tenantId).catch(() => [])
@@ -634,10 +670,12 @@ export class TwilioMediaStreamAdapter {
     // Skip when the current turn already emits end_session — the WS will be
     // torn down below, and dispatching into a closing session produces noise.
     const alreadyEnding = sideEffects.some((fx) => fx.type === 'end_session');
+    // Use per-session resolved settings (preferred) falling back to the static dep.
+    const activeEscalationSettings = this.state.resolvedEscalationSettings ?? this.deps.escalationSettings;
     if (
       !alreadyEnding &&
       this.deps.sentimentClassifier &&
-      this.deps.escalationSettings?.trigger_llm_sentiment
+      activeEscalationSettings?.trigger_llm_sentiment
     ) {
       void this.runSentimentCheckAndMaybeEscalate(session, event.transcript, sideEffects).catch(
         (err) =>
@@ -824,6 +862,9 @@ export class TwilioMediaStreamAdapter {
           reason: summary.panel.reason.code,
           dispatcherUserId: dispatcher.userId,
           tenantId: payload.tenantId,
+          // summary.panel is structurally compatible with PanelData at runtime;
+          // the Zod schema uses z.string() for reason.code vs the TS union type.
+          panel: summary.panel as unknown as PanelData,
         }),
       );
     }
