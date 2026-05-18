@@ -194,4 +194,65 @@ describe('P6-008 — Convert drag/drop into schedule proposal', () => {
     const body2 = JSON.parse(calls[1][1].body);
     expect(body1.proposalType).toBe(body2.proposalType);
   });
+
+  it('forwards appointmentVersion as If-Match header and body field', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: () => Promise.resolve({ id: 'p-1' }),
+    });
+    const { result } = renderHook(() => useCreateScheduleProposal());
+    const dragResult: DragResult = {
+      appointmentId: 'a-1', sourceType: 'queue', sourceTechnicianId: null,
+      targetTechnicianId: 'tech-1', targetPosition: null,
+      appointmentVersion: '2026-05-16T12:00:00.000Z',
+    };
+    await act(async () => { await result.current.createProposal(dragResult); });
+    const call = (global.fetch as any).mock.calls[0];
+    expect(call[1].headers['If-Match']).toBe('2026-05-16T12:00:00.000Z');
+    const body = JSON.parse(call[1].body);
+    expect(body.appointmentVersion).toBe('2026-05-16T12:00:00.000Z');
+  });
+
+  it('returns { success:false, error:"STALE" } on 409', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 409,
+      json: () => Promise.resolve({ error: 'STALE_APPOINTMENT', currentVersion: 'x', providedVersion: 'y' }),
+      text: () => Promise.resolve(''),
+    });
+    const { result } = renderHook(() => useCreateScheduleProposal());
+    let r: any;
+    await act(async () => {
+      r = await result.current.createProposal({
+        appointmentId: 'a-1', appointmentVersion: 'old',
+        sourceType: 'queue', sourceTechnicianId: null,
+        targetTechnicianId: 'tech-1', targetPosition: null,
+      } as DragResult);
+    });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe('STALE');
+  });
+
+  it('returns { success:false, error:"INFEASIBLE", blocking } on 422', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false, status: 422,
+      json: () => Promise.resolve({
+        error: 'INFEASIBLE',
+        blocking: [{ check: 'overlap', severity: 'blocking', message: 'overlaps' }],
+        warnings: [], info: [],
+      }),
+      text: () => Promise.resolve(''),
+    });
+    const { result } = renderHook(() => useCreateScheduleProposal());
+    let r: any;
+    await act(async () => {
+      r = await result.current.createProposal({
+        appointmentId: 'a-1', appointmentVersion: 'v',
+        sourceType: 'queue', sourceTechnicianId: null,
+        targetTechnicianId: 'tech-1', targetPosition: null,
+      } as DragResult);
+    });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe('INFEASIBLE');
+    expect(r.blocking).toHaveLength(1);
+    expect(r.blocking[0].check).toBe('overlap');
+  });
 });

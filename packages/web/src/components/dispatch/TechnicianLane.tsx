@@ -1,9 +1,15 @@
 import React from 'react';
 import { AppointmentCard, AppointmentCardData } from './AppointmentCard';
+import type { FeasibilityResult } from './feasibility-types';
 
 export interface TechnicianInfo {
   id: string;
   name: string;
+}
+
+export interface DragPreview {
+  targetTechnicianId: string;
+  preview: FeasibilityResult | null;
 }
 
 export interface TechnicianLaneProps {
@@ -15,22 +21,24 @@ export interface TechnicianLaneProps {
   onDragOver?: (e: React.DragEvent) => void;
   onDragLeave?: (e: React.DragEvent) => void;
   onDrop?: (e: React.DragEvent) => void;
-  /**
-   * P6-020 — within-lane reorder affordance. When supplied, each card gets
-   * up/down buttons that fire a reorder request (by appointment id, from
-   * current index to the target index). The caller turns that into a
-   * reschedule_appointment proposal via useCreateScheduleProposal.
-   */
   onReorderWithinLane?: (appointmentId: string, fromIndex: number, toIndex: number) => void;
-  /**
-   * P6-026 — set of appointment ids that overlap another booking on
-   * the same technician's lane. Computed by the DispatchBoard
-   * parent and forwarded to each AppointmentCard so the conflict
-   * badge renders. Optional — omitting it leaves cards quiet.
-   * Cross-lane same-customer detection is tracked as a follow-up
-   * (Codex PR #316 review).
-   */
   conflictIds?: ReadonlySet<string>;
+  /**
+   * Live feasibility preview for an in-flight drag. When this lane is the
+   * drop target and a preview has resolved, the drop zone takes on a
+   * colored state (blocking=red, warnings-only=amber, clean=green).
+   */
+  dragPreview?: DragPreview | null;
+}
+
+function dropZoneStateClass(dragPreview: DragPreview | null | undefined, technicianId: string): string {
+  if (!dragPreview || dragPreview.targetTechnicianId !== technicianId || !dragPreview.preview) {
+    return 'drop-zone--idle';
+  }
+  const { preview } = dragPreview;
+  if (!preview.feasible) return 'drop-zone--blocking';
+  if (preview.warnings.length > 0) return 'drop-zone--warning';
+  return 'drop-zone--ok';
 }
 
 export function TechnicianLane({
@@ -43,16 +51,20 @@ export function TechnicianLane({
   onDrop,
   onReorderWithinLane,
   conflictIds,
+  dragPreview,
 }: TechnicianLaneProps) {
   const sortedAppointments = [...appointments].sort(
     (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime()
   );
 
+  const dropZoneClass = dropZoneStateClass(dragPreview, technician.id);
+
   return (
     <div
-      className={`technician-lane ${isDragOver ? 'technician-lane--drag-over' : ''}`}
+      className={`technician-lane ${isDragOver ? 'technician-lane--drag-over' : ''} ${dropZoneClass}`}
       data-testid="technician-lane"
       data-technician-id={technician.id}
+      data-drop-zone-state={dropZoneClass}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}

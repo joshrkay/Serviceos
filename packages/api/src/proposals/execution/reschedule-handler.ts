@@ -5,12 +5,13 @@ import { AppointmentRepository, updateAppointment } from '../../appointments/app
 import { AssignmentRepository } from '../../appointments/assignment';
 import { validateAppointmentTimes } from '../../appointments/validation';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
-import { detectOverlappingAppointments } from '../../dispatch/validation';
 import {
   DispatchAnalyticsRepository,
   captureDispatchEvent,
 } from '../../dispatch/analytics';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { checkFeasibility } from '../../scheduling/feasibility';
+import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -20,6 +21,7 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
+    private readonly feasibilityDeps?: FeasibilityDependencies,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -71,44 +73,36 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
       }
 
-      // Conflict check — ensure no overlapping appointments for the assigned technician
-      if (this.assignmentRepo) {
-        const assignments = await this.assignmentRepo.findByAppointment(
-          context.tenantId,
-          appointmentId,
-        );
-        const primary = assignments.find((a) => a.isPrimary);
-        if (primary) {
-          const techAssignments = await this.assignmentRepo.findByTechnician(
-            context.tenantId,
-            primary.technicianId,
-          );
-          const techAppointments = await Promise.all(
-            techAssignments.map((a) =>
-              this.appointmentRepo!.findById(context.tenantId, a.appointmentId)
-            )
-          );
-          const existingAppts = techAppointments
-            .filter((a): a is NonNullable<typeof a> => a !== null)
-            .map((a) => ({
-              id: a.id,
-              technicianId: primary.technicianId,
-              scheduledStart: a.scheduledStart,
-              scheduledEnd: a.scheduledEnd,
-              status: a.status,
-            }));
-          const conflicts = detectOverlappingAppointments(
-            primary.technicianId,
-            startDate,
-            endDate,
-            existingAppts,
-            appointmentId,
-          );
-          const blocking = conflicts.filter((c) => c.severity === 'blocking');
-          if (blocking.length > 0) {
-            return { success: false, error: blocking[0].message };
-          }
+      // Conflict / feasibility check — delegate to the checkFeasibility composer
+      let trailingWarnings: FeasibilityIssue[] = [];
+      if (this.feasibilityDeps) {
+        // Determine the proposed technician — for in-lane reschedule, that's the current primary.
+        // Look it up via assignmentRepo if available; otherwise fall back to '' (composer skips overlap).
+        let proposedTechnicianId = '';
+        if (this.assignmentRepo) {
+          const currentAssignments = await this.assignmentRepo.findByAppointment(context.tenantId, appointmentId);
+          const primary = currentAssignments.find((a) => a.isPrimary);
+          if (primary) proposedTechnicianId = primary.technicianId;
         }
+
+        const feasibility = await checkFeasibility(
+          {
+            tenantId: context.tenantId,
+            appointment,
+            proposedTechnicianId,
+            proposedScheduledStart: startDate,
+            proposedScheduledEnd: endDate,
+          },
+          this.feasibilityDeps,
+        );
+        if (feasibility.blocking.length > 0) {
+          return {
+            success: false,
+            error: feasibility.blocking[0].message,
+            ...({ warnings: feasibility.warnings } as Record<string, unknown>),
+          };
+        }
+        trailingWarnings = feasibility.warnings;
       }
 
       const updates: Record<string, unknown> = {
@@ -169,7 +163,11 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         );
       }
 
-      return { success: true, resultEntityId: appointmentId };
+      return {
+        success: true,
+        resultEntityId: appointmentId,
+        ...({ warnings: trailingWarnings } as Record<string, unknown>),
+      };
     }
 
     return { success: true, resultEntityId: appointmentId };

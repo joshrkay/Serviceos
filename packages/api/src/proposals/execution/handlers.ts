@@ -216,6 +216,7 @@ export function createExecutionHandlerRegistry(deps?: {
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
   jobRepo?: JobRepository;
+  feasibilityDeps?: import('../../scheduling/feasibility-types').FeasibilityDependencies;
   // P7-026 PR c — review-response wiring. All three are optional;
   // when absent the handler degrades sub-actions to passthrough so
   // unit tests that don't exercise the mutation path can omit them.
@@ -248,8 +249,8 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
-    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo, deps?.feasibilityDeps),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo, deps?.auditRepo),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is

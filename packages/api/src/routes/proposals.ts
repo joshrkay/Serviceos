@@ -23,6 +23,8 @@ import {
   rejectProposalBodySchema,
   editProposalBodySchema,
 } from '../proposals/proposal-contracts';
+import { FeasibilityDependencies } from '../scheduling/feasibility-types';
+import { createSchedulingProposal } from '../proposals/create-scheduling';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -38,8 +40,68 @@ export function createProposalsRouter(
   proposalRepo: ProposalRepository,
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
+  feasibilityDeps?: FeasibilityDependencies,
 ): Router {
   const router = Router();
+
+  // NEW: bare POST handler for scheduling proposal creation (reschedule/reassign).
+  // MUST be registered before any '/:id' routes so Express does not mistake the
+  // empty segment as an :id param. Scoped to scheduling types only — AI-originated
+  // proposal types are created via the LLM gateway, not this HTTP path.
+  router.post(
+    '/',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const body = req.body as { proposalType?: string; payload?: any; summary?: string; appointmentVersion?: string };
+        if (body.proposalType !== 'reschedule_appointment' && body.proposalType !== 'reassign_appointment') {
+          res.status(400).json({ error: 'UNSUPPORTED_PROPOSAL_TYPE', proposalType: body.proposalType });
+          return;
+        }
+        if (!appointmentRepo || !feasibilityDeps) {
+          res.status(500).json({ error: 'SCHEDULING_DEPS_UNCONFIGURED' });
+          return;
+        }
+        // If-Match header takes precedence over body.appointmentVersion, consistent
+        // with HTTP semantics. The client hook (useCreateScheduleProposal) sends
+        // the header; the body field is a fallback for non-browser callers.
+        const headerVersion = req.header('If-Match') ?? null;
+        const expectedVersion = headerVersion ?? body.appointmentVersion ?? null;
+
+        const result = await createSchedulingProposal(
+          {
+            tenantId: req.auth!.tenantId,
+            actorId: req.auth!.userId,
+            proposalType: body.proposalType,
+            payload: body.payload,
+            summary: body.summary,
+            expectedVersion,
+          },
+          proposalRepo, appointmentRepo, feasibilityDeps,
+        );
+
+        switch (result.kind) {
+          case 'created': res.status(200).json(result.proposal); return;
+          case 'missing_version': res.status(400).json({ error: 'MISSING_VERSION' }); return;
+          case 'invalid_version': res.status(400).json({ error: 'INVALID_VERSION' }); return;
+          case 'not_found': res.status(404).json({ error: 'APPOINTMENT_NOT_FOUND' }); return;
+          case 'stale': res.status(409).json({
+            error: 'STALE_APPOINTMENT',
+            currentVersion: result.currentVersion,
+            providedVersion: result.providedVersion,
+          }); return;
+          case 'infeasible': res.status(422).json({
+            error: 'INFEASIBLE',
+            ...result.feasibility,
+          }); return;
+        }
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
 
   router.get(
     '/',
