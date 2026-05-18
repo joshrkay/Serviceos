@@ -114,6 +114,17 @@ export interface VoiceActionRouterDeps {
   >;
   /** When provided, the create_appointment handler produces held-slot bookings. */
   appointmentRepo?: AppointmentRepository;
+  /**
+   * §3B/3D/3E — vertical-aware prompt resolver. When wired, the classifier
+   * sees the tenant's active pack terminology, intake-disambiguation
+   * questions, and objection scripts as a separate system message. Without
+   * it the operator's voice commands ("draft an estimate for the Johnson
+   * water heater") miss vertical-specific entity terms and the classifier
+   * is more likely to bottom out at `unknown` for HVAC/plumbing-shaped
+   * utterances. Optional so tests can omit it; production wires
+   * `buildVerticalPromptResolver(...)` from `verticals/resolve-active-pack.ts`.
+   */
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
 }
 
 // P11-001: lookup_* intents are READ-ONLY and never produce a
@@ -449,7 +460,28 @@ export function createVoiceActionRouterWorker(
         }
       }
 
-      const classification = await classifyIntent(effectiveTranscript, { tenantId }, deps.gateway);
+      // §3B/3D/3E — resolve the tenant's vertical context once per
+      // request (the resolver memoizes internally) so the classifier
+      // sees HVAC/plumbing terminology, intake-disambiguation
+      // questions, and objection scripts in its system messages. A
+      // resolver failure is non-fatal — fall back to the bare classifier.
+      let verticalPromptSection: string | undefined;
+      if (deps.verticalPromptResolver) {
+        try {
+          verticalPromptSection = await deps.verticalPromptResolver(tenantId);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          log.warn('voice-action-router: verticalPromptResolver failed, continuing without vertical context', {
+            error: error.message,
+          });
+        }
+      }
+
+      const classification = await classifyIntent(
+        effectiveTranscript,
+        { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
+        deps.gateway,
+      );
 
       // Surface enum-validation drift from the classifier so prompt
       // regressions are debuggable. Dropped-value behavior (field

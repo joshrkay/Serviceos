@@ -754,4 +754,92 @@ describe('voice-action-router worker', () => {
       )
     ).rejects.toThrow(/db down/);
   });
+
+  // §3B/3D/3E — operator voice path must see the same vertical context
+  // that the customer-facing telephony adapter already gets. Without
+  // this, the tradesperson saying "draft an estimate for the Johnson
+  // water heater" misses HVAC/plumbing-specific entity terms and the
+  // classifier is far more likely to bottom out at 'unknown'.
+  it('forwards verticalPromptResolver output into the classifier system messages', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Acme' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerId: 'cust-1',
+        jobId: 'job-1',
+        lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 45000 }],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const verticalPromptResolver = vi.fn(
+      async (_tenantId: string) => 'Service vertical: HVAC\nEquipment: furnace, AC',
+    );
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      verticalPromptResolver,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Create an invoice for Acme for 450 dollars',
+      }),
+      silentLogger(),
+    );
+
+    expect(verticalPromptResolver).toHaveBeenCalledWith('t-1');
+    const classifierCall = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemContents = classifierCall.messages
+      .filter((m: { role: string }) => m.role === 'system')
+      .map((m: { content: string }) => m.content);
+    expect(systemContents.some((c: string) => c.includes('Service vertical: HVAC'))).toBe(true);
+  });
+
+  // Regression guard: a vertical resolver that throws must not break the
+  // classifier turn — the operator's command still routes, just without
+  // vertical context. Falling out loudly would create flake on stale
+  // pack registrations during cutover.
+  it('falls back gracefully when the verticalPromptResolver throws', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'create_invoice',
+        confidence: 0.9,
+        extractedEntities: { customerName: 'Acme' },
+      } satisfies IntentClassification),
+      JSON.stringify({
+        customerId: 'cust-1',
+        jobId: 'job-1',
+        lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 45000 }],
+        confidence_score: 0.9,
+      }),
+    ]);
+    const verticalPromptResolver = vi.fn(async (_tenantId: string): Promise<string | undefined> => {
+      throw new Error('pack registry down');
+    });
+
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      verticalPromptResolver,
+    });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Create an invoice for Acme for 450 dollars',
+      }),
+      silentLogger(),
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('draft_invoice');
+  });
 });
