@@ -11,10 +11,12 @@
  * The reviews list call throws `GoogleBusinessQuotaError` on HTTP 429
  * so the worker can branch on it (per-tenant exponential backoff lives
  * in `poll-state.ts`, not here — this module stays oblivious to retry
- * policy).
+ * policy). Schema violations throw `GoogleBusinessApiError` — distinct
+ * so the worker doesn't mistake them for throttling.
  *
  * `fetchFn` is injectable so tests can stub HTTP without nock.
  */
+import { z } from 'zod';
 
 export interface GoogleBusinessOAuthConfig {
   clientId: string;
@@ -55,6 +57,21 @@ export class GoogleBusinessQuotaError extends Error {
     if (retryAfterSeconds !== undefined) {
       this.retryAfterSeconds = retryAfterSeconds;
     }
+  }
+}
+
+/**
+ * Thrown when Google's response is a 2xx but does not match the
+ * documented schema (missing required fields, unexpected enum values,
+ * etc.). Distinct from {@link GoogleBusinessQuotaError} because this
+ * is NOT a throttle signal — the worker should log + count as failed
+ * (not extend the backoff window). The original Zod error is attached
+ * via `cause` for diagnostic logging.
+ */
+export class GoogleBusinessApiError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'GoogleBusinessApiError';
   }
 }
 
@@ -159,6 +176,48 @@ const STAR_RATING_MAP: Record<GoogleStarRating, number> = {
   FIVE: 5,
 };
 
+/**
+ * Schema for a single review in Google's list response. Only `name`
+ * is required (the upstream resource path — without it we can't
+ * dedupe). `reviewer.profilePhotoUrl` is the upstream field name; we
+ * map it to `reviewerProfileUrl` at the worker edge. Unknown fields
+ * pass through — Google adds fields over time and we shouldn't reject
+ * future additions.
+ */
+const reviewerSchema = z
+  .object({
+    displayName: z.string().optional(),
+    profilePhotoUrl: z.string().optional(),
+  })
+  .passthrough();
+
+const starRatingSchema = z.enum([
+  'STAR_RATING_UNSPECIFIED',
+  'ONE',
+  'TWO',
+  'THREE',
+  'FOUR',
+  'FIVE',
+]);
+
+const reviewPayloadSchema = z
+  .object({
+    name: z.string().min(1),
+    reviewer: reviewerSchema.optional(),
+    starRating: starRatingSchema.optional(),
+    comment: z.string().optional(),
+    createTime: z.string().optional(),
+    updateTime: z.string().optional(),
+  })
+  .passthrough();
+
+const listReviewsResponseSchema = z
+  .object({
+    reviews: z.array(reviewPayloadSchema).optional(),
+    nextPageToken: z.string().optional(),
+  })
+  .passthrough();
+
 /** Public helper — exported so PR b/c can re-use the normalization. */
 export function parseStarRating(raw?: GoogleStarRating): number {
   if (!raw) return 0;
@@ -213,12 +272,20 @@ export async function listReviews(
     );
   }
 
-  const json = (await res.json()) as {
-    reviews?: GoogleReviewPayload[];
-    nextPageToken?: string;
-  };
+  // Parse through Zod so a schema drift on Google's side becomes an
+  // explicit error instead of silent data loss (the previous `as` cast
+  // + `?? []` fallback would have silently advanced the cursor on a
+  // shape change, dropping every review on the page).
+  const raw: unknown = await res.json();
+  const parsed = listReviewsResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new GoogleBusinessApiError(
+      'Google Business listReviews response failed schema validation',
+      { cause: parsed.error },
+    );
+  }
   return {
-    reviews: json.reviews ?? [],
-    nextPageToken: json.nextPageToken ?? null,
+    reviews: parsed.data.reviews ?? [],
+    nextPageToken: parsed.data.nextPageToken ?? null,
   };
 }

@@ -31,7 +31,8 @@ interface ReviewRow {
   comment_text: string | null;
   review_create_time: string;
   review_update_time: string | null;
-  fetched_at: string;
+  first_fetched_at: string;
+  last_fetched_at: string;
 }
 
 function mapRow(row: ReviewRow): Review {
@@ -48,7 +49,8 @@ function mapRow(row: ReviewRow): Review {
     updateTime: row.review_update_time
       ? new Date(row.review_update_time)
       : null,
-    fetchedAt: new Date(row.fetched_at),
+    firstFetchedAt: new Date(row.first_fetched_at),
+    lastFetchedAt: new Date(row.last_fetched_at),
   };
 }
 
@@ -62,19 +64,27 @@ export class PgReviewRepository
 
   async upsert(review: Review): Promise<ReviewUpsertResult> {
     return this.withTenant(review.tenantId, async (client) => {
+      // On INSERT, both fetched-at columns get the caller-supplied
+      // moment (review.firstFetchedAt). On CONFLICT we leave
+      // first_fetched_at alone and advance last_fetched_at to the
+      // caller-supplied lastFetchedAt — the worker passes `now` for
+      // both on a fresh insert and only advances lastFetchedAt on
+      // re-polls (the model carries both fields).
       const result = await client.query<ReviewRow & { is_insert: boolean }>(
         `INSERT INTO google_reviews (
            id, tenant_id, external_review_id, location_id,
            reviewer_display_name, reviewer_profile_url,
            rating, comment_text,
-           review_create_time, review_update_time, fetched_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           review_create_time, review_update_time,
+           first_fetched_at, last_fetched_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (tenant_id, external_review_id) DO UPDATE
            SET reviewer_display_name = EXCLUDED.reviewer_display_name,
                reviewer_profile_url  = EXCLUDED.reviewer_profile_url,
                rating                = EXCLUDED.rating,
                comment_text          = EXCLUDED.comment_text,
-               review_update_time    = EXCLUDED.review_update_time
+               review_update_time    = EXCLUDED.review_update_time,
+               last_fetched_at       = EXCLUDED.last_fetched_at
          RETURNING *, (xmax = 0) AS is_insert`,
         [
           review.id,
@@ -87,7 +97,8 @@ export class PgReviewRepository
           review.commentText,
           review.createTime,
           review.updateTime,
-          review.fetchedAt,
+          review.firstFetchedAt,
+          review.lastFetchedAt,
         ],
       );
       const row = result.rows[0];

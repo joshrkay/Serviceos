@@ -147,4 +147,51 @@ describe('P7-026 InMemoryReviewPollStateRepository', () => {
     expect(state?.cursor).toBe('2026-05-17T11:00:00.000Z');
     expect(state?.consecutive429Count).toBe(1);
   });
+
+  it('Retry-After header floors the wait on a fresh tenant (300s overrides 30s base)', async () => {
+    const repo = new InMemoryReviewPollStateRepository(() => NOW);
+    // First-ever 429 with a Retry-After of 300s. Exponential would be
+    // 30_000ms (count=1 → base) — header asks for longer, so GREATEST
+    // picks the header value.
+    await repo.recordQuotaError('t1', 300);
+    const state = await repo.getPollState('t1');
+    expect(state?.consecutive429Count).toBe(1);
+    expect(state?.backoffUntil?.getTime()).toBeGreaterThanOrEqual(
+      NOW.getTime() + 300_000,
+    );
+    // It should NOT be longer than max(300s, exponential=30s) = 300s.
+    expect(state?.backoffUntil?.getTime()).toBe(NOW.getTime() + 300_000);
+  });
+
+  it('Retry-After header never shortens the exponential backoff (header=10s, count=4 still gets 240s)', async () => {
+    const repo = new InMemoryReviewPollStateRepository(() => NOW);
+    // Get to count=3 first.
+    await repo.recordQuotaError('t1');
+    await repo.recordQuotaError('t1');
+    await repo.recordQuotaError('t1');
+    // 4th 429 with Retry-After=10. Exponential is 240_000 ms. GREATEST
+    // must keep the 240s wait, not collapse to 10s.
+    await repo.recordQuotaError('t1', 10);
+    const state = await repo.getPollState('t1');
+    expect(state?.consecutive429Count).toBe(4);
+    expect(state?.backoffUntil?.getTime()).toBe(
+      NOW.getTime() + REVIEW_BACKOFF_BASE_MS * 8,
+    );
+  });
+
+  it('Retry-After=0 or undefined behaves like no header (pure exponential)', async () => {
+    const repo = new InMemoryReviewPollStateRepository(() => NOW);
+    await repo.recordQuotaError('t1', 0);
+    const stateA = await repo.getPollState('t1');
+    expect(stateA?.backoffUntil?.getTime()).toBe(
+      NOW.getTime() + REVIEW_BACKOFF_BASE_MS,
+    );
+
+    const repo2 = new InMemoryReviewPollStateRepository(() => NOW);
+    await repo2.recordQuotaError('t2');
+    const stateB = await repo2.getPollState('t2');
+    expect(stateB?.backoffUntil?.getTime()).toBe(
+      NOW.getTime() + REVIEW_BACKOFF_BASE_MS,
+    );
+  });
 });

@@ -41,10 +41,19 @@ export interface ReviewPollStateRepository {
 
   /**
    * Persist a 429: increment `consecutive_429_count`, set
-   * `backoff_until = now + exponential delay`. Cursor untouched —
-   * we'll retry from the same watermark once the backoff lifts.
+   * `backoff_until = now + max(exponential delay, retryAfter)`.
+   * Cursor untouched — we'll retry from the same watermark once the
+   * backoff lifts.
+   *
+   * @param retryAfterSeconds  Optional `Retry-After` header value
+   *   from the 429 response. Floors the wait — it never shortens the
+   *   exponential delay, only extends it when Google asks for more.
+   *   The exponential count still increments either way.
    */
-  recordQuotaError(tenantId: string): Promise<void>;
+  recordQuotaError(
+    tenantId: string,
+    retryAfterSeconds?: number,
+  ): Promise<void>;
 }
 
 /**
@@ -135,8 +144,20 @@ export class PgReviewPollStateRepository
     });
   }
 
-  async recordQuotaError(tenantId: string): Promise<void> {
+  async recordQuotaError(
+    tenantId: string,
+    retryAfterSeconds?: number,
+  ): Promise<void> {
     const now = this.now();
+    // `Retry-After` floors the wait but never shortens the exponential
+    // delay. The SQL uses GREATEST(exponential, retryAfterMs) so the
+    // header only matters when it asks for a LONGER wait than our
+    // backoff. A missing / non-positive header passes 0 to GREATEST,
+    // which is a no-op.
+    const retryAfterMs =
+      retryAfterSeconds !== undefined && retryAfterSeconds > 0
+        ? Math.floor(retryAfterSeconds * 1000)
+        : 0;
     await this.withTenant(tenantId, async (client) => {
       // Single round-trip: compute next count + backoff in SQL so we
       // never race with a concurrent worker tick (there shouldn't be
@@ -149,20 +170,32 @@ export class PgReviewPollStateRepository
            backoff_until, consecutive_429_count, updated_at
          ) VALUES (
            $1, NULL, NULL,
-           $2::timestamptz + (LEAST(
-             $3::bigint * POWER(2, 0)::bigint,
-             $4::bigint
+           $2::timestamptz + (GREATEST(
+             LEAST(
+               $3::bigint * POWER(2, 0)::bigint,
+               $4::bigint
+             ),
+             $5::bigint
            ) || ' milliseconds')::interval,
            1, $2
          )
          ON CONFLICT (tenant_id) DO UPDATE
            SET consecutive_429_count = review_poll_state.consecutive_429_count + 1,
-               backoff_until         = $2::timestamptz + (LEAST(
-                 ($3::bigint * POWER(2, review_poll_state.consecutive_429_count)::bigint),
-                 $4::bigint
+               backoff_until         = $2::timestamptz + (GREATEST(
+                 LEAST(
+                   ($3::bigint * POWER(2, review_poll_state.consecutive_429_count)::bigint),
+                   $4::bigint
+                 ),
+                 $5::bigint
                ) || ' milliseconds')::interval,
                updated_at            = $2`,
-        [tenantId, now, REVIEW_BACKOFF_BASE_MS, REVIEW_BACKOFF_MAX_MS],
+        [
+          tenantId,
+          now,
+          REVIEW_BACKOFF_BASE_MS,
+          REVIEW_BACKOFF_MAX_MS,
+          retryAfterMs,
+        ],
       );
     });
   }
@@ -195,11 +228,21 @@ export class InMemoryReviewPollStateRepository
     });
   }
 
-  async recordQuotaError(tenantId: string): Promise<void> {
+  async recordQuotaError(
+    tenantId: string,
+    retryAfterSeconds?: number,
+  ): Promise<void> {
     const now = this.now();
     const existing = this.store.get(tenantId);
     const nextCount = (existing?.consecutive429Count ?? 0) + 1;
-    const delay = computeBackoffMs(nextCount);
+    const exponentialMs = computeBackoffMs(nextCount);
+    const retryAfterMs =
+      retryAfterSeconds !== undefined && retryAfterSeconds > 0
+        ? Math.floor(retryAfterSeconds * 1000)
+        : 0;
+    // GREATEST: header only floors the wait, never shortens the
+    // exponential backoff. Mirrors the SQL branch above.
+    const delay = Math.max(exponentialMs, retryAfterMs);
     this.store.set(tenantId, {
       tenantId,
       cursor: existing?.cursor ?? null,

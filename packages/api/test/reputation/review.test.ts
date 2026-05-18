@@ -14,7 +14,8 @@ function makeReview(overrides: Partial<Review> = {}): Review {
     commentText: 'Great service',
     createTime: new Date('2026-05-10T10:00:00Z'),
     updateTime: new Date('2026-05-10T10:00:00Z'),
-    fetchedAt: new Date('2026-05-10T10:01:00Z'),
+    firstFetchedAt: new Date('2026-05-10T10:01:00Z'),
+    lastFetchedAt: new Date('2026-05-10T10:01:00Z'),
     ...overrides,
   };
 }
@@ -51,6 +52,30 @@ describe('P7-026 InMemoryReviewRepository', () => {
     expect(updated.review.rating).toBe(5);
     expect(updated.review.commentText).toBe('great after followup');
     expect(repo.size()).toBe(1);
+  });
+
+  it('preserves firstFetchedAt and advances lastFetchedAt on re-upsert', async () => {
+    const FIRST = new Date('2026-05-10T10:00:00Z');
+    const LATER = new Date('2026-05-11T15:30:00Z');
+    let now = FIRST;
+    const repo = new InMemoryReviewRepository(() => now);
+
+    const original = makeReview({
+      firstFetchedAt: FIRST,
+      lastFetchedAt: FIRST,
+    });
+    await repo.upsert(original);
+
+    // Advance the clock + re-upsert.
+    now = LATER;
+    const updated = await repo.upsert({
+      ...original,
+      firstFetchedAt: LATER, // worker passes the "now" — repo must ignore it for first
+      lastFetchedAt: LATER,
+    });
+
+    expect(updated.review.firstFetchedAt.getTime()).toBe(FIRST.getTime());
+    expect(updated.review.lastFetchedAt.getTime()).toBe(LATER.getTime());
   });
 
   it('isolates rows by tenant', async () => {

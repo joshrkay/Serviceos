@@ -36,7 +36,19 @@ export interface Review {
   commentText: string | null;
   createTime: Date;
   updateTime: Date | null;
-  fetchedAt: Date;
+  /**
+   * Moment we FIRST persisted this review (i.e. first sweep that saw
+   * the upstream id). Immutable after insert — admin "when did we
+   * discover this?" view reads this column.
+   */
+  firstFetchedAt: Date;
+  /**
+   * Moment we last confirmed this review via a Google API response.
+   * Advances on every upsert, even when no fields changed. Ops
+   * monitoring ("are we still successfully reaching Google?") reads
+   * this column.
+   */
+  lastFetchedAt: Date;
 }
 
 export interface ReviewUpsertResult {
@@ -68,6 +80,8 @@ export interface ReviewRepository {
 export class InMemoryReviewRepository implements ReviewRepository {
   private readonly store = new Map<string, Review>();
 
+  constructor(private readonly now: () => Date = () => new Date()) {}
+
   private key(tenantId: string, externalReviewId: string): string {
     return `${tenantId}::${externalReviewId}`;
   }
@@ -76,8 +90,9 @@ export class InMemoryReviewRepository implements ReviewRepository {
     const k = this.key(review.tenantId, review.externalReviewId);
     const existing = this.store.get(k);
     if (existing) {
-      // Preserve original id + fetchedAt so the row's "first seen" moment
-      // is stable across re-polls. Only mutate upstream-owned fields.
+      // Preserve original id + firstFetchedAt so the row's "first seen"
+      // moment is stable across re-polls. Mutate upstream-owned fields
+      // and advance lastFetchedAt on every confirmation.
       const updated: Review = {
         ...existing,
         reviewerDisplayName: review.reviewerDisplayName,
@@ -85,6 +100,7 @@ export class InMemoryReviewRepository implements ReviewRepository {
         rating: review.rating,
         commentText: review.commentText,
         updateTime: review.updateTime,
+        lastFetchedAt: this.now(),
       };
       this.store.set(k, updated);
       return { review: updated, inserted: false };

@@ -2653,13 +2653,23 @@ export const MIGRATIONS = {
       comment_text TEXT,
       review_create_time TIMESTAMPTZ NOT NULL,
       review_update_time TIMESTAMPTZ,
-      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- first_fetched_at is set at insert and NEVER updated — the row's
+      -- "first seen" moment. Useful for admin "when did we discover
+      -- this review?" views.
+      first_fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      -- last_fetched_at advances on every upsert — useful for ops
+      -- monitoring ("when did we last confirm this review still
+      -- exists?"). Both default to now() on insert; ON CONFLICT
+      -- updates last_fetched_at only.
+      last_fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (tenant_id, external_review_id)
     );
     CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_create_time
       ON google_reviews(tenant_id, review_create_time DESC);
-    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_fetched_at
-      ON google_reviews(tenant_id, fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_first_fetched_at
+      ON google_reviews(tenant_id, first_fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_last_fetched_at
+      ON google_reviews(tenant_id, last_fetched_at DESC);
     ALTER TABLE google_reviews ENABLE ROW LEVEL SECURITY;
     ALTER TABLE google_reviews FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_google_reviews ON google_reviews;

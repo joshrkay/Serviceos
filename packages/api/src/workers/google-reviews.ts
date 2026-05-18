@@ -228,7 +228,7 @@ export async function runGoogleReviewsSweep(
     } catch (err) {
       if (err instanceof GoogleBusinessQuotaError) {
         await deps.pollStateRepo
-          .recordQuotaError(tenantId)
+          .recordQuotaError(tenantId, err.retryAfterSeconds)
           .catch((recordErr) => {
             deps.logger.error(
               'Google reviews sweep: failed to record quota error',
@@ -349,6 +349,10 @@ function toReview(
     commentText: payload.comment ?? null,
     createTime,
     updateTime,
-    fetchedAt,
+    // On INSERT both columns get this moment; ON CONFLICT the repo
+    // preserves first_fetched_at and advances last_fetched_at to the
+    // value passed here.
+    firstFetchedAt: fetchedAt,
+    lastFetchedAt: fetchedAt,
   };
 }

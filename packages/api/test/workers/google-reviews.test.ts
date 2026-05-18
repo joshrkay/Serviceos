@@ -220,9 +220,100 @@ describe('P7-026 runGoogleReviewsSweep', () => {
     expect(result.persisted).toBe(0);
     const state = await pollStateRepo.getPollState('t1');
     expect(state?.consecutive429Count).toBe(1);
+    // Retry-After=30s equals the exponential base of 30s — GREATEST
+    // picks either; the resulting backoff is the same.
     expect(state?.backoffUntil?.getTime()).toBe(
       NOW.getTime() + REVIEW_BACKOFF_BASE_MS,
     );
+  });
+
+  it('honors a long Retry-After (600s) over the small exponential base', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      new Response('quota exceeded', {
+        status: 429,
+        headers: { 'Retry-After': '600' },
+      });
+
+    await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: makeCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+    });
+
+    const state = await pollStateRepo.getPollState('t1');
+    // Header asks for 600s; exponential at count=1 is only 30s. The
+    // worker must honor the longer wait Google requested.
+    expect(state?.backoffUntil?.getTime()).toBeGreaterThanOrEqual(
+      NOW.getTime() + 600_000,
+    );
+  });
+
+  it('continues to next tenant when a response fails schema validation (GoogleBusinessApiError)', async () => {
+    const fetchFn = async (
+      url: string | URL | Request,
+    ): Promise<Response> => {
+      const urlStr = url.toString();
+      if (urlStr.includes('locations/L1')) {
+        // Malformed: starRating is an unexpected enum value Google
+        // never sends. The Zod schema must reject it.
+        return jsonResponse({
+          reviews: [
+            {
+              name: 'accounts/A/locations/L1/reviews/r1',
+              starRating: 'SIX_STARS',
+              createTime: '2026-05-17T10:00:00Z',
+              updateTime: '2026-05-17T10:00:00Z',
+            },
+          ],
+        });
+      }
+      return jsonResponse({
+        reviews: [makeReviewJson('r1', '2026-05-17T10:00:00Z')],
+      });
+    };
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: {
+          t1: makeCredRow('t1', {
+            credentials: {
+              accessToken: 'at-t1',
+              providerData: { accountId: 'A', locationId: 'L1' },
+            },
+          }),
+          t2: makeCredRow('t2', {
+            credentials: {
+              accessToken: 'at-t2',
+              providerData: { accountId: 'A', locationId: 'L2' },
+            },
+          }),
+        },
+      }),
+      listTenantIds: async () => ['t1', 't2'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+    });
+
+    // t1 fails on the schema; t2 succeeds. Critically: t1 must NOT be
+    // counted as throttled (GoogleBusinessApiError is distinct from
+    // GoogleBusinessQuotaError) and the loop must continue.
+    expect(result.tenants).toBe(2);
+    expect(result.failed).toBe(1);
+    expect(result.throttled).toBe(0);
+    expect(result.persisted).toBe(1);
+    // And the failed tenant's poll-state must NOT have a backoff
+    // (which would have been the bug if we'd treated it as quota).
+    const t1State = await pollStateRepo.getPollState('t1');
+    expect(t1State?.backoffUntil ?? null).toBeNull();
   });
 
   it('skips throttled tenants entirely', async () => {

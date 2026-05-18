@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildGoogleBusinessAuthUrl,
   exchangeAuthorizationCode,
+  GoogleBusinessApiError,
   GoogleBusinessQuotaError,
   GOOGLE_BUSINESS_SCOPE,
   listReviews,
@@ -192,5 +193,76 @@ describe('P7-026 listReviews', () => {
     await expect(
       listReviews('at', 'A', 'L', null, fetchFn),
     ).rejects.toThrow(/Google Business listReviews failed \(500\)/);
+  });
+
+  it('throws GoogleBusinessApiError when reviews[].starRating is an unexpected enum', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(200, {
+        reviews: [
+          {
+            name: 'accounts/A/locations/L/reviews/R1',
+            // Google has never published "SIX_STARS" — schema must reject.
+            starRating: 'SIX_STARS',
+            createTime: '2026-05-10T10:00:00Z',
+          },
+        ],
+      });
+    await expect(
+      listReviews('at', 'A', 'L', null, fetchFn),
+    ).rejects.toThrow(GoogleBusinessApiError);
+  });
+
+  it('throws GoogleBusinessApiError when reviews[].name is missing (required field)', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(200, {
+        reviews: [
+          {
+            // no `name` field at all — schema requires it for dedupe
+            starRating: 'FIVE',
+            createTime: '2026-05-10T10:00:00Z',
+          },
+        ],
+      });
+    await expect(
+      listReviews('at', 'A', 'L', null, fetchFn),
+    ).rejects.toThrow(GoogleBusinessApiError);
+  });
+
+  it('GoogleBusinessApiError attaches the Zod error as .cause for diagnostics', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(200, { reviews: [{ starRating: 'SIX_STARS' }] });
+    try {
+      await listReviews('at', 'A', 'L', null, fetchFn);
+      throw new Error('expected GoogleBusinessApiError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(GoogleBusinessApiError);
+      expect((err as Error & { cause?: unknown }).cause).toBeDefined();
+    }
+  });
+
+  it('GoogleBusinessApiError is NOT a GoogleBusinessQuotaError (distinct classes)', () => {
+    const err = new GoogleBusinessApiError('test');
+    expect(err).toBeInstanceOf(GoogleBusinessApiError);
+    expect(err).not.toBeInstanceOf(GoogleBusinessQuotaError);
+  });
+
+  it('accepts well-formed responses with passthrough fields (forward-compat)', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(200, {
+        reviews: [
+          {
+            name: 'accounts/A/locations/L/reviews/R1',
+            starRating: 'FIVE',
+            createTime: '2026-05-10T10:00:00Z',
+            // unknown field Google may add later — must NOT reject
+            futureField: { nested: 'value' },
+          },
+        ],
+        // unknown top-level field — must NOT reject
+        unknownTopLevel: 42,
+      });
+    const page = await listReviews('at', 'A', 'L', null, fetchFn);
+    expect(page.reviews).toHaveLength(1);
+    expect(page.reviews[0].name).toBe('accounts/A/locations/L/reviews/R1');
   });
 });
