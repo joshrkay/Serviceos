@@ -17,6 +17,7 @@
     "voice-quality:layer2": "vitest run -c vitest.voice-quality-layer2.config.ts",
     "voice-quality:layer2:weekly": "VOICE_QUALITY_LAYER2_WEEKLY=true vitest run -c vitest.voice-quality-layer2.config.ts",
     "lint": "npm run lint:log-safety && tsc --noEmit -p tsconfig.lint.json",
+    "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
     "seed": "ts-node scripts/seed.ts",
     "seed:clean": "ts-node scripts/seed.ts --clean",
     "migrate:dryrun": "ts-node scripts/migrate-dryrun.ts",
@@ -24,8 +25,9 @@
     "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
     "smoke-test": "ts-node scripts/smoke-test.ts",
     "lint:log-safety": "node scripts/check-log-safety.js",
-    "check:ai-gateway-guard": "bash scripts/check-ai-gateway-guard.sh",
-    "launch-quality-check": "tsx scripts/launch-quality-check.ts"
+    "launch-quality-check": "tsx scripts/launch-quality-check.ts",
+    "voice-load:selfcheck": "tsx scripts/voice-load-selfcheck.ts",
+    "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300"
   },
   "dependencies": {
     "@ai-service-os/shared": "*",

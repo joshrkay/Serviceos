@@ -542,8 +542,6 @@ export function NewJobFlow({
           ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
           : existingCustomer
       );
-      const [firstName = '', ...rest] = trimmedName.split(/\s+/);
-      const lastName = rest.join(' ');
       const newId = `c${Date.now()}`;
       const createdCustomer: Customer = {
         id: newId,
