@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { escalateToHuman } from '../../../src/ai/skills/escalate-to-human';
+import { escalateToHuman, mapSkillReasonToBuilderReason } from '../../../src/ai/skills/escalate-to-human';
 import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import type { OnCallEntry } from '../../../src/oncall/rotation';
@@ -217,7 +217,7 @@ describe('escalateToHuman — emits escalate_with_context', () => {
     const result = await escalateToHuman({
       tenantId: 'tenant-1',
       sessionId: 'sess-1',
-      reason: 'operator_request',
+      reason: 'caller_requested',
       channel: 'telephony',
       callSid: 'CA-test',
       onCallRepo: onCallRepo as never,
@@ -236,5 +236,89 @@ describe('escalateToHuman — emits escalate_with_context', () => {
     expect(result.transfer).toBeDefined();
     expect(result.transfer?.summary).toBeDefined();
     expect(result.transfer?.summary?.whisper).toContain('Sarah Chen');
+  });
+
+  it('returns summary=undefined when buildSummary throws but transfer still succeeds', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [
+        { id: 'rot-1', userId: 'user-disp-1', phone: '+15125550999', cursorIndex: 0 },
+      ]),
+      getCursor: vi.fn(async () => ({ index: 0 })),
+      setCursorAfter: vi.fn(async () => undefined),
+    };
+    const buildSummary = vi.fn(() => { throw new Error('template missing'); });
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      callSid: 'CA-test',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver: async () => '+15125550999',
+      buildSummary,
+      shopName: "Joe's HVAC",
+      callerContext: {
+        caller: { name: 'Sarah Chen', phone: '+15125550142' },
+        intent: { type: 'create_appointment', entities: {}, confidence: 0.4 },
+        transcriptSnapshot: [],
+      },
+    });
+
+    expect(result.escalated).toBe(true);
+    expect(result.transfer?.summary).toBeUndefined();
+    expect(result.transfer?.escalationId).toBeUndefined();
+  });
+
+  it('omits summary when callerContext is missing even if buildSummary is provided', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [
+        { id: 'rot-1', userId: 'user-disp-1', phone: '+15125550999', cursorIndex: 0 },
+      ]),
+      getCursor: vi.fn(async () => ({ index: 0 })),
+      setCursorAfter: vi.fn(async () => undefined),
+    };
+    const buildSummary = vi.fn();
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'caller_requested',
+      channel: 'telephony',
+      callSid: 'CA-test',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver: async () => '+15125550999',
+      buildSummary,
+    });
+    expect(buildSummary).not.toHaveBeenCalled();
+    expect(result.transfer?.summary).toBeUndefined();
+    expect(result.transfer?.escalationId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mapSkillReasonToBuilderReason — reason mapping
+// ---------------------------------------------------------------------------
+
+describe('mapSkillReasonToBuilderReason', () => {
+  it('maps caller_requested → operator_request', () => {
+    expect(mapSkillReasonToBuilderReason('caller_requested')).toBe('operator_request');
+  });
+  it('maps emergency_dispatch → emergency_dispatch', () => {
+    expect(mapSkillReasonToBuilderReason('emergency_dispatch')).toBe('emergency_dispatch');
+  });
+  it('maps low_confidence → low_confidence_intent', () => {
+    expect(mapSkillReasonToBuilderReason('low_confidence')).toBe('low_confidence_intent');
+  });
+  it('maps max_retries_exceeded → low_confidence_intent', () => {
+    expect(mapSkillReasonToBuilderReason('max_retries_exceeded')).toBe('low_confidence_intent');
+  });
+  it('maps cost_cap_exceeded → low_confidence_intent', () => {
+    expect(mapSkillReasonToBuilderReason('cost_cap_exceeded')).toBe('low_confidence_intent');
+  });
+  it('maps abuse_detected → low_confidence_intent', () => {
+    expect(mapSkillReasonToBuilderReason('abuse_detected')).toBe('low_confidence_intent');
+  });
+  it('maps provider_failure → low_confidence_intent', () => {
+    expect(mapSkillReasonToBuilderReason('provider_failure')).toBe('low_confidence_intent');
   });
 });
