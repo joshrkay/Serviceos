@@ -160,6 +160,7 @@ import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
 import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
+import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
@@ -1981,6 +1982,40 @@ export function createApp(): express.Express {
       fillerCache.load();
       const fillerEngine = new FillerEngine();
 
+      // F6c — wire LLM-backed sentiment classifier into the MediaStream adapter.
+      // The adapter calls this after each caller turn (fire-and-forget); if the
+      // frustration score exceeds the per-tenant threshold it dispatches
+      // `frustration_detected` back into the FSM out-of-band.
+      //
+      // The sentiment function expects `deps.llm.complete({ prompt })` returning
+      // `{ text }`. We adapt the LLM gateway (which uses messages arrays) into
+      // that interface here using the `call_sentiment` task type so routing
+      // config can target it separately from main call-flow completions.
+      //
+      // NOTE: escalationSettings is per-tenant and must be resolved per-session.
+      // For now we pass undefined here — the feature is enabled only when
+      // the adapter dep is non-undefined, so wiring escalationSettings requires
+      // threading settingsRepo into a per-session init hook (deferred to
+      // Section 12 per-tenant resolution work, tracked in TODO below).
+      //
+      // TODO(S12): resolve escalationSettings per-tenant at session start by
+      // passing a factory/resolver into attachMediaStreamServer so each session
+      // can call `settingsRepo.findByTenantId(tenantId)` and surface the result.
+      const sentimentClassifierDep = llmGateway
+        ? (input: Parameters<typeof classifyTurnSentiment>[0]) =>
+            classifyTurnSentiment(input, {
+              llm: {
+                complete: async ({ prompt }: { prompt: string }) => {
+                  const res = await llmGateway.complete({
+                    taskType: 'call_sentiment',
+                    messages: [{ role: 'user' as const, content: prompt }],
+                  });
+                  return { text: res.content };
+                },
+              },
+            })
+        : undefined;
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -2024,6 +2059,10 @@ export function createApp(): express.Express {
             // this the caller stays on hold forever — the dispatcher gets SMS
             // but the call never bridges.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            // F6c: LLM-backed sentiment classifier. Only fires when
+            // escalationSettings.trigger_llm_sentiment is true.
+            ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
+            // escalationSettings: resolved per-tenant — see TODO above.
           },
         );
         return server;
