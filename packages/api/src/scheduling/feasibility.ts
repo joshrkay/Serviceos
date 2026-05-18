@@ -88,6 +88,23 @@ async function locationCoordsFor(
   return { coords: { latitude: lat, longitude: lng } };
 }
 
+async function skillMatchIssues(
+  input: FeasibilityInput,
+  deps: FeasibilityDependencies,
+): Promise<FeasibilityIssue[]> {
+  const required = await deps.skillMatcher.requiredSkillsForJob(input.tenantId, input.appointment.jobId);
+  if (required.length === 0) return [];
+  const held = await deps.skillMatcher.skillsForTechnician(input.tenantId, input.proposedTechnicianId);
+  const missing = required.filter((s) => !held.includes(s));
+  if (missing.length === 0) return [];
+  return [{
+    check: 'skill_match' as const,
+    severity: 'warning' as const,
+    message: `Technician is missing required skill(s): ${missing.join(', ')}`,
+    metadata: { missingSkills: missing },
+  }];
+}
+
 async function travelTimeIssues(
   input: FeasibilityInput,
   deps: FeasibilityDependencies,
@@ -171,10 +188,11 @@ export async function checkFeasibility(
   input: FeasibilityInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityResult> {
-  const [overlap, availability, travel] = await Promise.all([
+  const [overlap, availability, travel, skill] = await Promise.all([
     overlapIssues(input, deps),
     availabilityIssues(input, deps),
     travelTimeIssues(input, deps),
+    skillMatchIssues(input, deps),
   ]);
-  return partition([...overlap, ...availability, ...travel.issues], travel.summary);
+  return partition([...overlap, ...availability, ...travel.issues, ...skill], travel.summary);
 }
