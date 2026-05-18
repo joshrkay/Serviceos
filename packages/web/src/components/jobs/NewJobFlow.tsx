@@ -549,7 +549,7 @@ export function NewJobFlow({
         id: newId,
         name: trimmedName,
         phone: newCustomerPhone.trim() || '(000) 000-0000',
-        email: newCustomerEmail.trim() || `${firstName.toLowerCase() || 'new'}.${lastName.toLowerCase() || 'customer'}@example.com`,
+        email: newCustomerEmail.trim() || '',
         address: trimmedAddress,
         serviceType: draft.serviceType ?? 'HVAC',
         locations: [
