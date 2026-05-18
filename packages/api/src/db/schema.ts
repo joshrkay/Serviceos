@@ -2715,10 +2715,10 @@ export const MIGRATIONS = {
     CREATE TABLE IF NOT EXISTS service_credits (
       id UUID PRIMARY KEY,
       tenant_id UUID NOT NULL REFERENCES tenants(id),
-      customer_id UUID NOT NULL,
+      customer_id UUID NOT NULL REFERENCES customers(id),
       amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
       review_id UUID NULL,
-      proposal_id UUID NOT NULL,
+      proposal_id UUID NOT NULL REFERENCES proposals(id),
       issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );

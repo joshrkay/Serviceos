@@ -194,8 +194,14 @@ export class ReviewResponseExecutionHandler implements ExecutionHandler {
     context: ExecutionContext,
   ): Promise<SubActionResult> {
     // No resolver wired → degrade to passthrough (used by unit tests
-    // that don't exercise the Google call path).
+    // that don't exercise the Google call path). In production this
+    // signals a misconfigured composition root — log a warning so ops
+    // can detect it without flipping the proposal to failed (the
+    // operator's approval was the desired terminal state).
     if (!this.googleReplyResolver) {
+      console.warn(
+        `ReviewResponseExecutionHandler: no googleReplyResolver wired; public reply for proposal ${proposal.id} was skipped. TODO wire at app.ts composition root.`,
+      );
       return { kind: 'public', ok: true, id: reviewId };
     }
     const replyCtx = await this.googleReplyResolver.resolve(

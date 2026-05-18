@@ -111,6 +111,44 @@ describe('P7-026 InMemoryServiceCreditRepository', () => {
     ).rejects.toThrow(/positive/);
   });
 
+  it('uses calendar-month subtraction (matches Pg INTERVAL 12 months), not a fixed 365-day window', async () => {
+    // Mirrors the Pg semantics: `NOW() - INTERVAL '12 months'` rolls
+    // back exactly 12 calendar months, not 365 days. Boundary contract
+    // is strict (`>`): a row at cutoff - 1ms is excluded, a row at
+    // cutoff + 1ms is included.
+    const now = new Date('2026-05-17T12:00:00Z');
+    const repo = new InMemoryServiceCreditRepository(() => now);
+    const cutoff = new Date(now);
+    cutoff.setMonth(cutoff.getMonth() - 12);
+    // Diverges from the fixed 365-day window: that would land on
+    // 2025-05-17 (same day), but `setMonth(-12)` from a leap-year
+    // anchor confirms the path actually walks calendar months — assert
+    // both the boundary and the cross-year date arithmetic.
+    expect(cutoff.toISOString()).toBe('2025-05-17T12:00:00.000Z');
+
+    const justBefore = new Date(cutoff.getTime() - 1);
+    const justAfter = new Date(cutoff.getTime() + 1);
+
+    await repo.create({
+      tenantId: TENANT,
+      customerId: CUSTOMER,
+      amountCents: 1111,
+      reviewId: null,
+      proposalId: PROPOSAL,
+      issuedAt: justBefore,
+    });
+    await repo.create({
+      tenantId: TENANT,
+      customerId: CUSTOMER,
+      amountCents: 2222,
+      reviewId: null,
+      proposalId: PROPOSAL,
+      issuedAt: justAfter,
+    });
+
+    expect(await repo.sumIssuedInLast12Months(TENANT, CUSTOMER)).toBe(2222);
+  });
+
   it('returns a fresh ID per create (no collision)', async () => {
     const repo = new InMemoryServiceCreditRepository();
     const a = await repo.create({

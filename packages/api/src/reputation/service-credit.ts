@@ -89,7 +89,13 @@ export class InMemoryServiceCreditRepository implements ServiceCreditRepository 
     tenantId: string,
     customerId: string,
   ): Promise<number> {
-    const cutoff = new Date(this.now().getTime() - 365 * 24 * 60 * 60 * 1000);
+    // Mirror Postgres `NOW() - INTERVAL '12 months'` semantics:
+    // calendar-month subtraction (not a fixed 365-day window) so
+    // leap-year + month-end behavior matches the Pg implementation.
+    // Strict `>` to match Pg's strict comparison — a row issued
+    // exactly at the cutoff instant is excluded.
+    const cutoff = new Date(this.now());
+    cutoff.setMonth(cutoff.getMonth() - 12);
     return this.store
       .filter(
         (c) =>

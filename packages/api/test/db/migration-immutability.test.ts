@@ -160,7 +160,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['100_payments_refund_tracking', '242a61a9e99abd1dfc793c6cd53962beeab7c15d283fa37d84004dfe1bf940ed'],
   ['101_google_reviews', 'ee39147f5eb59b0455ea40290a3592f70068907e13fa0d2c392ba4a3acd6d8f8'],
   ['102_review_poll_state', 'b069f6a315219c16ac432f1854b1865d337efa6a8fa66a12efc6c89d18ebb207'],
-  ['103_service_credits', '71816359ad45f8daa6ed8219f367b239348102d09b23d23ba913c06e4cd63507'],
+  ['103_service_credits', 'd4a6951eb9a1afe53bc92e1b81b7594e8f084d48765580ecae3065325198e102'],
 ];
 
 function hashMigration(value: string): string {
