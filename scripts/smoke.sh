@@ -99,19 +99,18 @@ echo "==> [3/3] Deployed voice path (real call)"
 # maps to STAGING_API_URL / PRODUCTION_API_URL the same way smoke-test.ts
 # resolves it (kept in sync so an `--env=` invocation actually exercises
 # Layer 3 against the named environment instead of silently skipping).
-TARGET_BASE="${API_BASE_URL:-}"
-# --base= must take precedence over --env=* so Layer 1 and Layer 3
-# resolve to the SAME target (smoke-test.ts Layer 1 prefers --base
-# unconditionally). A naïve single-pass loop would let whichever
-# arg appeared later overwrite the earlier one, splitting layers
-# across environments (e.g. probe staging but mutate prod).
-if [ -z "$TARGET_BASE" ]; then
-  for arg in "${SMOKE_ARGS[@]}"; do
-    case "$arg" in
-      --base=*) TARGET_BASE="${arg#--base=}"; break ;;
-    esac
-  done
-fi
+TARGET_BASE=""
+# Match Layer 1's precedence (smoke-test.ts and the wrapper above):
+# CLI --base wins, then --env=<name>, and API_BASE_URL is the fallback
+# used only when no CLI target flag was supplied. Seeding from
+# API_BASE_URL first would let a CI-exported var silently override an
+# explicit --env=prod / --base= and split Layer 1 and Layer 3 across
+# environments.
+for arg in "${SMOKE_ARGS[@]}"; do
+  case "$arg" in
+    --base=*) TARGET_BASE="${arg#--base=}"; break ;;
+  esac
+done
 if [ -z "$TARGET_BASE" ]; then
   for arg in "${SMOKE_ARGS[@]}"; do
     case "$arg" in
@@ -119,6 +118,9 @@ if [ -z "$TARGET_BASE" ]; then
       --env=prod|--env=production) TARGET_BASE="${PRODUCTION_API_URL:-}" ;;
     esac
   done
+fi
+if [ -z "$TARGET_BASE" ]; then
+  TARGET_BASE="${API_BASE_URL:-}"
 fi
 # Strip a trailing slash so `${TARGET_BASE}/api/voice/sessions` doesn't
 # turn into a double slash on hosts that 308 on canonical paths.
