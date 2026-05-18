@@ -108,5 +108,23 @@ export function createElectricalPack(): VerticalPack {
     training_tier: 'second_class',
     training_assets: ELECTRICAL_TRAINING_ASSETS,
   };
+  pack.sttKeywords = [
+    'breaker:3',
+    'panel:3',
+    'GFCI:3',
+    'sub-panel:3',
+    'amperage:3',
+    'voltage:3',
+    'arc fault:3',
+    'romex:3',
+    'conduit:3',
+    'service entrance:3',
+  ];
+  pack.repairTemplates = [
+    { trigger: 'ambiguous_service_type', text: 'Is this about a power outage, or about installing or fixing wiring?' },
+    { trigger: 'low_intent_confidence', text: 'Are you reporting a loss of power, or something else electrical?' },
+    { trigger: 'low_audio_confidence', text: "I'm having trouble hearing you — could you say that one more time?" },
+    { trigger: 'ambiguous_entity', text: 'Just to make sure I have the right name — could you spell that for me?' },
+  ];
   return pack;
 }

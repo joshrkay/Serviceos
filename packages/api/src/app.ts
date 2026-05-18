@@ -157,6 +157,13 @@ import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
+import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
+import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
+import { createHvacPack } from './verticals/packs/hvac';
+import { createPlumbingPack } from './verticals/packs/plumbing';
+import { createElectricalPack } from './verticals/packs/electrical';
+import { isValidVerticalType } from './shared/vertical-types';
 import {
   buildCallerPlanContext,
   formatCallerPlanForPrompt,
@@ -1637,6 +1644,25 @@ export function createApp(): express.Express {
     const section = formatCallerPlanForPrompt(ctx);
     return section.length > 0 ? section : undefined;
   };
+  // §P2-3 — Build a shared in-memory map for rich pack fields (sttKeywords,
+  // repairTemplates) that are NOT round-tripped through the canonical registry.
+  // This is the same Map used by the streaming terminologyProvider; creating it
+  // here ensures it is also available to the non-streaming twilio/inapp adapters.
+  const sharedRichPackByType = new Map([
+    ['hvac', createHvacPack()],
+    ['plumbing', createPlumbingPack()],
+    ['electrical', createElectricalPack()],
+  ]);
+  const repairTemplatesResolver = async (tenantId: string): Promise<ReadonlyArray<import('./verticals/registry').RepairTemplate>> => {
+    const activations = await packActivationRepo.findByTenant(tenantId);
+    const active = activations
+      .filter((a) => a.status === 'active')
+      .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+    if (!active) return [];
+    const base = active.packId.replace(/-v\d+$/, '');
+    if (!isValidVerticalType(base)) return [];
+    return sharedRichPackByType.get(base)?.repairTemplates ?? [];
+  };
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1665,6 +1691,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
@@ -1912,6 +1939,48 @@ export function createApp(): express.Express {
       ? new DeepgramStreamingProvider(deepgramKey)
       : null;
     if (streamingProvider) {
+      // Reuse sharedRichPackByType (already built above for repairTemplatesResolver)
+      // so sttKeywords + repairTemplates come from the same in-memory pack instances.
+      const terminologyProvider = new VerticalTerminologyProvider({
+        repo: {
+          findByType: async (type) => sharedRichPackByType.get(type) ?? null,
+        },
+        lookupVertical: async (tenantId: string) => {
+          const activations = await packActivationRepo.findByTenant(tenantId);
+          const active = activations
+            .filter((a) => a.status === 'active')
+            .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+          if (!active) return null;
+          // Activation packId is conventionally the verticalType ('hvac',
+          // 'plumbing', 'electrical') or a versioned packId like 'hvac-v1'.
+          // Strip the suffix and validate.
+          const packId = active.packId;
+          const base = packId.replace(/-v\d+$/, '');
+          if (!isValidVerticalType(base)) {
+            verticalPromptResolverLogger.debug('vertical lookup returned null', {
+              tenantId,
+              packId,
+              derivedBase: base,
+              reason: 'invalid_vertical_type',
+            });
+            return null;
+          }
+          return base;
+        },
+      });
+
+      // P2-1: Filler engine + cache. One engine instance is shared across
+      // calls. Cross-call state sharing means the no-repeat guarantee is
+      // process-wide, not per-call — acceptable because callers can't hear
+      // each other's audio, and round-robin over 8 fillers means no caller
+      // hears the same filler back-to-back regardless. The cache loads all
+      // PCM files from disk once at boot; missing files are logged (warn).
+      const fillerCache = new FillerAudioCache(
+        require('path').resolve(__dirname, 'ai/agents/customer-calling/fillers'),
+      );
+      fillerCache.load();
+      const fillerEngine = new FillerEngine();
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -1925,6 +1994,9 @@ export function createApp(): express.Express {
             store: voiceSessionStore,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            terminologyProvider,
+            fillerEngine,
+            fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
@@ -2501,6 +2573,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
   });
