@@ -741,15 +741,18 @@ export class TwilioGatherAdapter {
     });
 
     // B3.2 — keyword frustration check BEFORE intent classification.
-    // Fire-and-forget into the FSM; if matched, FSM produces escalation
-    // side effects and we return them directly.
+    // Route through the processor so notify_oncall (and any escalation
+    // side effects added by the FSM) actually fire — the mediastream
+    // adapter's emitSideEffects only handles tts_play/quality events.
     const frustration = detectFrustration(opts.speechResult);
     if (frustration.matched) {
-      return session.machine.dispatch({
+      const sideEffects = session.machine.dispatch({
         type: 'frustration_detected',
         source: 'keyword',
         detail: frustration.keyword,
       });
+      await this.processor.executeSideEffects(session, sideEffects, opts.tenantId);
+      return sideEffects;
     }
 
     return this.processor.speechTurn({
