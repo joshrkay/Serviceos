@@ -2,6 +2,7 @@ import { WorkerHandler, QueueMessage } from '../queues/queue';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository, createProposal, CreateProposalInput, ProposalType } from '../proposals/proposal';
+import { assertValidProposalPayload } from '../proposals/contracts';
 import {
   classifyIntent,
   ExtractedEntities,
@@ -360,6 +361,12 @@ async function emitClarification(
   const tenantThresholdOverride = deps.thresholdResolver
     ? await deps.thresholdResolver(tenantId).catch(() => undefined)
     : undefined;
+
+  // P2-002 AI-safety gate. The clarification payload is built
+  // by-construction above, but the validator pins the contract so a
+  // future edit that drops `transcript` or `reason` trips here
+  // instead of writing a malformed proposal to storage.
+  assertValidProposalPayload('voice_clarification', payload);
 
   const proposal = createProposal({
     tenantId,
