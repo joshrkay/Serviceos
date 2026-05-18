@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { escalateToHuman } from '../../../src/ai/skills/escalate-to-human';
 import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
@@ -193,5 +193,48 @@ describe('escalateToHuman — telephony channel (v1)', () => {
       makeInput({ onCallRepo, channel: 'telephony' })
     );
     expect(result.escalated).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// escalate_with_context — summary builder wiring
+// ---------------------------------------------------------------------------
+
+describe('escalateToHuman — emits escalate_with_context', () => {
+  it('returns an EscalationResult whose transfer includes a built summary', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [
+        { id: 'rot-1', userId: 'user-disp-1', phone: '+15125550999', cursorIndex: 0 },
+      ]),
+    };
+    const dispatcherPhoneResolver = vi.fn(async () => '+15125550999');
+    const buildSummary = vi.fn(() => ({
+      whisper: 'Incoming call from Sarah Chen.',
+      sms: 'Test SMS body',
+      panel: { header: {}, customer: {}, lastInteraction: null, intent: {}, reason: {}, transcriptSnapshot: [] },
+    }));
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: 'sess-1',
+      reason: 'operator_request',
+      channel: 'telephony',
+      callSid: 'CA-test',
+      onCallRepo: onCallRepo as never,
+      dispatcherPhoneResolver,
+      buildSummary,
+      shopName: "Joe's HVAC",
+      callerContext: {
+        caller: { name: 'Sarah Chen', phone: '+15125550142' },
+        intent: { type: 'create_appointment', entities: {}, confidence: 0.4 },
+        transcriptSnapshot: [],
+      },
+    });
+
+    expect(result.escalated).toBe(true);
+    expect(buildSummary).toHaveBeenCalledTimes(1);
+    expect(result.transfer).toBeDefined();
+    expect(result.transfer?.summary).toBeDefined();
+    expect(result.transfer?.summary?.whisper).toContain('Sarah Chen');
   });
 });
