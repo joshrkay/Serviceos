@@ -63,6 +63,7 @@ export class TeamExtractor implements OnboardingExtractor<TeamMemberExtraction> 
           { role: 'user', content: userMessage },
         ],
         responseFormat: 'json',
+        tenantId: context.tenantId,
       });
       parsed = tryParseJson(response.content);
     } catch {

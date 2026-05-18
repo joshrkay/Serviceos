@@ -7,7 +7,7 @@
  * locking the whole task type to one model up-front.
  */
 
-import type { TaskRouteConfig } from './types';
+import type { TaskRouteConfig } from './routing-config';
 
 export type TaskComplexity = 'simple' | 'complex';
 

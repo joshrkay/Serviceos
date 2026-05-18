@@ -20,6 +20,7 @@ import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import { dispatchInboundSms } from '../sms/inbound-dispatch';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -1237,6 +1238,54 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
       await deps.webhookEventRepo.markProcessed('twilio', eventId);
     }
+
+    // P2-034 — Inbound SMS keyword dispatcher. Runs only for inbound SMS
+    // (voice/status callbacks have no body to route on) and only AFTER
+    // markProcessed succeeds, so a duplicate delivery short-circuits before
+    // dispatch. The dispatcher contract guarantees no throw — we still
+    // wrap so an unexpected programming error here can never turn into a
+    // Twilio 5xx (which would trigger a retry of an already-acknowledged
+    // message and re-fire any handler side-effects).
+    if (kind === 'sms') {
+      const fromE164 = (req.body?.From as string | undefined) ?? '';
+      const body = (req.body?.Body as string | undefined) ?? '';
+      let dispatchResult: { handled: boolean; handler?: string; reason?: string };
+      try {
+        dispatchResult = await dispatchInboundSms({
+          tenantId,
+          fromE164,
+          body,
+          messageSid: eventId,
+        });
+      } catch (err) {
+        logger.error('Inbound SMS dispatch failed unexpectedly', {
+          tenantId,
+          messageSid: eventId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        dispatchResult = { handled: false, reason: 'handler_error' };
+      }
+      if (deps.auditRepo) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: 'system:twilio_inbound_sms',
+            actorRole: 'system',
+            eventType: dispatchResult.handled
+              ? 'sms.inbound.dispatched'
+              : 'sms.inbound.unhandled',
+            entityType: 'webhook',
+            entityId: eventId,
+            metadata: {
+              handler: dispatchResult.handler,
+              reason: dispatchResult.reason,
+              fromE164,
+            },
+          }),
+        );
+      }
+    }
+
     return res.status(200).json({ received: true });
   };
   router.post('/twilio/voice/:tenantId', (req: Request, res: Response) => void recordTwilio('voice', req, res));

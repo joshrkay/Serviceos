@@ -384,6 +384,20 @@ export class VoiceSessionStore {
   }
 
   /**
+   * X10/PR#398 — supervisor wall discovery. Returns non-ended sessions
+   * for the given tenant so the wall can seed its local state and send
+   * per-session WS `subscribe` frames (the gateway rejects voice subs
+   * without a `targetId` — see `authorizeSubscribe` in `ws/client-gateway`).
+   */
+  listActiveByTenant(tenantId: string): VoiceSession[] {
+    const out: VoiceSession[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.tenantId === tenantId && !session.ended) out.push(session);
+    }
+    return out;
+  }
+
+  /**
    * Sweep idle sessions. Public so tests can drive it deterministically
    * without waiting on the setInterval timer.
    */

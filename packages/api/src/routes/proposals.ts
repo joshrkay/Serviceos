@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
@@ -12,6 +13,7 @@ import { buildInboxPayload } from '../proposals/inbox';
 import { listProposals, getProposalDetail } from '../proposals/routes';
 import {
   approveProposal,
+  approveProposalsBatch,
   rejectProposal,
   editProposal,
   undoProposal,
@@ -21,6 +23,16 @@ import {
   rejectProposalBodySchema,
   editProposalBodySchema,
 } from '../proposals/proposal-contracts';
+
+// P2-035 — Batch approval body schema. Lives inline rather than in
+// proposal-contracts.ts so this story stays within its allowed-files
+// budget. The 50-ID cap bounds blast radius — the inbox UI's "APPROVE
+// ALL" affordance is gated client-side on a 3+ threshold, so 50 leaves
+// plenty of headroom for the realistic batch sizes without letting a
+// scripted caller flood approval audit rows.
+const approveBatchBodySchema = z.object({
+  proposalIds: z.array(z.string().uuid()).min(1).max(50),
+});
 
 export function createProposalsRouter(
   proposalRepo: ProposalRepository,
@@ -92,6 +104,32 @@ export function createProposalsRouter(
         res.status(statusCode).json(body);
       }
     }
+  );
+
+  // P2-035 — POST /api/proposals/approve-batch. MUST be declared before the
+  // `/:id/approve` route so Express does not match "approve-batch" as an :id.
+  router.post(
+    '/approve-batch',
+    requireAuth,
+    requireTenant,
+    requirePermission('proposals:approve'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const parsed = validate(approveBatchBodySchema, req.body);
+        const result = await approveProposalsBatch(
+          proposalRepo,
+          req.auth!.tenantId,
+          parsed.proposalIds,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          auditRepo,
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   router.post(

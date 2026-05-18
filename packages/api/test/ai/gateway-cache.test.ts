@@ -1,3 +1,4 @@
+import { describe, it, expect, vi } from 'vitest';
 import {
   createCacheKey,
   InMemoryCacheStore,
@@ -7,11 +8,14 @@ import type { CacheConfig } from '../../src/ai/gateway/cache';
 import { LLMGateway } from '../../src/ai/gateway/gateway';
 import type { LLMProvider, LLMRequest, LLMGatewayConfig } from '../../src/ai/gateway/gateway';
 import { StubProvider } from '../../src/ai/gateway/providers';
+import { InMemoryAiRunRepository } from '../../src/ai/ai-run';
+import { metricsRegistry } from '../../src/monitoring/metrics';
 
 function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
   return {
     taskType: 'summarize',
     messages: [{ role: 'user', content: 'Hello' }],
+    tenantId: 'tenant-1',
     ...overrides,
   };
 }
@@ -146,8 +150,9 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     await wrapper.complete(request);
     expect(wrapper.getStats()).toEqual({ hits: 1, misses: 1 });
 
+    // Non-deterministic tasks bypass the cache and do NOT increment misses.
     await wrapper.complete(makeRequest({ taskType: 'non_cached' }));
-    expect(wrapper.getStats()).toEqual({ hits: 1, misses: 2 });
+    expect(wrapper.getStats()).toEqual({ hits: 1, misses: 1 });
   });
 
   it('malformed AI output handled gracefully — underlying gateway error not cached', async () => {
@@ -179,5 +184,363 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     const key = createCacheKey(request, 'tenant-1');
     const cached = await cacheStore.get(key);
     expect(cached).toBeNull();
+  });
+
+  // ─── P2-031 new requirements ───────────────────────────────────────────────
+
+  it('cache hit writes AiRun row with cached: true', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Audit response', tokenUsage: { input: 10, output: 5, total: 15 } });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+    const aiRunRepo = new InMemoryAiRunRepository();
+
+    const wrapper = new CachingGatewayWrapper(
+      gateway,
+      cacheStore,
+      makeCacheConfig(),
+      'tenant-audit',
+      aiRunRepo,
+    );
+
+    const request = makeRequest({ taskType: 'summarize', tenantId: 'tenant-audit' });
+
+    // First call: cache miss, no cached AiRun row
+    await wrapper.complete(request);
+
+    // Second call: cache hit, should write AiRun row with cached: true
+    const result = await wrapper.complete(request);
+    expect(result.cached).toBe(true);
+
+    const runs = await aiRunRepo.findByTaskType('tenant-audit', 'summarize');
+    const cachedRun = runs.find((r) => r.outputSnapshot?.cached === true);
+    expect(cachedRun).toBeDefined();
+    expect(cachedRun!.status).toBe('completed');
+    expect(cachedRun!.outputSnapshot?.cached).toBe(true);
+  });
+
+  it('cache miss writes normal AiRun row without cached flag', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Fresh response' });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+    const aiRunRepo = new InMemoryAiRunRepository();
+
+    const wrapper = new CachingGatewayWrapper(
+      gateway,
+      cacheStore,
+      makeCacheConfig(),
+      'tenant-miss',
+      aiRunRepo,
+    );
+
+    const request = makeRequest({ taskType: 'summarize', tenantId: 'tenant-miss' });
+    const result = await wrapper.complete(request);
+
+    expect(result.cached).toBeUndefined();
+  });
+
+  it('cross-tenant isolation: tenant-A cache entry is NOT served to tenant-B', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Tenant A response' });
+
+    const gatewayA = makeGateway(stub);
+    const gatewayB = makeGateway(stub);
+
+    // Shared cache store (simulating shared Redis)
+    const sharedCacheStore = new InMemoryCacheStore();
+    const config = makeCacheConfig({ deterministicTaskTypes: ['summarize'] });
+
+    const wrapperA = new CachingGatewayWrapper(gatewayA, sharedCacheStore, config, 'tenant-A');
+    const wrapperB = new CachingGatewayWrapper(gatewayB, sharedCacheStore, config, 'tenant-B');
+
+    const request: LLMRequest = {
+      taskType: 'summarize',
+      messages: [{ role: 'user', content: 'Identical prompt' }],
+      model: 'test-model',
+    };
+
+    // Tenant A populates the cache
+    await wrapperA.complete(request);
+
+    // Tenant B should NOT get tenant A's cached response (different cache key)
+    stub.setResponse({ content: 'Tenant B response' });
+    const resultB = await wrapperB.complete(request);
+
+    expect(resultB.content).toBe('Tenant B response');
+    expect(resultB.cached).toBeUndefined();
+
+    // Verify the cache keys are different
+    const keyA = createCacheKey(request, 'tenant-A');
+    const keyB = createCacheKey(request, 'tenant-B');
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('same tenant, same request → gets cache hit', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Cached value' });
+
+    const gateway = makeGateway(stub);
+    const sharedCacheStore = new InMemoryCacheStore();
+    const config = makeCacheConfig({ deterministicTaskTypes: ['summarize'] });
+
+    const wrapperA1 = new CachingGatewayWrapper(gateway, sharedCacheStore, config, 'tenant-X');
+    const wrapperA2 = new CachingGatewayWrapper(gateway, sharedCacheStore, config, 'tenant-X');
+
+    const request: LLMRequest = {
+      taskType: 'summarize',
+      messages: [{ role: 'user', content: 'Same prompt' }],
+      model: 'test-model',
+    };
+
+    await wrapperA1.complete(request);
+    stub.setResponse({ content: 'Different value' });
+
+    // Same tenant, same request — should hit the cache
+    const result = await wrapperA2.complete(request);
+    expect(result.content).toBe('Cached value');
+    expect(result.cached).toBe(true);
+  });
+
+  it('Prometheus hit/miss counters increment correctly by taskType', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Metered response' });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+
+    const wrapper = new CachingGatewayWrapper(
+      gateway,
+      cacheStore,
+      makeCacheConfig({ deterministicTaskTypes: ['summarize'] }),
+      'tenant-metrics',
+    );
+
+    const request = makeRequest({ taskType: 'summarize', tenantId: 'tenant-metrics' });
+
+    // Get initial metric values
+    const getHits = async () => {
+      const metrics = await metricsRegistry.getMetricsAsJSON();
+      const counter = metrics.find((m) => m.name === 'gateway_cache_hits_total');
+      if (!counter) return 0;
+      const values = counter.values as Array<{ labels: Record<string, string>; value: number }>;
+      return values.find((v) => v.labels.taskType === 'summarize')?.value ?? 0;
+    };
+
+    const getMisses = async () => {
+      const metrics = await metricsRegistry.getMetricsAsJSON();
+      const counter = metrics.find((m) => m.name === 'gateway_cache_misses_total');
+      if (!counter) return 0;
+      const values = counter.values as Array<{ labels: Record<string, string>; value: number }>;
+      return values.find((v) => v.labels.taskType === 'summarize')?.value ?? 0;
+    };
+
+    const hitsBefore = await getHits();
+    const missesBefore = await getMisses();
+
+    // First call: miss
+    await wrapper.complete(request);
+    expect(await getMisses()).toBe(missesBefore + 1);
+
+    // Second call: hit
+    await wrapper.complete(request);
+    expect(await getHits()).toBe(hitsBefore + 1);
+  });
+
+  it('isolates cache entries per-request tenantId when constructed with a system-level wrapper', async () => {
+    // Mirrors production wiring: ONE CachingGatewayWrapper with tenantId='system'.
+    // Each request carries its own tenantId on request.tenantId.
+    // Tenant-B's request must NOT get tenant-A's cached response.
+    let callCount = 0;
+
+    const trackingProvider: LLMProvider = {
+      name: 'stub',
+      async complete(req) {
+        callCount++;
+        const tenantId = req.tenantId ?? 'unknown';
+        return {
+          content: `response-for-${tenantId}-call-${callCount}`,
+          model: 'test-model',
+          provider: 'stub',
+          tokenUsage: { input: 10, output: 5, total: 15 },
+          latencyMs: 1,
+        };
+      },
+      async isAvailable() { return true; },
+    };
+
+    const providers = new Map<string, LLMProvider>();
+    providers.set('stub', trackingProvider);
+    const gateway = new LLMGateway(
+      { defaultProvider: 'stub', defaultModel: 'test-model' },
+      providers,
+    );
+
+    const sharedCacheStore = new InMemoryCacheStore();
+    const config = makeCacheConfig({ deterministicTaskTypes: ['intent_classification'] });
+
+    // ONE wrapper with tenantId='system' — mirroring the factory.
+    const systemWrapper = new CachingGatewayWrapper(gateway, sharedCacheStore, config, 'system');
+
+    const identicalMessages = [{ role: 'user' as const, content: 'classify this please' }];
+
+    const req1: LLMRequest = {
+      taskType: 'intent_classification',
+      messages: identicalMessages,
+      model: 'test-model',
+      tenantId: 'tenant-A',
+    };
+
+    const req2: LLMRequest = {
+      taskType: 'intent_classification',
+      messages: identicalMessages,
+      model: 'test-model',
+      tenantId: 'tenant-B',
+    };
+
+    // First call: tenant-A, cache miss — provider called once
+    const resultA1 = await systemWrapper.complete(req1);
+    expect(resultA1.content).toBe('response-for-tenant-A-call-1');
+    expect(resultA1.cached).toBeUndefined();
+    expect(callCount).toBe(1);
+
+    // Second call: tenant-B, MUST be a cache miss — provider called again (not tenant-A's cache)
+    const resultB = await systemWrapper.complete(req2);
+    expect(resultB.content).toBe('response-for-tenant-B-call-2');
+    expect(resultB.cached).toBeUndefined();
+    expect(callCount).toBe(2); // Must be 2, not 1 (cache miss for tenant-B)
+
+    // Third call: tenant-A again — MUST get cached response (no new provider call)
+    const resultA2 = await systemWrapper.complete(req1);
+    expect(resultA2.content).toBe('response-for-tenant-A-call-1'); // cached value
+    expect(resultA2.cached).toBe(true);
+    expect(callCount).toBe(2); // Still 2 — cache hit
+  });
+
+  it('non-deterministic task type does NOT write to cache', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Non-det response' });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+    const config = makeCacheConfig({ deterministicTaskTypes: ['summarize'] });
+
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, config, 'tenant-1');
+
+    const request = makeRequest({ taskType: 'generate_proposal' });
+    await wrapper.complete(request);
+
+    // Nothing should be in cache for this non-deterministic task
+    const key = createCacheKey(request, 'tenant-1');
+    const cached = await cacheStore.get(key);
+    expect(cached).toBeNull();
+  });
+
+  it('Fix 2 — non-deterministic task does NOT increment miss counter', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Non-det response' });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+    const config = makeCacheConfig({ deterministicTaskTypes: ['summarize'] });
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, config, 'tenant-1');
+
+    const getMisses = async () => {
+      const metrics = await metricsRegistry.getMetricsAsJSON();
+      const counter = metrics.find((m) => m.name === 'gateway_cache_misses_total');
+      if (!counter) return 0;
+      const values = counter.values as Array<{ labels: Record<string, string>; value: number }>;
+      return values.find((v) => v.labels.taskType === 'generate_proposal')?.value ?? 0;
+    };
+
+    const missesBefore = await getMisses();
+
+    await wrapper.complete(makeRequest({ taskType: 'generate_proposal' }));
+
+    // Miss counter must NOT increment for non-deterministic task types.
+    expect(await getMisses()).toBe(missesBefore);
+  });
+
+  it('Fix 4 — empty-string request.tenantId falls back to wrapper tenantId', async () => {
+    const req1 = makeRequest({ taskType: 'summarize', tenantId: '' });
+    const req2 = makeRequest({ taskType: 'summarize', tenantId: undefined });
+
+    // Both empty and undefined tenantId should fall back to the wrapper-level tenantId.
+    const key1 = (() => {
+      const effectiveTenantId = req1.tenantId || 'system';
+      return createCacheKey(req1, effectiveTenantId);
+    })();
+    const key2 = (() => {
+      const effectiveTenantId = req2.tenantId || 'system';
+      return createCacheKey(req2, effectiveTenantId);
+    })();
+
+    expect(key1).toBe(key2);
+  });
+
+  it('Fix 4 — CachingGatewayWrapper uses wrapper tenantId when request.tenantId is empty string', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'System tenant response' });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+    const wrapper = new CachingGatewayWrapper(gateway, cacheStore, makeCacheConfig(), 'system');
+
+    // First call with empty tenantId — populates cache under 'system' tenant key
+    await wrapper.complete(makeRequest({ taskType: 'summarize', tenantId: '' }));
+
+    stub.setResponse({ content: 'Should be cached' });
+
+    // Second call with undefined tenantId — should hit the same cache key
+    const result = await wrapper.complete(makeRequest({ taskType: 'summarize', tenantId: undefined }));
+    expect(result.cached).toBe(true);
+  });
+
+  it('Fix 6 — InMemoryCacheStore.set ignores entry with ttlMs <= 0', async () => {
+    const cacheStore = new InMemoryCacheStore();
+    const entry = {
+      response: { content: 'x', model: 'm', provider: 'p', tokenUsage: { input: 0, output: 0, total: 0 }, latencyMs: 0 },
+      cachedAt: Date.now(),
+      ttlMs: 0,
+    };
+    await cacheStore.set('zero-ttl', entry);
+    expect(await cacheStore.get('zero-ttl')).toBeNull();
+
+    const negEntry = { ...entry, ttlMs: -1 };
+    await cacheStore.set('neg-ttl', negEntry);
+    expect(await cacheStore.get('neg-ttl')).toBeNull();
+  });
+
+  it('Fix 7 — cache hit AiRun write is fire-and-forget (does not block response)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Audit test', tokenUsage: { input: 5, output: 2, total: 7 } });
+
+    const gateway = makeGateway(stub);
+    const cacheStore = new InMemoryCacheStore();
+    const aiRunRepo = new InMemoryAiRunRepository();
+
+    const wrapper = new CachingGatewayWrapper(
+      gateway, cacheStore, makeCacheConfig(), 'tenant-ff', aiRunRepo,
+    );
+
+    const request = makeRequest({ taskType: 'summarize', tenantId: 'tenant-ff' });
+
+    // First call: cache miss
+    await wrapper.complete(request);
+
+    // Second call: cache hit — response must return immediately without waiting for DB write
+    const result = await wrapper.complete(request);
+    expect(result.cached).toBe(true);
+
+    // Allow microtasks to flush so the fire-and-forget write completes
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Verify the AiRun row was eventually written
+    const runs = await aiRunRepo.findByTaskType('tenant-ff', 'summarize');
+    const cachedRun = runs.find((r) => r.outputSnapshot?.cached === true);
+    expect(cachedRun).toBeDefined();
+    expect(cachedRun!.status).toBe('completed');
   });
 });

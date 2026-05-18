@@ -28,11 +28,11 @@ const emailTemplateContractSchema = z.object({
 });
 
 export const EMAIL_TEMPLATES = [
-  { id: 'E1', description: 'Proposal digest email for supervisor.', requiredToolsHooks: ['proposal_queue'], jurisdictionFlags: [], proposalTypes: [ProposalType.CREATE_CUSTOMER, ProposalType.UPDATE_CUSTOMER, ProposalType.CREATE_JOB, ProposalType.CREATE_APPOINTMENT, ProposalType.UPDATE_APPOINTMENT, ProposalType.DRAFT_ESTIMATE, ProposalType.UPDATE_ESTIMATE, ProposalType.DRAFT_INVOICE, ProposalType.REASSIGN_APPOINTMENT, ProposalType.RESCHEDULE_APPOINTMENT, ProposalType.CANCEL_APPOINTMENT] },
+  { id: 'E1', description: 'Proposal digest email for supervisor.', requiredToolsHooks: ['proposal_queue'], jurisdictionFlags: [], proposalTypes: [ProposalType.CREATE_CUSTOMER, ProposalType.UPDATE_CUSTOMER, ProposalType.CREATE_JOB, ProposalType.CREATE_APPOINTMENT, ProposalType.DRAFT_ESTIMATE, ProposalType.UPDATE_ESTIMATE, ProposalType.DRAFT_INVOICE, ProposalType.REASSIGN_APPOINTMENT, ProposalType.RESCHEDULE_APPOINTMENT, ProposalType.CANCEL_APPOINTMENT] },
   { id: 'E2', description: 'New customer welcome follow-up.', requiredToolsHooks: ['customer_lookup'], jurisdictionFlags: [], proposalTypes: [ProposalType.CREATE_CUSTOMER] },
   { id: 'E3', description: 'Customer profile change summary.', requiredToolsHooks: ['customer_lookup'], jurisdictionFlags: [], proposalTypes: [ProposalType.UPDATE_CUSTOMER] },
   { id: 'E4', description: 'New job request summary.', requiredToolsHooks: ['job_lookup'], jurisdictionFlags: [], proposalTypes: [ProposalType.CREATE_JOB] },
-  { id: 'E5', description: 'Appointment scheduling confirmation.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.CREATE_APPOINTMENT, ProposalType.UPDATE_APPOINTMENT, ProposalType.RESCHEDULE_APPOINTMENT] },
+  { id: 'E5', description: 'Appointment scheduling confirmation.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.CREATE_APPOINTMENT, ProposalType.RESCHEDULE_APPOINTMENT] },
   { id: 'E6', description: 'Appointment cancellation confirmation.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: [], proposalTypes: [ProposalType.CANCEL_APPOINTMENT] },
   { id: 'E7', description: 'Technician reassignment confirmation.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: [], proposalTypes: [ProposalType.REASSIGN_APPOINTMENT] },
   { id: 'E8', description: 'Estimate draft/revision ready email.', requiredToolsHooks: ['estimate_lookup'], jurisdictionFlags: [], proposalTypes: [ProposalType.DRAFT_ESTIMATE, ProposalType.UPDATE_ESTIMATE] },

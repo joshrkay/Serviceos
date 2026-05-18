@@ -244,14 +244,14 @@ export function SettingsPage() {
       title: 'Team',
       items: [
         { icon: Users,  label: 'Team members',        description: 'View the roster and roles', action: () => setTeamMembersOpen(true) },
-        { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => {} },
+        { icon: Shield, label: 'Roles & permissions', description: 'Owner, Admin, Technician',             action: () => toast.info('Coming soon') },
       ],
     },
     {
       title: 'AI & Automation',
       items: [
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
-        { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => {} },
+        { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
       ],
     },
@@ -291,7 +291,7 @@ export function SettingsPage() {
           icon: Link,
           label: 'Zapier',
           description: 'Not connected',
-          action: () => {},
+          action: () => toast.info('Coming soon'),
         },
       ],
     },
