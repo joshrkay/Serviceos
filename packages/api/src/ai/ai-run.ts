@@ -43,6 +43,8 @@ export interface AiRunRepository {
       outputSnapshot?: Record<string, unknown>;
       error?: string;
       tokenUsage?: { input?: number; output?: number; total?: number };
+      completedAt?: Date;
+      durationMs?: number;
     }
   ): Promise<AiRun | null>;
 }
@@ -133,6 +135,8 @@ export class InMemoryAiRunRepository implements AiRunRepository {
       outputSnapshot?: Record<string, unknown>;
       error?: string;
       tokenUsage?: { input?: number; output?: number; total?: number };
+      completedAt?: Date;
+      durationMs?: number;
     }
   ): Promise<AiRun | null> {
     const run = this.runs.get(id);
@@ -140,9 +144,17 @@ export class InMemoryAiRunRepository implements AiRunRepository {
 
     run.status = status;
     if (status === 'completed' || status === 'failed') {
-      run.completedAt = new Date();
-      if (run.startedAt) {
-        run.durationMs = run.completedAt.getTime() - run.startedAt.getTime();
+      // Use caller-supplied timing if provided (gateway is the source of truth);
+      // fall back to computing from wall clock for backward compat.
+      if (result?.completedAt !== undefined) {
+        run.completedAt = result.completedAt;
+      } else {
+        run.completedAt = new Date();
+      }
+      if (result?.durationMs !== undefined) {
+        run.durationMs = result.durationMs;
+      } else if (run.startedAt) {
+        run.durationMs = run.completedAt!.getTime() - run.startedAt.getTime();
       }
     }
     if (result?.outputSnapshot) run.outputSnapshot = result.outputSnapshot;
