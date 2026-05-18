@@ -43,6 +43,10 @@ export type IntentType =
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
   | 'language_switch'
+  // Seamless Handoff: caller explicitly asks to speak with a human.
+  // The FSM fast-paths directly to escalating without entity_resolution
+  // or intent_confirm.
+  | 'operator_request'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -70,6 +74,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_customer',
   'lookup_estimates',
   'language_switch',
+  'operator_request',
   'unknown',
 ] as const;
 
@@ -328,6 +333,16 @@ Supported intents (return exactly ONE):
                                      "My pipes burst and water is everywhere"
                                      "No heat and it's 10 degrees outside"
                                      "I smell burning from my AC unit"
+- "operator_request"   — caller explicitly asks to speak with a person,
+                          dispatcher, owner, or asks to leave the AI agent.
+                          Skip normal intent confirmation — escalate
+                          directly to on-call dispatcher.
+                          Examples: "Let me talk to a human"
+                                    "I want a real person"
+                                    "Is anyone there"
+                                    "Transfer me to dispatch"
+                                    "I don't want to talk to a bot"
+                                    "Can I speak with the owner"
 - "lookup_appointments" — caller is ASKING about their upcoming
                            appointment(s). Read-only — never moves money
                            or creates records. Routed to the
