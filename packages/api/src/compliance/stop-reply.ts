@@ -1,22 +1,42 @@
+import { DncRepository, normalizePhone } from './dnc';
+import type { KeywordHandler } from '../sms/inbound-dispatch';
+
 /**
  * Twilio-required opt-out keywords (carrier-honored). When the carrier sees
- * these single-token replies it auto-suppresses; we still process locally so
- * our DNC list mirrors carrier reality and the next outbound send is gated.
+ * these single-token replies it auto-suppresses; we still mirror locally so
+ * the DNC list reflects carrier reality and the next outbound send is gated.
  */
 export const STOP_KEYWORDS = ['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT'] as const;
 
 /** Re-opt-in keywords. */
 export const START_KEYWORDS = ['START', 'UNSTOP', 'YES'] as const;
 
-export type InboundSmsClass = 'stop' | 'start' | 'other';
+/**
+ * Build the STOP keyword handler. Registered against the inbound-SMS
+ * dispatcher; when the first token of an inbound SMS matches any STOP
+ * keyword, the sender's phone is normalised and inserted into the
+ * tenant_dnc_list (idempotent at the repo level).
+ */
+export function buildStopKeywordHandler(deps: { dncRepo: DncRepository }): KeywordHandler {
+  return {
+    keywords: STOP_KEYWORDS,
+    async handle(ctx) {
+      await deps.dncRepo.addToDnc(ctx.tenantId, normalizePhone(ctx.fromE164), 'inbound-stop');
+      return { handled: true, handler: 'stop-reply' };
+    },
+  };
+}
 
 /**
- * Strict single-token match after trim + trailing-punctuation strip.
- * Embedded "stop" inside a sentence is not an opt-out per carrier conventions.
+ * Build the START / opt-back-in keyword handler. Removes the sender's
+ * phone from the tenant DNC list.
  */
-export function classifyInboundSms(body: string): InboundSmsClass {
-  const token = body.trim().replace(/[!.?,;]+$/, '').toUpperCase();
-  if ((STOP_KEYWORDS as readonly string[]).includes(token)) return 'stop';
-  if ((START_KEYWORDS as readonly string[]).includes(token)) return 'start';
-  return 'other';
+export function buildStartKeywordHandler(deps: { dncRepo: DncRepository }): KeywordHandler {
+  return {
+    keywords: START_KEYWORDS,
+    async handle(ctx) {
+      await deps.dncRepo.removeFromDnc(ctx.tenantId, normalizePhone(ctx.fromE164));
+      return { handled: true, handler: 'start-reply' };
+    },
+  };
 }
