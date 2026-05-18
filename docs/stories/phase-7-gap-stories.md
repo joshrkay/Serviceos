@@ -1,6 +1,6 @@
 # Phase 7 — Integrations + Beta Hardening: Launch Readiness Gaps
 
-> **7 stories** | Continues from P7-018
+> **8 stories** | Continues from P7-018
 
 ---
 
@@ -39,6 +39,7 @@ The following original Phase 7 stories (P7-001 through P7-018) are **entirely un
 | P7-023 | Production smoke test script | S | Operations | High | Moderate | P0-023, P0-029 |
 | P7-024 | Fix `as any` type escapes | XS | Code Quality | High | Light | None |
 | P7-025 | Load test with realistic data | S | Performance | Medium | Moderate | P0-023, P0-024 |
+| P7-028 | Tenant-timezone bucketing for money dashboard + tax export | S | Reports | High | Light | None |
 
 ---
 
@@ -228,3 +229,37 @@ npm run load-test -- --env staging
 - [ ] RLS overhead < 10ms per query
 - [ ] No connection pool exhaustion
 - [ ] Dispatch board query < 1s with 200 appointments
+
+---
+
+### P7-028 — Tenant-timezone bucketing for money dashboard + tax export
+
+> **Size:** S | **Layer:** Reports | **AI Build:** High | **Human Review:** Light
+
+**Dependencies:** None — `tenant_settings.timezone` already exists with `'America/New_York'` default and validation via `packages/api/src/shared/timezone.ts`.
+
+**Allowed files:** `packages/api/src/reports/money-dashboard.ts, packages/api/src/reports/tax-export.ts, packages/api/src/routes/reports.ts, packages/api/test/reports/**, packages/web/src/components/reports/MoneyDashboardPage.tsx`
+
+**Build prompt:** CLAUDE.md mandates "All times: stored UTC, **rendered in tenant timezone**." Today the money dashboard and tax export bucket by UTC instead — a Jan 31 5pm PST payment lands in February's dashboard and the next year's tax bucket can include a Dec 31 11pm local payment from the prior year. Fix:
+
+1. **`packages/api/src/reports/money-dashboard.ts`** — change `resolveMonthWindow(month)` to `resolveMonthWindow(month, tz)`. Replace each `new Date(Date.UTC(year, monthIndex, ...))` with a tz-anchored boundary. Use `Intl.DateTimeFormat` (or the existing `wallClockMs`/`addCalendarDays` helpers in `packages/api/src/shared/timezone.ts`) — do NOT add a luxon dependency. Boundary semantics: `start` = midnight in `tz` on day 1, `end` = midnight in `tz` on day 1 of the next month. Pass `tz` from the caller (`computeMoneyDashboardSummary` takes a new required `tz: string` arg).
+2. **`packages/api/src/reports/tax-export.ts`** — same change: the `from`/`to` parser interprets `YYYY-MM-DD` as midnight in tenant `tz`; the per-row `date` column emits the receivedAt formatted in `tz`.
+3. **`packages/api/src/routes/reports.ts`** — load tenant settings before calling either, thread `settings.timezone ?? 'America/New_York'` through. Fall back to `'America/New_York'` if `isValidTimezone(settings.timezone) === false`.
+4. **`packages/web/src/components/reports/MoneyDashboardPage.tsx`** — drop the inline `monthRange` UTC computation; let the server own bucketing. Add a small caption near the dashboard heading: "Buckets reflect your business timezone ({tz})" with `tz` from `/api/settings`.
+5. **Tests** — extend `packages/api/test/reports/money-dashboard.test.ts` (or create if missing) with two cases per file: a payment at 23:30 local-time on the last day of the month buckets into that month for both `America/Los_Angeles` and `America/New_York` tenants; a UTC-only-bucketed implementation would put the LA payment in the next month and fail the test.
+
+**Review prompt:** Verify `Intl.DateTimeFormat` (or shared helpers) drive every boundary — no `Date.UTC` in the modified files. Verify the fallback to `'America/New_York'` triggers only when the settings value is missing or invalid. Verify the new tests fail without the production change (delete the production fix locally, watch the assertion fire). Verify the dashboard caption renders the tenant timezone correctly. Confirm no other report file silently re-introduces UTC bucketing.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- -t "money-dashboard|tax-export|P7-028|timezone"
+cd packages/web && npx tsc --noEmit
+```
+
+**Required tests:**
+- [ ] LA tenant: payment at 2026-01-31 23:30 PST buckets into January, not February
+- [ ] NY tenant: payment at 2026-01-31 23:30 EST buckets into January
+- [ ] Tax export `from=2026-01-01&to=2026-01-31` for LA tenant includes that Jan 31 23:30 PST payment
+- [ ] Invalid timezone in settings falls back to `'America/New_York'`
+- [ ] Dashboard caption renders the active tenant timezone
