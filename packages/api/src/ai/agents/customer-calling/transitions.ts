@@ -389,6 +389,26 @@ function transitionIntentCapture(
       };
     }
 
+    // operator_request → fast-path directly to escalating (skip entity_resolution and intent_confirm)
+    if (event.intentType === 'operator_request') {
+      const updatedContext: CallingAgentContext = {
+        ...context,
+        currentIntent: event.intentType,
+        extractedEntities: event.entities,
+        retryCount: 0,
+        escalationReason: 'operator_request',
+      };
+      return {
+        nextState: 'escalating',
+        sideEffects: [
+          auditLog(updatedContext, 'intent_capture', 'escalating', 'operator_request'),
+          ttsPlay("Of course — let me connect you with a person right now."),
+          notifyOncall(updatedContext, 'operator_request'),
+        ],
+        updatedContext,
+      };
+    }
+
     // Confidence at or above threshold → entity_resolution
     if (event.confidence >= TAU_INT) {
       const updatedContext: CallingAgentContext = {

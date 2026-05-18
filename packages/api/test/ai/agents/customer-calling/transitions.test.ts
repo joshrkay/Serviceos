@@ -70,3 +70,29 @@ describe('intent_capture low-confidence reprompt', () => {
     expect(ttsText).toContain('say that again');
   });
 });
+
+describe('intent_capture operator_request fast-path', () => {
+  it('transitions directly to escalating with reason operator_request', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 0.95 },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('operator_request');
+    // Should NOT have entity_resolution or intent_confirm side effects.
+    const sideEffectTypes = result.sideEffects.map((fx) => fx.type);
+    expect(sideEffectTypes).not.toContain('create_proposal');
+    expect(sideEffectTypes).toContain('tts_play');
+    expect(sideEffectTypes).toContain('notify_oncall');
+  });
+
+  it('does not require confidence threshold for operator_request (treats any confidence as valid)', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 0.2 },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+  });
+});
