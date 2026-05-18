@@ -26,8 +26,10 @@ server {
     # index.html and env.js are NOT content-hashed and bootstrap every route.
     # They must always be revalidated so a redeploy's new asset hashes load
     # immediately — otherwise browsers pin to a stale HTML + old JS bundle.
+    # "no-cache" allows the browser to store the response but forces revalidation
+    # via ETag before use — do NOT use "no-store" (it disables back/forward cache).
     location = /index.html {
-        add_header Cache-Control "no-cache, must-revalidate";
+        add_header Cache-Control "no-cache" always;
     }
 
     location = /env.js {

@@ -161,4 +161,24 @@ describe('voice-sessions routes', () => {
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }, 10_000);
+
+  it('GET /active returns only the calling tenant\'s non-ended sessions', async () => {
+    const appA = buildApp('tenant-a', 'user-a', store, adapter);
+    const appB = buildApp('tenant-b', 'user-b', store, adapter);
+
+    const startA = await request(appA).post('/api/voice/sessions').send({});
+    const startB = await request(appB).post('/api/voice/sessions').send({});
+
+    const listA = await request(appA).get('/api/voice/sessions/active');
+    expect(listA.status).toBe(200);
+    const ids = (listA.body.sessions as Array<{ id: string }>).map((s) => s.id);
+    expect(ids).toContain(startA.body.sessionId);
+    expect(ids).not.toContain(startB.body.sessionId);
+
+    const session = listA.body.sessions.find(
+      (s: { id: string }) => s.id === startA.body.sessionId,
+    );
+    expect(session.channel).toBe('inapp_voice');
+    expect(typeof session.startedAt).toBe('string');
+  });
 });

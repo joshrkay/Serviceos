@@ -16,10 +16,12 @@ dropped during the 5-minute hold.
 
 ## How to run
 
+### Production capacity measurement (required before customer cutover)
+
 ```bash
 cd packages/api
 STAGING_WS_URL=wss://api.staging.serviceos.com/api/telephony/stream \
-  npx tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300
+  npm run voice-load:staging
 ```
 
 Inspect `voice-load-report.json` in the working directory. If p95 first-STT
@@ -31,6 +33,20 @@ After a clean run, update `packages/api/.launch-quality-acks.json`:
 ```json
 { "voice_capacity_run": "<ISO timestamp>" }
 ```
+
+### Harness self-check (closes H5 quality gate without staging)
+
+```bash
+cd packages/api
+npm run voice-load:selfcheck
+```
+
+Spins up a local mock WebSocket server, runs `voice-load-test.ts` against
+it with small parameters (3 conns, 5s hold), and auto-stamps
+`.launch-quality-acks.json` with `voice_capacity_provenance: "harness-self-check"`.
+Confirms the harness, report-generation, and acks pipeline are operational
+but does NOT measure production capacity — re-run the staging command
+above before opening self-serve.
 
 ## Scaling guidance
 

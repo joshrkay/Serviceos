@@ -33,7 +33,8 @@
     "qa:runbook": "bash scripts/qa-runbook-run.sh",
     "qa:run": "node qa-runner/src/orchestrator.mjs run",
     "qa:report": "node qa-runner/src/orchestrator.mjs summary",
-    "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report"
+    "qa:run:now": "npm run qa:doctor && npm run qa:smoke-tools && npm run qa:run && npm run qa:report",
+    "smoke": "bash scripts/smoke.sh"
   },
   "devDependencies": {
     "@clerk/testing": "^2.0.27",

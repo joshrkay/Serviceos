@@ -336,6 +336,9 @@ import {
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
+import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
+import { registerKeywordHandler } from './sms/inbound-dispatch';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -740,6 +743,14 @@ export function createApp(): express.Express {
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
 
+  // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
+  // The inbound-SMS dispatcher routes any matching first-token to these
+  // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
+  // time is layered on top in send-service / appointment-confirmation-notifier.
+  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
+  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
+  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
+
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
@@ -912,6 +923,23 @@ export function createApp(): express.Express {
   // for the affected tenant so admins see activate/archive without
   // waiting for the 5-minute TTL.
   let invalidateVerticalPromptCache: ((tenantId: string) => void) | null = null;
+  // §3B/3D/3E — operator-side classifier paths (voice-action-router worker
+  // and assistant chat router) are constructed BEFORE the vertical prompt
+  // resolver itself, so we hand them a lazy holder that defers to the real
+  // resolver once it's built (mirrors `invalidateVerticalPromptCache` above).
+  // Operator paths don't have a customerId in scope, so they only need the
+  // vertical resolver — the caller-plan resolver applies to inbound callers
+  // (twilio/inapp adapters), not to operator-spoken commands.
+  let operatorVerticalPromptResolver:
+    | ((tenantId: string) => Promise<string | undefined>)
+    | null = null;
+  const operatorVerticalResolverShim = async (
+    tenantId: string,
+  ): Promise<string | undefined> => {
+    return operatorVerticalPromptResolver
+      ? operatorVerticalPromptResolver(tenantId)
+      : undefined;
+  };
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
@@ -1055,6 +1083,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1188,6 +1217,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
       })
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
@@ -1365,6 +1395,13 @@ export function createApp(): express.Express {
     availabilityFinder,
     thresholdResolver,
     appointmentRepo,
+    // §3B/3D/3E — operator voice commands need the same vertical
+    // terminology + intake-question disambiguation the customer-facing
+    // adapters get. The shim is wired here because the real resolver
+    // is built ~280 lines below; once `verticalPromptResolver` is
+    // constructed, `operatorVerticalPromptResolver` is assigned and the
+    // shim starts returning live data on the next classifier call.
+    verticalPromptResolver: operatorVerticalResolverShim,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1645,6 +1682,10 @@ export function createApp(): express.Express {
     logger: verticalPromptResolverLogger,
   });
   invalidateVerticalPromptCache = (tenantId) => verticalPromptResolver.invalidate(tenantId);
+  // §3B/3D/3E — light up the operator-side resolver shim now that the
+  // real resolver exists. The voice-action-router worker and assistant
+  // router both pick it up on their next classifier call.
+  operatorVerticalPromptResolver = verticalPromptResolver;
   // §3C: caller-plan resolver. Returns a prompt-shaped block when the
   // caller's customerId resolves to an active maintenance agreement.
   const callerPlanResolver = async (
@@ -2486,7 +2527,17 @@ export function createApp(): express.Express {
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
-  app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
+  app.use(
+    '/api/assistant',
+    createAssistantRouter({
+      gateway: llmGateway,
+      proposalRepo,
+      // §3B/3D/3E — assistant chat shares the operator-side resolver
+      // shim with the voice-action-router so the same vertical context
+      // reaches both text and voice classification paths.
+      verticalPromptResolver: operatorVerticalResolverShim,
+    }),
+  );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
   app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo));
   if (pool) {

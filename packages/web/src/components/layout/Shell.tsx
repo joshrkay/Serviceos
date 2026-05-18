@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
   Home, MessageSquare, Briefcase, Calendar,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
@@ -17,7 +17,10 @@ import {
   shouldShowModeSwitchModal,
 } from '../mode/ModeSwitchModal';
 import { CompressedSessionStrip } from '../sessions/CompressedSessionStrip';
-import { useActiveSessions } from '../../hooks/useActiveSessions';
+import {
+  ActiveSessionsProvider,
+  useActiveSessions,
+} from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 
@@ -200,6 +203,19 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
 }
 
 export function Shell() {
+  // ActiveSessionsProvider singletonizes the supervisor-wall WS + the
+  // /api/voice/sessions/active poller — `useActiveSessions()` is
+  // called in both ShellInner and CompressedSessionStrip, and both
+  // now read from the same provider instance instead of opening
+  // duplicate connections per consumer.
+  return (
+    <ActiveSessionsProvider>
+      <ShellInner />
+    </ActiveSessionsProvider>
+  );
+}
+
+function ShellInner() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
   const voiceBarRef = useRef<VoiceBarHandle>(null);
@@ -224,7 +240,37 @@ export function Shell() {
   const { isLoaded, user } = useUser();
   const { signOut } = useClerk();
   const { me, switchMode } = useMe();
-  const { sessions, pendingProposalCount } = useActiveSessions();
+  const { sessions, pendingProposalCount: liveSessionPendingCount } = useActiveSessions();
+  const navigate = useNavigate();
+
+  // P2-033 — toast on each genuinely new pending proposal. Sonner's
+  // action.onClick doesn't auto-navigate, so we drive it through
+  // react-router's `navigate` to land on /inbox where the operator can
+  // approve/reject. Callback is stable so the hook doesn't reset its
+  // visibility-aware polling on every render.
+  const handleNewProposal = useCallback(
+    (proposal: PendingProposalSummary) => {
+      toast.info(`New proposal: ${proposal.summary}`, {
+        action: {
+          label: 'Review',
+          onClick: () => navigate('/inbox'),
+        },
+      });
+    },
+    [navigate],
+  );
+
+  const {
+    count: pendingProposalCount,
+  } = usePendingProposals({
+    enabled: isLoaded && Boolean(user),
+    onNewProposal: handleNewProposal,
+  });
+
+  // Prefer the live session feed when it's reporting (the supervisor
+  // wall ships its own count); otherwise fall back to the polled
+  // proposals total so the mode-switch modal sees the right number.
+  const modeSwitchPendingCount = liveSessionPendingCount || pendingProposalCount;
   // Phase 12 — pending mode-switch confirmation. When a user clicks a
   // destination that requires a confirmation modal (supervisor→tech /
   // both→tech), we stash it here and render <ModeSwitchModal>. The
@@ -308,10 +354,17 @@ export function Shell() {
             <Zap size={14} className="text-white" />
           </span>
           <span className="text-sm text-slate-900 tracking-tight">Fieldly</span>
-          <span
-            className="ml-auto flex size-5 items-center justify-center rounded-full bg-blue-600 text-white"
-            style={{ fontSize: 10 }}
-          >3</span>
+          {pendingProposalCount > 0 && (
+            <NavLink
+              to="/inbox"
+              aria-label={`${pendingProposalCount} pending proposal${pendingProposalCount === 1 ? '' : 's'} — open inbox`}
+              data-testid="pending-proposal-badge"
+              className="ml-auto flex size-5 items-center justify-center rounded-full bg-blue-600 text-white"
+              style={{ fontSize: 10 }}
+            >
+              {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+            </NavLink>
+          )}
         </div>
 
         {/* Nav */}
@@ -481,7 +534,7 @@ export function Shell() {
           from={currentMode}
           to={pendingMode}
           activeSessionCount={sessions.length}
-          pendingProposalCount={pendingProposalCount}
+          pendingProposalCount={modeSwitchPendingCount}
           onConfirm={confirmPendingMode}
           onCancel={() => setPendingMode(null)}
         />
