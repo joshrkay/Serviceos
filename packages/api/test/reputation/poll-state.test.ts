@@ -7,7 +7,7 @@ import {
   REVIEW_BACKOFF_MAX_MS,
 } from '../../src/reputation/poll-state';
 
-describe('computeBackoffMs', () => {
+describe('P7-026 computeBackoffMs', () => {
   it('returns 0 for non-positive counts', () => {
     expect(computeBackoffMs(0)).toBe(0);
     expect(computeBackoffMs(-1)).toBe(0);
@@ -32,7 +32,7 @@ describe('computeBackoffMs', () => {
   });
 });
 
-describe('isThrottled', () => {
+describe('P7-026 isThrottled', () => {
   const now = new Date('2026-05-17T12:00:00Z');
 
   it('returns false when state is null', () => {
@@ -88,7 +88,7 @@ describe('isThrottled', () => {
   });
 });
 
-describe('InMemoryReviewPollStateRepository', () => {
+describe('P7-026 InMemoryReviewPollStateRepository', () => {
   const NOW = new Date('2026-05-17T12:00:00Z');
 
   it('returns null when no row exists', async () => {

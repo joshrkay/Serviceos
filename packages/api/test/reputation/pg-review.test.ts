@@ -35,7 +35,7 @@ function makeMockPool(queryFn: ReturnType<typeof vi.fn>) {
   } as unknown as Pool;
 }
 
-describe('PgReviewRepository', () => {
+describe('P7-026 PgReviewRepository', () => {
   it('upsert issues INSERT ... ON CONFLICT and maps result row', async () => {
     const row = makeRow();
     const queries: string[] = [];

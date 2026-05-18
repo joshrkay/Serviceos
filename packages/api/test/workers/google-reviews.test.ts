@@ -65,7 +65,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
   });
 }
 
-describe('runGoogleReviewsSweep', () => {
+describe('P7-026 runGoogleReviewsSweep', () => {
   let reviewRepo: InMemoryReviewRepository;
   let pollStateRepo: InMemoryReviewPollStateRepository;
 

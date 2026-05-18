@@ -19,7 +19,7 @@ function makeReview(overrides: Partial<Review> = {}): Review {
   };
 }
 
-describe('InMemoryReviewRepository', () => {
+describe('P7-026 InMemoryReviewRepository', () => {
   it('reports inserted=true on first insert and persists the row', async () => {
     const repo = new InMemoryReviewRepository();
     const review = makeReview();

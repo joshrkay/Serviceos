@@ -22,7 +22,7 @@ function makeResponse(
   });
 }
 
-describe('parseStarRating', () => {
+describe('P7-026 parseStarRating', () => {
   it('maps Google enums to integers', () => {
     expect(parseStarRating('ONE')).toBe(1);
     expect(parseStarRating('TWO')).toBe(2);
@@ -37,7 +37,7 @@ describe('parseStarRating', () => {
   });
 });
 
-describe('buildGoogleBusinessAuthUrl', () => {
+describe('P7-026 buildGoogleBusinessAuthUrl', () => {
   it('produces a consent URL with business.manage scope + state', () => {
     const url = buildGoogleBusinessAuthUrl(
       {
@@ -59,7 +59,7 @@ describe('buildGoogleBusinessAuthUrl', () => {
   });
 });
 
-describe('exchangeAuthorizationCode', () => {
+describe('P7-026 exchangeAuthorizationCode', () => {
   it('returns parsed access + refresh tokens on 200', async () => {
     const fetchFn = async (): Promise<Response> =>
       makeResponse(200, {
@@ -109,7 +109,7 @@ describe('exchangeAuthorizationCode', () => {
   });
 });
 
-describe('listReviews', () => {
+describe('P7-026 listReviews', () => {
   it('returns reviews + nextPageToken on success', async () => {
     let capturedUrl = '';
     const fetchFn = async (
