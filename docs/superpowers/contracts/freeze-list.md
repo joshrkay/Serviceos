@@ -65,7 +65,7 @@ These surfaces have known drift or known-incomplete shape. Each one needs a dedi
 
 **Decision needed before Sprint 5:** add a `_schema_version` column to mutable JSON columns, OR commit to "all schema changes are additive" forever.
 
-**Not a freeze blocker for Sprints 1–4** but should be resolved before launching to real customers. File as P7-026 (new gap story).
+**Not a freeze blocker for Sprints 1–4** but should be resolved before launching to real customers. File as P7-027 (new gap story; P7-026 is taken by Google Business review monitoring).
 
 ## Migration number reservation
 

@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { AssistantPage } from './AssistantPage';
 
@@ -92,5 +92,84 @@ describe('AssistantPage', () => {
   it('renders header with AI assistant name', () => {
     renderPage();
     expect(screen.getByText('Fieldly AI')).toBeInTheDocument();
+  });
+});
+
+// ─── P20-005: Accurate AI failure messaging ──────────────────────────────────
+
+describe('P20-005 — AI failure messaging', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('P20-005: shows accurate error message when chat API call fails (network error)', async () => {
+    // Simulate a network failure on the assistant chat endpoint.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Network error'));
+
+    renderPage();
+
+    // Wait for welcome message then type and send
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Hello' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Unable to connect to AI service — please try again or contact support.')
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('P20-005: shows accurate error message when chat API returns a non-2xx status', async () => {
+    // Simulate an HTTP 503 response from the assistant chat endpoint.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('Service Unavailable', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain' },
+      })
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Hello' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Unable to connect to AI service — please try again or contact support.')
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('P20-005: does not display "not connected yet" string on AI failure', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Network error'));
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/I'm your AI assistant/)).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText('Ask anything or give a command…');
+    fireEvent.change(input, { target: { value: 'Hello' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Unable to connect to AI service — please try again or contact support.')
+      ).toBeInTheDocument();
+    });
+
+    // The old misleading copy must not appear anywhere in the rendered output
+    expect(screen.queryByText(/not connected yet/i)).not.toBeInTheDocument();
   });
 });
