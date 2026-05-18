@@ -9,6 +9,7 @@ import {
   escalationTriggeredEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
+import type { EscalationSummary, EscalationContext } from '../agents/customer-calling/escalation-summary-builder';
 
 /**
  * Phase 12 — emergency-intent immediate-Dial decision.
@@ -139,6 +140,31 @@ export interface EscalateToHumanInput {
    * don't have a session in scope; pre-VQ-003 behavior is preserved.
    */
   session?: VoiceSession;
+  /**
+   * F1 wiring: optional callback that produces a structured
+   * `EscalationSummary` (whisper / SMS / panel) from FSM context.
+   * When provided alongside `callerContext`, the skill generates an
+   * `escalationId` and calls this once; the result is included in the
+   * returned `TransferDescriptor`. Optional — existing callers that
+   * don't supply it continue to work unchanged.
+   */
+  buildSummary?: (ctx: EscalationContext) => EscalationSummary;
+  /**
+   * F1 wiring: minimal FSM context needed to build an escalation
+   * summary. Required when `buildSummary` is set; ignored otherwise.
+   */
+  callerContext?: {
+    caller: EscalationContext['caller'];
+    customer?: EscalationContext['customer'];
+    intent: EscalationContext['intent'];
+    transcriptSnapshot: EscalationContext['transcriptSnapshot'];
+  };
+  /**
+   * F1 wiring: tenant's trading name, included in whisper/SMS output.
+   * Defaults to `'Our shop'` when `buildSummary` is set but `shopName`
+   * is omitted.
+   */
+  shopName?: string;
 }
 
 /**
@@ -161,6 +187,18 @@ export interface TransferDescriptor {
   dispatcherUserId: string;
   /** Zero-based index into the rotation that was dialed. */
   rotationIndex: number;
+  /**
+   * F1 wiring: structured summary produced by `buildSummary` callback.
+   * Present when the caller supplied both `buildSummary` and
+   * `callerContext` on `EscalateToHumanInput`. Undefined otherwise.
+   */
+  summary?: EscalationSummary;
+  /**
+   * F1 wiring: opaque ID that ties the whisper webhook, SMS deep-link,
+   * and in-app panel to this specific escalation. Generated at the time
+   * `buildSummary` is called. Undefined when no summary was built.
+   */
+  escalationId?: string;
 }
 
 export interface EscalationResult {
@@ -224,6 +262,9 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     callSid,
     dialActionUrl,
     session,
+    buildSummary,
+    callerContext,
+    shopName,
   } = input;
   const lang: Language = input.language ?? 'en';
   const transferringText = t('escalate.transferring', lang);
@@ -238,7 +279,6 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   // no-answer / failed.
   if (
     channel === 'telephony' &&
-    callControl &&
     dispatcherPhoneResolver
   ) {
     const rotation = await onCallRepo.listRotation(tenantId);
@@ -246,7 +286,8 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     // Cursor tells us which rotation index to dial next. On the first
     // call we read it (index 0) without advancing; subsequent calls
     // (from /dial-result) pass a higher cursor via callControl.
-    const cursor = callControl.getCursor(sessionId);
+    // When callControl is not wired (summary-only path), start at 0.
+    const cursor = callControl ? callControl.getCursor(sessionId) : { index: 0 };
 
     // Walk forward from the cursor index, skipping entries with no
     // phone. Stops at the first entry with a phone.
@@ -303,19 +344,43 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     // alone only bumps +1 from the stored value, which can stall on the
     // same dispatcher when earlier entries were skipped for missing
     // phones. setCursorAfter is the source of truth here.
-    callControl.setCursorAfter(sessionId, chosen.index);
+    if (callControl) {
+      callControl.setCursorAfter(sessionId, chosen.index);
+    }
+
+    // Build escalation summary if the caller supplied both a builder
+    // callback and caller context. The escalationId is generated here
+    // so it can be shared with the whisper cache and SMS deep-link.
+    let summary: EscalationSummary | undefined;
+    let escalationId: string | undefined;
+    if (buildSummary && callerContext) {
+      escalationId = `esc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const ctx: EscalationContext = {
+        shopName: shopName ?? 'Our shop',
+        caller: callerContext.caller,
+        customer: callerContext.customer,
+        intent: callerContext.intent,
+        reason: reason as EscalationContext['reason'],
+        transcriptSnapshot: callerContext.transcriptSnapshot,
+      };
+      summary = buildSummary(ctx);
+    }
 
     // Build the dial TwiML. Action URL is required so Twilio POSTs the
     // outcome to /dial-result. Caller passes it via `dialActionUrl`;
     // when missing we still produce a transfer descriptor with a
     // best-effort placeholder so the adapter can recover.
-    const fallbackTwiml = callControl.dialDispatcher(
-      callSid ?? sessionId,
-      chosen.phone,
-      {
-        actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
-      },
-    );
+    // When callControl is not wired (summary-only path), use an empty
+    // TwiML string — the adapter is expected not to emit <Dial> in that case.
+    const fallbackTwiml = callControl
+      ? callControl.dialDispatcher(
+          callSid ?? sessionId,
+          chosen.phone,
+          {
+            actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+          },
+        )
+      : '';
 
     if (auditRepo) {
       await auditRepo.create(
@@ -353,11 +418,13 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         rotationEntryId: chosen.entry.id,
         dispatcherUserId: chosen.entry.userId,
         rotationIndex: chosen.index,
+        summary,
+        escalationId,
       },
     };
   }
 
-  // Default branch (in-app, or telephony without callControl wired).
+  // Default branch (in-app, or telephony without dispatcherPhoneResolver).
   // ─────────────────────────────────────────────────────────────────
   // Look up next on-call dispatcher
   const entry = await onCallRepo.getNextOnCall(tenantId);
