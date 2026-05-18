@@ -195,14 +195,13 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       dateTimeStr: string;
     }) => { body: string },
   ): Promise<void> {
+    const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     if (
-      entityType === 'appointment_confirmation' ||
-      entityType === 'appointment_reminder'
+      (entityType === 'appointment_confirmation' ||
+        entityType === 'appointment_reminder') &&
+      settings?.autoSendAppointmentReminders === false
     ) {
-      const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-      if (settings?.autoSendAppointmentReminders === false) {
-        return;
-      }
+      return;
     }
 
     const appointment = await this.deps.appointmentRepo.findById(tenantId, appointmentId);
@@ -214,7 +213,6 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     const customer = await this.deps.customerRepo.findById(tenantId, job.customerId);
     if (!customer) return;
 
-    const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     const businessName = settings?.businessName ?? 'Your service team';
     const dateTimeStr = formatAppointmentDate(appointment.scheduledStart, appointment.timezone);
     const sms = renderSms({
