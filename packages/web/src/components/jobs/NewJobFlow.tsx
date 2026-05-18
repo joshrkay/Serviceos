@@ -542,14 +542,12 @@ export function NewJobFlow({
           ? markLocationAsOldAddress(existingCustomer, trimmedAddress)
           : existingCustomer
       );
-      const [firstName = '', ...rest] = trimmedName.split(/\s+/);
-      const lastName = rest.join(' ');
       const newId = `c${Date.now()}`;
       const createdCustomer: Customer = {
         id: newId,
         name: trimmedName,
         phone: newCustomerPhone.trim() || '(000) 000-0000',
-        email: newCustomerEmail.trim() || `${firstName.toLowerCase() || 'new'}.${lastName.toLowerCase() || 'customer'}@example.com`,
+        email: newCustomerEmail.trim(),
         address: trimmedAddress,
         serviceType: draft.serviceType ?? 'HVAC',
         locations: [
