@@ -1211,6 +1211,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
       })
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
