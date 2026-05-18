@@ -19,6 +19,8 @@ export interface DragResult {
   targetPosition: number | null;
   proposedScheduledStart?: string;
   proposedScheduledEnd?: string;
+  /** Optimistic-concurrency token — appointment.updatedAt ISO string. */
+  appointmentVersion?: string;
 }
 
 export interface UseDragDropResult {

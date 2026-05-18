@@ -329,6 +329,12 @@ import { IdempotencyGuard } from './proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import { InMemoryWorkingHoursRepository } from './availability/working-hours';
+import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
+import { createTravelTimeProvider } from './scheduling/travel-time/factory';
+import { StubSkillMatcher } from './scheduling/skill-matcher';
+import { createSchedulingRouter } from './scheduling/routes';
+import type { FeasibilityDependencies } from './scheduling/feasibility-types';
 import {
   createDiffAnalysisWorker,
   InMemoryDiffAnalysisRepository,
@@ -870,6 +876,14 @@ export function createApp(): express.Express {
   const timelineRepo       = pool ? new PgJobTimelineRepository(pool)    : new InMemoryJobTimelineRepository();
   const appointmentRepo    = pool ? new PgAppointmentRepository(pool)    : new InMemoryAppointmentRepository();
   const assignmentRepo     = pool ? new PgAssignmentRepository(pool)     : new InMemoryAssignmentRepository();
+  // Availability repos and skill matcher have no Pg variants yet — the
+  // dispatch feasibility composer treats missing rows as no-conflict, so
+  // running InMemory in production is degraded-but-safe (working-hours and
+  // unavailable-block warnings simply won't fire until Pg variants land).
+  const workingHoursRepo       = new InMemoryWorkingHoursRepository();
+  const unavailableBlockRepo   = new InMemoryUnavailableBlockRepository();
+  const travelTimeProvider     = createTravelTimeProvider(process.env);
+  const skillMatcher           = new StubSkillMatcher();
   const estimateRepo       = pool ? new PgEstimateRepository(pool)       : new InMemoryEstimateRepository();
   const invoiceRepo        = pool ? new PgInvoiceRepository(pool)        : new InMemoryInvoiceRepository();
   const paymentRepo        = pool ? new PgPaymentRepository(pool)        : new InMemoryPaymentRepository();
@@ -1229,6 +1243,16 @@ export function createApp(): express.Express {
         dncRepo,
       })
     : undefined;
+  const feasibilityDeps: FeasibilityDependencies = {
+    assignmentRepo,
+    appointmentRepo,
+    jobRepo,
+    locationRepo,
+    workingHoursRepo,
+    unavailableBlockRepo,
+    travelTimeProvider,
+    skillMatcher,
+  };
   // P7-026 — wire the review-response execution handler's three
   // optional deps so an approved review_response_proposal actually
   // mutates state instead of falling through the handler's "no dep
@@ -1270,6 +1294,7 @@ export function createApp(): express.Express {
     expenseRepo,
     auditRepo,
     jobRepo,
+    feasibilityDeps,
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
@@ -2578,7 +2603,8 @@ export function createApp(): express.Express {
     }),
   );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo));
+  app.use('/api/dispatch', createSchedulingRouter(feasibilityDeps, userRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps));
   if (pool) {
     app.use('/api/interactions', createInteractionsRouter({ pool }));
   }

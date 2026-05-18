@@ -197,4 +197,30 @@ describe('P6-006 — Day-scoped dispatch board query', () => {
     expect(result.technicianLanes[0].appointments[0].lateness?.progressState).toBe('at_site');
     expect(result.technicianLanes[0].appointments[0].lateness?.latenessState).toBe('late_prompt_required');
   });
+
+  it('exposes appointment updatedAt as an ISO string on board appointments', async () => {
+    const appt = await createAppointment({
+      tenantId,
+      jobId: 'job-1',
+      scheduledStart: new Date(2026, 2, 14, 9, 0),
+      scheduledEnd: new Date(2026, 2, 14, 11, 0),
+      timezone: 'America/New_York',
+      createdBy: 'user-1',
+    }, appointmentRepo);
+
+    await assignTechnician({
+      tenantId,
+      appointmentId: appt.id,
+      technicianId: techId,
+      technicianRole: 'technician',
+      isPrimary: true,
+      assignedBy: 'user-1',
+    }, assignmentRepo);
+
+    const result = await getDispatchBoardData(tenantId, '2026-03-14', deps);
+    const boardAppt = result.technicianLanes[0].appointments[0];
+    expect(boardAppt.updatedAt).toBeDefined();
+    expect(typeof boardAppt.updatedAt).toBe('string');
+    expect(() => new Date(boardAppt.updatedAt!).toISOString()).not.toThrow();
+  });
 });

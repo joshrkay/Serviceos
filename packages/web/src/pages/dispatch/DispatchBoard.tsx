@@ -12,6 +12,10 @@ import {
   ProposedProposalType,
 } from '../../components/dispatch/ConfirmProposalDialog';
 import { apiFetch } from '../../utils/api-fetch';
+import {
+  useFeasibilityPreview,
+  FeasibilityPreviewInput,
+} from '../../components/dispatch/useFeasibilityPreview';
 
 type DragSourceType = 'queue' | 'lane';
 
@@ -86,6 +90,23 @@ export function DispatchBoard() {
     const fromLanes = data.technicianLanes.flatMap((lane) => lane.appointments);
     return [...data.unassignedAppointments, ...fromLanes];
   }, [data]);
+
+  // ── Live feasibility preview during drag ──────────────────────────────
+  // Builds a debounced read-only query so the hovered lane can render
+  // red/yellow/green drop-zone feedback without committing a proposal.
+  const previewInput = useMemo<FeasibilityPreviewInput | null>(() => {
+    if (!dragSource) return null;
+    if (!dragOverTarget || dragOverTarget === '__unassigned__') return null;
+    const appt = allAppointments.find((a) => a.id === dragSource.appointmentId);
+    if (!appt) return null;
+    return {
+      appointmentId: dragSource.appointmentId,
+      proposedTechnicianId: dragOverTarget,
+      proposedScheduledStart: appt.scheduledStart,
+      proposedScheduledEnd: appt.scheduledEnd,
+    };
+  }, [dragSource, dragOverTarget, allAppointments]);
+  const { preview: feasibilityPreview } = useFeasibilityPreview(previewInput);
 
   /**
    * P6-026 — set of appointment ids whose time range overlaps another
@@ -314,19 +335,40 @@ export function DispatchBoard() {
       summary = 'Cancel appointment assignment';
     }
 
+    const appointmentVersion = appointment?.updatedAt;
+
     try {
       const response = await apiFetch('/api/proposals', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(appointmentVersion ? { 'If-Match': appointmentVersion } : {}),
+        },
         body: JSON.stringify({
           proposalType,
           payload,
           summary,
           idempotencyKey,
+          ...(appointmentVersion ? { appointmentVersion } : {}),
         }),
       });
 
       if (!response.ok) {
+        if (response.status === 409) {
+          toast.warning(
+            'Someone else updated this appointment — refresh and try again.',
+          );
+          void refetch();
+          return;
+        }
+        if (response.status === 422) {
+          const body = (await response.json().catch(() => ({}))) as {
+            blocking?: Array<{ message?: string }>;
+          };
+          const reason = body.blocking?.[0]?.message ?? 'feasibility check failed';
+          toast.error(`Cannot schedule: ${reason}`);
+          return;
+        }
         const text = await response.text().catch(() => '');
         toast.error(`Could not create proposal${text ? `: ${text}` : ''}`);
         return;
@@ -447,6 +489,11 @@ export function DispatchBoard() {
                 onDragLeave={handleDragLeaveTarget()}
                 onDrop={handleDropOnLane(lane.technicianId)}
                 conflictIds={conflictIds}
+                dragPreview={
+                  dragOverTarget === lane.technicianId && feasibilityPreview
+                    ? { targetTechnicianId: lane.technicianId, preview: feasibilityPreview }
+                    : null
+                }
               />
             ))}
             {filteredLanes.length === 0 && (
