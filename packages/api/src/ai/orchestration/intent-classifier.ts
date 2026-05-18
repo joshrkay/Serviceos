@@ -339,10 +339,13 @@ Supported intents (return exactly ONE):
                           directly to on-call dispatcher.
                           Examples: "Let me talk to a human"
                                     "I want a real person"
-                                    "Is anyone there"
+                                    "Can I speak to a person please"
                                     "Transfer me to dispatch"
                                     "I don't want to talk to a bot"
                                     "Can I speak with the owner"
+                          NOTE: "I want to schedule with a person" is NOT
+                          operator_request — the intent is scheduling, not
+                          transferring.
 - "lookup_appointments" — caller is ASKING about their upcoming
                            appointment(s). Read-only — never moves money
                            or creates records. Routed to the
