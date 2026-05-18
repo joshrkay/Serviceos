@@ -307,6 +307,10 @@ import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { escalationOutcomeRouter } from './escalations/outcome-route';
+import { escalationEventsRouter } from './escalations/events-route';
+import { whisperRouter } from './telephony/whisper-route';
+import { WhisperCache } from './telephony/whisper-cache';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
@@ -1617,6 +1621,11 @@ export function createApp(): express.Express {
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
   const voiceSessionStore = new VoiceSessionStore();
+  // F6b: Process-local whisper TwiML cache. Shared between:
+  //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
+  //   - MediaStreamAdapter (stores whisper text after escalation_started)
+  // Single-instance; multi-instance Railway deploys would need Redis.
+  const sharedWhisperCache = new WhisperCache();
   // OnCall repo is created here so both the telephony adapter (notify_oncall
   // side effect) and the in-app adapter (escalation) share a single
   // implementation. The in-app block below reuses this same instance.
@@ -1913,6 +1922,11 @@ export function createApp(): express.Express {
     }),
   );
 
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
+  // signed GETs (no Clerk session) are accepted. Path is under
+  // /api/telephony so it's co-located with the main telephony webhook.
+  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
   // returned by app.listen(). We override `app.listen` so the bare
   // `index.ts` entry point doesn't need any new wiring — when the
@@ -2059,6 +2073,9 @@ export function createApp(): express.Express {
             // this the caller stays on hold forever — the dispatcher gets SMS
             // but the call never bridges.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            // F6b: Wire the shared whisper cache so the MediaStream adapter
+            // stores whisper TwiML after handleEscalateWithContext runs.
+            whisperCache: sharedWhisperCache,
             // F6c: LLM-backed sentiment classifier. Only fires when
             // escalationSettings.trigger_llm_sentiment is true.
             ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
@@ -2625,6 +2642,24 @@ export function createApp(): express.Express {
   app.use(
     '/api/voice/sessions',
     createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
+
+  // ── F5: Escalation outcome + SSE events routes ────────────────────────────
+  // escalationOutcomeRouter: user-facing POST /api/escalations/:id/outcome.
+  // escalationEventsRouter:  user-facing GET  /api/escalations/events (SSE).
+  // Both sit behind /api so they inherit the requireAuth gate above.
+  app.use(
+    '/api/escalations',
+    escalationOutcomeRouter({ store: voiceSessionStore }),
+  );
+  app.use(
+    '/api/escalations',
+    escalationEventsRouter({
+      authUserIdFromRequest: async (req) => {
+        return (req as unknown as { auth?: { userId?: string } }).auth?.userId ?? null;
+      },
+      subscribeToVoiceEvents: (cb) => voiceSessionStore.subscribeGlobal(cb),
+    }),
   );
 
   const featureFlagRepo: FeatureFlagRepository = pool

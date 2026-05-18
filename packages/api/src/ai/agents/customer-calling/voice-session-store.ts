@@ -32,6 +32,14 @@ import type {
   EscalationOutcomeEvent,
 } from '../../voice-quality/events';
 
+/**
+ * Channel name for per-session voice events. Kept as a module-local
+ * constant (rather than imported from event-bus.ts) to avoid a circular
+ * dependency: event-bus.ts already imports VoiceSession/VoiceSessionEvent
+ * from this module.
+ */
+const STORE_VOICE_EVENT_CHANNEL = 'voice-event';
+
 /** Session is reaped this many ms after last activity. */
 export const DEFAULT_IDLE_TTL_MS = 30 * 60 * 1000;
 
@@ -201,6 +209,12 @@ export interface VoiceSessionStoreOptions {
 export class VoiceSessionStore {
   private readonly sessions = new Map<string, VoiceSession>();
   /**
+   * Global listeners that receive every VoiceSessionEvent emitted by any
+   * session. Registered via subscribeGlobal() and used by the escalation
+   * SSE route to forward escalation_started events to connected dispatchers.
+   */
+  private readonly globalListeners = new Set<(evt: VoiceSessionEvent) => void>();
+  /**
    * Secondary index: Twilio CallSid → sessionId. Maintained on
    * create/delete so findByCallSid is O(1) instead of an O(n) scan
    * across all active sessions.
@@ -267,9 +281,45 @@ export class VoiceSessionStore {
       lastActivityAt: now,
       events,
     };
+    // Forward all events from this session to registered global listeners.
+    // This enables the escalation SSE route to receive escalation_started
+    // events from any active session without knowing the session id upfront.
+    if (this.globalListeners.size > 0) {
+      events.on(STORE_VOICE_EVENT_CHANNEL, (evt: VoiceSessionEvent) => {
+        for (const listener of this.globalListeners) {
+          listener(evt);
+        }
+      });
+    }
     this.sessions.set(id, session);
     if (opts.callSid) this.callSidIndex.set(opts.callSid, id);
     return session;
+  }
+
+  /**
+   * Subscribe to all VoiceSessionEvents emitted by any current or future
+   * session. Used by the escalation SSE route. Returns an unsubscribe
+   * function.
+   *
+   * Note: only sessions created AFTER this call will have the listener
+   * automatically attached. Existing active sessions at subscription time
+   * do not retroactively receive the listener — acceptable because the
+   * typical use case (browser SSE connect on page load) happens before
+   * escalation calls arrive.
+   */
+  subscribeGlobal(callback: (evt: VoiceSessionEvent) => void): () => void {
+    this.globalListeners.add(callback);
+    // Also attach to all currently-active sessions so reconnecting SSE
+    // clients don't miss events on in-flight calls.
+    for (const session of this.sessions.values()) {
+      session.events.on(STORE_VOICE_EVENT_CHANNEL, callback);
+    }
+    return () => {
+      this.globalListeners.delete(callback);
+      for (const session of this.sessions.values()) {
+        session.events.off(STORE_VOICE_EVENT_CHANNEL, callback);
+      }
+    };
   }
 
   /**
