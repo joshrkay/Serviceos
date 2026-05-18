@@ -246,6 +246,15 @@ import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
+import { runGoogleReviewsSweep } from './workers/google-reviews';
+import { PgReviewRepository } from './reputation/pg-review';
+import { PgReviewPollStateRepository } from './reputation/poll-state';
+import { PgServiceCreditRepository } from './reputation/pg-service-credit';
+import { PgGoogleBusinessReplyResolver } from './reputation/pg-google-business-reply-resolver';
+import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
+import { NoopBrandVoiceLoader } from './reputation/brand-voice';
+import { PgCustomerLoader } from './reputation/match-customer';
+import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
@@ -1214,6 +1223,33 @@ export function createApp(): express.Express {
         dncRepo,
       })
     : undefined;
+  // P7-026 — wire the review-response execution handler's three
+  // optional deps so an approved review_response_proposal actually
+  // mutates state instead of falling through the handler's "no dep
+  // wired" guards. Hoisted ahead of the createExecutionHandlerRegistry
+  // call (the polling worker, registered later, reuses these
+  // instances).
+  const googleReviewsReviewRepo = pool ? new PgReviewRepository(pool) : null;
+  const googleReviewsPollStateRepo = pool
+    ? new PgReviewPollStateRepository(pool)
+    : null;
+  const googleReviewsCredResolver = pool
+    ? createCredentialResolver({ pool })
+    : null;
+  const serviceCreditRepo = pool ? new PgServiceCreditRepository(pool) : undefined;
+  const googleReplyResolver =
+    googleReviewsReviewRepo && googleReviewsCredResolver
+      ? new PgGoogleBusinessReplyResolver(
+          googleReviewsReviewRepo,
+          googleReviewsCredResolver,
+        )
+      : undefined;
+  const reviewPrivateMessageSender = messageDelivery
+    ? new MessageDeliveryReviewPrivateMessageSender(
+        messageDelivery,
+        customerRepo,
+      )
+    : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
     appointmentRepo,
     assignmentRepo,
@@ -1228,6 +1264,9 @@ export function createApp(): express.Express {
     expenseRepo,
     auditRepo,
     jobRepo,
+    ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
+    ...(googleReplyResolver ? { googleReplyResolver } : {}),
+    ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
   });
   // P18-001: replace the stub create_customer handler from the registry
   // with the wired-up voice handler so an approved create_customer
@@ -2604,6 +2643,81 @@ export function createApp(): express.Express {
       });
     }
   }, 60 * 60_000);
+
+  // P7-026 PR a: Google Business reviews polling. Every 15 minutes
+  // we sweep every tenant with an active `google_business`
+  // integration and persist new reviews idempotently. One tenant's
+  // failure never stops the loop (per-tenant try/catch inside the
+  // sweep). Per-tenant exponential backoff on 429 lives in
+  // review_poll_state; tenants currently throttled are skipped
+  // entirely until the window lifts.
+  //
+  // When `pool` is unset (in-memory dev), the sweep no-ops cleanly:
+  // the worker short-circuits on a null credential resolver and
+  // returns all-zero metrics.
+  const googleReviewsLogger = createLogger({
+    service: 'google-reviews-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  // P7-026 final wiring — ingestion → proposal bridge. When all the
+  // build-proposal deps are available (LLM gateway + customer loader +
+  // brand voice + service-credit repo), newly-inserted reviews
+  // immediately produce a draft review_response_proposal. When any are
+  // missing, we log a one-shot warning so ops can see "ingestion only,
+  // no proposals being created" without grepping the per-tick logs.
+  const googleReviewsCustomerLoader = pool ? new PgCustomerLoader(pool) : null;
+  const googleReviewsBrandVoiceLoader = new NoopBrandVoiceLoader();
+  const googleReviewsProposalEmission =
+    serviceCreditRepo && googleReviewsCustomerLoader
+      ? {
+          proposalRepo,
+          buildProposalDeps: {
+            llmGateway,
+            customerLoader: googleReviewsCustomerLoader,
+            brandVoiceLoader: googleReviewsBrandVoiceLoader,
+            serviceCreditRepo,
+          },
+        }
+      : undefined;
+  if (!googleReviewsProposalEmission) {
+    googleReviewsLogger.warn(
+      'Google reviews worker: proposal emission deps incomplete — ' +
+        'ingestion will run but no review_response_proposal drafts will be created',
+      {
+        hasServiceCreditRepo: Boolean(serviceCreditRepo),
+        hasCustomerLoader: Boolean(googleReviewsCustomerLoader),
+      },
+    );
+  }
+  setInterval(async () => {
+    if (
+      !googleReviewsReviewRepo ||
+      !googleReviewsPollStateRepo ||
+      !googleReviewsCredResolver
+    ) {
+      return;
+    }
+    try {
+      await runGoogleReviewsSweep({
+        reviewRepo: googleReviewsReviewRepo,
+        pollStateRepo: googleReviewsPollStateRepo,
+        credentialResolver: googleReviewsCredResolver,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: googleReviewsLogger,
+        ...(googleReviewsProposalEmission
+          ? { proposalEmission: googleReviewsProposalEmission }
+          : {}),
+      });
+    } catch (err) {
+      googleReviewsLogger.error('Google reviews sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 15 * 60_000);
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
