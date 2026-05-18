@@ -153,14 +153,14 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
   const scheduledTime = formatTime(job.scheduledStart);
   const moneyState = normalizeJobMoneyState(job.moneyState);
   const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
+  const moneyBadgeClasses: Record<string, string> = {
+    overdue: 'bg-red-100 text-red-700',
+    paid: 'bg-green-100 text-green-700',
+    invoiced: 'bg-amber-100 text-amber-800',
+    estimate_sent: 'bg-amber-100 text-amber-800',
+  };
   const moneyBadgeClass =
-    moneyState === 'overdue'
-      ? 'bg-red-100 text-red-700'
-      : moneyState === 'paid'
-        ? 'bg-green-100 text-green-700'
-        : moneyState === 'invoiced' || moneyState === 'estimate_sent'
-          ? 'bg-amber-100 text-amber-800'
-          : 'bg-violet-100 text-violet-700';
+    (moneyState && moneyBadgeClasses[moneyState]) ?? 'bg-violet-100 text-violet-700';
 
   return (
     <button
