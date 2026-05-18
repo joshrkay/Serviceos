@@ -10,6 +10,7 @@ import { useListQuery } from '../../hooks/useListQuery';
 import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
+import { ErrorState } from '../ErrorState';
 
 // ─── API Types ────────────────────────────────────────────────────────────
 interface ApiJob {
@@ -317,6 +318,11 @@ export function HomePage() {
                 <div className="flex items-center justify-center py-8">
                   <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
                 </div>
+              ) : jobsQuery.error ? (
+                <ErrorState
+                  message={jobsQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load jobs — please try again"}
+                  onRetry={() => jobsQuery.refetch()}
+                />
               ) : todayJobs.length === 0 ? (
                 <p className="text-sm text-slate-400 py-4 text-center">No jobs scheduled today</p>
               ) : (
@@ -419,13 +425,18 @@ export function HomePage() {
             )}
 
             {/* Pending estimates */}
-            {(estimatesQuery.isLoading || pendingEsts.length > 0) && (
+            {(estimatesQuery.isLoading || estimatesQuery.error || pendingEsts.length > 0) && (
               <section className="px-4 py-5">
                 <SectionHead label="Pending estimates" count={pendingEsts.length} onAll={() => navigate('/estimates')} />
                 {estimatesQuery.isLoading ? (
                   <div className="flex items-center justify-center py-6">
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
                   </div>
+                ) : estimatesQuery.error ? (
+                  <ErrorState
+                    message={estimatesQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load estimates — please try again"}
+                    onRetry={() => estimatesQuery.refetch()}
+                  />
                 ) : (
                   <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
                     {pendingEsts.map(est => (
@@ -455,7 +466,7 @@ export function HomePage() {
             )}
 
             {/* Unpaid invoices */}
-            {(invoicesQuery.isLoading || unpaidInvs.length > 0) && (
+            {(invoicesQuery.isLoading || invoicesQuery.error || unpaidInvs.length > 0) && (
               <section className="px-4 py-5">
                 <div className="flex items-center justify-between mb-2.5">
                   <div className="flex items-center gap-2">
@@ -473,6 +484,11 @@ export function HomePage() {
                   <div className="flex items-center justify-center py-6">
                     <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-900 border-t-transparent" />
                   </div>
+                ) : invoicesQuery.error ? (
+                  <ErrorState
+                    message={invoicesQuery.error.includes('401') ? "Session expired — please reload" : "Couldn't load invoices — please try again"}
+                    onRetry={() => invoicesQuery.refetch()}
+                  />
                 ) : (
                   <div className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 overflow-hidden">
                     {unpaidInvs.map(inv => {
@@ -532,7 +548,7 @@ export function HomePage() {
             </section>
 
             {/* All clear */}
-            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && (
+            {attentionItems.length === 0 && unpaidInvs.length === 0 && pendingEsts.length === 0 && !jobsQuery.isLoading && !estimatesQuery.isLoading && !invoicesQuery.isLoading && !jobsQuery.error && !estimatesQuery.error && !invoicesQuery.error && (
               <section className="px-4 py-8 flex flex-col items-center gap-2">
                 <CheckCircle2 size={28} className="text-green-500" />
                 <p className="text-sm text-slate-600">All clear — nothing urgent</p>
