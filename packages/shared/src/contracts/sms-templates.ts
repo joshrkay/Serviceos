@@ -28,8 +28,8 @@ const smsTemplateContractSchema = z.object({
 });
 
 export const SMS_TEMPLATES = [
-  { id: 'S1', description: 'Proposal ready for review alert.', requiredToolsHooks: ['proposal_queue'], jurisdictionFlags: [], proposalTypes: [ProposalType.CREATE_CUSTOMER, ProposalType.UPDATE_CUSTOMER, ProposalType.CREATE_JOB, ProposalType.CREATE_APPOINTMENT, ProposalType.UPDATE_APPOINTMENT, ProposalType.DRAFT_ESTIMATE, ProposalType.UPDATE_ESTIMATE, ProposalType.DRAFT_INVOICE, ProposalType.REASSIGN_APPOINTMENT, ProposalType.RESCHEDULE_APPOINTMENT, ProposalType.CANCEL_APPOINTMENT] },
-  { id: 'S2', description: 'Appointment confirmation SMS.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.CREATE_APPOINTMENT, ProposalType.UPDATE_APPOINTMENT] },
+  { id: 'S1', description: 'Proposal ready for review alert.', requiredToolsHooks: ['proposal_queue'], jurisdictionFlags: [], proposalTypes: [ProposalType.CREATE_CUSTOMER, ProposalType.UPDATE_CUSTOMER, ProposalType.CREATE_JOB, ProposalType.CREATE_APPOINTMENT, ProposalType.DRAFT_ESTIMATE, ProposalType.UPDATE_ESTIMATE, ProposalType.DRAFT_INVOICE, ProposalType.REASSIGN_APPOINTMENT, ProposalType.RESCHEDULE_APPOINTMENT, ProposalType.CANCEL_APPOINTMENT] },
+  { id: 'S2', description: 'Appointment confirmation SMS.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.CREATE_APPOINTMENT] },
   { id: 'S3', description: 'Appointment reschedule request SMS.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.RESCHEDULE_APPOINTMENT] },
   { id: 'S4', description: 'Appointment cancellation notice SMS.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.CANCEL_APPOINTMENT] },
   { id: 'S5', description: 'Technician reassignment notice SMS.', requiredToolsHooks: ['appointment_lookup'], jurisdictionFlags: ['quiet_hours_restrictions'], proposalTypes: [ProposalType.REASSIGN_APPOINTMENT] },
