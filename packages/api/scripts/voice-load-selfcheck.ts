@@ -130,6 +130,44 @@ function stampAcks(): void {
   );
 }
 
+interface LoadReport {
+  totalConnections?: number;
+  droppedConnections?: number;
+}
+
+/**
+ * Read voice-load-report.json and confirm the harness actually
+ * opened connections. `voice-load-test.ts` exits 0 after writing the
+ * report even when every WS attempt dropped (path/protocol mismatch,
+ * handshake failures, ...), so without this check the self-check
+ * would stamp `voice_capacity_run` off a 100%-dropped run and the H5
+ * gate would falsely report PASS. Throws on any failure mode so main()
+ * skips stampAcks().
+ */
+function assertLoadReportSucceeded(): void {
+  const reportPath = join(__dirname, '..', 'voice-load-report.json');
+  if (!existsSync(reportPath)) {
+    throw new Error(`load-test report not found at ${reportPath}; NOT stamping acks`);
+  }
+  let report: LoadReport;
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8') || '{}') as LoadReport;
+  } catch (err) {
+    throw new Error(`load-test report at ${reportPath} is unparseable: ${(err as Error).message}`);
+  }
+  const total = report.totalConnections ?? 0;
+  const dropped = report.droppedConnections ?? total;
+  if (total === 0) {
+    throw new Error('load-test report has totalConnections=0; NOT stamping acks');
+  }
+  if (dropped === total) {
+    throw new Error(
+      `load-test report has ${dropped}/${total} dropped connections; NOT stamping acks`,
+    );
+  }
+  console.log(`  load-test report: ${total - dropped}/${total} connections succeeded`);
+}
+
 async function main(): Promise<void> {
   console.log('Voice-load harness self-check (mock WS server)');
   const srv = await startMockServer();
@@ -141,6 +179,7 @@ async function main(): Promise<void> {
       process.exit(code);
     }
     console.log(`  mock server accepted ${srv.acceptedConnections} WS connection(s)`);
+    assertLoadReportSucceeded();
     stampAcks();
   } finally {
     await srv.close();
