@@ -1,0 +1,431 @@
+# Dispatch Feasibility — Design Spec
+
+**Date:** 2026-05-17
+**Status:** Draft
+**Scope:** Close the three documented write-side gaps in Dispatch + Scheduling — server-side overlap check, travel-time, and concurrent-edit protection — plus a stubbed seam for technician skill matching.
+
+---
+
+## 1. Background
+
+The dispatch + scheduling read-side is complete:
+
+- `packages/api/src/dispatch/board-query.ts` and `routes.ts` (`GET /api/dispatch/board`)
+- `packages/web/src/pages/dispatch/DispatchBoard.tsx` + `components/dispatch/*` (technician lanes, drag-drop, conflict badges)
+
+The write-side currently routes every dispatcher edit through the proposal system: the UI builds a `reschedule_appointment` or `reassign_appointment` proposal and `POST`s it to `/api/proposals`. The proposal sits pending until a human approves it; the approval calls into `proposals/execution/{reschedule,reassignment}-handler.ts`, which already runs an overlap check via `dispatch/validation.ts:detectOverlappingAppointments` before mutating.
+
+Three gaps remain:
+
+1. **No overlap pre-check at creation.** A dispatcher can drag a card onto a slot that will obviously fail at approval time, and not learn until approval.
+2. **No travel-time awareness.** Two appointments scheduled 9:00–10:00 and 10:00–11:00 across town are flagged as fine by the overlap check (they don't overlap) but are physically impossible.
+3. **No concurrent-edit protection at creation time.** Two dispatchers can grab the same card and create competing proposals. Today the *execution* `checkSchedulingProposalFreshness` catches stale proposals at approval, but at *creation* there's no version check — two pending proposals can stack on the same appointment.
+
+(And a discovered bug, addressed in §4: the dispatcher proposal-create endpoint `POST /api/proposals` doesn't exist on the server today. The web client posts to it and gets a 404. This work creates the route.)
+
+A fourth dimension — **technician skill matching** — comes from product intent. The codebase has no skill data model today; this spec adds a seam for it and defers the data model to a follow-up spec.
+
+## 2. Goals & non-goals
+
+**Goals**
+
+- Server-side overlap check at proposal creation (blocking)
+- Travel-time awareness using a real routing provider (warning, with graceful fallback)
+- Optimistic concurrency at proposal creation via `If-Match` against `appointment.updatedAt`
+- Live "feasibility preview" endpoint the UI calls during drag for instant red/yellow drop-zone feedback
+- A `SkillMatcher` interface in place, with a no-op stub implementation. Composition logic is real; data model is deferred.
+- No regression in existing execution-time checks (`detectOverlappingAppointments`, `checkSchedulingProposalFreshness`).
+
+**Non-goals**
+
+- The actual technician-skill data model (separate spec).
+- Pessimistic "lock the card while I'm dragging it" UX (considered, dropped — the optimistic `If-Match` provides correctness; the UX badge can be added later if dispatchers ask).
+- Realtime push of other dispatchers' changes (separate spec).
+- Tenant-level overrides for travel-time defaults (defaults are global env-level; revisit if demand appears).
+- Changes to the proposal types or approval workflow themselves.
+
+## 3. Architecture
+
+Four independent checks composed into the proposal-create path:
+
+```
+                 ┌────────────────────┐
+                 │ Web dispatch board │
+                 │   (drag drop)      │
+                 └─────────┬──────────┘
+                           │ during drag (debounced)
+                           ▼
+          POST /api/dispatch/check-feasibility   (read-only preview)
+                           │
+                           ▼
+                  ┌─────────────────────────┐
+                  │ scheduling/             │
+                  │   feasibility.ts        │  ← composes 4 checks
+                  └─┬──────┬──────┬──────┬──┘
+                    │      │      │      │
+                    │      │      │      └─→ SkillMatcher        (stub today)
+                    │      │      └────────→ TravelTimeProvider  (Google + haversine fallback)
+                    │      └───────────────→ availability (working-hours, unavailable-block)
+                    └──────────────────────→ existing dispatch/validation.ts (overlap)
+
+           ─── on drop / submit ─────────────────────────────────────────
+
+                  POST /api/proposals       (existing endpoint, extended)
+                  • body now requires `appointmentVersion`
+                  • header `If-Match: <appointment.updatedAt ISO>`
+                  • server runs feasibility.ts as authoritative gate
+                  • 409 STALE_APPOINTMENT on version mismatch
+                  • 422 INFEASIBLE on blocking issues
+```
+
+### Module layout
+
+```
+packages/api/src/scheduling/                      ← NEW
+├── feasibility.ts            ← composer
+├── travel-time/
+│   ├── provider.ts           ← TravelTimeProvider interface
+│   ├── google-provider.ts    ← Google Distance Matrix impl
+│   └── haversine-fallback.ts
+├── skill-matcher.ts          ← SkillMatcher interface + StubSkillMatcher
+└── routes.ts                 ← /check-feasibility endpoint
+```
+
+### Design principles
+
+- All four checks return a unified `FeasibilityResult` with `blocking[] | warnings[]`.
+- `dispatch/validation.ts` (overlap primitive) stays put; `scheduling/` is the composer + new infrastructure.
+- `proposals/execution/{reschedule,reassignment}-handler.ts` is refactored to delegate to `feasibility.ts` instead of calling `detectOverlappingAppointments` directly, so creation-time and execution-time checks are guaranteed identical.
+- `SkillMatcher` is a real interface but `StubSkillMatcher` always returns `[]`, so the check is a no-op today. A follow-up spec drops in a real implementation backed by a `technician_skills` table; no callsite in `feasibility.ts` changes.
+
+## 4. API surface
+
+### New endpoint: `POST /api/dispatch/check-feasibility`
+
+Read-only, idempotent. UI calls this during drag (debounced ~150ms).
+
+**Auth:** `requireAuth + requireTenant` (same as other dispatch routes).
+
+**Request body:**
+
+```typescript
+{
+  appointmentId: string;
+  proposedTechnicianId: string;
+  proposedScheduledStart: string;   // ISO 8601
+  proposedScheduledEnd: string;     // ISO 8601
+}
+```
+
+**Response (200, even when infeasible — body says so):**
+
+```typescript
+{
+  feasible: boolean;                // false iff blocking.length > 0
+  blocking: FeasibilityIssue[];
+  warnings: FeasibilityIssue[];
+  travelTime: {
+    fromPrevSeconds: number | null; // null when no neighbor or coords missing
+    toNextSeconds: number | null;
+    estimateSource: 'google' | 'haversine' | 'unknown';
+    degraded: boolean;              // true if google failed and we fell back
+  } | null;
+}
+
+interface FeasibilityIssue {
+  check: 'overlap' | 'working_hours' | 'unavailable_block'
+       | 'travel_time' | 'skill_match';
+  severity: 'blocking' | 'warning';
+  message: string;
+  conflictingEntityId?: string;
+  metadata?: Record<string, unknown>;
+}
+```
+
+(Appointment-not-found is **not** a `FeasibilityIssue`. The route handler resolves the appointment before invoking the composer; a missing appointment short-circuits to a `404 { error: 'APPOINTMENT_NOT_FOUND' }` response and the composer never runs.)
+
+**Severity routing:**
+
+| Check                   | Severity   |
+|-------------------------|------------|
+| Overlap (same tech)     | blocking   |
+| Working-hours violation | warning    |
+| Unavailable block       | warning    |
+| Travel-time too tight   | warning    |
+| Skill mismatch          | warning    |
+
+Concurrent-edit is not part of the feasibility preview — it's detected only at submit time via `If-Match`, where the actor is committing to a write.
+
+**Error responses:**
+
+| Code | Meaning |
+|------|---------|
+| 400  | Malformed request, invalid ISO dates |
+| 404  | Appointment or technician not found |
+
+### New endpoint: `POST /api/proposals` (created in this work)
+
+**Spec correction:** the prior version of this spec described this as "extending an existing endpoint." That was wrong. The proposals router at `packages/api/src/routes/proposals.ts` has handlers for `GET /`, `GET /inbox`, `GET /:id`, `POST /approve-batch`, `POST /:id/approve`, `POST /:id/reject`, `POST /:id/undo`, and a `PUT` — but **no `POST /` create handler**. The web hook `packages/web/src/components/dispatch/useCreateScheduleProposal.ts:83` already issues `POST /api/proposals`, which returns 404 today. The dispatcher drag-drop UI is broken in production for proposal creation. This work fixes that bug as a prerequisite to adding the version-token gate.
+
+**Scope:** the new `POST /` handler accepts `proposalType ∈ {reschedule_appointment, reassign_appointment}` only. Other proposal types return `400 { error: 'UNSUPPORTED_PROPOSAL_TYPE' }` for now; future work can broaden the set as needed. (Non-dispatcher proposal types are created via direct `proposalRepo.create(...)` calls from AI tasks today and don't need the HTTP route.)
+
+**Required inputs:**
+
+- Body: existing `CreateProposalInput` shape (`proposalType`, `payload`, `summary`)
+- Header `If-Match: <appointment.updatedAt as ISO 8601>` (preferred)
+- Body field `appointmentVersion: string` (mirror of `If-Match`; required so JSON parsing alone is sufficient on the server. If both are present and disagree, header wins.)
+
+**Server flow:**
+
+1. Auth: `requireAuth + requireTenant` + `requirePermission('proposals:write')` (new permission scope — `proposals:approve` already exists, this matches the convention).
+2. Validate `proposalType` is in the supported set; otherwise 400.
+3. Load the appointment referenced by `payload.appointmentId` (the route handler owns this read — `feasibility.ts` does not re-fetch; see §5).
+4. Absent → `404 { error: 'APPOINTMENT_NOT_FOUND' }`.
+5. Resolve `expectedVersion` from `If-Match` header or `body.appointmentVersion`. Missing both → `400 { error: 'MISSING_VERSION' }`. Non-ISO string → `400 { error: 'INVALID_VERSION' }`.
+6. Compare `expectedVersion` to `appointment.updatedAt.toISOString()` (ms precision). Mismatch → `409 { error: 'STALE_APPOINTMENT', currentVersion, providedVersion }`.
+7. Run `feasibility.checkFeasibility(...)` with the pre-loaded appointment.
+8. `blocking.length > 0` → `422 { error: 'INFEASIBLE', ...FeasibilityResult }`.
+9. Otherwise: `proposalRepo.create(...)` and respond `201 { id, ... }`.
+
+### Read path: board response gains `updatedAt`
+
+`GET /api/dispatch/board` is extended with one new field per appointment in the response: `updatedAt: string` (ISO 8601). The dispatcher UI uses this as the source of the `If-Match` token at drag-time — without it, the client has no way to populate the version check and every `POST /api/proposals` would 400. The field already exists on the underlying `Appointment` model (`packages/api/src/appointments/appointment.ts:39`); only the board-query projection needs to surface it. No other field changes.
+
+## 5. Components
+
+### `feasibility.ts` — the composer
+
+```typescript
+export interface FeasibilityInput {
+  tenantId: string;
+  appointment: Appointment;           // pre-loaded by the caller, never re-fetched inside
+  proposedTechnicianId: string;
+  proposedScheduledStart: Date;
+  proposedScheduledEnd: Date;
+}
+
+export interface FeasibilityDependencies {
+  assignmentRepo: AssignmentRepository;
+  appointmentRepo: AppointmentRepository; // used only for sibling-appointment reads (overlap, travel-time)
+  jobRepo: JobRepository;
+  locationRepo: LocationRepository;
+  workingHoursRepo: WorkingHoursRepository;
+  unavailableBlockRepo: UnavailableBlockRepository;
+  travelTimeProvider: TravelTimeProvider;
+  skillMatcher: SkillMatcher;
+  timezone?: string;          // tenant default; falls back to 'UTC'
+  clock?: () => Date;         // injectable for tests
+}
+
+export async function checkFeasibility(
+  input: FeasibilityInput,
+  deps: FeasibilityDependencies,
+): Promise<FeasibilityResult>;
+```
+
+**The proposed appointment is passed in pre-loaded, not re-fetched by ID.** This closes a TOCTOU window — the route handler reads the appointment once for the `If-Match` check, then hands the same object to the composer. Without this, the composer's own `findById` could observe a different version than the one that just passed the version check, and a concurrent write could slip through the gate.
+
+Pure composer. Each sub-check returns `FeasibilityIssue[]`; the composer concatenates and partitions into `blocking[] | warnings[]`. No side effects.
+
+Composition order (each runs independently, all results aggregated):
+
+1. Use the pre-loaded `input.appointment`. The route handler is responsible for the 404 case (appointment-not-found never reaches the composer). The composer never calls `appointmentRepo.findById(appointmentId)` for the proposed appointment.
+2. Overlap — `dispatch/validation.detectOverlappingAppointments` (existing). Load the technician's sibling appointments for the same day via `assignmentRepo.findByTechnician` → mapped through `appointmentRepo.findById` for each assignment (mirrors the existing pattern in `proposals/execution/reschedule-handler.ts:82-99`). Cap the assignment list at 50 entries (matches the dispatch board's existing limit) to bound memory for outlier technicians.
+3. Availability — `dispatch/validation.detectAvailabilityConflicts` (existing) using working-hours + unavailable-blocks.
+4. Travel-time — see §5.2.
+5. Skill match — see §5.3. Uses `input.appointment.jobId` to query `skillMatcher.requiredSkillsForJob`.
+
+### TravelTimeProvider
+
+```typescript
+export interface TravelTimeProvider {
+  estimateDriveTime(
+    origin: LatLng,
+    destination: LatLng,
+    departAt?: Date,            // for traffic-aware providers
+  ): Promise<TravelTimeEstimate>;
+}
+
+export interface TravelTimeEstimate {
+  seconds: number;
+  source: 'google' | 'haversine';
+  degraded: boolean;
+}
+
+export interface LatLng { latitude: number; longitude: number; }
+```
+
+**`GoogleDistanceMatrixProvider`:**
+
+- Constructor reads `GOOGLE_MAPS_API_KEY` from env.
+- Every call is `try`/`catch`. On error → delegates to `HaversineFallbackProvider` and sets `degraded: true`.
+- Logs each fallback at WARN level (via the existing logger) so ops can spot sustained outages.
+- In-memory LRU cache keyed by `${originLat},${originLng}→${destLat},${destLng}` with coords rounded to 4 decimals (~11m). TTL `TRAVEL_TIME_CACHE_TTL_SECONDS` (default 300). Keeps the Google bill bounded for a board that issues a preview per drag-move.
+- Wired through a `createTravelTimeProvider(env)` factory in `app.ts`: if `GOOGLE_MAPS_API_KEY` is unset, the factory returns a `HaversineFallbackProvider` instead of a Google one (acceptable for local dev; deployment docs call this out).
+
+**`HaversineFallbackProvider`:**
+
+- Great-circle distance ÷ 13.4 m/s (≈30 mph).
+- Pure function. Always succeeds when both coords are present.
+- Used both as the fallback and as the primary provider when Google is intentionally disabled.
+
+**Travel-time check inside the composer:**
+
+1. Read the technician's other appointments via `assignmentRepo.findByTechnician(tenantId, technicianId)` filtered to a window of `[proposedStart - 24h, proposedEnd + 24h]` (covers cross-midnight neighbors that a same-date filter would miss). Cap at 50 assignment rows — matches the dispatch board's existing limit and bounds the in-memory sort for outlier technicians. Map each assignment to its appointment via `appointmentRepo.findById`, sort by `scheduledStart`.
+2. Find `prev` (latest end ≤ proposed start) and `next` (earliest start ≥ proposed end) from that windowed list.
+3. For each neighbor that exists *and has lat/lng on its location*, call `estimateDriveTime` and compare against the gap.
+4. If `gap < travelSeconds` → emit warning with `metadata: { neighborAppointmentId, gapSeconds, travelSeconds, source }`.
+5. If a neighbor exists but lat/lng is missing on either end, emit `metadata: { reason: 'missing_coords', neighborAppointmentId }` as an info-level entry — surfaced so the UI can show "travel-time unverified," not a warning that blocks anything.
+
+### SkillMatcher (stub)
+
+```typescript
+export interface SkillMatcher {
+  requiredSkillsForJob(tenantId: string, jobId: string): Promise<string[]>;
+  skillsForTechnician(tenantId: string, technicianId: string): Promise<string[]>;
+}
+
+export class StubSkillMatcher implements SkillMatcher {
+  async requiredSkillsForJob(): Promise<string[]> { return []; }
+  async skillsForTechnician(): Promise<string[]> { return []; }
+}
+```
+
+Composer's skill check:
+
+1. `required = await skillMatcher.requiredSkillsForJob(tenantId, jobId)`.
+2. If `required.length === 0` → no issue (the stub always hits this path).
+3. `held = await skillMatcher.skillsForTechnician(tenantId, technicianId)`.
+4. `missing = required.filter(s => !held.includes(s))`.
+5. If `missing.length > 0` → warning with `metadata: { missingSkills: missing }`.
+
+A follow-up spec replaces `StubSkillMatcher` with a real implementation backed by a `technician_skills` table and a job-side `requiredSkills` field. No code in `feasibility.ts` changes when that lands.
+
+### Optimistic concurrency wiring
+
+In the existing `POST /api/proposals` handler, for the two scheduling proposal types:
+
+1. Resolve `expectedVersion` from `If-Match` header (preferred) or `body.appointmentVersion`.
+2. If neither present → `400 { error: 'MISSING_VERSION' }`.
+3. Load appointment; compare `expectedVersion` to `appointment.updatedAt.toISOString()`.
+4. Mismatch → `409 { error: 'STALE_APPOINTMENT', currentVersion, providedVersion }`.
+5. Run `feasibility.checkFeasibility(...)`.
+6. `blocking.length > 0` → `422 { error: 'INFEASIBLE', ...feasibilityResult }`.
+7. Proceed with existing proposal creation.
+
+The existing `checkSchedulingProposalFreshness` (used at *execution* time) stays as-is. It guards the case where a proposal sits pending and the underlying appointment moves before approval. The new `If-Match` covers the same race at *creation* time.
+
+### Refactor of existing execution handlers
+
+`proposals/execution/reschedule-handler.ts` and `proposals/execution/reassignment-handler.ts` currently call `detectOverlappingAppointments` directly — overlap is the only check enforced at execution today. They will be refactored to call `feasibility.checkFeasibility(...)` and reject on `blocking.length > 0`, so the creation-time and execution-time gates are guaranteed identical.
+
+**Behavioral delta — not a no-op refactor.** Executing handlers now also run availability (working-hours, unavailable-block), travel-time, and skill-match sub-checks. Per the severity routing in §4, only `overlap` is `blocking` today; the other three are `warning`. So the execution path's `if (blocking.length > 0)` gate remains overlap-only in effect — but the handler now produces warning telemetry it didn't produce before, and the failure-message shape changes from a single string to a `FeasibilityResult` (existing tests assert on the string and will need updating).
+
+This delta is intentional: it ensures that any future severity escalation (e.g., promoting availability to `blocking` per the deferral in §9.2) automatically applies at both creation and execution without further refactor. Tests must explicitly assert: (a) overlap still blocks at execution, (b) availability does NOT block at execution today, (c) the warning array is populated and audited.
+
+### Web-side wiring
+
+Two existing callsites issue `POST /api/proposals` for the two scheduling types — both must be updated together:
+
+- `useCreateScheduleProposal.ts` — extended to send `If-Match` and `appointmentVersion`; new branches: 409 returns `{ success: false, error: 'STALE' }`; 422 returns `{ success: false, error, blocking[] }`.
+- `DispatchBoard.tsx:318` — currently calls `apiFetch('/api/proposals', ...)` directly for `reschedule_appointment` / `reassign_appointment`. Refactored to route through `useCreateScheduleProposal` so the version-token path is identical across the surface. If kept inline as a transitional step, it must also send `If-Match` from `appointment.updatedAt` (now exposed on the board response — see §4 Read path).
+- `useFeasibilityPreview.ts` — new hook, debounced 150ms, feeds the existing `ConflictDisplay` component.
+- `DispatchBoard.tsx` / `TechnicianLane.tsx` — color drop zones from `feasibility.feasible` + `warnings[]`.
+
+### Wiring (`app.ts`)
+
+`app.ts` constructs `GoogleDistanceMatrixProvider` (or haversine-only if no API key), `StubSkillMatcher`, and a single `FeasibilityDependencies` instance. Both `/check-feasibility` and the proposals route consume the same deps so behavior is identical.
+
+## 6. Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `GOOGLE_MAPS_API_KEY` | unset | When unset, provider falls back to haversine-only. Required for production. |
+| `TRAVEL_TIME_CACHE_TTL_SECONDS` | `300` | LRU cache TTL for Google responses. |
+| `TRAVEL_TIME_CACHE_MAX_ENTRIES` | `1000` | Hard cap on LRU cache size. Prevents unbounded memory growth on multi-tenant deploys with many unique origin/destination pairs. Eviction is least-recently-used. |
+
+No DB migration required.
+
+## 7. Testing
+
+Per project standard (80% coverage minimum), TDD throughout.
+
+**Unit** (`packages/api/test/scheduling/`):
+
+| File | Coverage |
+|---|---|
+| `feasibility.test.ts` | All-stub deps. Clean, blocking-overlap, warning-availability, warning-travel-time, warning-skill-mismatch, multiple combined, missing coords skips travel-time. ~15 cases. |
+| `travel-time/google-provider.test.ts` | Mocked HTTP. Happy path returns google, cache hit doesn't re-call, transient failure falls back with `degraded: true`, missing API key constructs haversine-only. |
+| `travel-time/haversine-fallback.test.ts` | Pure math. Known city pairs, antipodal, identical coords (0s), missing-coord throws. |
+| `skill-matcher.test.ts` | `StubSkillMatcher` returns `[]`. |
+
+**Integration:**
+
+| File | Coverage |
+|---|---|
+| `check-feasibility-route.test.ts` (new, in `test/dispatch/`) | 200-with-feasible-false shape, FeasibilityIssue serialization, missing-tenant 400, missing-appointment 404. |
+| `proposal-create-version-check.test.ts` (new, in `test/proposals/`) | Correct `If-Match` succeeds, mismatched returns 409, blocking feasibility returns 422 with body, header-vs-body precedence (header wins), missing-both returns 400 with `MISSING_VERSION`, malformed `If-Match` (non-ISO string) returns 400 with `INVALID_VERSION` (not 409), 404 fires before the version check when the appointment doesn't exist. |
+| Existing `reschedule-handler.test.ts` / `reassignment-handler.test.ts` | Updated to assert delegation to `feasibility.ts` (behavioral assertions unchanged). |
+
+**Web:** existing tests in `packages/web/src/components/dispatch/` updated for the new hook signatures; new test for `useFeasibilityPreview`.
+
+**Out of scope for the test plan:**
+
+- No E2E against the real Google API; we mock the HTTP boundary.
+- No load test for `/check-feasibility`. Caching + early-exit on missing coords should keep p95 tight; revisit if instrumentation shows otherwise.
+
+**Build verification** (per project CLAUDE.md, mandatory before commit):
+
+```
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+```
+
+## 8. Risks & mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Google bill surprise from a busy board (drag fires N preview calls). | LRU cache + 4-decimal coord rounding + 150ms UI debounce. |
+| Locations missing lat/lng silently let bad schedules through. | Info-level entry with `metadata.reason: 'missing_coords'` in response so the UI can show "travel-time unverified" affordance. |
+| Duplicated overlap computation (handlers + feasibility). | Refactor handlers to call `feasibility.ts` so the check runs once and is identical at both creation and execution. |
+| `updatedAt` precision drift: Postgres `timestamptz` is microsecond, `Date.toISOString()` is millisecond. Could cause spurious 409s. | Compare at millisecond precision on both sides (server truncates `currentVersion` the same way before compare). All `updatedAt` writes MUST go through application code (`new Date()` in Node, ms precision) — any DB-side `NOW()` or trigger-driven write must use `date_trunc('milliseconds', now())` to stay aligned. Verify during migration review that no existing trigger writes a microsecond `updatedAt`. |
+| Malformed `If-Match` token (non-ISO string) always mismatches → returns 409 instead of the semantically correct 400. | Server parses `expectedVersion` via `new Date(s)` and rejects with `400 { error: 'INVALID_VERSION' }` if `isNaN(d.getTime())` before the equality compare. |
+| Google API key leaked in logs. | Provider never logs the key; only logs status code + URL host on failure. Standard secret hygiene. |
+| Proposals stacking — N pending proposals on the same appointment because each one's `If-Match` was valid when created. | Out of scope. The execution-time `checkSchedulingProposalFreshness` catches it at approval. If product wants creation-time stacking prevention, that's a follow-up — server can reject if there's a pending proposal for the same appointment. |
+
+## 9. Open questions / explicit deferrals
+
+Flagged so they're not lost:
+
+1. **Skill data model.** Separate spec. Trigger: when product wants real skill matching to land, replace `StubSkillMatcher`.
+2. **Working-hours / unavailable-block: warn vs block.** Today they're warnings. If product later decides "outside working hours should block," it's a one-line severity change in the composer.
+3. **Tenant override of travel-time defaults** (heuristic mph, cache TTL, warn-vs-block). Settings infrastructure exists (`packages/api/src/settings/`); punt until there's demand.
+4. **Realtime board updates** when another dispatcher's proposal lands. Today, the second dispatcher learns about conflict on next manual refresh or at submit. Pusher/SSE channel is its own spec.
+5. **"Alex is editing this" UX (advisory lease).** Considered and dropped. Optimistic `If-Match` provides correctness; revisit only if dispatchers actually report being surprised by 409s.
+6. **`/check-feasibility` rate-limit.** Inherits `requireAuth + requireTenant`. No bespoke limit; revisit if hot.
+
+## 10. Rollout
+
+Single PR; no flags. Two new endpoints are additive: `POST /api/dispatch/check-feasibility` (new) and `POST /api/proposals` (new — see §4 spec correction). There is **no breaking change** to existing endpoints; the prior version of this spec incorrectly described the proposals create route as "existing." Existing proposal routes (`/approve-batch`, `/:id/approve`, `/:id/reject`, `/:id/undo`, GETs) are unaffected.
+
+This PR also incidentally fixes a 404 bug: `useCreateScheduleProposal.ts` has been posting to `/api/proposals` since it was written, with no server handler. Dispatcher proposal creation via drag-drop has been broken in production. Tests added in this work assert the route exists and behaves correctly.
+
+### Enforcement boundary
+
+The `If-Match` / `appointmentVersion` check is enforced **at the HTTP route layer only**, not inside `ProposalRepository.create` or any domain-level helper. This matters because the codebase has non-HTTP creators of these proposal types:
+
+- `packages/api/src/workers/voice-action-router.ts` and `packages/api/src/ai/tasks/voice-extended-tasks.ts` call `proposalRepo.create(...)` directly for `reschedule_appointment` / `reassign_appointment` — they never traverse the Express route.
+
+These AI-originated proposals are **explicitly exempt** from the new version-token check. The justification: AI proposals don't represent a competing human dispatcher edit, and they already pass through `checkSchedulingProposalFreshness` at execution time (`packages/api/src/ai/guardrails/scheduling-staleness.ts`), which catches any underlying appointment drift between proposal creation and human approval. No new code is required to maintain this exemption — the AI handlers build `CreateProposalInput` without `appointmentVersion`, and the route-layer gate never runs on their path.
+
+### Callers audited
+
+- `useCreateScheduleProposal.ts` (web) — updated in this work, sends `If-Match`.
+- `DispatchBoard.tsx:318` (web) — updated in this work, sends `If-Match`.
+- Voice/AI task handlers (api) — exempt by design as above; no code change.
+- Tests under `packages/api/test/proposals/` that exercise the route — updated to send `If-Match`.
+
+These four are the complete set of `reschedule_appointment` / `reassign_appointment` creators in the repo today; verified via `grep -rn "reschedule_appointment\|reassign_appointment" packages/`.
+
+---
+
+**Next step:** This spec is closed. Implementation is out of scope per the brainstorming brief. A separate session can pick up the implementation plan via the writing-plans skill.

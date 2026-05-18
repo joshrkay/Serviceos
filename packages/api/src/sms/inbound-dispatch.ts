@@ -62,13 +62,27 @@ function normalize(keyword: string): string {
   return keyword.trim().toLowerCase();
 }
 
-export function registerKeywordHandler(handler: KeywordHandler): void {
+export interface RegisterKeywordHandlerOptions {
+  /**
+   * When true, replaces any existing registration for the same keyword
+   * instead of throwing. Use when bootstrapping handlers from a function
+   * (like createApp) that may legitimately run multiple times in the same
+   * process — e.g. across test files. Defaults to false to preserve the
+   * "feature bootstraps register exactly once at init" production guarantee.
+   */
+  overwrite?: boolean;
+}
+
+export function registerKeywordHandler(
+  handler: KeywordHandler,
+  options: RegisterKeywordHandlerOptions = {},
+): void {
   for (const raw of handler.keywords) {
     const key = normalize(raw);
     if (!key) {
       throw new Error('Cannot register an empty keyword');
     }
-    if (registry.has(key)) {
+    if (registry.has(key) && !options.overwrite) {
       throw new Error(
         `duplicate keyword registration: '${key}' is already registered`,
       );
