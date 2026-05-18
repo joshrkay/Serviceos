@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ProposalType } from './proposal';
+import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
@@ -217,4 +218,31 @@ export function validateProposalPayload(
   }
 
   return { valid: true };
+}
+
+/**
+ * P2-002 AI-safety gate. Production AI task handlers (and any other
+ * code path that translates a model's structured output into a
+ * proposal) MUST call this before `createProposal`. Throws a typed
+ * `ValidationError` with the offending Zod paths in `details.errors`,
+ * which the HTTP layer surfaces as a 400 rather than letting the
+ * payload reach storage or execution.
+ *
+ * Plain `createProposal` is intentionally left as a pure builder so
+ * test fixtures can construct proposals with synthetic payloads
+ * without dragging in the full schema for unrelated concerns
+ * (lifecycle, audit, prioritization). The gate is enforced where AI
+ * emits, not where any caller builds.
+ */
+export function assertValidProposalPayload(
+  proposalType: string,
+  payload: unknown
+): void {
+  const validation = validateProposalPayload(proposalType, payload);
+  if (!validation.valid) {
+    throw new ValidationError(
+      `Invalid payload for proposal type '${proposalType}'`,
+      { errors: validation.errors }
+    );
+  }
 }

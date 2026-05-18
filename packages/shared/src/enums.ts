@@ -133,20 +133,44 @@ export enum ProposalStatus {
   EXECUTION_FAILED = 'execution_failed',
 }
 
+// Mirrors the ProposalType union in
+// `packages/api/src/proposals/proposal.ts`. The API package owns
+// runtime validation via PROPOSAL_TYPE_SCHEMAS; this enum is the
+// shared identifier set that downstream packages (template specs,
+// voice/SMS/email registries, web UI) reference. Keep the two
+// sources in lockstep — adding a new ProposalType to the API
+// without mirroring it here will leave the shared registries
+// blind to the new type.
+//
+// `update_appointment` was removed: the API never carried it.
+// Update-style flows are modeled as `reassign_appointment`,
+// `reschedule_appointment`, or `cancel_appointment`, which template
+// consumers should reference directly.
 export enum ProposalType {
   CREATE_CUSTOMER = 'create_customer',
   UPDATE_CUSTOMER = 'update_customer',
   CREATE_JOB = 'create_job',
   CREATE_APPOINTMENT = 'create_appointment',
-  UPDATE_APPOINTMENT = 'update_appointment',
+  CREATE_BOOKING = 'create_booking',
   DRAFT_ESTIMATE = 'draft_estimate',
   UPDATE_ESTIMATE = 'update_estimate',
-  // Phase 5
   DRAFT_INVOICE = 'draft_invoice',
-  // Phase 6
+  UPDATE_INVOICE = 'update_invoice',
+  ISSUE_INVOICE = 'issue_invoice',
   REASSIGN_APPOINTMENT = 'reassign_appointment',
   RESCHEDULE_APPOINTMENT = 'reschedule_appointment',
   CANCEL_APPOINTMENT = 'cancel_appointment',
+  VOICE_CLARIFICATION = 'voice_clarification',
+  ADD_NOTE = 'add_note',
+  SEND_INVOICE = 'send_invoice',
+  RECORD_PAYMENT = 'record_payment',
+  LOG_EXPENSE = 'log_expense',
+  EMERGENCY_DISPATCH = 'emergency_dispatch',
+  ONBOARDING_TENANT_SETTINGS = 'onboarding_tenant_settings',
+  ONBOARDING_SERVICE_CATEGORY = 'onboarding_service_category',
+  ONBOARDING_ESTIMATE_TEMPLATE = 'onboarding_estimate_template',
+  ONBOARDING_TEAM_MEMBER = 'onboarding_team_member',
+  ONBOARDING_SCHEDULE = 'onboarding_schedule',
 }
 
 export enum RejectionCategory {
