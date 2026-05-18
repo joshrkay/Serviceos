@@ -120,7 +120,7 @@ import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
-import { InMemorySettingsRepository } from './settings/settings';
+import { InMemorySettingsRepository, resolveEscalationSettings } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
 import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
 import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
@@ -160,6 +160,7 @@ import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
 import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
+import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
 import { createHvacPack } from './verticals/packs/hvac';
 import { createPlumbingPack } from './verticals/packs/plumbing';
 import { createElectricalPack } from './verticals/packs/electrical';
@@ -315,6 +316,11 @@ import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
+import { escalationOutcomeRouter } from './escalations/outcome-route';
+import { escalationEventsRouter } from './escalations/events-route';
+import { whisperRouter } from './telephony/whisper-route';
+import { WhisperCache } from './telephony/whisper-cache';
+import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
@@ -1717,6 +1723,11 @@ export function createApp(): express.Express {
   // sessions in the same VoiceSessionStore so the FSM/cost-tracker pool
   // is uniform across channels. Process-local; idle-reaped via setInterval.
   const voiceSessionStore = new VoiceSessionStore();
+  // F6b: Process-local whisper TwiML cache. Shared between:
+  //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
+  //   - MediaStreamAdapter (stores whisper text after escalation_started)
+  // Single-instance; multi-instance Railway deploys would need Redis.
+  const sharedWhisperCache = new WhisperCache();
   // OnCall repo is created here so both the telephony adapter (notify_oncall
   // side effect) and the in-app adapter (escalation) share a single
   // implementation. The in-app block below reuses this same instance.
@@ -2017,6 +2028,20 @@ export function createApp(): express.Express {
     }),
   );
 
+  // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
+  // signed GETs (no Clerk session) are accepted. Path is under
+  // /api/telephony so it's co-located with the main telephony webhook.
+  // Twilio signature verification is enforced to prevent unauthenticated
+  // access to whisper TwiML (which contains PII: caller name, phone, intent).
+  app.use(
+    '/api/telephony',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+    whisperRouter({ whisperCache: sharedWhisperCache }),
+  );
+
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
   // returned by app.listen(). We override `app.listen` so the bare
   // `index.ts` entry point doesn't need any new wiring — when the
@@ -2086,6 +2111,40 @@ export function createApp(): express.Express {
       fillerCache.load();
       const fillerEngine = new FillerEngine();
 
+      // F6c — wire LLM-backed sentiment classifier into the MediaStream adapter.
+      // The adapter calls this after each caller turn (fire-and-forget); if the
+      // frustration score exceeds the per-tenant threshold it dispatches
+      // `frustration_detected` back into the FSM out-of-band.
+      //
+      // The sentiment function expects `deps.llm.complete({ prompt })` returning
+      // `{ text }`. We adapt the LLM gateway (which uses messages arrays) into
+      // that interface here using the `call_sentiment` task type so routing
+      // config can target it separately from main call-flow completions.
+      //
+      // NOTE: escalationSettings is per-tenant and must be resolved per-session.
+      // For now we pass undefined here — the feature is enabled only when
+      // the adapter dep is non-undefined, so wiring escalationSettings requires
+      // threading settingsRepo into a per-session init hook (deferred to
+      // Section 12 per-tenant resolution work, tracked in TODO below).
+      //
+      // TODO(S12): resolve escalationSettings per-tenant at session start by
+      // passing a factory/resolver into attachMediaStreamServer so each session
+      // can call `settingsRepo.findByTenantId(tenantId)` and surface the result.
+      const sentimentClassifierDep = llmGateway
+        ? (input: Parameters<typeof classifyTurnSentiment>[0]) =>
+            classifyTurnSentiment(input, {
+              llm: {
+                complete: async ({ prompt }: { prompt: string }) => {
+                  const res = await llmGateway.complete({
+                    taskType: 'call_sentiment',
+                    messages: [{ role: 'user' as const, content: prompt }],
+                  });
+                  return { text: res.content };
+                },
+              },
+            })
+        : undefined;
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -2123,6 +2182,24 @@ export function createApp(): express.Express {
             // future-phase change (auth at first `start` message).
             authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+            // Section 7 (CRITICAL): wire the gather adapter's shared Map so
+            // Dial TwiML built inside handleEscalateWithContext is visible to
+            // the route layer via takePendingTransferTwiml(sessionId). Without
+            // this the caller stays on hold forever — the dispatcher gets SMS
+            // but the call never bridges.
+            setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            // F6b: Wire the shared whisper cache so the MediaStream adapter
+            // stores whisper TwiML after handleEscalateWithContext runs.
+            whisperCache: sharedWhisperCache,
+            // F6c: LLM-backed sentiment classifier. Only fires when
+            // escalationSettings.trigger_llm_sentiment is true.
+            ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
+            // F6c (per-tenant): resolve escalation settings at WS session start
+            // so CallRoutingSheet toggle changes take effect on the next call.
+            resolveEscalationSettings: async (tenantId: string) => {
+              const settings = await settingsRepo.findByTenant(tenantId);
+              return resolveEscalationSettings(settings);
+            },
           },
         );
         return server;
@@ -2771,6 +2848,27 @@ export function createApp(): express.Express {
   app.use(
     '/api/voice/sessions',
     createVoiceSessionsRouter({ adapter: inAppVoiceAdapter, store: voiceSessionStore })
+  );
+
+  // ── F5: Escalation outcome + SSE events routes ────────────────────────────
+  // escalationOutcomeRouter: user-facing POST /api/escalations/:id/outcome.
+  // escalationEventsRouter:  user-facing GET  /api/escalations/events (SSE).
+  // Both sit behind /api so they inherit the requireAuth gate above.
+  app.use(
+    '/api/escalations',
+    escalationOutcomeRouter({ store: voiceSessionStore }),
+  );
+  app.use(
+    '/api/escalations',
+    escalationEventsRouter({
+      authUserIdFromRequest: async (req) => {
+        return (req as unknown as { auth?: { userId?: string } }).auth?.userId ?? null;
+      },
+      authTenantIdFromRequest: async (req) => {
+        return (req as unknown as { auth?: { tenantId?: string } }).auth?.tenantId ?? null;
+      },
+      subscribeToVoiceEvents: (cb) => voiceSessionStore.subscribeGlobal(cb),
+    }),
   );
 
   const featureFlagRepo: FeatureFlagRepository = pool

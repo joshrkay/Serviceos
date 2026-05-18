@@ -9,6 +9,7 @@ import {
   escalationTriggeredEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
+import type { EscalationSummary, EscalationContext } from '../agents/customer-calling/escalation-summary-builder';
 
 /**
  * Phase 12 — emergency-intent immediate-Dial decision.
@@ -79,6 +80,36 @@ export type EscalationReason =
   | 'max_retries_exceeded';
 
 /**
+ * Maps the skill-layer EscalationReason (internal system categorisation)
+ * to the builder-layer EscalationContext['reason'] (dispatcher-facing UX
+ * vocabulary). The two unions describe different things: the skill captures
+ * *why the system decided to escalate*; the builder captures *what to tell
+ * the dispatcher*. They overlap only on `emergency_dispatch`.
+ *
+ * Exported for unit-testing.
+ */
+export function mapSkillReasonToBuilderReason(
+  reason: EscalationReason,
+): EscalationContext['reason'] {
+  switch (reason) {
+    case 'emergency_dispatch':
+      return 'emergency_dispatch';
+    case 'caller_requested':
+      return 'operator_request';
+    case 'low_confidence':
+    case 'max_retries_exceeded':
+      return 'low_confidence_intent';
+    case 'cost_cap_exceeded':
+    case 'abuse_detected':
+    case 'provider_failure':
+      // No semantically clean dispatcher-facing reason for these;
+      // group with low_confidence_intent so the dispatcher knows the AI
+      // gave up rather than the caller demanding a human.
+      return 'low_confidence_intent';
+  }
+}
+
+/**
  * Resolve a dispatcher's outbound phone number.
  *
  * The on-call rotation table only carries `userId`; today there is no
@@ -139,6 +170,42 @@ export interface EscalateToHumanInput {
    * don't have a session in scope; pre-VQ-003 behavior is preserved.
    */
   session?: VoiceSession;
+  /**
+   * F1 wiring: optional callback that produces a structured
+   * `EscalationSummary` (whisper / SMS / panel) from FSM context.
+   * When provided alongside `callerContext`, the skill generates an
+   * `escalationId` and calls this once; the result is included in the
+   * returned `TransferDescriptor`. Optional — existing callers that
+   * don't supply it continue to work unchanged.
+   */
+  buildSummary?: (ctx: EscalationContext) => EscalationSummary;
+  /**
+   * F1 wiring: minimal FSM context needed to build an escalation
+   * summary. Required when `buildSummary` is set; ignored otherwise.
+   */
+  callerContext?: {
+    caller: EscalationContext['caller'];
+    customer?: EscalationContext['customer'];
+    intent: EscalationContext['intent'];
+    transcriptSnapshot: EscalationContext['transcriptSnapshot'];
+  };
+  /**
+   * F1 wiring: tenant's trading name, included in whisper/SMS output.
+   * Defaults to `'Our shop'` when `buildSummary` is set but `shopName`
+   * is omitted.
+   */
+  shopName?: string;
+  /**
+   * F8 — per-tenant channel flags. When absent, all three channels
+   * default to enabled (matches pre-F8 single-channel behavior).
+   */
+  channelPreferences?: { sms: boolean; in_app: boolean; whisper: boolean };
+  /**
+   * Public web app base URL used to build the SMS short-link in the
+   * escalation summary. Passed through to `EscalationContext.publicWebBaseUrl`.
+   * Defaults to `process.env.PUBLIC_WEB_URL` (or `app.serviceos.app` as last resort).
+   */
+  publicWebBaseUrl?: string;
 }
 
 /**
@@ -153,14 +220,34 @@ export interface TransferDescriptor {
   /**
    * Complete `<Response>` TwiML the adapter should hand back to
    * Twilio. Built via `TwilioCallControl.dialDispatcher`.
+   * `undefined` when `callControl` was not wired (summary-only path) —
+   * the adapter MUST NOT send an empty string to Twilio (400 error).
    */
-  fallbackTwiml: string;
+  fallbackTwiml: string | undefined;
   /** Rotation entry that produced this transfer. */
   rotationEntryId: string;
   /** Dispatcher's userId (FK to users.id). */
   dispatcherUserId: string;
   /** Zero-based index into the rotation that was dialed. */
   rotationIndex: number;
+  /**
+   * F1 wiring: structured summary produced by `buildSummary` callback.
+   * Present when the caller supplied both `buildSummary` and
+   * `callerContext` on `EscalateToHumanInput`. Undefined otherwise.
+   */
+  summary?: EscalationSummary;
+  /**
+   * F1 wiring: opaque ID that ties the whisper webhook, SMS deep-link,
+   * and in-app panel to this specific escalation. Generated at the time
+   * `buildSummary` is called. Undefined when no summary was built.
+   */
+  escalationId?: string;
+  /**
+   * F8 — channel preferences threaded from per-tenant escalation settings.
+   * The adapter fan-out handler reads this to skip disabled channels.
+   * Defaults to all-enabled when absent.
+   */
+  channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean };
 }
 
 export interface EscalationResult {
@@ -224,6 +311,10 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     callSid,
     dialActionUrl,
     session,
+    buildSummary,
+    callerContext,
+    shopName,
+    publicWebBaseUrl,
   } = input;
   const lang: Language = input.language ?? 'en';
   const transferringText = t('escalate.transferring', lang);
@@ -238,7 +329,6 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   // no-answer / failed.
   if (
     channel === 'telephony' &&
-    callControl &&
     dispatcherPhoneResolver
   ) {
     const rotation = await onCallRepo.listRotation(tenantId);
@@ -246,7 +336,8 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     // Cursor tells us which rotation index to dial next. On the first
     // call we read it (index 0) without advancing; subsequent calls
     // (from /dial-result) pass a higher cursor via callControl.
-    const cursor = callControl.getCursor(sessionId);
+    // When callControl is not wired (summary-only path), start at 0.
+    const cursor = callControl ? callControl.getCursor(sessionId) : { index: 0 };
 
     // Walk forward from the cursor index, skipping entries with no
     // phone. Stops at the first entry with a phone.
@@ -303,19 +394,60 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     // alone only bumps +1 from the stored value, which can stall on the
     // same dispatcher when earlier entries were skipped for missing
     // phones. setCursorAfter is the source of truth here.
-    callControl.setCursorAfter(sessionId, chosen.index);
+    if (callControl) {
+      callControl.setCursorAfter(sessionId, chosen.index);
+    }
+
+    // Build escalation summary if the caller supplied both a builder
+    // callback and caller context. The escalationId is generated here
+    // so it can be shared with the whisper cache and SMS deep-link.
+    // summary and escalationId are always present together or both absent.
+    let summary: EscalationSummary | undefined;
+    let escalationId: string | undefined;
+    if (buildSummary && callerContext) {
+      escalationId = `esc_${uuidv4()}`;
+      const ctx: EscalationContext = {
+        shopName: shopName ?? 'Our shop',
+        caller: callerContext.caller,
+        customer: callerContext.customer,
+        intent: callerContext.intent,
+        reason: mapSkillReasonToBuilderReason(reason),
+        transcriptSnapshot: callerContext.transcriptSnapshot,
+        ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
+      };
+      try {
+        summary = buildSummary(ctx);
+      } catch (err) {
+        // buildSummary threw (e.g. missing template). Log and proceed
+        // without a summary — the telephony transfer still succeeds;
+        // only the dispatcher context is degraded.
+        // eslint-disable-next-line no-console
+        console.warn('[escalate] buildSummary threw — proceeding without summary', {
+          tenantId,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Reset escalationId too since we have no summary to pair it with.
+        escalationId = undefined;
+      }
+    }
 
     // Build the dial TwiML. Action URL is required so Twilio POSTs the
     // outcome to /dial-result. Caller passes it via `dialActionUrl`;
     // when missing we still produce a transfer descriptor with a
     // best-effort placeholder so the adapter can recover.
-    const fallbackTwiml = callControl.dialDispatcher(
-      callSid ?? sessionId,
-      chosen.phone,
-      {
-        actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
-      },
-    );
+    // When callControl is not wired (summary-only path), fallbackTwiml is
+    // undefined — adapters must guard on this and not send an empty string
+    // to Twilio (which would return HTTP 400).
+    const fallbackTwiml: string | undefined = callControl
+      ? callControl.dialDispatcher(
+          callSid ?? sessionId,
+          chosen.phone,
+          {
+            actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+          },
+        )
+      : undefined;
 
     if (auditRepo) {
       await auditRepo.create(
@@ -353,11 +485,14 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         rotationEntryId: chosen.entry.id,
         dispatcherUserId: chosen.entry.userId,
         rotationIndex: chosen.index,
+        summary,
+        escalationId,
+        channelPreferences: input.channelPreferences ?? { sms: true, in_app: true, whisper: true },
       },
     };
   }
 
-  // Default branch (in-app, or telephony without callControl wired).
+  // Default branch (in-app, or telephony without dispatcherPhoneResolver).
   // ─────────────────────────────────────────────────────────────────
   // Look up next on-call dispatcher
   const entry = await onCallRepo.getNextOnCall(tenantId);

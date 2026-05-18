@@ -20,6 +20,7 @@ import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
+import { CallRoutingSheet } from './CallRoutingSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -122,6 +123,7 @@ export function SettingsPage() {
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
+  const [callRoutingOpen, setCallRoutingOpen] = useState(false);
   // Tier 4 (Calendar sync — PR 1). Auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
   // server-side callback redirects to /settings?calendar_connected=1
@@ -253,6 +255,7 @@ export function SettingsPage() {
         { icon: Zap,      label: 'AI approval rules',               description: 'Set what the AI can apply automatically',    action: () => setAiRulesOpen(true) },
         { icon: Bell,     label: 'Reminders & follow-ups',          description: 'Auto-send thresholds and timing',             action: () => toast.info('Coming soon') },
         { icon: FileText, label: 'Estimate & invoice templates',    description: 'Default line items, terms, expiry',           action: () => navigate('/settings/templates') },
+        { icon: Zap,      label: 'Call routing & handoff',          description: 'Channels, triggers, and AI sentiment gate',   action: () => setCallRoutingOpen(true) },
       ],
     },
     {
@@ -681,6 +684,12 @@ export function SettingsPage() {
       {verticalPacksOpen && (
         <VerticalPacksSheet onClose={() => setVerticalPacksOpen(false)} />
       )}
+
+      {/* Call routing & handoff sheet — channels, triggers, AI sentiment gate. */}
+      <CallRoutingSheet
+        open={callRoutingOpen}
+        onOpenChange={setCallRoutingOpen}
+      />
     </div>
   );
 }

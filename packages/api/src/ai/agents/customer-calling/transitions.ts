@@ -206,6 +206,59 @@ function checkGlobalGuards(
     };
   }
 
+  // operator_request from any non-terminal state fast-paths to escalation.
+  // Idempotent: skip if already in a terminal/escalating state.
+  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      escalationReason: 'operator_request',
+    };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', 'operator_request'),
+        ttsPlay("Of course — let me connect you with a person right now."),
+        notifyOncall(updatedContext, 'operator_request'),
+      ],
+      updatedContext,
+    };
+  }
+
+  // frustration_detected fires from keyword detector or LLM sentiment classifier.
+  // Idempotent: skip if already in a terminal/escalating state.
+  if (event.type === 'frustration_detected') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const escalationReason: CallingAgentContext['escalationReason'] =
+      event.source === 'keyword' ? 'keyword_frustration' : 'llm_sentiment';
+    const updatedContext: CallingAgentContext = { ...context, escalationReason };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', escalationReason),
+        {
+          type: 'emit_quality_event',
+          payload: {
+            eventType: 'frustration_escalation',
+            trigger: escalationReason,
+            keyword: event.detail ?? null,
+            source: event.source,
+          },
+        },
+        ttsPlay("I understand. Let me get a person on the line for you right away."),
+        notifyOncall(updatedContext, escalationReason),
+      ],
+      updatedContext,
+    };
+  }
+
   return null;
 }
 
@@ -389,6 +442,7 @@ function transitionIntentCapture(
       };
     }
 
+    // operator_request is handled by checkGlobalGuards and never reaches here.
     // Confidence at or above threshold → entity_resolution
     if (event.confidence >= TAU_INT) {
       const updatedContext: CallingAgentContext = {
@@ -616,6 +670,7 @@ function transitionIntentConfirm(
     };
   }
 
+  // operator_request is handled by checkGlobalGuards and never reaches here.
   // intent_classified in intent_confirm → treat as correction
   if (event.type === 'intent_classified') {
     return {
@@ -690,6 +745,7 @@ function transitionClosing(
     };
   }
 
+  // operator_request is handled by checkGlobalGuards and never reaches here.
   // intent_classified in closing → treat as second intent (loop back)
   if (event.type === 'intent_classified') {
     return {

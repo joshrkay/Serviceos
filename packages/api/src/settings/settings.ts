@@ -4,6 +4,47 @@ import { ValidationError } from '../shared/errors';
 import { isValidTimezone } from '../shared/timezone';
 
 /**
+ * F8 — per-tenant escalation channel + trigger flags.
+ *
+ * Stored as a JSON column on tenant_settings (migration deferred to the
+ * full F8 data-plane PR). Until then, the field is purely in-memory and
+ * resolved at runtime via `resolveEscalationSettings`.
+ */
+export interface EscalationSettings {
+  channel_sms: boolean;
+  channel_in_app: boolean;
+  channel_whisper: boolean;
+  trigger_low_confidence: boolean;
+  trigger_explicit_request: boolean;
+  trigger_keyword_frustration: boolean;
+  /** Opt-in: async LLM sentiment classifier. Default false (cost-aware). */
+  trigger_llm_sentiment: boolean;
+  /** Frustration score (0..1) above which `frustration_detected` is dispatched. */
+  llm_sentiment_threshold: number;
+}
+
+export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
+  channel_sms: true,
+  channel_in_app: true,
+  channel_whisper: true,
+  trigger_low_confidence: true,
+  trigger_explicit_request: true,
+  trigger_keyword_frustration: true,
+  trigger_llm_sentiment: false,
+  llm_sentiment_threshold: 0.7,
+};
+
+/**
+ * Resolve escalation settings for a tenant, falling back to defaults for
+ * any missing field. Safe to call with `null` (tenant has no settings row).
+ */
+export function resolveEscalationSettings(
+  settings: TenantSettings | null,
+): EscalationSettings {
+  return { ...DEFAULT_ESCALATION_SETTINGS, ...(settings?.escalationSettings ?? {}) };
+}
+
+/**
  * Phase 12 — supervisor-mode-related settings on tenant_settings.
  *
  * Schema lives in migration 063 (P12-001). The repository round-trips
@@ -127,6 +168,11 @@ export interface TenantSettings {
    * the custom greeting text. Null = use default.
    */
   voiceGreeting?: string | null;
+  /**
+   * F8 — per-tenant escalation channel + trigger flags. When absent,
+   * `resolveEscalationSettings` returns `DEFAULT_ESCALATION_SETTINGS`.
+   */
+  escalationSettings?: EscalationSettings;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -180,6 +226,8 @@ export interface UpdateSettingsInput {
   voiceAgentName?: string | null;
   /** B1 — custom greeting text; null clears the field. */
   voiceGreeting?: string | null;
+  /** F8 — per-tenant escalation settings; partial — missing keys fall back to DEFAULT_ESCALATION_SETTINGS. */
+  escalationSettings?: Partial<EscalationSettings>;
 }
 
 export interface SettingsRepository {

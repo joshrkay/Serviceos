@@ -19,7 +19,7 @@ export interface DncCheckResult {
 
 export interface DncRepository {
   isOnDnc(tenantId: string, normalizedPhone: string): Promise<boolean>;
-  addToDnc(tenantId: string, normalizedPhone: string, addedBy: string): Promise<void>;
+  addToDnc(tenantId: string, normalizedPhone: string, source: string): Promise<void>;
   removeFromDnc(tenantId: string, normalizedPhone: string): Promise<void>;
 }
 
@@ -54,23 +54,21 @@ export class PgDncRepository extends PgBaseRepository implements DncRepository {
     });
   }
 
-  async addToDnc(tenantId: string, normalizedPhone: string, addedBy: string): Promise<void> {
-    await this.withTenant(tenantId, async (client) => {
+  async addToDnc(tenantId: string, normalizedPhone: string, source: string): Promise<void> {
+    return this.withTenant(tenantId, async (client) => {
       await client.query(
-        `INSERT INTO tenant_dnc_list (id, tenant_id, phone, added_by, created_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+        `INSERT INTO tenant_dnc_list (tenant_id, phone, source, created_at)
+         VALUES ($1, $2, $3, NOW())
          ON CONFLICT (tenant_id, phone) DO NOTHING`,
-        [tenantId, normalizedPhone, addedBy]
+        [tenantId, normalizedPhone, source]
       );
     });
   }
 
   async removeFromDnc(tenantId: string, normalizedPhone: string): Promise<void> {
-    await this.withTenant(tenantId, async (client) => {
+    return this.withTenant(tenantId, async (client) => {
       await client.query(
-        `DELETE FROM tenant_dnc_list
-         WHERE tenant_id = $1
-           AND ($2 LIKE '%' || phone OR phone LIKE '%' || $2)`,
+        `DELETE FROM tenant_dnc_list WHERE tenant_id = $1 AND phone = $2`,
         [tenantId, normalizedPhone]
       );
     });
@@ -102,17 +100,11 @@ export class InMemoryDncRepository implements DncRepository {
     return false;
   }
 
-  async addToDnc(tenantId: string, normalizedPhone: string, _addedBy: string): Promise<void> {
+  async addToDnc(tenantId: string, normalizedPhone: string, _source: string): Promise<void> {
     this.add(tenantId, normalizedPhone);
   }
 
   async removeFromDnc(tenantId: string, normalizedPhone: string): Promise<void> {
-    const set = this.entries.get(tenantId);
-    if (!set) return;
-    for (const stored of [...set]) {
-      if (normalizedPhone.endsWith(stored) || stored.endsWith(normalizedPhone)) {
-        set.delete(stored);
-      }
-    }
+    this.entries.get(tenantId)?.delete(normalizedPhone);
   }
 }

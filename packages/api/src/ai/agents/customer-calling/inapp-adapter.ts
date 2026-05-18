@@ -645,6 +645,11 @@ export class InAppVoiceAdapter {
           // the event bus is telephony-specific. Handled here to satisfy
           // the exhaustiveness guard.
           break;
+        case 'escalate_with_context':
+          // Section 7 will wire the full escalate_with_context fan-out
+          // (SMS, whisper, in-app panel) in the telephony adapter.
+          // No-op here until the in-app channel gets escalation support.
+          break;
         default: {
           // Exhaustiveness guard: future SideEffectType additions
           // surface as a typecheck error here.
