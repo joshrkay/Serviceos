@@ -24,6 +24,8 @@ export interface TranscriptTurn {
 
 export interface EscalationContext {
   shopName: string;
+  /** IANA timezone (e.g. "America/New_York"). Defaults to UTC if omitted. */
+  tenantTimezone?: string;
   caller: {
     name?: string;
     phone: string;
@@ -124,14 +126,17 @@ function formatPhone(phone: string): string {
     const d = digits.slice(1);
     return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
   }
+  if (digits.length === 10) {
+    return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
   return phone;
 }
 
-function lastInteractionText(customer?: EscalationContext['customer']): string | null {
+function lastInteractionText(customer?: EscalationContext['customer'], timeZone = 'UTC'): string | null {
   if (!customer?.lastService) return null;
   const { date, type, amountCents } = customer.lastService;
-  const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  const amount = amountCents != null ? `, $${(amountCents / 100).toFixed(0)}` : '';
+  const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone });
+  const amount = amountCents != null ? `, $${(amountCents / 100).toFixed(2)}` : '';
   return `Last service: ${dateStr} — ${type}${amount}`;
 }
 
@@ -141,17 +146,10 @@ function entitiesAsList(entities: Record<string, unknown>): ReadonlyArray<{ key:
     .map(([k, v]) => ({ key: k, value: String(v) }));
 }
 
-export function buildEscalationSummary(ctx: EscalationContext): EscalationSummary {
-  const callerName = ctx.caller.name?.trim() || 'Unknown caller';
-  const phoneReadable = formatPhone(ctx.caller.phone);
-  const intent = intentShort(ctx.intent);
-  const member = membershipPhrase(ctx.customer);
-  const reasonText = reasonShort(ctx.reason);
-
-  // Whisper: target ≤25 words. Drop membership phrase if needed.
-  const whisperFull = [
+function buildWhisperString(callerName: string, intentText: string, member: string, reasonText: string): string {
+  return [
     `Incoming call from ${callerName}.`,
-    capitalizeFirst(`${intent}.`),
+    capitalizeFirst(`${intentText}.`),
     member,
     `Reason: ${reasonText}.`,
   ]
@@ -159,15 +157,63 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
 
-  const whisper = ensureMaxWords(whisperFull, 25);
+function smartTruncate(s: string, maxWords: number): string {
+  const words = s.split(/\s+/);
+  if (words.length <= maxWords) return s;
+  // Truncate to maxWords, then walk back to the last sentence terminator.
+  const truncated = words.slice(0, maxWords).join(' ');
+  const lastPeriod = Math.max(
+    truncated.lastIndexOf('.'),
+    truncated.lastIndexOf('?'),
+    truncated.lastIndexOf('!'),
+  );
+  if (lastPeriod >= truncated.length / 2) {
+    // We have at least half the content ending at a sentence boundary — good.
+    return truncated.slice(0, lastPeriod + 1);
+  }
+  // No clean break; strip trailing punctuation/preposition and add a period.
+  const stripped = truncated.replace(/[:;,]+$/, '').replace(/\s+(of|and|the|a|to|in|on|for|with|from)$/i, '');
+  return `${stripped}.`;
+}
 
-  // SMS: target ≤160 chars. Short link placeholder; route resolves to mobile panel.
+export function buildEscalationSummary(ctx: EscalationContext): EscalationSummary {
+  const callerName = ctx.caller.name?.trim() || 'Unknown caller';
+  const phoneReadable = formatPhone(ctx.caller.phone);
+  const intent = intentShort(ctx.intent);
+  const member = membershipPhrase(ctx.customer);
+  const reasonText = reasonShort(ctx.reason);
+
+  // Whisper: target ≤25 words. Drop membership phrase if needed, then smart-truncate.
+  const whisperFull = buildWhisperString(callerName, intent, member, reasonText);
+  let whisper: string;
+  if (whisperFull.split(/\s+/).length <= 25) {
+    whisper = whisperFull;
+  } else {
+    // Try dropping the membership phrase first.
+    const withoutMember = buildWhisperString(callerName, intent, '', reasonText);
+    if (withoutMember.split(/\s+/).length <= 25) {
+      whisper = withoutMember;
+    } else {
+      whisper = smartTruncate(withoutMember, 25);
+    }
+  }
+
+  // SMS: target ≤160 chars. Always reserve space for the link; truncate core at word boundary.
   const linkPlaceholder = `app.serviceos.app/c/<escalationId>`;
-  const smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${reasonText}.`;
-  const sms = (smsCore.length + linkPlaceholder.length + 1 <= 160)
-    ? `${smsCore} ${linkPlaceholder}`
-    : `${smsCore}`.slice(0, 160);
+  const linkBudget = linkPlaceholder.length + 1; // space before link
+  const coreBudget = 160 - linkBudget;
+
+  let smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${reasonText}.`;
+
+  if (smsCore.length > coreBudget) {
+    // Truncate at last word boundary within budget, append ellipsis.
+    const cutAt = smsCore.lastIndexOf(' ', coreBudget - 1);
+    smsCore = (cutAt > 0 ? smsCore.slice(0, cutAt) : smsCore.slice(0, coreBudget - 1)) + '…';
+  }
+
+  const sms = `${smsCore} ${linkPlaceholder}`;
 
   const panel: PanelData = {
     header: {
@@ -180,7 +226,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
       phone: phoneReadable,
       tags: ctx.caller.tags ?? [],
     },
-    lastInteraction: lastInteractionText(ctx.customer),
+    lastInteraction: lastInteractionText(ctx.customer, ctx.tenantTimezone),
     intent: {
       summary: `Calling about: ${intent}`,
       entities: entitiesAsList(ctx.intent.entities),
@@ -197,10 +243,4 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
 
 function capitalizeFirst(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
-}
-
-function ensureMaxWords(s: string, maxWords: number): string {
-  const words = s.split(/\s+/);
-  if (words.length <= maxWords) return s;
-  return words.slice(0, maxWords).join(' ');
 }
