@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { toast } from 'sonner';
 
@@ -31,6 +31,7 @@ interface Props {
 
 export function CallRoutingSheet({ open, onOpenChange }: Props) {
   const [settings, setSettings] = useState<EscalationSettings>(DEFAULTS);
+  const updateSeqRef = useRef(0);
 
   useEffect(() => {
     if (!open) return;
@@ -53,8 +54,10 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
   }, [open]);
 
   async function update(patch: Partial<EscalationSettings>) {
+    const prevSettings = settings;
     const next = { ...settings, ...patch };
     setSettings(next);
+    const seq = ++updateSeqRef.current;
     try {
       const res = await apiFetch('/api/settings', {
         method: 'PUT',
@@ -63,8 +66,11 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
       });
       if (!res.ok) throw new Error(`PUT /api/settings ${res.status}`);
     } catch {
-      toast.error('Could not save preference');
-      setSettings(settings);
+      // Only roll back if this is still the most recent update attempt.
+      if (seq === updateSeqRef.current) {
+        toast.error('Could not save preference');
+        setSettings(prevSettings);
+      }
     }
   }
 

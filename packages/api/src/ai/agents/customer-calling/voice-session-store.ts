@@ -215,6 +215,15 @@ export class VoiceSessionStore {
    */
   private readonly globalListeners = new Set<(evt: VoiceSessionEvent) => void>();
   /**
+   * Hooks fired by create() each time a new session is added. Each
+   * subscribeGlobal() subscriber registers one hook here so it can attach
+   * a per-subscriber forwarder to the new session's emitter. This avoids
+   * the anonymous-closure leak in the old create() implementation, where
+   * a single shared closure iterated globalListeners at emit time and
+   * could never be removed when a subscriber unsubscribed.
+   */
+  private readonly sessionCreatedListeners = new Set<(session: VoiceSession) => void>();
+  /**
    * Secondary index: Twilio CallSid → sessionId. Maintained on
    * create/delete so findByCallSid is O(1) instead of an O(n) scan
    * across all active sessions.
@@ -281,44 +290,61 @@ export class VoiceSessionStore {
       lastActivityAt: now,
       events,
     };
-    // Forward all events from this session to registered global listeners.
-    // This enables the escalation SSE route to receive escalation_started
-    // events from any active session without knowing the session id upfront.
-    if (this.globalListeners.size > 0) {
-      events.on(STORE_VOICE_EVENT_CHANNEL, (evt: VoiceSessionEvent) => {
-        for (const listener of this.globalListeners) {
-          listener(evt);
-        }
-      });
-    }
     this.sessions.set(id, session);
     if (opts.callSid) this.callSidIndex.set(opts.callSid, id);
+    // Notify each subscribeGlobal() subscriber so it can attach its own
+    // per-subscriber forwarder to the new session. This replaces the old
+    // anonymous-closure approach (which iterated globalListeners at emit
+    // time and could never be cleaned up on unsubscribe).
+    for (const listener of this.sessionCreatedListeners) {
+      listener(session);
+    }
     return session;
   }
 
   /**
    * Subscribe to all VoiceSessionEvents emitted by any current or future
    * session. Used by the escalation SSE route. Returns an unsubscribe
-   * function.
+   * function that cleanly removes all per-session forwarders registered by
+   * this subscriber.
    *
-   * Note: only sessions created AFTER this call will have the listener
-   * automatically attached. Existing active sessions at subscription time
-   * do not retroactively receive the listener — acceptable because the
-   * typical use case (browser SSE connect on page load) happens before
-   * escalation calls arrive.
+   * Each subscriber gets its own named forwarder per session so that
+   * unsubscribing removes only that subscriber's listeners — not listeners
+   * from other concurrent subscribers.
    */
   subscribeGlobal(callback: (evt: VoiceSessionEvent) => void): () => void {
     this.globalListeners.add(callback);
-    // Also attach to all currently-active sessions so reconnecting SSE
-    // clients don't miss events on in-flight calls.
+
+    // Track per-session forwarders for THIS subscriber so we can detach
+    // them on unsubscribe without touching other subscribers' forwarders.
+    const sessionForwarders = new Map<string, (evt: VoiceSessionEvent) => void>();
+
+    const attachToSession = (session: VoiceSession): void => {
+      const forwarder = (evt: VoiceSessionEvent): void => callback(evt);
+      sessionForwarders.set(session.id, forwarder);
+      session.events.on(STORE_VOICE_EVENT_CHANNEL, forwarder);
+    };
+
+    // Attach to all currently-active sessions so reconnecting SSE clients
+    // don't miss events on in-flight calls.
     for (const session of this.sessions.values()) {
-      session.events.on(STORE_VOICE_EVENT_CHANNEL, callback);
+      attachToSession(session);
     }
+
+    // Register hook so future sessions created after this subscribe call
+    // also get this subscriber's forwarder attached immediately.
+    this.sessionCreatedListeners.add(attachToSession);
+
     return () => {
       this.globalListeners.delete(callback);
-      for (const session of this.sessions.values()) {
-        session.events.off(STORE_VOICE_EVENT_CHANNEL, callback);
+      this.sessionCreatedListeners.delete(attachToSession);
+      for (const [sessionId, forwarder] of sessionForwarders) {
+        const session = this.sessions.get(sessionId);
+        if (session) {
+          session.events.off(STORE_VOICE_EVENT_CHANNEL, forwarder);
+        }
       }
+      sessionForwarders.clear();
     };
   }
 
