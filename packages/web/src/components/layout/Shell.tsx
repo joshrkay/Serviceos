@@ -23,6 +23,10 @@ import {
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
+import {
+  usePendingProposals,
+  type PendingProposalSummary,
+} from '../../hooks/usePendingProposals';
 
 interface NavItem {
   to: string;
