@@ -57,6 +57,8 @@ import {
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
+import type { EscalationSettings } from '../../settings/settings';
+import type { SentimentInput, SentimentResult } from '../../ai/agents/customer-calling/sentiment-classifier';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -224,6 +226,21 @@ export interface MediaStreamAdapterDeps {
    * Wire via: `gatherAdapter.setPendingTransferTwiml.bind(gatherAdapter)`
    */
   setPendingTransferTwiml?: (sessionId: string, twiml: string) => void;
+  /**
+   * F6c — async LLM sentiment classifier. When present and per-tenant
+   * `escalationSettings.trigger_llm_sentiment` is true, the adapter
+   * calls this after each `speechTurn` in a fire-and-forget manner.
+   * If the returned frustrationScore >= threshold, a `frustration_detected`
+   * FSM event is dispatched out-of-band and the resulting side effects executed.
+   */
+  sentimentClassifier?: (input: SentimentInput) => Promise<SentimentResult>;
+  /**
+   * F6c + F8 — per-tenant escalation settings resolved before the WS
+   * session starts (or refreshed per-turn if needed). Used to gate
+   * `trigger_llm_sentiment` and read `llm_sentiment_threshold`.
+   * Optional — when absent, LLM sentiment is disabled.
+   */
+  escalationSettings?: EscalationSettings;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -611,6 +628,17 @@ export class TwilioMediaStreamAdapter {
 
     await this.emitSideEffects(sideEffects);
 
+    // B3.3 — async LLM sentiment classifier. Gated by per-tenant settings.
+    // Fire-and-forget so it never blocks the audio response path.
+    if (this.deps.sentimentClassifier && this.deps.escalationSettings?.trigger_llm_sentiment) {
+      void this.runSentimentCheckAndMaybeEscalate(session, event.transcript, sideEffects).catch(
+        (err) =>
+          logger.warn('sentiment check failed', {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+      );
+    }
+
     // FSM may have terminated this turn — close the call.
     if (sideEffects.some((fx) => fx.type === 'end_session')) {
       // B2: stash the dispatch's effects so the finalize hook can read
@@ -619,6 +647,63 @@ export class TwilioMediaStreamAdapter {
       this.state.pendingFinalizeEffects = sideEffects;
       this.handleClose('end_session');
     }
+  }
+
+  /**
+   * B3.3 — Run the async LLM sentiment classifier and, if the score
+   * meets or exceeds the per-tenant threshold, dispatch
+   * `frustration_detected` out-of-band into the FSM and execute the
+   * resulting side effects. The FSM's idempotency guard handles
+   * double-fires correctly (keyword detector may have already fired).
+   */
+  private async runSentimentCheckAndMaybeEscalate(
+    session: VoiceSession,
+    transcript: string,
+    priorTurnEffects: SideEffect[],
+  ): Promise<void> {
+    const priorTurns = this.extractPriorTurns(session, 4);
+    const intent =
+      (priorTurnEffects.find((fx) => fx.type === 'audit_log')?.payload as { intent?: string } | undefined)
+        ?.intent ?? 'unknown';
+
+    const result = await this.deps.sentimentClassifier!({
+      transcript,
+      priorTurns,
+      intent,
+    });
+
+    const threshold = this.deps.escalationSettings!.llm_sentiment_threshold;
+    if (result.frustrationScore >= threshold) {
+      const newEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'llm_sentiment',
+        detail: result.frustrationScore.toFixed(2),
+      });
+      await this.emitSideEffects(newEffects);
+    }
+  }
+
+  /**
+   * Extract the last `n` caller + AI turns from the session transcript
+   * in the format `{ role, text }` the sentiment classifier expects.
+   * The session transcript stores strings like `"caller: text"` and
+   * `"agent: text"`.
+   */
+  private extractPriorTurns(
+    session: VoiceSession,
+    n: number,
+  ): ReadonlyArray<{ role: 'caller' | 'ai'; text: string }> {
+    const snapshot = [...session.transcript].slice(-n);
+    return snapshot
+      .map((line) => {
+        const colonIdx = line.indexOf(': ');
+        if (colonIdx === -1) return null;
+        const speaker = line.slice(0, colonIdx);
+        const text = line.slice(colonIdx + 2);
+        const role: 'caller' | 'ai' = speaker === 'caller' ? 'caller' : 'ai';
+        return { role, text };
+      })
+      .filter((t): t is { role: 'caller' | 'ai'; text: string } => t !== null);
   }
 
   // ─── Outbound: TTS → μ-law → media frame ───────────────────────────────────
