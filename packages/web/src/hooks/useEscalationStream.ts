@@ -32,57 +32,72 @@ export function useEscalationStream(): UseEscalationStream {
 
   useEffect(() => {
     let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const subscribe = async () => {
+    const subscribe = async (attempt = 0): Promise<void> => {
+      if (cancelled) return;
       sseAbortRef.current?.abort();
       const controller = new AbortController();
       sseAbortRef.current = controller;
 
-      const token = await getToken();
-      const headers: Record<string, string> = { Accept: 'text/event-stream' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-
-      let response: Response;
       try {
-        response = await fetch('/api/escalations/events', {
+        const token = await getToken();
+        const headers: Record<string, string> = { Accept: 'text/event-stream' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+
+        const response = await fetch('/api/escalations/events', {
           method: 'GET',
           headers,
           signal: controller.signal,
         });
-      } catch {
-        return;
-      }
 
-      if (!response.ok || !response.body) return;
+        if (response.status === 401 || response.status === 403) {
+          // Auth failure — don't keep retrying.
+          return;
+        }
+        if (!response.ok || !response.body) {
+          throw new Error(`SSE failed: ${response.status}`);
+        }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done || cancelled) break;
-          buffer += decoder.decode(value, { stream: true });
-          let idx: number;
-          while ((idx = buffer.indexOf('\n\n')) !== -1) {
-            const eventBlock = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
-            for (const line of eventBlock.split('\n')) {
-              if (line.startsWith('data:')) {
-                try {
-                  const evt = JSON.parse(line.slice(5).trim()) as EscalationEvent;
-                  if (evt.type === 'escalation_started') {
-                    setActiveEscalations((prev) => [...prev, evt]);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done || cancelled) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx: number;
+            while ((idx = buffer.indexOf('\n\n')) !== -1) {
+              const eventBlock = buffer.slice(0, idx);
+              buffer = buffer.slice(idx + 2);
+              for (const line of eventBlock.split('\n')) {
+                if (line.startsWith('data:')) {
+                  try {
+                    const evt = JSON.parse(line.slice(5).trim()) as EscalationEvent;
+                    if (evt.type === 'escalation_started') {
+                      setActiveEscalations((prev) => [...prev, evt]);
+                    }
+                  } catch {
+                    // ignore malformed
                   }
-                } catch {
-                  // ignore malformed
                 }
               }
             }
           }
+        } catch {
+          // aborted or stream broken — fall through to reconnect
+        }
+
+        // Stream closed cleanly — reconnect with backoff.
+        if (!cancelled) {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
+          reconnectTimer = setTimeout(() => void subscribe(attempt + 1), delay);
         }
       } catch {
-        // aborted or stream broken
+        if (cancelled) return;
+        const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
+        reconnectTimer = setTimeout(() => void subscribe(attempt + 1), delay);
       }
     };
 
@@ -90,6 +105,7 @@ export function useEscalationStream(): UseEscalationStream {
     return () => {
       cancelled = true;
       sseAbortRef.current?.abort();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
   }, [getToken]);
 
