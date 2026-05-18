@@ -1,4 +1,4 @@
-import { detectOverlappingAppointments } from '../dispatch/validation';
+import { detectOverlappingAppointments, detectAvailabilityConflicts } from '../dispatch/validation';
 import {
   FeasibilityInput, FeasibilityDependencies, FeasibilityResult,
   FeasibilityIssue, TravelTimeSummary,
@@ -48,6 +48,30 @@ async function overlapIssues(
   }));
 }
 
+async function availabilityIssues(
+  input: FeasibilityInput,
+  deps: FeasibilityDependencies,
+): Promise<FeasibilityIssue[]> {
+  const dayOfWeek = input.proposedScheduledStart.getUTCDay();
+  const wh = await deps.workingHoursRepo.findByTechnicianAndDay(
+    input.tenantId, input.proposedTechnicianId, dayOfWeek,
+  );
+  const blocks = await deps.unavailableBlockRepo.findByTechnicianAndDateRange(
+    input.tenantId, input.proposedTechnicianId,
+    input.proposedScheduledStart, input.proposedScheduledEnd,
+  );
+  const conflicts = detectAvailabilityConflicts(
+    input.proposedScheduledStart, input.proposedScheduledEnd,
+    wh, blocks, deps.timezone ?? input.appointment.timezone ?? 'UTC',
+  );
+  return conflicts.map((c) => ({
+    check: (c.type === 'outside_working_hours' ? 'working_hours' : 'unavailable_block') as FeasibilityIssue['check'],
+    severity: 'warning' as const,
+    message: c.message,
+    conflictingEntityId: c.conflictingEntityId,
+  }));
+}
+
 function partition(issues: FeasibilityIssue[], travelTime: TravelTimeSummary | null): FeasibilityResult {
   const blocking = issues.filter((i) => i.severity === 'blocking');
   const warnings = issues.filter((i) => i.severity === 'warning');
@@ -63,6 +87,9 @@ export async function checkFeasibility(
   input: FeasibilityInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityResult> {
-  const all = await overlapIssues(input, deps);
-  return partition(all, null);
+  const [overlap, availability] = await Promise.all([
+    overlapIssues(input, deps),
+    availabilityIssues(input, deps),
+  ]);
+  return partition([...overlap, ...availability], null);
 }

@@ -34,7 +34,7 @@ function depsWith(siblings: Appointment[], technicianId: string): FeasibilityDep
     jobRepo: { findById: async () => null } as any,
     locationRepo: { findById: async () => null } as any,
     workingHoursRepo: { findByTechnicianAndDay: async () => null } as any,
-    unavailableBlockRepo: { findByTechnicianInRange: async () => [] } as any,
+    unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
     skillMatcher: new StubSkillMatcher(),
   };
