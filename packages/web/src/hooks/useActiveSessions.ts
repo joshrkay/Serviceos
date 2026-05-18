@@ -63,7 +63,10 @@ async function fetchActiveSessions(token: string): Promise<ActiveSessionDTO[]> {
   const res = await fetch('/api/voice/sessions/active', {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!res.ok) return [];
+  // Throw on non-2xx so the caller's catch keeps the previous session
+  // state instead of treating a transient 401/500/proxy blip as
+  // "tenant has zero sessions" and flapping the wall to empty.
+  if (!res.ok) throw new Error(`/active responded ${res.status}`);
   const body = (await res.json()) as { sessions?: ActiveSessionDTO[] };
   return Array.isArray(body.sessions) ? body.sessions : [];
 }
