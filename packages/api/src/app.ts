@@ -120,7 +120,7 @@ import { InMemoryPaymentRepository } from './invoices/payment';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
 import { InMemoryNoteRepository } from './notes/note';
 import { InMemoryConversationRepository } from './conversations/conversation-service';
-import { InMemorySettingsRepository } from './settings/settings';
+import { InMemorySettingsRepository, resolveEscalationSettings } from './settings/settings';
 import { InMemoryAuditRepository } from './audit/audit';
 import { InMemoryLookupEventRepository } from './lookup-events/lookup-event';
 import { PgLookupEventRepository } from './lookup-events/pg-lookup-event';
@@ -2089,7 +2089,12 @@ export function createApp(): express.Express {
             // F6c: LLM-backed sentiment classifier. Only fires when
             // escalationSettings.trigger_llm_sentiment is true.
             ...(sentimentClassifierDep ? { sentimentClassifier: sentimentClassifierDep } : {}),
-            // escalationSettings: resolved per-tenant — see TODO above.
+            // F6c (per-tenant): resolve escalation settings at WS session start
+            // so CallRoutingSheet toggle changes take effect on the next call.
+            resolveEscalationSettings: async (tenantId: string) => {
+              const settings = await settingsRepo.findByTenant(tenantId);
+              return resolveEscalationSettings(settings);
+            },
           },
         );
         return server;
