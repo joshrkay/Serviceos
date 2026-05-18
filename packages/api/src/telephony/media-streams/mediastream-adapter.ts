@@ -32,6 +32,7 @@ import type {
 import type { TtsProvider } from '../../ai/tts/tts-provider';
 import type { VoiceSession, VoiceSessionStore } from '../../ai/agents/customer-calling/voice-session-store';
 import type { SideEffect } from '../../ai/agents/customer-calling/types';
+import type { EscalateWithContextPayload } from '../../ai/agents/customer-calling/types';
 import {
   decodeTwilioInboundFrame,
   encodeTwilioOutboundFrame,
@@ -49,8 +50,12 @@ import {
   repairTemplateFiredEvent,
   fillerFiredEvent,
   fillerCancelledEvent,
+  escalationStartedEvent,
+  escalationSummaryBuiltEvent,
 } from '../../ai/voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
+import type { WhisperCache } from '../whisper-cache';
+import type { TwilioCallControl } from '../twilio-call-control';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -180,6 +185,33 @@ export interface MediaStreamAdapterDeps {
   };
   /** Override for the 250ms filler threshold (ms). Default 250. */
   fillerDelayMs?: number;
+  /**
+   * Section 7 — escalate_with_context fan-out deps.
+   * When present, handleEscalateWithContext stores whisper TwiML so the
+   * /whisper/:escalationId webhook can serve it to the dispatcher's leg.
+   */
+  whisperCache?: WhisperCache;
+  /**
+   * Section 7 — delivery provider for dispatcher SMS. Optional so
+   * existing test fixtures continue to work without DI'ing a stub.
+   */
+  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * Section 7 — used to build the whisper webhook URL and the dial-action
+   * URL injected into the <Dial> TwiML.
+   * Falls back to relative paths when absent.
+   */
+  publicBaseUrl?: string;
+  /**
+   * Section 7 — Twilio call-control surface used to emit the <Dial>
+   * TwiML that bridges the caller to the dispatcher with whisper.
+   * When absent, the Dial step is skipped gracefully.
+   *
+   * Whisper-route mounting note: mount the whisper router inside
+   * createTelephonyRouter so it inherits requireTwilioSignature.
+   * Full wiring in app.ts is deferred to Section 12.
+   */
+  callControl?: TwilioCallControl;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -244,6 +276,14 @@ interface RuntimeState {
    * TTFA emission and to coordinate filler/real-TTS cancellation.
    */
   fillerActive: boolean;
+  /**
+   * Section 7 — pending <Dial> TwiML produced by handleEscalateWithContext.
+   * Initialized to null; set when the escalation fan-out builds the
+   * Dial TwiML. The route layer reads this via takePendingTransferTwiml()
+   * on the next gather webhook response so the call bridges to the
+   * dispatcher with whisper.
+   */
+  pendingTransferTwiml: string | null;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -328,6 +368,7 @@ export class TwilioMediaStreamAdapter {
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
       fillerActive: false,
+      pendingTransferTwiml: null,
     };
   }
 
@@ -585,6 +626,10 @@ export class TwilioMediaStreamAdapter {
         }
         continue;
       }
+      if (fx.type === 'escalate_with_context') {
+        void this.handleEscalateWithContext(fx.payload as unknown as EscalateWithContextPayload);
+        continue;
+      }
       if (fx.type !== 'tts_play') continue;
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
       if (!text) continue;
@@ -603,6 +648,90 @@ export class TwilioMediaStreamAdapter {
           this.state.agentSpeaking = false;
         }
       }
+    }
+  }
+
+  /**
+   * Section 7 — Fan out the escalate_with_context side effect to three
+   * parallel channels: whisper TwiML cache, dispatcher SMS, and in-app
+   * SSE event. Builds and stashes the <Dial> TwiML with whisperUrl so
+   * the next gather-webhook response bridges the call to the dispatcher.
+   *
+   * All channels are independently opt-in via channelPreferences and
+   * fail gracefully — a failed SMS send is logged and swallowed, never
+   * blocking the Dial TwiML or in-app notification.
+   *
+   * Whisper-route mounting: mount inside createTelephonyRouter so it
+   * inherits requireTwilioSignature. Full wiring deferred to Section 12.
+   */
+  private async handleEscalateWithContext(
+    payload: EscalateWithContextPayload,
+  ): Promise<void> {
+    const startMs = Date.now();
+    const { escalationId, summary, dispatcher, callSid, channelPreferences } = payload;
+
+    // 1) Store whisper text in cache for Twilio's webhook fetch (no-op if disabled).
+    if (channelPreferences.whisper && this.deps.whisperCache) {
+      this.deps.whisperCache.set(escalationId, summary.whisper);
+    }
+
+    // 2) Send dispatcher SMS in parallel (no-op if disabled).
+    let smsPromise: Promise<unknown> = Promise.resolve();
+    if (channelPreferences.sms && this.deps.deliveryProvider) {
+      const smsBody = summary.sms.replace('<escalationId>', escalationId);
+      smsPromise = this.deps.deliveryProvider
+        .sendSms({ to: dispatcher.phone, body: smsBody })
+        .catch((err) => {
+          logger.warn('escalate_with_context: SMS dispatch failed', {
+            escalationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    }
+
+    // 3) Emit in-app SSE event (no-op if disabled or no active session).
+    if (channelPreferences.in_app && this.state.session) {
+      this.state.session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        escalationStartedEvent({
+          escalationId,
+          reason: summary.panel.reason.code,
+          dispatcherUserId: dispatcher.userId,
+        }),
+      );
+    }
+
+    // 4) Build <Dial> with whisper URL and stash for the route layer.
+    if (this.deps.callControl) {
+      const whisperUrl =
+        channelPreferences.whisper && this.deps.publicBaseUrl
+          ? `${this.deps.publicBaseUrl}/api/telephony/whisper/${escalationId}`
+          : undefined;
+      const dialActionUrl = this.deps.publicBaseUrl
+        ? `${this.deps.publicBaseUrl}/api/telephony/dial-action`
+        : '/api/telephony/dial-action';
+      this.state.pendingTransferTwiml = this.deps.callControl.dialDispatcher(
+        callSid,
+        dispatcher.phone,
+        {
+          actionUrl: dialActionUrl,
+          whisperUrl,
+          timeoutSeconds: 20,
+        },
+      );
+    }
+
+    await smsPromise;
+
+    // 5) Telemetry — summary built event.
+    if (this.state.session) {
+      this.state.session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        escalationSummaryBuiltEvent({
+          escalationId,
+          durationMs: Date.now() - startMs,
+        }),
+      );
     }
   }
 
