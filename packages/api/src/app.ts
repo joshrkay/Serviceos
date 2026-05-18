@@ -330,6 +330,9 @@ import {
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
+import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
+import { registerKeywordHandler } from './sms/inbound-dispatch';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -734,6 +737,14 @@ export function createApp(): express.Express {
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
 
+  // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
+  // The inbound-SMS dispatcher routes any matching first-token to these
+  // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
+  // time is layered on top in send-service / appointment-confirmation-notifier.
+  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
+  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
+  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
+
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
   // doesn't match — recordTwilio / recordSendGrid then 403 with audit.
@@ -1066,6 +1077,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1199,6 +1211,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
       })
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
