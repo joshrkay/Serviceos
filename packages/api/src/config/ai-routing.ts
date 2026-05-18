@@ -2,6 +2,10 @@ export type ModelTier = 'lightweight' | 'standard' | 'complex';
 
 export interface TierConfig {
   model: string;
+  /**
+   * Currently unused — provider selection comes from `LLMGatewayConfig.taskRouting`.
+   * Reserved for future use (P2-029 failover/provider routing will wire this).
+   */
   provider: string;
   maxTokens?: number;
   temperature?: number;

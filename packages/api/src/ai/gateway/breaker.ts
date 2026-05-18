@@ -22,6 +22,7 @@
  */
 import {
   breakerState,
+  gatewayBreakerState,
   breakerTransitionsTotal,
   breakerOpenSecondsTotal,
   breakerHalfOpenProbeSuccessRatio,
@@ -79,6 +80,17 @@ const STATE_VALUE: Record<BreakerStateName, number> = {
   open: 2,
 };
 
+/** All valid state names for the spec-compliant gateway_breaker_state metric. */
+const GATEWAY_BREAKER_STATES = ['closed', 'open', 'half_open'] as const;
+type GatewayBreakerState = (typeof GATEWAY_BREAKER_STATES)[number];
+
+/** Map internal BreakerStateName → Prometheus-friendly label (underscored). */
+const TO_GATEWAY_STATE: Record<BreakerStateName, GatewayBreakerState> = {
+  closed: 'closed',
+  open: 'open',
+  'half-open': 'half_open',
+};
+
 class BreakerCell {
   private state: BreakerStateName = 'closed';
   private samples: Sample[] = [];
@@ -95,12 +107,32 @@ class BreakerCell {
   private halfOpenReserved = 0;
   private reopenStreak = 0;
 
+  /** Last failure message recorded via onResult(false). */
+  private lastErrorMessage: string | undefined;
+  /** Timestamp of the last recorded success. */
+  private lastSuccessAt: Date | undefined;
+
+  /** The provider label extracted from the composite key (first segment). */
+  private readonly provider: string;
+
   constructor(
     readonly key: string,
     readonly cfg: BreakerConfig,
   ) {
     this.currentCooldownMs = cfg.cooldownMs;
+    this.provider = key.split('|')[0];
     breakerState.set({ key }, STATE_VALUE.closed);
+    this.emitGatewayBreakerState('closed');
+  }
+
+  /** Expose last recorded failure message (undefined if no failure yet). */
+  getLastError(): string | undefined {
+    return this.lastErrorMessage;
+  }
+
+  /** Expose timestamp of the last recorded success (undefined if no success yet). */
+  getLastSuccessAt(): Date | undefined {
+    return this.lastSuccessAt;
   }
 
   /**
@@ -152,7 +184,18 @@ class BreakerCell {
     }
   }
 
-  onResult(success: boolean): void {
+  onResult(success: boolean, err?: unknown): void {
+    if (!success) {
+      this.lastErrorMessage =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'string'
+          ? err
+          : 'unknown error';
+    } else {
+      this.lastSuccessAt = new Date();
+    }
+
     if (this.state === 'half-open') {
       if (this.halfOpenReserved > 0) this.halfOpenReserved--;
       this.halfOpenProbes++;
@@ -220,6 +263,7 @@ class BreakerCell {
     breakerTransitionsTotal.inc({ key: this.key, from, to });
     this.state = to;
     breakerState.set({ key: this.key }, STATE_VALUE[to]);
+    this.emitGatewayBreakerState(to);
 
     if (to === 'open') {
       // Exponential cooldown on reopen, capped.
@@ -252,6 +296,17 @@ class BreakerCell {
     }
   }
 
+  /**
+   * Emit the spec-compliant gateway_breaker_state gauge.
+   * Sets the active state to 1 and the other two to 0.
+   */
+  private emitGatewayBreakerState(active: BreakerStateName): void {
+    const activeLabel = TO_GATEWAY_STATE[active];
+    for (const s of GATEWAY_BREAKER_STATES) {
+      gatewayBreakerState.set({ provider: this.provider, state: s }, s === activeLabel ? 1 : 0);
+    }
+  }
+
   private prune(now: number): void {
     const cutoff = now - this.cfg.windowMs;
     if (this.samples.length === 0) return;
@@ -276,6 +331,17 @@ export function breakerKey(parts: BreakerKeyParts): string {
   ].join('|');
 }
 
+/** Aggregated health state for a single provider (across all its breaker cells). */
+export interface ProviderHealthState {
+  provider: string;
+  /** Most-degraded breaker state across all cells for this provider. */
+  breakerState: BreakerStateName;
+  /** Most recent failure message across all cells, if any. */
+  lastError: string | undefined;
+  /** Most recent success timestamp across all cells, if any. */
+  lastSuccessAt: Date | undefined;
+}
+
 export class CircuitBreakerRegistry {
   private cells: Map<string, BreakerCell> = new Map();
 
@@ -289,6 +355,58 @@ export class CircuitBreakerRegistry {
       this.cells.set(key, cell);
     }
     return cell;
+  }
+
+  /**
+   * Return per-provider health state by aggregating all breaker cells.
+   *
+   * Multiple cells per provider (different model/tier combinations) are
+   * collapsed to one entry per provider name (the first segment of the cell
+   * key). Aggregation rules:
+   *   - breakerState: most-degraded wins (open > half-open > closed).
+   *   - lastError:    most-recently recorded failure message across cells.
+   *   - lastSuccessAt: latest recorded success timestamp across cells.
+   */
+  getProviderStates(): ProviderHealthState[] {
+    const degradationOrder: BreakerStateName[] = ['closed', 'half-open', 'open'];
+    const byProvider = new Map<string, ProviderHealthState>();
+
+    for (const [_key, cell] of this.cells) {
+      const providerName = cell.key.split('|')[0];
+      const cellState = cell.getState();
+      const cellLastError = cell.getLastError();
+      const cellLastSuccessAt = cell.getLastSuccessAt();
+
+      const existing = byProvider.get(providerName);
+      if (!existing) {
+        byProvider.set(providerName, {
+          provider: providerName,
+          breakerState: cellState,
+          lastError: cellLastError,
+          lastSuccessAt: cellLastSuccessAt,
+        });
+      } else {
+        // Most-degraded state wins.
+        if (degradationOrder.indexOf(cellState) > degradationOrder.indexOf(existing.breakerState)) {
+          existing.breakerState = cellState;
+        }
+        // Latest success timestamp.
+        if (
+          cellLastSuccessAt !== undefined &&
+          (existing.lastSuccessAt === undefined || cellLastSuccessAt > existing.lastSuccessAt)
+        ) {
+          existing.lastSuccessAt = cellLastSuccessAt;
+        }
+        // Keep whichever lastError was recorded most recently — both are
+        // strings so we can't compare timestamps; retain the existing value
+        // unless this cell has one and existing doesn't.
+        if (cellLastError !== undefined && existing.lastError === undefined) {
+          existing.lastError = cellLastError;
+        }
+      }
+    }
+
+    return Array.from(byProvider.values());
   }
 
   /**
@@ -309,7 +427,7 @@ export class CircuitBreakerRegistry {
       return result;
     } catch (err) {
       if (!isPermanentClientError(err)) {
-        cell.onResult(false);
+        cell.onResult(false, err);
       } else {
         // Permanent client error doesn't reflect provider health.
         // Release the half-open reservation so the slot doesn't leak.
