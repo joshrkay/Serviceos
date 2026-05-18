@@ -78,6 +78,7 @@ import {
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
 import type { RepairTemplate } from '../verticals/registry';
+import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -723,6 +724,19 @@ export class TwilioGatherAdapter {
         { type: 'end_session', payload: { reason: 'session_not_found' } },
       ];
     }
+
+    // B3.2 — keyword frustration check BEFORE intent classification.
+    // Fire-and-forget into the FSM; if matched, FSM produces escalation
+    // side effects and we return them directly.
+    const frustration = detectFrustration(opts.speechResult);
+    if (frustration.matched) {
+      return session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: frustration.keyword,
+      });
+    }
+
     return this.processor.speechTurn({
       session,
       speechResult: opts.speechResult,

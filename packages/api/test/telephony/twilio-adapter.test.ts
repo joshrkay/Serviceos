@@ -1024,3 +1024,42 @@ describe('buildTelephonyGreeting', () => {
     expect((result.match(/\?/g) ?? []).length).toBe(1);
   });
 });
+
+// ─── B3.2 — frustration detector wiring ──────────────────────────────────────
+
+describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', () => {
+  it('escalates on frustration keyword without invoking intent classifier', async () => {
+    const store = new VoiceSessionStore();
+    const speechTurn = vi.fn();
+    const machineDispatch = vi.fn(() => [
+      { type: 'tts_play', payload: { text: 'connecting you' } } as const,
+      { type: 'notify_oncall', payload: { escalationId: 'e1', reason: 'keyword_frustration' } } as const,
+    ]);
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      publicBaseUrl: 'https://example.com',
+      processor: { speechTurn } as never,
+    } as never);
+
+    // Inject a fake session with a mock machine into the store so
+    // processCallerUtterance finds it without going through handleInbound.
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-frust-1' });
+    // Replace the machine's dispatch with our spy.
+    (session.machine as unknown as { dispatch: typeof machineDispatch }).dispatch = machineDispatch;
+
+    const sideEffects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-frust-1',
+      speechResult: 'this is ridiculous',
+      tenantId: 'tenant-t1',
+    });
+
+    expect(speechTurn).not.toHaveBeenCalled();
+    expect(machineDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'frustration_detected', source: 'keyword' }),
+    );
+    expect(sideEffects.length).toBeGreaterThan(0);
+  });
+});
