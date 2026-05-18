@@ -110,12 +110,19 @@ export function useResilientStream(opts: UseResilientStreamOptions): {
 
     const scheduleReconnect = () => {
       if (unmounted) return;
+      // Browsers commonly fire `error` immediately followed by `close`
+      // for the same failure. Without this guard, both handlers would
+      // call scheduleReconnect, double-incrementing attemptRef and
+      // making backoff steeper than intended (1s → 4s → 16s instead
+      // of 1s → 2s → 4s).
+      if (reconnectTimer) return;
       attemptRef.current += 1;
       const delay = Math.min(
         RECONNECT_MAX_MS,
         RECONNECT_BASE_MS * 2 ** (attemptRef.current - 1),
       );
       reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
         if (!unmounted) setReconnectTrigger((n) => n + 1);
       }, delay);
     };

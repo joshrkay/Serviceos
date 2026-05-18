@@ -95,15 +95,23 @@ echo ""
 echo "==> [3/3] Deployed voice path (real call)"
 
 # Resolve the actual target base: prefer explicit env var, fall back
-# to whatever --base= the inner harness already received.
+# to the args already forwarded to the inner harness. `--env=staging|prod`
+# maps to STAGING_API_URL / PRODUCTION_API_URL the same way smoke-test.ts
+# resolves it (kept in sync so an `--env=` invocation actually exercises
+# Layer 3 against the named environment instead of silently skipping).
 TARGET_BASE="${API_BASE_URL:-}"
 if [ -z "$TARGET_BASE" ]; then
   for arg in "${SMOKE_ARGS[@]}"; do
     case "$arg" in
       --base=*) TARGET_BASE="${arg#--base=}" ;;
+      --env=staging) TARGET_BASE="${STAGING_API_URL:-}" ;;
+      --env=prod|--env=production) TARGET_BASE="${PRODUCTION_API_URL:-}" ;;
     esac
   done
 fi
+# Strip a trailing slash so `${TARGET_BASE}/api/voice/sessions` doesn't
+# turn into a double slash on hosts that 308 on canonical paths.
+TARGET_BASE="${TARGET_BASE%/}"
 
 if [ -z "$TARGET_BASE" ] || [ -z "${SMOKE_API_TOKEN:-}" ]; then
   echo "      ⚠️  skipping — needs SMOKE_API_TOKEN + a remote target (API_BASE_URL or --base=)."
