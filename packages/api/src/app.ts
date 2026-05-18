@@ -293,7 +293,15 @@ import {
   createLLMGateway,
   createMockLLMGateway,
   createEmbeddingProvider,
+  shutdownCacheStores,
 } from './ai/gateway/factory';
+import * as gatewayFactory from './ai/gateway/factory';
+import { createAiHealthRouter } from './routes/ai-health';
+import { InMemoryAiRunRepository } from './ai/ai-run';
+import { PgAiRunRepository } from './ai/pg-ai-run';
+import { createEvaluationRouter } from './routes/evaluation';
+import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
+import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
@@ -627,6 +635,25 @@ export function createApp(): express.Express {
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
+  // P2-029 — AI provider health endpoint. Public, no auth required.
+  // Uses the shared breaker registry populated by createLLMGateway().
+  // Reading gatewayFactory.sharedBreakerRegistry at request time (not at
+  // mount time) ensures the registry is populated after createLLMGateway()
+  // is called later in the boot sequence.
+  app.use('/api/health', (req, res, next) => {
+    const registry = gatewayFactory.sharedBreakerRegistry;
+    if (!registry) {
+      // Gateway not yet initialised (e.g. mock mode without AI_PROVIDER_API_KEY)
+      if (req.path === '/ai') {
+        res.status(200).json({ providers: [] });
+        return;
+      }
+      next();
+      return;
+    }
+    createAiHealthRouter(registry)(req, res, next);
+  });
+
   // Prometheus metrics. Mounted on the public surface deliberately —
   // production should rely on network-level allowlist (ingress / VPC).
   app.get('/metrics', async (_req, res) => {
@@ -947,12 +974,24 @@ export function createApp(): express.Express {
 
   // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
+  // AI-run repository — tracks every LLM call lifecycle (pending → running → completed/failed).
+  // Pg-backed in production; InMemory when DATABASE_URL is unset (dev/test).
+  const aiRunRepo = pool ? new PgAiRunRepository(pool) : new InMemoryAiRunRepository();
+
+  // P2-030 — shadow comparison store.
+  // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
+  // InMemoryShadowComparisonStore otherwise (zero overhead, data not durable).
+  const shadowStore =
+    pool && process.env.SHADOW_LLM_ENABLED === 'true'
+      ? new PgShadowComparisonStore(pool)
+      : new InMemoryShadowComparisonStore();
+
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
   // without an AI_PROVIDER_API_KEY.
   const llmGateway = config.AI_PROVIDER_API_KEY
-    ? createLLMGateway(config)
+    ? createLLMGateway(config, { aiRunRepo, shadowStore })
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
 
   // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
@@ -2374,6 +2413,10 @@ export function createApp(): express.Express {
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
+
+  // P2-030 — AI evaluation admin API (owner-only; tenant-scoped).
+  app.use('/api/evaluation', createEvaluationRouter({ shadowStore }));
+
   const voiceLogger = createLogger({
     service: 'voice',
     environment: process.env.NODE_ENV || 'development',
@@ -2645,6 +2688,9 @@ export function createApp(): express.Express {
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Disconnect Redis cache store(s) before draining the DB pool so Railway
+      // shutdown is not slowed by lingering Redis connections.
+      await shutdownCacheStores();
       if (pool) {
         await Promise.race([
           pool.end(),

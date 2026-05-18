@@ -43,7 +43,7 @@
  */
 import OpenAI from 'openai';
 
-import { LLMGateway } from './gateway';
+import { LLMGateway, SYSTEM_TENANT_ID } from './gateway';
 import type {
   LLMProvider,
   LLMRequest,
@@ -127,9 +127,25 @@ export function createRealLayerTwoGateway(
   });
 
   const providers = new Map<string, LLMProvider>([[provider.name, provider]]);
+  // P2-028: tier routing now controls model resolution. voice.agent is a
+  // harness-specific taskType not in the default taskTierMapping. We configure
+  // a 'system' tenant override so the caller-specified model is always used
+  // for all tiers when no tenantId is set on the request (system calls default
+  // to tenantId='system'). This preserves the deps.model override contract.
   const gatewayConfig: LLMGatewayConfig = {
     defaultProvider: provider.name,
-    defaultModel: model,
+    tenantOverrides: {
+      [SYSTEM_TENANT_ID]: {
+        tiers: {
+          lightweight: { model, provider: provider.name },
+          standard: { model, provider: provider.name },
+          complex: { model, provider: provider.name },
+        },
+        taskTierMapping: {
+          'voice.agent': 'lightweight',
+        },
+      },
+    },
   };
   const baseGateway = new LLMGateway(gatewayConfig, providers);
 
