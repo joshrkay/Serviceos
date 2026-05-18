@@ -207,7 +207,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   }
 
   // SMS: target ≤160 chars. Always reserve space for the link; truncate core at word boundary.
-  const baseUrl = (ctx.publicWebBaseUrl ?? process.env.PUBLIC_WEB_URL ?? 'app.serviceos.app')
+  const baseUrl = (ctx.publicWebBaseUrl ?? 'app.serviceos.app')
     .replace(/^https?:\/\//, '')
     .replace(/\/$/, '');
   const linkPlaceholder = `${baseUrl}/c/<escalationId>`;
