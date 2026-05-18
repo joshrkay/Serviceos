@@ -1,17 +1,25 @@
 /**
  * P12-003 / X10 — `useActiveSessions`.
  *
- * Supervisor wall data source. Opens a WS to the client gateway
- * (`/api/ws`), subscribes to the `voice` channel, and aggregates the
- * `voice.event` frames into the live session list rendered by
- * `CompressedSessionStrip` and read by `ModeSwitchModal`.
+ * Supervisor wall data source. Two-part wiring required by the WS
+ * gateway's auth model (`authorizeSubscribe` in
+ * `packages/api/src/ws/client-gateway.ts` rejects voice subscriptions
+ * that omit a `targetId`):
+ *
+ *   1. Discovery: GET /api/voice/sessions/active returns the list of
+ *      live sessions for the tenant. The hook seeds local state from
+ *      this and polls it every 10s to catch sessions that arrived
+ *      after mount.
+ *   2. Per-session subscribe: for each discovered sessionId the hook
+ *      sends `{ kind: 'subscribe', channel: 'voice', targetId: id }`
+ *      so the gateway forwards `voice.event` frames for that session.
  *
  * Tests should mock this module if they need a non-empty session list
  * to drive a particular UI state (see `ModeSwitchModal.test.tsx` and
  * `CompressedSessionStrip.test.tsx`).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useResilientStream, type WsServerFrame } from './useResilientStream';
 
@@ -36,18 +44,28 @@ export interface UseActiveSessionsResult {
   pendingProposalCount: number;
 }
 
-// Voice events that signal the session is over and should be dropped
-// from the wall. Mirrors `VoiceSessionEvent` in the API
-// (`packages/api/src/ai/agents/customer-calling/voice-session-store.ts`):
-// `ended` (idle/normal termination) and `session_terminated` (VQ-003
-// canonical cause). The `payload.cause === 'hangup'` case is covered by
-// `session_terminated`.
+interface ActiveSessionDTO {
+  id: string;
+  channel: SessionChannel;
+  startedAt: string;
+}
+
 const TERMINAL_VOICE_EVENTS = new Set(['ended', 'session_terminated']);
+const DISCOVERY_POLL_MS = 10_000;
 
 function buildWsUrl(): string {
   if (typeof window === 'undefined') return '';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/api/ws`;
+}
+
+async function fetchActiveSessions(token: string): Promise<ActiveSessionDTO[]> {
+  const res = await fetch('/api/voice/sessions/active', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return [];
+  const body = (await res.json()) as { sessions?: ActiveSessionDTO[] };
+  return Array.isArray(body.sessions) ? body.sessions : [];
 }
 
 export function useActiveSessions(): UseActiveSessionsResult {
@@ -57,6 +75,8 @@ export function useActiveSessions(): UseActiveSessionsResult {
     () => new Map()
   );
   const sendRef = useRef<((frame: object) => void) | null>(null);
+  const subscribedRef = useRef<Set<string>>(new Set());
+  const wsConnectedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,10 +93,69 @@ export function useActiveSessions(): UseActiveSessionsResult {
     };
   }, [getToken]);
 
+  const subscribeToSession = useCallback((sessionId: string) => {
+    if (subscribedRef.current.has(sessionId)) return;
+    if (!wsConnectedRef.current) return;
+    sendRef.current?.({
+      kind: 'subscribe',
+      channel: 'voice',
+      targetId: sessionId,
+    });
+    subscribedRef.current.add(sessionId);
+  }, []);
+
+  const reconcileSessions = useCallback(
+    (discovered: ActiveSessionDTO[]) => {
+      const discoveredIds = new Set(discovered.map((s) => s.id));
+      setSessions((prev) => {
+        const next = new Map(prev);
+        for (const s of discovered) {
+          if (!next.has(s.id)) {
+            next.set(s.id, {
+              id: s.id,
+              channel: s.channel,
+              customerLabel: 'Caller',
+              startedAt: s.startedAt,
+            });
+          }
+        }
+        for (const id of prev.keys()) {
+          if (!discoveredIds.has(id)) next.delete(id);
+        }
+        return next;
+      });
+      for (const s of discovered) subscribeToSession(s.id);
+      for (const id of Array.from(subscribedRef.current)) {
+        if (!discoveredIds.has(id)) subscribedRef.current.delete(id);
+      }
+    },
+    [subscribeToSession]
+  );
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const list = await fetchActiveSessions(token);
+        if (!cancelled) reconcileSessions(list);
+      } catch {
+        // Network blip — next tick retries.
+      }
+    };
+    void poll();
+    const handle = setInterval(() => void poll(), DISCOVERY_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+    };
+  }, [token, reconcileSessions]);
+
   const handleFrame = useCallback((frame: WsServerFrame) => {
     if (frame.kind !== 'voice.event') return;
     const { sessionId, event, payload } = frame;
     if (TERMINAL_VOICE_EVENTS.has(event)) {
+      subscribedRef.current.delete(sessionId);
       setSessions((prev) => {
         if (!prev.has(sessionId)) return prev;
         const next = new Map(prev);
@@ -117,9 +196,16 @@ export function useActiveSessions(): UseActiveSessionsResult {
     });
   }, []);
 
+  const knownSessionIds = useMemo(
+    () => Array.from(sessions.keys()),
+    [sessions]
+  );
+
   const handleOpen = useCallback(() => {
-    sendRef.current?.({ kind: 'subscribe', channel: 'voice' });
-  }, []);
+    wsConnectedRef.current = true;
+    subscribedRef.current.clear();
+    for (const id of knownSessionIds) subscribeToSession(id);
+  }, [knownSessionIds, subscribeToSession]);
 
   const wsUrl = buildWsUrl();
   const { status, send } = useResilientStream({
@@ -132,6 +218,12 @@ export function useActiveSessions(): UseActiveSessionsResult {
   useEffect(() => {
     sendRef.current = send;
   }, [send]);
+
+  useEffect(() => {
+    if (status !== 'open') {
+      wsConnectedRef.current = false;
+    }
+  }, [status]);
 
   return {
     sessions: Array.from(sessions.values()),
