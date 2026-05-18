@@ -725,6 +725,14 @@ export class TwilioGatherAdapter {
       ];
     }
 
+    // Always append utterance to transcript first so it is captured
+    // regardless of the path below (frustration escalation or normal turn).
+    this.deps.store.appendTranscript(opts.sessionId, {
+      speaker: 'caller',
+      text: opts.speechResult,
+      ts: Date.now(),
+    });
+
     // B3.2 — keyword frustration check BEFORE intent classification.
     // Fire-and-forget into the FSM; if matched, FSM produces escalation
     // side effects and we return them directly.
@@ -974,12 +982,27 @@ export class TwilioGatherAdapter {
       );
     }
 
-    // 1. Append caller utterance to transcript.
+    // 1. Append caller utterance to transcript first — must happen before
+    //    any early-exit path so the utterance is never lost.
     this.deps.store.appendTranscript(opts.sessionId, {
       speaker: 'caller',
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
+    // the same guard in processCallerUtterance (WS path). Runs after the
+    // transcript append so the triggering utterance is always captured.
+    const gatherFrustration = detectFrustration(opts.speechResult);
+    if (gatherFrustration.matched) {
+      const frustrationEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: gatherFrustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, frustrationEffects, opts.tenantId);
+      return this.finalizeTwiml(session, frustrationEffects, opts.sessionId);
+    }
 
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
