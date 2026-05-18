@@ -548,8 +548,8 @@ export function NewJobFlow({
       const createdCustomer: Customer = {
         id: newId,
         name: trimmedName,
-        phone: newCustomerPhone.trim() || '(000) 000-0000',
-        email: newCustomerEmail.trim() || '',
+        phone: newCustomerPhone.trim(),
+        email: newCustomerEmail.trim(),
         address: trimmedAddress,
         serviceType: draft.serviceType ?? 'HVAC',
         locations: [
