@@ -84,7 +84,9 @@ async function startMockServer(): Promise<MockSrv> {
 
   return {
     port: addr.port,
-    acceptedConnections: 0,
+    get acceptedConnections() {
+      return accepted;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         wss.close(() => http.close(() => resolve()));
@@ -116,7 +118,7 @@ function runLoadTest(wsUrl: string): Promise<{ code: number; stdout: string }> {
 function stampAcks(): void {
   const acksPath = join(__dirname, '..', '.launch-quality-acks.json');
   const acks = existsSync(acksPath)
-    ? (JSON.parse(readFileSync(acksPath, 'utf8')) as Record<string, unknown>)
+    ? (JSON.parse(readFileSync(acksPath, 'utf8') || '{}') as Record<string, unknown>)
     : {};
   acks.voice_capacity_run = new Date().toISOString();
   acks.voice_capacity_provenance = 'harness-self-check (local mock WS server)';
@@ -138,6 +140,7 @@ async function main(): Promise<void> {
       console.error(`load test exited ${code}; NOT stamping acks`);
       process.exit(code);
     }
+    console.log(`  mock server accepted ${srv.acceptedConnections} WS connection(s)`);
     stampAcks();
   } finally {
     await srv.close();

@@ -129,7 +129,9 @@ export function useActiveSessions(): UseActiveSessionsResult {
     onFrame: handleFrame,
     onOpen: handleOpen,
   });
-  sendRef.current = send;
+  useEffect(() => {
+    sendRef.current = send;
+  }, [send]);
 
   return {
     sessions: Array.from(sessions.values()),
