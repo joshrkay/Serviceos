@@ -1077,6 +1077,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
         publicBaseUrl,
       })
     : undefined;
