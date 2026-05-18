@@ -24,7 +24,9 @@
     "validate-env": "ts-node -e \"require('./src/shared/config').validateEnvSchema(process.env); console.log('env ok');\"",
     "smoke-test": "ts-node scripts/smoke-test.ts",
     "lint:log-safety": "node scripts/check-log-safety.js",
-    "launch-quality-check": "tsx scripts/launch-quality-check.ts"
+    "launch-quality-check": "tsx scripts/launch-quality-check.ts",
+    "voice-load:selfcheck": "tsx scripts/voice-load-selfcheck.ts",
+    "voice-load:staging": "tsx scripts/voice-load-test.ts --max 50 --ramp 60 --hold 300"
   },
   "dependencies": {
     "@ai-service-os/shared": "*",
