@@ -107,6 +107,18 @@ export function useActiveSessions(): UseActiveSessionsResult {
     subscribedRef.current.add(sessionId);
   }, []);
 
+  const unsubscribeFromSession = useCallback((sessionId: string) => {
+    if (!subscribedRef.current.has(sessionId)) return;
+    if (wsConnectedRef.current) {
+      sendRef.current?.({
+        kind: 'unsubscribe',
+        channel: 'voice',
+        targetId: sessionId,
+      });
+    }
+    subscribedRef.current.delete(sessionId);
+  }, []);
+
   const reconcileSessions = useCallback(
     (discovered: ActiveSessionDTO[]) => {
       const discoveredIds = new Set(discovered.map((s) => s.id));
@@ -129,10 +141,10 @@ export function useActiveSessions(): UseActiveSessionsResult {
       });
       for (const s of discovered) subscribeToSession(s.id);
       for (const id of Array.from(subscribedRef.current)) {
-        if (!discoveredIds.has(id)) subscribedRef.current.delete(id);
+        if (!discoveredIds.has(id)) unsubscribeFromSession(id);
       }
     },
-    [subscribeToSession]
+    [subscribeToSession, unsubscribeFromSession]
   );
 
   useEffect(() => {
@@ -158,7 +170,7 @@ export function useActiveSessions(): UseActiveSessionsResult {
     if (frame.kind !== 'voice.event') return;
     const { sessionId, event, payload } = frame;
     if (TERMINAL_VOICE_EVENTS.has(event)) {
-      subscribedRef.current.delete(sessionId);
+      unsubscribeFromSession(sessionId);
       setSessions((prev) => {
         if (!prev.has(sessionId)) return prev;
         const next = new Map(prev);
@@ -197,7 +209,7 @@ export function useActiveSessions(): UseActiveSessionsResult {
       });
       return next;
     });
-  }, []);
+  }, [unsubscribeFromSession]);
 
   const knownSessionIds = useMemo(
     () => Array.from(sessions.keys()),

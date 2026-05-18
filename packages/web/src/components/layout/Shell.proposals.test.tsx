@@ -107,6 +107,27 @@ function listResponse(rows: Array<{ id: string; summary: string }>): Response {
   } as Response;
 }
 
+const EMPTY_OK_JSON = { ok: true, json: async () => ({}) } as Response;
+
+// Shell mounts several data hooks (usePendingProposals, useActiveSessions,
+// ...). Pre-P2-033 tests stacked `mockResolvedValueOnce` on the global
+// `fetch` spy, which assumed only one consumer fired requests. With the
+// X10 supervisor-wall hook also calling `/api/voice/sessions/active`,
+// raw Once chains race. This helper routes each fetch by URL: proposal
+// calls drain the supplied response queue; everything else returns an
+// inert {} response so unrelated hooks don't break the assertions here.
+function mockProposalFetchSequence(rows: ReadonlyArray<Array<{ id: string; summary: string }>>) {
+  const queue = [...rows];
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/api/proposals')) {
+      const next = queue.length > 1 ? queue.shift()! : queue[0] ?? [];
+      return listResponse(next);
+    }
+    return EMPTY_OK_JSON;
+  });
+}
+
 function renderShell() {
   return render(
     <MemoryRouter initialEntries={['/']}>
@@ -128,12 +149,12 @@ describe('P2-033 — Shell proposal notification integration', () => {
   });
 
   it('Badge count — Shell badge reflects the pending proposal count and links to /inbox', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      listResponse([
+    mockProposalFetchSequence([
+      [
         { id: 'p1', summary: 'Schedule visit' },
         { id: 'p2', summary: 'Issue invoice' },
-      ]),
-    );
+      ],
+    ]);
 
     renderShell();
 
@@ -143,26 +164,27 @@ describe('P2-033 — Shell proposal notification integration', () => {
   });
 
   it('Badge hidden when there are no pending proposals', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(listResponse([]));
+    const fetchSpy = mockProposalFetchSequence([[]]);
 
     renderShell();
 
-    // Wait for the polling fetch to settle before asserting absence.
     await waitFor(() => {
-      expect(globalThis.fetch).toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/proposals?status=ready_for_review&limit=100',
+        expect.anything(),
+      );
     });
     expect(screen.queryByTestId('pending-proposal-badge')).toBeNull();
   });
 
   it('Toast — new proposal fires sonner toast with /inbox action', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(listResponse([{ id: 'p1', summary: 'Old proposal' }]))
-      .mockResolvedValueOnce(
-        listResponse([
-          { id: 'p1', summary: 'Old proposal' },
-          { id: 'p2', summary: 'Reschedule Tuesday' },
-        ]),
-      );
+    const fetchSpy = mockProposalFetchSequence([
+      [{ id: 'p1', summary: 'Old proposal' }],
+      [
+        { id: 'p1', summary: 'Old proposal' },
+        { id: 'p2', summary: 'Reschedule Tuesday' },
+      ],
+    ]);
 
     vi.useFakeTimers({ shouldAdvanceTime: true });
     renderShell();
@@ -190,14 +212,13 @@ describe('P2-033 — Shell proposal notification integration', () => {
   });
 
   it('Action — badge decrements after a proposal is removed (auto-refresh)', async () => {
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(
-        listResponse([
-          { id: 'p1', summary: 'A' },
-          { id: 'p2', summary: 'B' },
-        ]),
-      )
-      .mockResolvedValue(listResponse([{ id: 'p1', summary: 'A' }]));
+    mockProposalFetchSequence([
+      [
+        { id: 'p1', summary: 'A' },
+        { id: 'p2', summary: 'B' },
+      ],
+      [{ id: 'p1', summary: 'A' }],
+    ]);
 
     vi.useFakeTimers({ shouldAdvanceTime: true });
     renderShell();
@@ -221,9 +242,7 @@ describe('P2-033 — Shell proposal notification integration', () => {
   // can't easily assert navigate() side-effects from a `NavLink`, but
   // a click on it must not throw and must request the right path.
   it('badge click navigates to /inbox without throwing', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      listResponse([{ id: 'p1', summary: 'Test' }]),
-    );
+    mockProposalFetchSequence([[{ id: 'p1', summary: 'Test' }]]);
 
     renderShell();
 
