@@ -2018,6 +2018,12 @@ export function createApp(): express.Express {
             // future-phase change (auth at first `start` message).
             authTokenGetter: () => process.env.TWILIO_AUTH_TOKEN,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
+            // Section 7 (CRITICAL): wire the gather adapter's shared Map so
+            // Dial TwiML built inside handleEscalateWithContext is visible to
+            // the route layer via takePendingTransferTwiml(sessionId). Without
+            // this the caller stays on hold forever — the dispatcher gets SMS
+            // but the call never bridges.
+            setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
           },
         );
         return server;

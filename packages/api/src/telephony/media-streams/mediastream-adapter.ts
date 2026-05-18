@@ -24,6 +24,7 @@
  * inflating unbounded.
  */
 
+import { z } from 'zod';
 import { createLogger } from '../../logging/logger';
 import type {
   StreamingSession,
@@ -32,7 +33,7 @@ import type {
 import type { TtsProvider } from '../../ai/tts/tts-provider';
 import type { VoiceSession, VoiceSessionStore } from '../../ai/agents/customer-calling/voice-session-store';
 import type { SideEffect } from '../../ai/agents/customer-calling/types';
-import type { EscalateWithContextPayload } from '../../ai/agents/customer-calling/types';
+import { escalateWithContextPayloadSchema } from '../../ai/agents/customer-calling/types';
 import {
   decodeTwilioInboundFrame,
   encodeTwilioOutboundFrame,
@@ -212,6 +213,17 @@ export interface MediaStreamAdapterDeps {
    * Full wiring in app.ts is deferred to Section 12.
    */
   callControl?: TwilioCallControl;
+  /**
+   * Section 7 (CRITICAL) — Callback that writes the <Dial> TwiML into the
+   * TwilioGatherAdapter's shared `pendingTransferTwiml` Map so the next
+   * gather-callback route invocation returns it to Twilio and bridges the
+   * call to the dispatcher. Without this wired, the TwiML is written to
+   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
+   * ever reads it — the caller stays on hold forever.
+   *
+   * Wire via: `gatherAdapter.setPendingTransferTwiml.bind(gatherAdapter)`
+   */
+  setPendingTransferTwiml?: (sessionId: string, twiml: string) => void;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -277,11 +289,10 @@ interface RuntimeState {
    */
   fillerActive: boolean;
   /**
-   * Section 7 — pending <Dial> TwiML produced by handleEscalateWithContext.
-   * Initialized to null; set when the escalation fan-out builds the
-   * Dial TwiML. The route layer reads this via takePendingTransferTwiml()
-   * on the next gather webhook response so the call bridges to the
-   * dispatcher with whisper.
+   * @deprecated DO NOT USE — use `deps.setPendingTransferTwiml` to write
+   * into the TwilioGatherAdapter's shared pendingTransferTwiml Map. This
+   * field is never read by any route handler; it exists only as a fallback
+   * log target when `deps.setPendingTransferTwiml` is not wired.
    */
   pendingTransferTwiml: string | null;
 }
@@ -627,7 +638,19 @@ export class TwilioMediaStreamAdapter {
         continue;
       }
       if (fx.type === 'escalate_with_context') {
-        void this.handleEscalateWithContext(fx.payload as unknown as EscalateWithContextPayload);
+        const parsed = escalateWithContextPayloadSchema.safeParse(fx.payload);
+        if (!parsed.success) {
+          logger.error('escalate_with_context: invalid payload, dropping', {
+            issues: parsed.error.issues,
+          });
+          continue;
+        }
+        this.handleEscalateWithContext(parsed.data).catch((err) => {
+          logger.error('escalate_with_context handler threw', {
+            error: err instanceof Error ? err.message : String(err),
+            escalationId: parsed.data.escalationId,
+          });
+        });
         continue;
       }
       if (fx.type !== 'tts_play') continue;
@@ -665,7 +688,7 @@ export class TwilioMediaStreamAdapter {
    * inherits requireTwilioSignature. Full wiring deferred to Section 12.
    */
   private async handleEscalateWithContext(
-    payload: EscalateWithContextPayload,
+    payload: z.infer<typeof escalateWithContextPayloadSchema>,
   ): Promise<void> {
     const startMs = Date.now();
     const { escalationId, summary, dispatcher, callSid, channelPreferences } = payload;
@@ -701,16 +724,23 @@ export class TwilioMediaStreamAdapter {
       );
     }
 
-    // 4) Build <Dial> with whisper URL and stash for the route layer.
+    // 4) Build <Dial> with whisper URL and hand off to the gather adapter's
+    // pendingTransferTwiml Map via deps.setPendingTransferTwiml. This is the
+    // CRITICAL fix: without this callback, the TwiML would be written to the
+    // media-stream adapter's state where no route handler ever reads it, and
+    // the caller would stay on hold forever while the dispatcher gets an SMS
+    // but no incoming call.
     if (this.deps.callControl) {
+      // Issue 6: strip trailing slash from publicBaseUrl before building URLs.
+      const baseUrl = this.deps.publicBaseUrl?.replace(/\/$/, '');
       const whisperUrl =
-        channelPreferences.whisper && this.deps.publicBaseUrl
-          ? `${this.deps.publicBaseUrl}/api/telephony/whisper/${escalationId}`
+        channelPreferences.whisper && baseUrl
+          ? `${baseUrl}/api/telephony/whisper/${escalationId}`
           : undefined;
-      const dialActionUrl = this.deps.publicBaseUrl
-        ? `${this.deps.publicBaseUrl}/api/telephony/dial-action`
+      const dialActionUrl = baseUrl
+        ? `${baseUrl}/api/telephony/dial-action`
         : '/api/telephony/dial-action';
-      this.state.pendingTransferTwiml = this.deps.callControl.dialDispatcher(
+      const dialTwiml = this.deps.callControl.dialDispatcher(
         callSid,
         dispatcher.phone,
         {
@@ -719,20 +749,42 @@ export class TwilioMediaStreamAdapter {
           timeoutSeconds: 20,
         },
       );
+
+      if (this.deps.setPendingTransferTwiml && this.state.session) {
+        // Route the TwiML through the gather adapter's shared Map so the
+        // next gather-callback route response bridges the call.
+        this.deps.setPendingTransferTwiml(this.state.session.id, dialTwiml);
+      } else {
+        // Legacy fallback — kept for parity but unread by any route handler.
+        // Log a warning so operators know the transfer will NOT happen.
+        this.state.pendingTransferTwiml = dialTwiml;
+        logger.warn(
+          'escalate_with_context: setPendingTransferTwiml not wired — call will not transfer',
+          { escalationId, callSid },
+        );
+      }
+    } else {
+      logger.warn(
+        'escalate_with_context: callControl not wired — Dial TwiML not built, call will not transfer',
+        { escalationId, callSid },
+      );
     }
 
-    await smsPromise;
-
-    // 5) Telemetry — summary built event.
+    // 5) Telemetry — capture durationMs BEFORE awaiting SMS so the metric
+    // reflects summary-build/dispatch time, not carrier round-trip latency.
+    const builtMs = Date.now();
     if (this.state.session) {
       this.state.session.events.emit(
         VOICE_EVENT_CHANNEL,
         escalationSummaryBuiltEvent({
           escalationId,
-          durationMs: Date.now() - startMs,
+          durationMs: builtMs - startMs,
         }),
       );
     }
+
+    // Block on SMS only to surface failures via logger.warn (already in .catch).
+    await smsPromise;
   }
 
   /**

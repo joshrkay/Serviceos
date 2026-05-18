@@ -1694,6 +1694,19 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * Store a pending <Dial> TwiML string for the given session. Called by
+   * `TwilioMediaStreamAdapter` via a deps callback so both the gather
+   * adapter (which reads via `takePendingTransferTwiml`) and the media-stream
+   * adapter (which writes during `handleEscalateWithContext`) share the same
+   * in-memory Map. Without this, the Dial TwiML would be written to
+   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
+   * ever reads it — the call would hang on hold forever.
+   */
+  setPendingTransferTwiml(sessionId: string, twiml: string): void {
+    this.pendingTransferTwiml.set(sessionId, twiml);
+  }
+
+  /**
    * B2 — derive the typed CallOutcome from FSM state, stash it on the
    * session, and kick off the best-effort `voice_sessions` persist.
    *
