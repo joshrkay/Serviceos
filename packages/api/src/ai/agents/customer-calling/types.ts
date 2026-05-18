@@ -5,6 +5,7 @@
  * all side effects are returned as data and executed by callers/adapters.
  */
 
+import { z } from 'zod';
 import type { RepairTemplate } from '../../../verticals/registry';
 import type { EscalationSummary } from './escalation-summary-builder';
 
@@ -122,6 +123,44 @@ export interface EscalateWithContextPayload {
   tenantId: string;
   channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean };
 }
+
+// ─── Payload schema (runtime validation) ─────────────────────────────────────
+
+/**
+ * Zod schema for `escalate_with_context` side-effect payloads.
+ * Used by `TwilioMediaStreamAdapter.emitSideEffects` to validate the raw
+ * `fx.payload` before dispatching to `handleEscalateWithContext`. Invalid
+ * payloads are logged and dropped — they never reach the handler.
+ */
+export const escalateWithContextPayloadSchema = z.object({
+  escalationId: z.string().min(1),
+  summary: z.object({
+    whisper: z.string(),
+    sms: z.string(),
+    panel: z.object({
+      header: z.record(z.string(), z.unknown()),
+      customer: z.record(z.string(), z.unknown()),
+      lastInteraction: z.union([z.string(), z.null()]),
+      intent: z.record(z.string(), z.unknown()),
+      reason: z.object({
+        code: z.string(),
+        humanReadable: z.string().optional(),
+      }),
+      transcriptSnapshot: z.array(z.unknown()),
+    }),
+  }),
+  dispatcher: z.object({
+    userId: z.string().min(1),
+    phone: z.string().min(1),
+  }),
+  callSid: z.string().min(1),
+  tenantId: z.string().min(1),
+  channelPreferences: z.object({
+    sms: z.boolean(),
+    in_app: z.boolean(),
+    whisper: z.boolean(),
+  }),
+});
 
 // ─── Transition result ────────────────────────────────────────────────────────
 
