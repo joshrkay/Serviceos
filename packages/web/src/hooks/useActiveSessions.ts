@@ -199,6 +199,22 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
     };
   }, [isAuthorized, refreshToken, reconcileSessions]);
 
+  // Authorization can flip true → false mid-session (mode switch from
+  // supervisor to technician, role downgrade, sign-out). The discovery
+  // effect early-returns when !isAuthorized but never clears state, so
+  // previously fetched sessions would remain rendered to an unprivileged
+  // user until the consumer unmounts. The WS effect below also closes
+  // (enabled flips false), and the gateway drops server-side subs on
+  // disconnect — but we still need to wipe local state here. Token is
+  // cleared so the next reauthorization fetches a fresh one rather than
+  // racing against a stale cached value.
+  useEffect(() => {
+    if (isAuthorized) return;
+    setSessions((prev) => (prev.size === 0 ? prev : new Map()));
+    subscribedRef.current.clear();
+    setToken((prev) => (prev === '' ? prev : ''));
+  }, [isAuthorized]);
+
   const handleFrame = useCallback((frame: WsServerFrame) => {
     if (frame.kind !== 'voice.event') return;
     const { sessionId, event, payload } = frame;
