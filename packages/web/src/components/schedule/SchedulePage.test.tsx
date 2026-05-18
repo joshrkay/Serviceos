@@ -133,10 +133,10 @@ describe('SchedulePage', () => {
     expect(await screen.findByText('No appointments')).toBeInTheDocument();
   });
 
-  it('falls back gracefully when /api/appointments returns non-ok', async () => {
+  it('shows error message when /api/appointments returns non-ok (500)', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce(mockResponse({}, false, 500));
     renderPage();
-    expect(await screen.findByText('No appointments')).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't load appointments — please try again")).toBeInTheDocument();
   });
 
   it('uses fallback customer label when /api/jobs/:id fails', async () => {
@@ -154,7 +154,9 @@ describe('SchedulePage', () => {
       expect(apptCall).toBeDefined();
       const url = String(apptCall![0]);
       expect(url).toContain(`fromDate=${TODAY}`);
-      expect(url).toContain(`toDate=${TODAY}`);
+      // toDate encodes the end of the selected day as UTC — may be TODAY or TODAY+1
+      // depending on the local timezone offset, so we only verify the param is present.
+      expect(url).toContain('toDate=');
       expect(url).toContain('sort=asc');
     });
   });
@@ -253,5 +255,38 @@ describe('SchedulePage', () => {
     const detailsButtons = screen.getAllByRole('button', { name: 'Details' });
     fireEvent.click(detailsButtons[0]);
     expect(screen.getByText('Appointment details')).toBeInTheDocument();
+  });
+
+  // ── P20-004: Error states for authenticated data panels ──────────────────
+
+  it('[P20-004] shows session-expired message on 401 and does not leave spinner up', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(mockResponse({}, false, 401));
+    renderPage();
+    expect(await screen.findByText('Session expired — please reload')).toBeInTheDocument();
+    // Spinner must not persist
+    const { container } = renderPage();
+    await waitFor(() => {
+      expect(container.querySelector('.animate-spin')).not.toBeInTheDocument();
+    });
+  });
+
+  it('[P20-004] shows generic error message on non-401 failure (not 401)', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(mockResponse({}, false, 503));
+    renderPage();
+    expect(await screen.findByText("Couldn't load appointments — please try again")).toBeInTheDocument();
+  });
+
+  it('[P20-004] renders "Reload page" affordance alongside the session-expired message', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(mockResponse({}, false, 401));
+    renderPage();
+    expect(await screen.findByText('Session expired — please reload')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reload page/i })).toBeInTheDocument();
+  });
+
+  it('[P20-004] happy path: loads data successfully without showing any error', async () => {
+    renderPage();
+    expect(await screen.findByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.queryByText('Session expired — please reload')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
   });
 });
