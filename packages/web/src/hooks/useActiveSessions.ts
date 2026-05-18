@@ -122,7 +122,15 @@ function useActiveSessionsInternal(): UseActiveSessionsResult {
   const subscribeToSession = useCallback((sessionId: string) => {
     if (subscribedRef.current.has(sessionId)) return;
     if (!wsConnectedRef.current) return;
-    sendRef.current?.({
+    // `sendRef` is wired in a useEffect that runs AFTER `onOpen`, so on
+    // the very first open we can race here with sendRef still null. If
+    // we marked the id as subscribed anyway, the next reconciliation
+    // would short-circuit on the `.has(sessionId)` check above and we'd
+    // never actually send. Skip marking when there's nothing to send;
+    // the next discovery poll will retry.
+    const send = sendRef.current;
+    if (!send) return;
+    send({
       kind: 'subscribe',
       channel: 'voice',
       targetId: sessionId,
