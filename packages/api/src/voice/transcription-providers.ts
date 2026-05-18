@@ -240,7 +240,8 @@ export interface StreamingTranscriptionProvider {
     onError: (err: Error) => void,
     onClose: () => void,
     /** P11-002: optional language hint ('en' | 'es'); defaults to 'en'. */
-    language?: 'en' | 'es'
+    language?: 'en' | 'es',
+    options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }
   ): Promise<StreamingSession>;
 }
 
@@ -268,24 +269,35 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
   }
 
   /** Build the Deepgram WS URL for a given language. Exposed for testing. */
-  private buildWsUrl(language: 'en' | 'es'): string {
-    return (
+  private buildWsUrl(
+    language: 'en' | 'es',
+    options: { keywords?: ReadonlyArray<string>; endpointingMs?: number } = {}
+  ): string {
+    const endpointing = options.endpointingMs ?? 600;
+    let url =
       'wss://api.deepgram.com/v1/listen' +
       `?model=nova-3&language=${language}&encoding=linear16&sample_rate=16000` +
-      '&channels=1&interim_results=true&smart_format=true&endpointing=300'
-    );
+      `&channels=1&interim_results=true&smart_format=true&endpointing=${endpointing}`;
+    if (options.keywords && options.keywords.length > 0) {
+      const params = options.keywords
+        .map((k) => `keywords=${encodeURIComponent(k)}`)
+        .join('&');
+      url += `&${params}`;
+    }
+    return url;
   }
 
   async openSession(
     onEvent: StreamingTranscriptCallback,
     onError: (err: Error) => void,
     onClose: () => void,
-    language?: 'en' | 'es'
+    language?: 'en' | 'es',
+    options: { keywords?: ReadonlyArray<string>; endpointingMs?: number } = {}
   ): Promise<StreamingSession> {
     // Node 22 native WebSocket follows the WHATWG spec and does not accept
     // a headers option. Pass the API key via query param instead.
     const lang = language ?? this.defaultLanguage;
-    const ws = new WebSocket(`${this.buildWsUrl(lang)}&token=${this.apiKey}`);
+    const ws = new WebSocket(`${this.buildWsUrl(lang, options)}&token=${this.apiKey}`);
 
     // Attach message listener BEFORE awaiting open to avoid missing frames
     // that Deepgram sends immediately on connection.

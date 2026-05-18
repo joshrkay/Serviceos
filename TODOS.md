@@ -5,32 +5,18 @@ tracks follow-ups surfaced during /review that were intentionally not fixed.
 
 ---
 
-## Executor double-execution on multi-instance deploys ✅ CLOSED
+## Executor double-execution on multi-instance deploys ✅ CLOSED (in code)
 
-`packages/api/src/proposals/execution/executor.ts:17-72` checks
-`proposal.status === 'approved'` from the in-memory object returned by
-`findReadyForExecution`, runs the handler's side effects, THEN calls
-`updateStatus('executed')`. With more than one API instance running, two
-workers can both claim the same approved proposal via `findReadyForExecution`
-and run the handler twice (customer created twice, appointment booked twice,
-etc.).
+Shipped via `ProposalRepository.claimForExecution(proposalId, workerId)`
+(see `packages/api/src/proposals/proposal.ts:546` for the in-memory impl
+and `pg-proposal.ts:285` for the Postgres impl). The execution worker calls
+`claimForExecution` at `packages/api/src/workers/execution-worker.ts:67`,
+which atomically transitions `approved → executing` and returns `null` if
+another worker won the race. `'executing'` is in the `ProposalStatus`
+enum (`proposal.ts:14`) and `resetStaleExecuting` (`proposal.ts:557`)
+handles crash recovery with a retry count cap.
 
-This was surfaced during `/review` of PR #89 but explicitly deferred to keep
-the P0-gap PR focused. Not a problem today because ServiceOS runs a single
-Railway dyno, but any horizontal scale flips this on.
-
-**Fix:** atomic claim via `UPDATE proposals SET status = 'executing' WHERE id
-= $1 AND status = 'approved' RETURNING *` before running the handler. If the
-update returns no row, another worker claimed it — skip. Add an `'executing'`
-ProposalStatus (or a dedicated `claimed_by` + `claimed_at` column pair) and
-thread it through the lifecycle.
-
-**Effort:** ~30 min CC + careful thinking about crash recovery (what if the
-handler crashes mid-execution — do we reset `executing` back to `approved` on
-a timeout?). Flag before scaling past one dyno.
-
-This same issue covers the §8 `log_expense` idempotency concern — same
-double-execution risk, same fix.
+Safe to scale past one dyno.
 
 ---
 

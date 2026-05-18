@@ -272,11 +272,11 @@ export function SchedulePage() {
       const to    = end.toISOString();
       const res  = await apiFetch(`/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}&sort=asc`);
       if (!res.ok) {
-        // A 401 means the session token was rejected — surface a clear message
-        // instead of a misleading empty state (BUG-4). Other failures fall
-        // through to the graceful empty state.
+        // Surface a clear error instead of a misleading empty state (BUG-4).
         if (res.status === 401) {
-          setError('Session expired — please reload the page to sign in again.');
+          setError('Session expired — please reload');
+        } else {
+          setError("Couldn't load appointments — please try again");
         }
         setLoading(false);
         return;
@@ -329,6 +329,7 @@ export function SchedulePage() {
     } catch {
       setAppointments([]);
       setEnriched([]);
+      setError("Couldn't load appointments — please try again");
     } finally {
       setLoading(false);
     }

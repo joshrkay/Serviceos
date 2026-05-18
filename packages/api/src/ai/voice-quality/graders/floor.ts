@@ -71,6 +71,16 @@ const IDENTITY_RESOLVING_LOOKUPS = new Set([
  * naming is not yet locked.
  */
 function extractAgentText(event: VoiceSessionEvent): string | undefined {
+  // Telemetry-only events carry a `text` / `fillerText` field that is not
+  // agent speech — skip them so the PII scan does not flag, e.g., a repair
+  // template containing a phone-format pattern as a real agent utterance.
+  if (
+    event.type === 'repair_template_fired' ||
+    event.type === 'filler_fired' ||
+    event.type === 'filler_cancelled'
+  ) {
+    return undefined;
+  }
   const e = event as unknown as Record<string, unknown>;
   for (const key of ['text', 'agentResponse', 'transcript', 'response']) {
     const v = e[key];

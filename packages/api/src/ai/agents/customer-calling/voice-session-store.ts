@@ -20,6 +20,7 @@ import type {
   CallingAgentState,
   SideEffect,
 } from './types';
+import type { RepairTemplate } from '../../../verticals/registry';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
 import type { CallOutcome } from '../../../voice/voice-service';
 
@@ -102,7 +103,13 @@ export type VoiceSessionEvent =
       /** Zero-indexed turn within the session. */
       turnIndex: number;
       ts: number;
-    };
+    }
+  /** P2-1 / Section 5: a pre-rendered filler clip started playing. */
+  | { type: 'filler_fired'; fillerText: string; ts: number }
+  /** P2-1 / Section 5: an in-flight filler was cancelled by a real response. */
+  | { type: 'filler_cancelled'; fillerText: string; ts: number }
+  /** P2-3 / Section 5: the FSM fired a vertical-specific repair template. */
+  | { type: 'repair_template_fired'; trigger: string; text: string; ts: number };
 
 export interface TranscriptEntry {
   speaker: 'caller' | 'agent';
@@ -210,7 +217,7 @@ export class VoiceSessionStore {
   create(
     tenantId: string,
     channel: CallingAgentChannel,
-    opts: { callSid?: string; conversationId?: string } = {}
+    opts: { callSid?: string; conversationId?: string; repairTemplates?: ReadonlyArray<RepairTemplate> } = {}
   ): VoiceSession {
     const id = uuidv4();
     const machine = new CallingAgentStateMachine({
@@ -219,6 +226,7 @@ export class VoiceSessionStore {
       channel,
       callSid: opts.callSid,
       conversationId: opts.conversationId,
+      ...(opts.repairTemplates ? { repairTemplates: opts.repairTemplates } : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS
@@ -373,6 +381,20 @@ export class VoiceSessionStore {
   /** Number of active sessions (for telemetry / tests). */
   size(): number {
     return this.sessions.size;
+  }
+
+  /**
+   * X10/PR#398 — supervisor wall discovery. Returns non-ended sessions
+   * for the given tenant so the wall can seed its local state and send
+   * per-session WS `subscribe` frames (the gateway rejects voice subs
+   * without a `targetId` — see `authorizeSubscribe` in `ws/client-gateway`).
+   */
+  listActiveByTenant(tenantId: string): VoiceSession[] {
+    const out: VoiceSession[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.tenantId === tenantId && !session.ended) out.push(session);
+    }
+    return out;
   }
 
   /**

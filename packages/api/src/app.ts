@@ -157,6 +157,13 @@ import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
+import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
+import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
+import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
+import { createHvacPack } from './verticals/packs/hvac';
+import { createPlumbingPack } from './verticals/packs/plumbing';
+import { createElectricalPack } from './verticals/packs/electrical';
+import { isValidVerticalType } from './shared/vertical-types';
 import {
   buildCallerPlanContext,
   formatCallerPlanForPrompt,
@@ -295,7 +302,15 @@ import {
   createLLMGateway,
   createMockLLMGateway,
   createEmbeddingProvider,
+  shutdownCacheStores,
 } from './ai/gateway/factory';
+import * as gatewayFactory from './ai/gateway/factory';
+import { createAiHealthRouter } from './routes/ai-health';
+import { InMemoryAiRunRepository } from './ai/ai-run';
+import { PgAiRunRepository } from './ai/pg-ai-run';
+import { createEvaluationRouter } from './routes/evaluation';
+import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
+import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider } from './ai/tts/tts-provider';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
@@ -324,6 +339,9 @@ import {
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
+import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
+import { registerKeywordHandler } from './sms/inbound-dispatch';
 
 // Auth middleware
 import { verifyClerkSession } from './auth/clerk';
@@ -629,6 +647,25 @@ export function createApp(): express.Express {
   const healthRouter = createHealthRouter('1.0.0', process.env.NODE_ENV || 'development', checks);
   app.use('/', healthRouter);
 
+  // P2-029 — AI provider health endpoint. Public, no auth required.
+  // Uses the shared breaker registry populated by createLLMGateway().
+  // Reading gatewayFactory.sharedBreakerRegistry at request time (not at
+  // mount time) ensures the registry is populated after createLLMGateway()
+  // is called later in the boot sequence.
+  app.use('/api/health', (req, res, next) => {
+    const registry = gatewayFactory.sharedBreakerRegistry;
+    if (!registry) {
+      // Gateway not yet initialised (e.g. mock mode without AI_PROVIDER_API_KEY)
+      if (req.path === '/ai') {
+        res.status(200).json({ providers: [] });
+        return;
+      }
+      next();
+      return;
+    }
+    createAiHealthRouter(registry)(req, res, next);
+  });
+
   // Prometheus metrics. Mounted on the public surface deliberately —
   // production should rely on network-level allowlist (ingress / VPC).
   app.get('/metrics', async (_req, res) => {
@@ -708,6 +745,14 @@ export function createApp(): express.Express {
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+
+  // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
+  // The inbound-SMS dispatcher routes any matching first-token to these
+  // handlers, which mutate tenant_dnc_list. Suppression at outbound-send
+  // time is layered on top in send-service / appointment-confirmation-notifier.
+  const dncRepo = pool ? new PgDncRepository(pool) : new InMemoryDncRepository();
+  registerKeywordHandler(buildStopKeywordHandler({ dncRepo }), { overwrite: true });
+  registerKeywordHandler(buildStartKeywordHandler({ dncRepo }), { overwrite: true });
 
   // Resolves per-tenant integration credentials for inbound webhook signature
   // verification. Returns null when no row exists or the integration provider
@@ -881,6 +926,23 @@ export function createApp(): express.Express {
   // for the affected tenant so admins see activate/archive without
   // waiting for the 5-minute TTL.
   let invalidateVerticalPromptCache: ((tenantId: string) => void) | null = null;
+  // §3B/3D/3E — operator-side classifier paths (voice-action-router worker
+  // and assistant chat router) are constructed BEFORE the vertical prompt
+  // resolver itself, so we hand them a lazy holder that defers to the real
+  // resolver once it's built (mirrors `invalidateVerticalPromptCache` above).
+  // Operator paths don't have a customerId in scope, so they only need the
+  // vertical resolver — the caller-plan resolver applies to inbound callers
+  // (twilio/inapp adapters), not to operator-spoken commands.
+  let operatorVerticalPromptResolver:
+    | ((tenantId: string) => Promise<string | undefined>)
+    | null = null;
+  const operatorVerticalResolverShim = async (
+    tenantId: string,
+  ): Promise<string | undefined> => {
+    return operatorVerticalPromptResolver
+      ? operatorVerticalPromptResolver(tenantId)
+      : undefined;
+  };
   const trainingAssetService = new TrainingAssetService({
     assetRepo: trainingAssetRepo,
     privacyAuditRepo,
@@ -932,12 +994,24 @@ export function createApp(): express.Express {
 
   // URL-based provider for the queue worker pipeline.
   const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
+  // AI-run repository — tracks every LLM call lifecycle (pending → running → completed/failed).
+  // Pg-backed in production; InMemory when DATABASE_URL is unset (dev/test).
+  const aiRunRepo = pool ? new PgAiRunRepository(pool) : new InMemoryAiRunRepository();
+
+  // P2-030 — shadow comparison store.
+  // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
+  // InMemoryShadowComparisonStore otherwise (zero overhead, data not durable).
+  const shadowStore =
+    pool && process.env.SHADOW_LLM_ENABLED === 'true'
+      ? new PgShadowComparisonStore(pool)
+      : new InMemoryShadowComparisonStore();
+
   // LLM gateway — single instance shared across intent classifier,
   // voice-action-router task handlers, and future AI features.
   // Falls back to a MockLLMProvider in dev/test so the app boots
   // without an AI_PROVIDER_API_KEY.
   const llmGateway = config.AI_PROVIDER_API_KEY
-    ? createLLMGateway(config)
+    ? createLLMGateway(config, { aiRunRepo, shadowStore })
     : createMockLLMGateway('{"intentType":"unknown","confidence":0}').gateway;
 
   // Phase 4a-1: dedicated EmbeddingProvider for the RAG corpus. The
@@ -1012,6 +1086,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1145,6 +1220,7 @@ export function createApp(): express.Express {
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        dncRepo,
       })
     : undefined;
   // P7-026 — wire the review-response execution handler's three
@@ -1352,6 +1428,13 @@ export function createApp(): express.Express {
     availabilityFinder,
     thresholdResolver,
     appointmentRepo,
+    // §3B/3D/3E — operator voice commands need the same vertical
+    // terminology + intake-question disambiguation the customer-facing
+    // adapters get. The shim is wired here because the real resolver
+    // is built ~280 lines below; once `verticalPromptResolver` is
+    // constructed, `operatorVerticalPromptResolver` is assigned and the
+    // shim starts returning live data on the next classifier call.
+    verticalPromptResolver: operatorVerticalResolverShim,
   });
   workerRegistry.set(
     voiceActionRouterWorker.type,
@@ -1627,6 +1710,10 @@ export function createApp(): express.Express {
     logger: verticalPromptResolverLogger,
   });
   invalidateVerticalPromptCache = (tenantId) => verticalPromptResolver.invalidate(tenantId);
+  // §3B/3D/3E — light up the operator-side resolver shim now that the
+  // real resolver exists. The voice-action-router worker and assistant
+  // router both pick it up on their next classifier call.
+  operatorVerticalPromptResolver = verticalPromptResolver;
   // §3C: caller-plan resolver. Returns a prompt-shaped block when the
   // caller's customerId resolves to an active maintenance agreement.
   const callerPlanResolver = async (
@@ -1636,6 +1723,25 @@ export function createApp(): express.Express {
     const ctx = await buildCallerPlanContext(tenantId, customerId, agreementRepo);
     const section = formatCallerPlanForPrompt(ctx);
     return section.length > 0 ? section : undefined;
+  };
+  // §P2-3 — Build a shared in-memory map for rich pack fields (sttKeywords,
+  // repairTemplates) that are NOT round-tripped through the canonical registry.
+  // This is the same Map used by the streaming terminologyProvider; creating it
+  // here ensures it is also available to the non-streaming twilio/inapp adapters.
+  const sharedRichPackByType = new Map([
+    ['hvac', createHvacPack()],
+    ['plumbing', createPlumbingPack()],
+    ['electrical', createElectricalPack()],
+  ]);
+  const repairTemplatesResolver = async (tenantId: string): Promise<ReadonlyArray<import('./verticals/registry').RepairTemplate>> => {
+    const activations = await packActivationRepo.findByTenant(tenantId);
+    const active = activations
+      .filter((a) => a.status === 'active')
+      .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+    if (!active) return [];
+    const base = active.packId.replace(/-v\d+$/, '');
+    if (!isValidVerticalType(base)) return [];
+    return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
@@ -1665,6 +1771,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voiceRepo,
     voicePersonaResolver,
@@ -1912,6 +2019,48 @@ export function createApp(): express.Express {
       ? new DeepgramStreamingProvider(deepgramKey)
       : null;
     if (streamingProvider) {
+      // Reuse sharedRichPackByType (already built above for repairTemplatesResolver)
+      // so sttKeywords + repairTemplates come from the same in-memory pack instances.
+      const terminologyProvider = new VerticalTerminologyProvider({
+        repo: {
+          findByType: async (type) => sharedRichPackByType.get(type) ?? null,
+        },
+        lookupVertical: async (tenantId: string) => {
+          const activations = await packActivationRepo.findByTenant(tenantId);
+          const active = activations
+            .filter((a) => a.status === 'active')
+            .sort((a, b) => b.activatedAt.getTime() - a.activatedAt.getTime())[0];
+          if (!active) return null;
+          // Activation packId is conventionally the verticalType ('hvac',
+          // 'plumbing', 'electrical') or a versioned packId like 'hvac-v1'.
+          // Strip the suffix and validate.
+          const packId = active.packId;
+          const base = packId.replace(/-v\d+$/, '');
+          if (!isValidVerticalType(base)) {
+            verticalPromptResolverLogger.debug('vertical lookup returned null', {
+              tenantId,
+              packId,
+              derivedBase: base,
+              reason: 'invalid_vertical_type',
+            });
+            return null;
+          }
+          return base;
+        },
+      });
+
+      // P2-1: Filler engine + cache. One engine instance is shared across
+      // calls. Cross-call state sharing means the no-repeat guarantee is
+      // process-wide, not per-call — acceptable because callers can't hear
+      // each other's audio, and round-robin over 8 fillers means no caller
+      // hears the same filler back-to-back regardless. The cache loads all
+      // PCM files from disk once at boot; missing files are logged (warn).
+      const fillerCache = new FillerAudioCache(
+        require('path').resolve(__dirname, 'ai/agents/customer-calling/fillers'),
+      );
+      fillerCache.load();
+      const fillerEngine = new FillerEngine();
+
       const origListen = app.listen.bind(app);
       // Wrap listen() so the WS upgrade handler is attached the moment
       // the http.Server exists. Fire-and-forget; errors during attach
@@ -1925,6 +2074,9 @@ export function createApp(): express.Express {
             store: voiceSessionStore,
             streamingProvider,
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
+            terminologyProvider,
+            fillerEngine,
+            fillerCache,
             speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
@@ -2313,6 +2465,10 @@ export function createApp(): express.Express {
   app.use('/api/templates', createTemplateRouter(templateRepo, auditRepo));
   app.use('/api/bundles', createBundleRouter(bundleRepo, auditRepo));
   app.use('/api/quality', createQualityRouter({ metricsRepo: qualityMetricsRepo, approvalRepo, deltaRepo }));
+
+  // P2-030 — AI evaluation admin API (owner-only; tenant-scoped).
+  app.use('/api/evaluation', createEvaluationRouter({ shadowStore }));
+
   const voiceLogger = createLogger({
     service: 'voice',
     environment: process.env.NODE_ENV || 'development',
@@ -2333,7 +2489,17 @@ export function createApp(): express.Express {
     '/api/files',
     createFilesRouter({ fileRepo, storage: storageProvider, bucket: storageBucket, auditRepo })
   );
-  app.use('/api/assistant', createAssistantRouter({ gateway: llmGateway, proposalRepo }));
+  app.use(
+    '/api/assistant',
+    createAssistantRouter({
+      gateway: llmGateway,
+      proposalRepo,
+      // §3B/3D/3E — assistant chat shares the operator-side resolver
+      // shim with the voice-action-router so the same vertical context
+      // reaches both text and voice classification paths.
+      verticalPromptResolver: operatorVerticalResolverShim,
+    }),
+  );
   // D2-1c — audit-log proposal approve / reject / edit / undo.
   app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo));
   if (pool) {
@@ -2572,6 +2738,7 @@ export function createApp(): express.Express {
     verticalPromptResolver,
     callerPlanResolver,
     thresholdResolver,
+    repairTemplatesResolver,
     voiceSessionRepo,
     voicePersonaResolver,
   });
@@ -2648,6 +2815,9 @@ export function createApp(): express.Express {
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // Disconnect Redis cache store(s) before draining the DB pool so Railway
+      // shutdown is not slowed by lingering Redis connections.
+      await shutdownCacheStores();
       if (pool) {
         await Promise.race([
           pool.end(),

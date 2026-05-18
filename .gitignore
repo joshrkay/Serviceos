@@ -3,6 +3,10 @@ dist/
 *.js.map
 *.d.ts
 
+# Ephemeral H5 voice-load report (regenerated on each run; do not commit
+# a single run's capture — staging numbers belong in voice-capacity.md).
+voice-load-report.json
+
 # Multi-agent dispatch worktrees (created by /dispatch-story; ephemeral)
 .claude/worktrees/
 
@@ -43,3 +47,9 @@ packages/api/voice-quality-report.json
 packages/api/voice-quality-layer2-report.json
 packages/api/voice-quality-layer2-vitest-report.json
 packages/api/voice-quality-layer2-failures/
+
+# P2-1 Filler engine — pre-rendered PCM clips (generated at deploy time by
+# scripts/render-fillers.ts; never committed).
+packages/api/src/ai/agents/customer-calling/fillers/*.mp3
+packages/api/src/ai/agents/customer-calling/fillers/*.bin
+packages/api/src/ai/agents/customer-calling/fillers/*.pcm
