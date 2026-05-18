@@ -9,12 +9,12 @@ describe('detectFrustration', () => {
   });
 
   it('returns the matched keyword in the result', () => {
-    const r = detectFrustration('forget it, just connect me');
+    const r = detectFrustration('this is ridiculous, just connect me');
     expect(r.matched).toBe(true);
-    expect(r.keyword).toBe('forget it');
+    expect(r.keyword).toBe('this is ridiculous');
   });
 
-  it('respects word boundaries — "forget the AC" does NOT match "forget it"', () => {
+  it('respects word boundaries — "forget the AC" does NOT match', () => {
     expect(detectFrustration('please forget the AC for now').matched).toBe(false);
   });
 
@@ -25,5 +25,20 @@ describe('detectFrustration', () => {
 
   it('matches multi-word phrases anywhere in the transcript', () => {
     expect(detectFrustration('You know what, real person please').matched).toBe(true);
+  });
+});
+
+describe('false-positive guards', () => {
+  it('does not match "I\'m not frustrated"', () => {
+    expect(detectFrustration("I'm not frustrated").matched).toBe(false);
+  });
+  it('does not match "I want a human technician" (after refinement)', () => {
+    expect(detectFrustration('I want a human technician to come look').matched).toBe(false);
+  });
+  it('does not match conversational "talk" phrases without the human/person target', () => {
+    expect(detectFrustration('I need to talk to my husband first').matched).toBe(false);
+  });
+  it('matches "talk to a human" exactly', () => {
+    expect(detectFrustration('Can I talk to a human about this').matched).toBe(true);
   });
 });
