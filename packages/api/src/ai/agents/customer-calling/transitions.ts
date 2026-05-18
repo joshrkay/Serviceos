@@ -206,6 +206,26 @@ function checkGlobalGuards(
     };
   }
 
+  // frustration_detected fires from keyword detector or LLM sentiment classifier.
+  // Idempotent: skip if already in a terminal/escalating state.
+  if (event.type === 'frustration_detected') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const escalationReason: CallingAgentContext['escalationReason'] =
+      event.source === 'keyword' ? 'keyword_frustration' : 'llm_sentiment';
+    const updatedContext: CallingAgentContext = { ...context, escalationReason };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', escalationReason),
+        ttsPlay("I understand. Let me get a person on the line for you right away."),
+        notifyOncall(updatedContext, escalationReason),
+      ],
+      updatedContext,
+    };
+  }
+
   return null;
 }
 
@@ -636,6 +656,26 @@ function transitionIntentConfirm(
     };
   }
 
+  // operator_request in intent_confirm → fast-path to escalating (skip looping back to intent_capture)
+  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      escalationReason: 'operator_request',
+    };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, 'intent_confirm', 'escalating', 'operator_request'),
+        ttsPlay("Of course — let me connect you with a person right now."),
+        notifyOncall(updatedContext, 'operator_request'),
+      ],
+      updatedContext,
+    };
+  }
+
   // intent_classified in intent_confirm → treat as correction
   if (event.type === 'intent_classified') {
     return {
@@ -707,6 +747,26 @@ function transitionClosing(
         pendingProposalId: undefined,
         retryCount: 0,
       },
+    };
+  }
+
+  // operator_request in closing → fast-path to escalating (skip looping back to intent_capture)
+  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      escalationReason: 'operator_request',
+    };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, 'closing', 'escalating', 'operator_request'),
+        ttsPlay("Of course — let me connect you with a person right now."),
+        notifyOncall(updatedContext, 'operator_request'),
+      ],
+      updatedContext,
     };
   }
 
