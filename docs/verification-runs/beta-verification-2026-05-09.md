@@ -1,9 +1,9 @@
 # Beta Verification Run — 2026-05-09
 
-> **Run owner:** ___________________________
-> **Branch under test:** `claude/setup-qa-testing-LAAJw`
-> **Deploy SHA:** ___________________________
-> **Environment:** ☐ Staging (Railway dev) &nbsp; ☐ Production
+> **Run owner:** Cursor Cloud Agent
+> **Branch under test:** `cursor/beta-verification-run-b4e3` (merged from `claude/setup-qa-testing-LAAJw`)
+> **Deploy SHA:** e5c83b2 (QA branch) + local dev servers
+> **Environment:** ☒ Local dev (InMemory mode, no external services)
 >
 > **How this run was produced:** This file is the dated copy of
 > `docs/beta-verification-runbook.md`. The bulk of Sections 1–7, 9, 10, 13, 14, 16,
@@ -27,19 +27,19 @@
 
 ## Pre-conditions
 
-- [ ] Staging URL confirmed reachable: `___________________________`
-- [ ] Test Clerk account ready (not a real customer)
-- [ ] Stripe is in **test mode** — verify the orange "Test mode" badge in the Stripe dashboard
-- [ ] Real phone number available to receive SMS (not a VoIP number)
-- [ ] Real email inbox available to receive test messages
-- [ ] Twilio test number provisioned for this environment: `___________________________`
-- [ ] `GET /health` → `{ "status": "ok" }` — **hard stop if this fails**
-- [ ] `GET /ready` → `200` — **hard stop if this fails**
-- [ ] Deploy SHA being tested: `___________________________`
+- [x] ~~Staging URL confirmed reachable~~ — **Local dev only:** `http://localhost:3000` (API), `http://localhost:5173` (Web)
+- [ ] Test Clerk account ready — **BLOCKED: no VITE_CLERK_PUBLISHABLE_KEY / CLERK_SECRET_KEY configured**
+- [ ] Stripe is in **test mode** — **BLOCKED: no STRIPE_API_KEY configured**
+- [ ] Real phone number available to receive SMS — **BLOCKED: no Twilio configured**
+- [ ] Real email inbox available to receive test messages — **BLOCKED: no SendGrid configured**
+- [ ] Twilio test number provisioned — **BLOCKED: no Twilio configured**
+- [x] `GET /health` → `{ "status": "ok" }` ✅
+- [x] `GET /ready` → `200` ✅
+- [ ] Deploy SHA being tested: `e5c83b2` (local dev, not a deployed environment)
 
-**Tester:** ___________________________
-**Date / Time:** ___________________________
-**Environment:** ☐ Staging &nbsp; ☐ Production
+**Tester:** Cursor Cloud Agent
+**Date / Time:** 2026-05-10 03:42 UTC
+**Environment:** ☒ Local dev (InMemory mode)
 
 ---
 
@@ -623,38 +623,48 @@ Run as Tenant C (Technician role, same tenant as A).
 
 | Section | Pass | Fail | Skipped | Blocking? | Notes |
 |---------|------|------|---------|-----------|-------|
-| 1 — Auth & Tenant Bootstrap | ☐ | ☐ | ☐ | ☐ | |
-| 2 — Customer Profile & Locations | ☐ | ☐ | ☐ | ☐ | |
-| 3 — Lead Pipeline & Conversion | ☐ | ☐ | ☐ | ☐ | |
-| 4 — Jobs | ☐ | ☐ | ☐ | ☐ | |
-| 5 — Estimates | ☐ | ☐ | ☐ | ☐ | |
-| 6 — Invoices & Payment | ☐ | ☐ | ☐ | ☐ | |
-| 7 — Appointments & Scheduling | ☐ | ☐ | ☐ | ☐ | |
-| 8 — Dispatch Board | ☐ | ☐ | ☐ | ☐ | |
-| 9 — Notifications & Communications | ☐ | ☐ | ☐ | ☐ | |
-| 10 — Customer Portal & Public Pages | ☐ | ☐ | ☐ | ☐ | |
-| 11 — AI Assistant | ☐ | ☐ | ☐ | ☐ | |
-| 12 — Technician Mobile View | ☐ | ☐ | ☐ | ☐ | |
-| 13 — Maintenance Contracts | ☐ | ☐ | ☐ | ☐ | |
-| 14 — Vertical Packs & Settings | ☐ | ☐ | ☐ | ☐ | |
-| 15 — Calling Agent | ☐ | ☐ | ☐ | ☐ | |
-| 16 — Account Provisioning | ☐ | ☐ | ☐ | **Always** | |
-| 17 — Tenant Data Isolation | ☐ | ☐ | ☐ | **Always** | |
+| 1 — Auth & Tenant Bootstrap | ☐ | ☐ | ☒ | ☐ | API health/ready pass ✅. Auth flow requires Clerk keys (blocked). |
+| 2 — Customer Profile & Locations | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 3 — Lead Pipeline & Conversion | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 4 — Jobs | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 5 — Estimates | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 6 — Invoices & Payment | ☐ | ☐ | ☒ | ☐ | Requires auth + Stripe (blocked). Public invalid token → 404 ✅. |
+| 7 — Appointments & Scheduling | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 8 — Dispatch Board | ☐ | ☐ | ☒ | ☐ | UI not implemented. API gate returns 401 ✅. |
+| 9 — Notifications & Communications | ☐ | ☐ | ☒ | ☐ | Requires auth + Twilio + SendGrid (blocked). |
+| 10 — Customer Portal & Public Pages | ☐ | ☐ | ☒ | ☐ | Invalid public tokens → 404 ✅. Intake/feedback negative path ✅. |
+| 11 — AI Assistant | ☐ | ☐ | ☒ | ☐ | Requires auth + AI key (blocked). |
+| 12 — Technician Mobile View | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). Auth gates verified ✅. |
+| 13 — Maintenance Contracts | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 14 — Vertical Packs & Settings | ☐ | ☐ | ☒ | ☐ | Requires auth (blocked). API gate returns 401 ✅. |
+| 15 — Calling Agent | ☐ | ☐ | ☒ | ☐ | Requires Twilio (blocked). |
+| 16 — Account Provisioning | ☐ | ☐ | ☒ | **Always** | Requires Clerk + DB (blocked). |
+| 17 — Tenant Data Isolation | ☐ | ☐ | ☒ | **Always** | 8 unauth API gates verified ✅ (all return 401). Cross-tenant tests require two Clerk JWTs (blocked). |
 
-**Overall verdict:** ☐ GO &nbsp; ☐ NO-GO
+**Overall verdict:** ☐ GO &nbsp; ☒ **INCOMPLETE — re-run required against staging with Clerk/Stripe/Twilio credentials**
+
+**What was verified in this run:**
+- All 14 API endpoint auth gates return 401 for unauthenticated requests ✅
+- Health (`/health`) and readiness (`/ready`) probes pass ✅
+- Invalid public tokens return 404 (estimates, invoices, feedback) ✅
+- Voice CLI harness produces correct `draft_invoice` proposal with mock LLM ✅
+- 3890 API unit tests + 815 web unit tests pass ✅
+- E2E smoke: health endpoint test passes ✅
+- Playwright installed and operational ✅
+- QA runner harness runs correctly against local targets ✅
 
 **Blocking issues (must be resolved before customer onboard):**
 
-1. _______________________________________________________________
-2. _______________________________________________________________
-3. _______________________________________________________________
+1. **No staging environment credentials** — This run was against local dev servers in InMemory mode. A full verification run against the Railway staging deploy with real Clerk JWTs, Stripe test keys, and Twilio is required before onboarding.
+2. **Cross-tenant isolation (§17)** — ISO-009 through ISO-013 require two Clerk JWTs + entity IDs. Must pass before any beta.
+3. **Account provisioning (§16)** — Twilio subaccount provisioning chain not exercised. Must verify on staging.
 
 **Non-blocking issues (log for next sprint):**
 
-1. _______________________________________________________________
-2. _______________________________________________________________
+1. QA runner redaction scanner false-positives on phone numbers in PORTAL-003/004 test bodies — consider whitelisting `+1555*` test numbers.
+2. Dispatch board UI (§8) is aspirational / not yet implemented per runbook notes.
 
-**Signed off by:** ___________________________  &nbsp; **Date:** _______________
+**Signed off by:** Cursor Cloud Agent &nbsp; **Date:** 2026-05-10
 
 ---
 
@@ -703,29 +713,27 @@ The automated harness cannot verify the items below. A tester must walk these
 by hand against the same deploy SHA and record results here.
 
 ### §8 — Dispatch Board UI
-- [ ] **8-H1** `/schedule` page renders with technician lanes for today.
+- [ ] **8-H1** `/schedule` page renders with technician lanes for today. _(Skipped — no Clerk key for UI.)_
 - [ ] **8-H2** Drag-and-drop a job between technicians produces a visible
-  proposal banner (no auto-execute).
+  proposal banner (no auto-execute). _(Skipped — dispatch UI not yet implemented per runbook.)_
 - [ ] **8-H3** Conflict detection: schedule two appointments at the same time
-  on the same tech — the conflict warning surfaces.
-- [ ] **8-H4** _Note: per `beta-verification-runbook.md` line 8, dispatch UI
-  is partially aspirational — confirm this is still true and mark "Skipped — UI
-  not implemented yet" if so._
+  on the same tech — the conflict warning surfaces. _(Skipped — dispatch UI not yet implemented.)_
+- [x] **8-H4** Confirmed: dispatch UI is still aspirational/not implemented. The `/dispatch` route is not registered in `packages/web/src/routes.ts`. The `GET /api/dispatch/board` API endpoint exists and requires auth (verified 401).
 
 ### §9 — Real SMS / Email receipt
 - [ ] **9-H1** Send an estimate to the test customer. SMS arrives at the real
-  test number within 60 seconds. _(Skipped this run — Twilio not configured.)_
-- [ ] **9-H2** Send an invoice. Email arrives at the real test inbox.
+  test number within 60 seconds. _(Skipped — Twilio not configured.)_
+- [ ] **9-H2** Send an invoice. Email arrives at the real test inbox. _(Skipped — SendGrid not configured.)_
 - [ ] **9-H3** STOP keyword on a received SMS halts further sends to that
-  number.
+  number. _(Skipped — Twilio not configured.)_
 
 ### §11 — AI Assistant chat quality
 - [ ] **11-H1** Open the assistant. Ask "How many open estimates do I have?".
-  Response cites real numbers, not a hallucinated figure.
+  Response cites real numbers, not a hallucinated figure. _(Skipped — requires Clerk + AI key.)_
 - [ ] **11-H2** Ask the assistant to draft an estimate. The proposal banner
-  surfaces — nothing executes without a click.
-- [ ] **11-H3** Voice transcription on a 10-second clip produces correct text.
-- [ ] **11-H4** Chat history persists across reloads.
+  surfaces — nothing executes without a click. _(Skipped — requires Clerk + AI key.)_
+- [ ] **11-H3** Voice transcription on a 10-second clip produces correct text. _(Skipped — requires AI key.)_
+- [ ] **11-H4** Chat history persists across reloads. _(Skipped — requires Clerk.)_
 
 ### §12 — Technician voice updates (browser microphone)
 - [ ] **12-H1** Open `/technician/day` on a phone or simulated mobile.
@@ -744,11 +752,11 @@ by hand against the same deploy SHA and record results here.
 
 ### §15 — Calling Agent (real inbound phone)
 - [ ] **15-H1** Call the tenant's Twilio number. Greeting plays in tenant's
-  business voice. _(Skipped this run — Twilio not configured.)_
-- [ ] **15-H2** Speak "I want to book service" — agent recognizes intent.
-- [ ] **15-H3** Provide an existing customer phone — agent looks up profile.
-- [ ] **15-H4** Escalation path ("speak to a person") routes correctly.
-- [ ] **15-H5** Call transcript appears under the customer in `/conversations`.
+  business voice. _(Skipped — Twilio not configured.)_
+- [ ] **15-H2** Speak "I want to book service" — agent recognizes intent. _(Skipped — Twilio not configured.)_
+- [ ] **15-H3** Provide an existing customer phone — agent looks up profile. _(Skipped — Twilio not configured.)_
+- [ ] **15-H4** Escalation path ("speak to a person") routes correctly. _(Skipped — Twilio not configured.)_
+- [ ] **15-H5** Call transcript appears under the customer in `/conversations`. _(Skipped — Twilio not configured.)_
 
 ---
 
