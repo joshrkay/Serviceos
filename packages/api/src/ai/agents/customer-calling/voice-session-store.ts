@@ -23,6 +23,14 @@ import type {
 import type { RepairTemplate } from '../../../verticals/registry';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
 import type { CallOutcome } from '../../../voice/voice-service';
+import type {
+  EscalationStartedEvent,
+  EscalationSummaryBuiltEvent,
+  WhisperPlayedEvent,
+  DispatcherAnsweredEvent,
+  DispatcherNoAnswerEvent,
+  EscalationOutcomeEvent,
+} from '../../voice-quality/events';
 
 /** Session is reaped this many ms after last activity. */
 export const DEFAULT_IDLE_TTL_MS = 30 * 60 * 1000;
@@ -109,7 +117,14 @@ export type VoiceSessionEvent =
   /** P2-1 / Section 5: an in-flight filler was cancelled by a real response. */
   | { type: 'filler_cancelled'; fillerText: string; ts: number }
   /** P2-3 / Section 5: the FSM fired a vertical-specific repair template. */
-  | { type: 'repair_template_fired'; trigger: string; text: string; ts: number };
+  | { type: 'repair_template_fired'; trigger: string; text: string; ts: number }
+  // Section 4 — Escalation telemetry events (emitted from the escalation path)
+  | EscalationStartedEvent
+  | EscalationSummaryBuiltEvent
+  | WhisperPlayedEvent
+  | DispatcherAnsweredEvent
+  | DispatcherNoAnswerEvent
+  | EscalationOutcomeEvent;
 
 export interface TranscriptEntry {
   speaker: 'caller' | 'agent';

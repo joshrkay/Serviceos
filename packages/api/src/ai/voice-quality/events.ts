@@ -180,3 +180,113 @@ export const speechOutboundEvent = (
   turnIndex: opts.turnIndex,
   ts: opts.ts ?? Date.now(),
 });
+
+// ─── Section 4 — Escalation telemetry events ─────────────────────────────────
+
+export interface EscalationStartedEvent {
+  type: 'escalation_started';
+  escalationId: string;
+  reason: string;
+  dispatcherUserId: string;
+  ts: number;
+}
+
+export interface EscalationSummaryBuiltEvent {
+  type: 'escalation_summary_built';
+  escalationId: string;
+  durationMs: number;
+  ts: number;
+}
+
+export interface WhisperPlayedEvent {
+  type: 'whisper_played';
+  escalationId: string;
+  dispatcherCallSid: string;
+  ts: number;
+}
+
+export interface DispatcherAnsweredEvent {
+  type: 'dispatcher_answered';
+  escalationId: string;
+  ts: number;
+}
+
+export interface DispatcherNoAnswerEvent {
+  type: 'dispatcher_no_answer';
+  escalationId: string;
+  secondsRing: number;
+  ts: number;
+}
+
+export interface EscalationOutcomeEvent {
+  type: 'escalation_outcome';
+  escalationId: string;
+  outcome: 'resolved' | 'hung_up' | 'needs_callback';
+  ts: number;
+}
+
+export const escalationStartedEvent = (opts: {
+  escalationId: string;
+  reason: string;
+  dispatcherUserId: string;
+  ts?: number;
+}): EscalationStartedEvent => ({
+  type: 'escalation_started',
+  escalationId: opts.escalationId,
+  reason: opts.reason,
+  dispatcherUserId: opts.dispatcherUserId,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const escalationSummaryBuiltEvent = (opts: {
+  escalationId: string;
+  durationMs: number;
+  ts?: number;
+}): EscalationSummaryBuiltEvent => ({
+  type: 'escalation_summary_built',
+  escalationId: opts.escalationId,
+  durationMs: opts.durationMs,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const whisperPlayedEvent = (opts: {
+  escalationId: string;
+  dispatcherCallSid: string;
+  ts?: number;
+}): WhisperPlayedEvent => ({
+  type: 'whisper_played',
+  escalationId: opts.escalationId,
+  dispatcherCallSid: opts.dispatcherCallSid,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const dispatcherAnsweredEvent = (opts: {
+  escalationId: string;
+  ts?: number;
+}): DispatcherAnsweredEvent => ({
+  type: 'dispatcher_answered',
+  escalationId: opts.escalationId,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const dispatcherNoAnswerEvent = (opts: {
+  escalationId: string;
+  secondsRing: number;
+  ts?: number;
+}): DispatcherNoAnswerEvent => ({
+  type: 'dispatcher_no_answer',
+  escalationId: opts.escalationId,
+  secondsRing: opts.secondsRing,
+  ts: opts.ts ?? Date.now(),
+});
+
+export const escalationOutcomeEvent = (opts: {
+  escalationId: string;
+  outcome: EscalationOutcomeEvent['outcome'];
+  ts?: number;
+}): EscalationOutcomeEvent => ({
+  type: 'escalation_outcome',
+  escalationId: opts.escalationId,
+  outcome: opts.outcome,
+  ts: opts.ts ?? Date.now(),
+});
