@@ -19,6 +19,7 @@ import {
 import { CompressedSessionStrip } from '../sessions/CompressedSessionStrip';
 import { useActiveSessions } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
+import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 
 interface NavItem {
   to: string;
@@ -466,6 +467,11 @@ export function Shell() {
       {cameraOpen && (
         <CameraCapture onClose={() => setCameraOpen(false)} />
       )}
+
+      {/* F5 — escalation panel host. Renders floating overlays for
+          dispatcher context when a call is transferred. Mounted at the
+          layout root so panels surface across all authenticated pages. */}
+      <EscalationPanelHost />
 
       {/* Phase 12 — mode-switch confirmation. Rendered at the layout
           root so it overlays everything. The modal owns its own
