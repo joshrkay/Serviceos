@@ -195,6 +195,11 @@ export interface EscalateToHumanInput {
    * is omitted.
    */
   shopName?: string;
+  /**
+   * F8 — per-tenant channel flags. When absent, all three channels
+   * default to enabled (matches pre-F8 single-channel behavior).
+   */
+  channelPreferences?: { sms: boolean; in_app: boolean; whisper: boolean };
 }
 
 /**
@@ -231,6 +236,12 @@ export interface TransferDescriptor {
    * `buildSummary` is called. Undefined when no summary was built.
    */
   escalationId?: string;
+  /**
+   * F8 — channel preferences threaded from per-tenant escalation settings.
+   * The adapter fan-out handler reads this to skip disabled channels.
+   * Defaults to all-enabled when absent.
+   */
+  channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean };
 }
 
 export interface EscalationResult {
@@ -468,6 +479,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         rotationIndex: chosen.index,
         summary,
         escalationId,
+        channelPreferences: input.channelPreferences ?? { sms: true, in_app: true, whisper: true },
       },
     };
   }

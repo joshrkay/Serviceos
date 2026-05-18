@@ -94,6 +94,8 @@ import type {
   CallOutcome,
 } from '../../voice/voice-service';
 import type { VoicePersonaResolver } from '../../settings/voice-persona-resolver';
+import type { SettingsRepository } from '../../settings/settings';
+import { resolveEscalationSettings } from '../../settings/settings';
 import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
 
@@ -213,6 +215,12 @@ export interface VoiceTurnProcessorDeps {
    * `runSummary` for parity with the adapter's legacy behavior.
    */
   onSessionTerminated?: (session: VoiceSession) => void | Promise<void>;
+  /**
+   * F8 — when wired, `handleNotifyOncall` loads per-tenant escalation
+   * settings and threads channel preferences into `escalateToHuman`.
+   * Optional: when absent, all three channels default to enabled.
+   */
+  settingsRepo?: SettingsRepository;
 }
 
 export interface VoiceTurnProcessor {
@@ -466,6 +474,26 @@ export function createVoiceTurnProcessor(
     const reason =
       typeof fx.payload.reason === 'string' ? fx.payload.reason : 'low_confidence';
     try {
+      // F8: resolve per-tenant channel preferences for this escalation.
+      let channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean } = {
+        sms: true,
+        in_app: true,
+        whisper: true,
+      };
+      if (deps.settingsRepo) {
+        try {
+          const tenantSettings = await deps.settingsRepo.findByTenant(tenantId);
+          const escSettings = resolveEscalationSettings(tenantSettings);
+          channelPreferences = {
+            sms: escSettings.channel_sms,
+            in_app: escSettings.channel_in_app,
+            whisper: escSettings.channel_whisper,
+          };
+        } catch {
+          // Best-effort: if settings lookup fails, fall back to all-enabled.
+        }
+      }
+
       const result = await escalateToHuman({
         tenantId,
         sessionId: session.id,
@@ -480,6 +508,7 @@ export function createVoiceTurnProcessor(
           : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
+        channelPreferences,
       });
 
       if (result.transfer) {

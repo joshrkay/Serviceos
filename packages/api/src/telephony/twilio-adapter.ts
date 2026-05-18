@@ -79,6 +79,7 @@ import {
 } from '../ai/voice-turn';
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
+import type { SettingsRepository } from '../settings/settings';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -222,6 +223,12 @@ export interface TwilioAdapterDeps {
    * When absent, the FSM falls back to the generic "say that again" prompt.
    */
   repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * F8 — per-tenant escalation settings repository. When wired, the
+   * processor loads channel preferences before each `escalateToHuman`
+   * call. Optional so existing test fixtures continue to work.
+   */
+  settingsRepo?: SettingsRepository;
 }
 
 /**
