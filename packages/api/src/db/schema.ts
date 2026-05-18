@@ -2703,6 +2703,33 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_review_poll_state ON review_poll_state
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P7-026 PR c — service_credits ledger. One row per credit issued.
+  // `amount_cents` is BIGINT (matches the established money-column
+  // shape across the schema) and constrained > 0 (the in-memory repo
+  // enforces the same — see service-credit.ts). `review_id` is
+  // nullable because credits may originate from non-review flows in
+  // the future. Indexed for the rolling-12-month sum query
+  // (tenant_id + customer_id + issued_at) that the cap check uses.
+  '103_service_credits': `
+    CREATE TABLE IF NOT EXISTS service_credits (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      customer_id UUID NOT NULL,
+      amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+      review_id UUID NULL,
+      proposal_id UUID NOT NULL,
+      issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_service_credits_tenant_customer_issued
+      ON service_credits(tenant_id, customer_id, issued_at DESC);
+    ALTER TABLE service_credits ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE service_credits FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_service_credits ON service_credits;
+    CREATE POLICY tenant_isolation_service_credits ON service_credits
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

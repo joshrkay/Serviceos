@@ -289,3 +289,79 @@ export async function listReviews(
     nextPageToken: parsed.data.nextPageToken ?? null,
   };
 }
+
+// ─── P7-026 PR c — reply API ────────────────────────────────────────────
+
+export interface ReplyToReviewResult {
+  /** The reply comment text Google echoed back. */
+  comment: string;
+  /** ISO timestamp when Google recorded the reply. */
+  updateTime: string;
+}
+
+const replyToReviewResponseSchema = z.object({
+  comment: z.string(),
+  updateTime: z.string(),
+});
+
+/**
+ * PUT a reply to a Google Business Profile review.
+ *
+ * Per Google's v4 spec, `PUT
+ * /v4/accounts/{accountId}/locations/{locationId}/reviews/{reviewId}/reply`
+ * with `{ comment: <text> }` is an UPSERT — calling it twice with the
+ * same text is idempotent (the second call returns the same
+ * `updateTime` as the first). PR c's execution handler relies on this
+ * idempotency rather than maintaining a local "did we already post?"
+ * flag.
+ *
+ * 429s throw `GoogleBusinessQuotaError` (same as `listReviews`). 4xx/5xx
+ * other than 429 throw the same shape `Error` as `listReviews` for
+ * consistent log handling at the call site.
+ */
+export async function replyToReview(
+  accessToken: string,
+  accountId: string,
+  locationId: string,
+  reviewId: string,
+  comment: string,
+  fetchFn: GoogleFetch = fetch,
+): Promise<ReplyToReviewResult> {
+  const url = `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations/${locationId}/reviews/${reviewId}/reply`;
+  const res = await fetchFn(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ comment }),
+  });
+
+  if (res.status === 429) {
+    const retryAfterRaw = res.headers.get('Retry-After');
+    const retryAfter = retryAfterRaw ? Number(retryAfterRaw) : undefined;
+    const body = await res.text().catch(() => '');
+    throw new GoogleBusinessQuotaError(
+      `Google Business Profile quota exceeded${body ? `: ${body.slice(0, 200)}` : ''}`,
+      Number.isFinite(retryAfter) ? retryAfter : undefined,
+    );
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(
+      `Google Business replyToReview failed (${res.status}): ${body.slice(0, 500)}`,
+    );
+  }
+
+  const raw: unknown = await res.json();
+  const parsed = replyToReviewResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new GoogleBusinessApiError(
+      'Google Business replyToReview response failed schema validation',
+      { cause: parsed.error },
+    );
+  }
+  return { comment: parsed.data.comment, updateTime: parsed.data.updateTime };
+}
