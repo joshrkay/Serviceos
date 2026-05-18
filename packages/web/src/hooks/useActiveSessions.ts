@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@clerk/clerk-react';
+import { useMe } from './useMe';
 import { useResilientStream, type WsServerFrame } from './useResilientStream';
 
 export type SessionChannel = 'voice_inbound' | 'sms' | 'mms' | 'inapp_voice';
@@ -73,6 +74,17 @@ async function fetchActiveSessions(token: string): Promise<ActiveSessionDTO[]> {
 
 export function useActiveSessions(): UseActiveSessionsResult {
   const { getToken } = useAuth();
+  const { me } = useMe();
+  // The /active route + the voice WS channel both require `ai:run`.
+  // Technicians don't have it (rbac.ts owner/dispatcher only), so
+  // mounting the discovery loop for them produces only 403 noise.
+  // Gate the whole effect tree on the permission.
+  const isAuthorized = Boolean(me?.permissions?.includes('ai:run'));
+  // Token is refreshed on every poll cycle via `getToken` rather than
+  // cached at mount — Clerk JWTs expire within minutes, and the prior
+  // shape would silently fail every API call after the first expiry.
+  // We still mirror the latest value into state so `useResilientStream`
+  // reconnects with a fresh credential on the WS side.
   const [token, setToken] = useState<string>('');
   const [sessions, setSessions] = useState<Map<string, ActiveSessionSummary>>(
     () => new Map()
@@ -81,19 +93,14 @@ export function useActiveSessions(): UseActiveSessionsResult {
   const subscribedRef = useRef<Set<string>>(new Set());
   const wsConnectedRef = useRef(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const t = await getToken({ template: 'serviceos' });
-        if (!cancelled && t) setToken(t);
-      } catch {
-        // No token — stream stays disabled below.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const refreshToken = useCallback(async (): Promise<string | null> => {
+    try {
+      const t = await getToken({ template: 'serviceos' });
+      if (t) setToken((prev) => (prev === t ? prev : t));
+      return t ?? null;
+    } catch {
+      return null;
+    }
   }, [getToken]);
 
   const subscribeToSession = useCallback((sessionId: string) => {
@@ -148,14 +155,16 @@ export function useActiveSessions(): UseActiveSessionsResult {
   );
 
   useEffect(() => {
-    if (!token) return;
+    if (!isAuthorized) return;
     let cancelled = false;
     const poll = async () => {
+      const fresh = await refreshToken();
+      if (cancelled || !fresh) return;
       try {
-        const list = await fetchActiveSessions(token);
+        const list = await fetchActiveSessions(fresh);
         if (!cancelled) reconcileSessions(list);
       } catch {
-        // Network blip — next tick retries.
+        // Network blip / expired token — next tick refreshes + retries.
       }
     };
     void poll();
@@ -164,7 +173,7 @@ export function useActiveSessions(): UseActiveSessionsResult {
       cancelled = true;
       clearInterval(handle);
     };
-  }, [token, reconcileSessions]);
+  }, [isAuthorized, refreshToken, reconcileSessions]);
 
   const handleFrame = useCallback((frame: WsServerFrame) => {
     if (frame.kind !== 'voice.event') return;
@@ -224,7 +233,7 @@ export function useActiveSessions(): UseActiveSessionsResult {
 
   const wsUrl = buildWsUrl();
   const { status, send } = useResilientStream({
-    enabled: !!token && !!wsUrl,
+    enabled: isAuthorized && !!token && !!wsUrl,
     url: wsUrl,
     token,
     onFrame: handleFrame,
