@@ -17,7 +17,11 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 const TEST_TENANT = 'tenant-ast-01b';
 const TEST_USER = 'user-ast-01b';
 
-function buildApp(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository) {
+function buildApp(
+  gateway: LLMGateway,
+  proposalRepo: InMemoryProposalRepository,
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>,
+) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -29,7 +33,14 @@ function buildApp(gateway: LLMGateway, proposalRepo: InMemoryProposalRepository)
     };
     next();
   });
-  app.use('/api/assistant', createAssistantRouter({ gateway, proposalRepo }));
+  app.use(
+    '/api/assistant',
+    createAssistantRouter({
+      gateway,
+      proposalRepo,
+      ...(verticalPromptResolver ? { verticalPromptResolver } : {}),
+    }),
+  );
   return app;
 }
 
@@ -120,6 +131,34 @@ describe('POST /api/assistant/chat — create_customer path', () => {
     );
     expect(byKey.email).toBe('');
     expect(byKey.phone).toBe('');
+  });
+
+  // §3B/3D/3E — assistant chat must thread the vertical resolver
+  // through to the classifier so the operator's text commands see the
+  // same HVAC/plumbing terminology the voice path already gets.
+  it('forwards verticalPromptResolver output into the classifier system messages', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.93,
+        extractedEntities: { displayName: 'Alex' },
+      }),
+    ]);
+    const verticalPromptResolver = vi.fn(
+      async (_tenantId: string) => 'Service vertical: HVAC\nEquipment: furnace, AC',
+    );
+    const app = buildApp(gateway, proposalRepo, verticalPromptResolver);
+
+    await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create a new customer named Alex' }] });
+
+    expect(verticalPromptResolver).toHaveBeenCalledWith(TEST_TENANT);
+    const classifierCall = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const systemContents = (classifierCall.messages as Array<{ role: string; content: string }>)
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content);
+    expect(systemContents.some((c) => c.includes('Service vertical: HVAC'))).toBe(true);
   });
 
   it('falls through to the generic LLM text reply when intent is not create_customer', async () => {
