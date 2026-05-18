@@ -1,17 +1,16 @@
 import { Router } from 'express';
 import type { WhisperCache } from './whisper-cache';
-
-function xmlEscape(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
+import { xmlEscape } from './twilio-adapter';
 
 export interface WhisperRouterDeps {
   whisperCache: WhisperCache;
+  /**
+   * TTS voice for the whisper `<Say>` element. When unset, Twilio uses
+   * its platform default voice. Pass an explicit value (e.g.,
+   * `'Polly.Joanna'`) to match the rest of the agent's voice persona —
+   * dispatchers will otherwise hear a generic Twilio voice that differs
+   * from caller-facing speech.
+   */
   voice?: string;
 }
 
