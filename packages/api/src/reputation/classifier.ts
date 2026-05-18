@@ -61,7 +61,22 @@ export const LLM_CONFIDENCE_FLOOR = 0.8;
 
 const PRAISE_RE = /\b(thank|thanks|amazing|awesome|fantastic|great|excellent|wonderful|loved|love|highly recommend|best|perfect)\b/i;
 
-const SPECIFIC_COMPLAINT_RE = /\b(no[- ]?show|never showed|wrong tech|broken|damaged|overcharged|overcharge|stole|stolen|rude|never came|cancelled|cancel(?:ation)? without|refund|charged twice|double[- ]?charged)\b/i;
+/**
+ * High-precision complaint keywords. These phrases are almost never
+ * idiomatic in a review context, so we trust them at 0.95 regardless
+ * of star rating ("thanks for the no-show" still means no-show).
+ */
+const SPECIFIC_COMPLAINT_HIGH_PRECISION_RE = /\b(no[- ]?show|never showed|wrong tech|overcharged|overcharge|rude|never came|cancel(?:l?ation)? without|refund|charged twice|double[- ]?charged)\b/i;
+
+/**
+ * Lower-precision complaint keywords that overlap with common English
+ * idioms ("broken record", "stole my heart", "damaged my expectations
+ * in a good way", "the show was cancelled"). We only trust these when
+ * the star rating corroborates the negative signal (rating <= 3). A
+ * 4-5 star review using one of these words almost certainly means it
+ * as a figure of speech — fall through to LLM for nuance.
+ */
+const SPECIFIC_COMPLAINT_LOW_PRECISION_RE = /\b(broken|damaged|stole|stolen|cancelled)\b/i;
 
 const SYSTEM_PROMPT = `You classify the sentiment of a customer review for a home-services business.
 
@@ -111,15 +126,34 @@ export async function classifyReview(
 
   // 2. Regex sweep. Specific-complaint takes precedence over praise:
   // "thanks for the no-show" reads as a complaint, not gratitude.
-  if (SPECIFIC_COMPLAINT_RE.test(comment)) {
+  if (SPECIFIC_COMPLAINT_HIGH_PRECISION_RE.test(comment)) {
     return {
       classification: 'specific_complaint',
       confidence: 0.95,
       source: 'regex',
     };
   }
+  // Lower-precision complaint keywords (broken/damaged/stole/etc.)
+  // overlap with English idioms. Only trust them when the star rating
+  // also signals dissatisfaction. High-rating "broken record" / "stole
+  // my heart" falls through to the LLM.
+  if (SPECIFIC_COMPLAINT_LOW_PRECISION_RE.test(comment) && rating <= 3) {
+    return {
+      classification: 'specific_complaint',
+      confidence: 0.85,
+      source: 'regex',
+    };
+  }
   if (PRAISE_RE.test(comment)) {
-    return { classification: 'praise', confidence: 1.0, source: 'regex' };
+    // Only trust regex-praise when the rating corroborates it. A
+    // 1-2 star review that contains "thanks" or "great" is almost
+    // always sarcastic ("thanks for nothing", "great waste of money").
+    // Send it through the LLM rather than auto-drafting a thank-you.
+    if (rating >= 3) {
+      return { classification: 'praise', confidence: 1.0, source: 'regex' };
+    }
+    // rating < 3 with only praise keywords → likely sarcasm. Fall
+    // through to LLM.
   }
 
   // 3. Star-rating shortcut for 5-star reviews whose text didn't hit
