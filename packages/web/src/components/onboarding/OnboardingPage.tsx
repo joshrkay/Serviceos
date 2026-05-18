@@ -549,21 +549,29 @@ function RuleCards({ initial, onConfirm }: { initial: Rule[]; onConfirm: (r: Rul
 }
 
 // ─── Config summary ────────────────────────────────────────────────────────
-function ConfigSummary({ answers: a, rules, onConfirm }: {
+/**
+ * P4-013 residual gap — the previous implementation `catch {}`-swallowed the
+ * `/api/onboarding/configure` response and unconditionally advanced to the
+ * DoneScreen. A network blip or 500 left the user with a "You're all set"
+ * confirmation while nothing was actually persisted. We now retain the
+ * collected answers in component state, render an error banner with a
+ * Try-again button, and only call `onConfirm` after a successful save.
+ *
+ * Exported for `OnboardingPage.ConfigSummary.test.tsx` so the error/retry
+ * branches can be exercised without walking the full 9-step voice flow.
+ */
+export function ConfigSummary({ answers: a, rules, onConfirm }: {
   answers: Answers; rules: Rule[]; onConfirm: () => void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const active = rules.filter(r => r.enabled);
-
-  const handleVoice = useCallback((transcript: string) => {
-    const result = parseConfirmation(transcript);
-    if (result === 'confirm') handleConfirm();
-  }, []);
 
   async function handleConfirm() {
     setSaving(true);
+    setError(null);
     try {
-      await apiFetch('/api/onboarding/configure', {
+      const res = await apiFetch('/api/onboarding/configure', {
         method: 'POST',
         body: JSON.stringify({
           name: a.name,
@@ -576,12 +584,25 @@ function ConfigSummary({ answers: a, rules, onConfirm }: {
           automationRules: rules.map(r => ({ id: r.id, enabled: r.enabled })),
         }),
       });
-    } catch {
-      // Still proceed — settings save is best-effort during onboarding
+      if (!res.ok) {
+        throw new Error(`Save failed (HTTP ${res.status})`);
+      }
+      setSaving(false);
+      onConfirm();
+    } catch (err) {
+      setSaving(false);
+      setError(err instanceof Error ? err.message : 'Could not save your setup. Please try again.');
     }
-    setSaving(false);
-    onConfirm();
   }
+
+  const handleVoice = useCallback((transcript: string) => {
+    const result = parseConfirmation(transcript);
+    if (result === 'confirm') void handleConfirm();
+  // handleConfirm references the latest `a`/`rules` props through closure; the
+  // parent re-renders this component on prop change, so the latest closure is
+  // always wired into the JSX onClick — no need to memoize.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="flex flex-col gap-3 w-full">
@@ -635,13 +656,31 @@ function ConfigSummary({ answers: a, rules, onConfirm }: {
         </div>
       </div>
 
+      {error && (
+        <div
+          role="alert"
+          className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 flex items-start gap-2"
+        >
+          <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-red-700">We couldn't save your setup</p>
+            <p className="text-xs text-red-500 mt-0.5">{error}</p>
+            <p className="text-xs text-red-500 mt-1">Your answers are safe — tap below to retry.</p>
+          </div>
+        </div>
+      )}
+
       <VoiceMicButton onTranscript={handleVoice} />
       <button
         onClick={handleConfirm}
         disabled={saving}
         className="flex items-center justify-center gap-2 rounded-2xl bg-indigo-600 text-white py-4 text-sm hover:bg-indigo-500 disabled:opacity-50 active:scale-95 transition-all"
       >
-        <Check size={15} /> {saving ? 'Saving...' : 'Looks good — launch my workspace'}
+        <Check size={15} /> {saving
+          ? 'Saving...'
+          : error
+            ? 'Try again'
+            : 'Looks good — launch my workspace'}
       </button>
     </div>
   );

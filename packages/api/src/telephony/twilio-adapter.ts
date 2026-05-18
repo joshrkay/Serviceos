@@ -78,6 +78,8 @@ import {
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
 import type { RepairTemplate } from '../verticals/registry';
+import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
+import type { SettingsRepository } from '../settings/settings';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -221,6 +223,12 @@ export interface TwilioAdapterDeps {
    * When absent, the FSM falls back to the generic "say that again" prompt.
    */
   repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * F8 — per-tenant escalation settings repository. When wired, the
+   * processor loads channel preferences before each `escalateToHuman`
+   * call. Optional so existing test fixtures continue to work.
+   */
+  settingsRepo?: SettingsRepository;
 }
 
 /**
@@ -723,6 +731,30 @@ export class TwilioGatherAdapter {
         { type: 'end_session', payload: { reason: 'session_not_found' } },
       ];
     }
+
+    // Always append utterance to transcript first so it is captured
+    // regardless of the path below (frustration escalation or normal turn).
+    this.deps.store.appendTranscript(opts.sessionId, {
+      speaker: 'caller',
+      text: opts.speechResult,
+      ts: Date.now(),
+    });
+
+    // B3.2 — keyword frustration check BEFORE intent classification.
+    // Route through the processor so notify_oncall (and any escalation
+    // side effects added by the FSM) actually fire — the mediastream
+    // adapter's emitSideEffects only handles tts_play/quality events.
+    const frustration = detectFrustration(opts.speechResult);
+    if (frustration.matched) {
+      const sideEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: frustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, sideEffects, opts.tenantId);
+      return sideEffects;
+    }
+
     return this.processor.speechTurn({
       session,
       speechResult: opts.speechResult,
@@ -960,12 +992,27 @@ export class TwilioGatherAdapter {
       );
     }
 
-    // 1. Append caller utterance to transcript.
+    // 1. Append caller utterance to transcript first — must happen before
+    //    any early-exit path so the utterance is never lost.
     this.deps.store.appendTranscript(opts.sessionId, {
       speaker: 'caller',
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
+    // the same guard in processCallerUtterance (WS path). Runs after the
+    // transcript append so the triggering utterance is always captured.
+    const gatherFrustration = detectFrustration(opts.speechResult);
+    if (gatherFrustration.matched) {
+      const frustrationEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: gatherFrustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, frustrationEffects, opts.tenantId);
+      return this.finalizeTwiml(session, frustrationEffects, opts.sessionId);
+    }
 
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
@@ -1691,6 +1738,19 @@ export class TwilioGatherAdapter {
     const twiml = this.pendingTransferTwiml.get(sessionId);
     if (twiml) this.pendingTransferTwiml.delete(sessionId);
     return twiml;
+  }
+
+  /**
+   * Store a pending <Dial> TwiML string for the given session. Called by
+   * `TwilioMediaStreamAdapter` via a deps callback so both the gather
+   * adapter (which reads via `takePendingTransferTwiml`) and the media-stream
+   * adapter (which writes during `handleEscalateWithContext`) share the same
+   * in-memory Map. Without this, the Dial TwiML would be written to
+   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
+   * ever reads it — the call would hang on hold forever.
+   */
+  setPendingTransferTwiml(sessionId: string, twiml: string): void {
+    this.pendingTransferTwiml.set(sessionId, twiml);
   }
 
   /**

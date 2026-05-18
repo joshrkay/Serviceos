@@ -3,6 +3,10 @@ dist/
 *.js.map
 *.d.ts
 
+# Ephemeral H5 voice-load report (regenerated on each run; do not commit
+# a single run's capture — staging numbers belong in voice-capacity.md).
+voice-load-report.json
+
 # Multi-agent dispatch worktrees (created by /dispatch-story; ephemeral)
 .claude/worktrees/
 

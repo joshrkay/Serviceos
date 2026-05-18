@@ -14,6 +14,12 @@ import {
   InvoiceDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
+import {
+  ReviewResponseExecutionHandler,
+  GoogleBusinessReplyResolver,
+  ReviewPrivateMessageSender,
+} from './review-response-handler';
+import { ServiceCreditRepository } from '../../reputation/service-credit';
 import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
@@ -210,6 +216,13 @@ export function createExecutionHandlerRegistry(deps?: {
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
   jobRepo?: JobRepository;
+  feasibilityDeps?: import('../../scheduling/feasibility-types').FeasibilityDependencies;
+  // P7-026 PR c — review-response wiring. All three are optional;
+  // when absent the handler degrades sub-actions to passthrough so
+  // unit tests that don't exercise the mutation path can omit them.
+  serviceCreditRepo?: ServiceCreditRepository;
+  googleReplyResolver?: GoogleBusinessReplyResolver;
+  reviewPrivateMessageSender?: ReviewPrivateMessageSender;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -236,8 +249,8 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
-    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo, deps?.feasibilityDeps),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo, deps?.auditRepo),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is
@@ -247,6 +260,17 @@ export function createExecutionHandlerRegistry(deps?: {
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
     new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo, moneyStateDeps),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    // P7-026 PR c — review-response handler. Wired with optional deps;
+    // see ReviewResponseExecutionHandler constructor for per-dep
+    // degraded behavior. Action class 'comms' guarantees the proposal
+    // can never auto-approve, so this only ever runs after explicit
+    // owner approval per component.
+    new ReviewResponseExecutionHandler(
+      deps?.serviceCreditRepo,
+      deps?.googleReplyResolver,
+      deps?.reviewPrivateMessageSender,
+      deps?.auditRepo,
+    ),
   ];
 
   // Handlers that mutate existing entities take a repo dep. Registered

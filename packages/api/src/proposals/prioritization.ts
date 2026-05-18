@@ -39,6 +39,11 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   onboarding_estimate_template: 8,
   onboarding_team_member: 9,
   onboarding_schedule: 10,
+  // P7-026 PR c — review responses are owner-approved comms. Same
+  // tier as send_invoice / record_payment — high priority but not
+  // critical, since they typically have ~24h relevance windows
+  // (longer than appointment-related work).
+  review_response_proposal: 1,
 };
 
 export function getUrgency(proposal: Proposal): { urgency: PrioritizedProposal['urgency']; reason: string } {

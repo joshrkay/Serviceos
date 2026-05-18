@@ -39,6 +39,7 @@ The following original Phase 7 stories (P7-001 through P7-018) are **entirely un
 | P7-023 | Production smoke test script | S | Operations | High | Moderate | P0-023, P0-029 |
 | P7-024 | Fix `as any` type escapes | XS | Code Quality | High | Light | None |
 | P7-025 | Load test with realistic data | S | Performance | Medium | Moderate | P0-023, P0-024 |
+| P7-026 | Google Business review monitoring + draft response | L | Reputation | Medium | Heavy | P4-015 |
 
 ---
 

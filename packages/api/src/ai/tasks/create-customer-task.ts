@@ -31,6 +31,7 @@ import {
   buildCreateCustomerPayload,
   CreateCustomerVoiceMetadata,
 } from '../../proposals/contracts/create-customer-contract';
+import { assertValidProposalPayload } from '../../proposals/contracts';
 
 /**
  * Voice-call signals the FSM forwards into TaskContext.existingEntities.
@@ -274,6 +275,13 @@ export class CreateCustomerVoiceTaskHandler implements TaskHandler {
       // ladder, but create_customer is too sensitive (PII + dedup
       // implications) to auto-approve even at the highest tier.
     };
+
+    // P2-002 AI-safety gate. `buildCreateCustomerPayload` is the
+    // contract-shaped builder, so this is defense-in-depth: if a
+    // future edit silently widens the builder's output, the schema
+    // check trips here instead of letting a malformed payload reach
+    // the proposal store and surface as an executor error later.
+    assertValidProposalPayload(this.taskType, input.payload);
 
     const proposal = createProposal(input);
     return {

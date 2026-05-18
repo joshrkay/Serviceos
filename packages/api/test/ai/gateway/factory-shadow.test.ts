@@ -36,13 +36,33 @@ describe('createLLMGateway — shadow-comparison wiring', () => {
     process.env = { ...originalEnv };
   });
 
+  /**
+   * After P2-029 the gateway stores:
+   *   ProviderTenantQuotaWrapper
+   *     .inner: ProviderFailoverWrapper
+   *       .providers[0]: ProviderBreakerWrapper
+   *         .inner: ProviderRetryDeadlineWrapper
+   *           .inner: <shadow-wrapped or raw provider>
+   */
+  function getInnermostProvider(p: unknown): unknown {
+    // TenantQuota → Failover → Breaker → RetryDeadline → raw
+    const tqw = p as { inner?: unknown };
+    const fow = tqw.inner as { providers?: unknown[] } | undefined;
+    const bw = (fow?.providers?.[0] ?? null) as { inner?: unknown } | null;
+    const rdw = bw?.inner as { inner?: unknown } | null;
+    return rdw?.inner ?? bw?.inner ?? fow ?? tqw.inner ?? p;
+  }
+
   it('does not wrap the primary provider when SHADOW_LLM_ENABLED is unset', () => {
     const gateway = createLLMGateway(cfg());
     // @ts-expect-error reach into internals for structural verification
-    const providers = gateway.providers as Map<string, { constructor: { name: string } }>;
-    const [p] = providers.values();
-    expect(p.constructor.name).not.toBe('ShadowComparisonGateway');
-    expect(p.constructor.name).toBe('OpenAICompatibleProvider');
+    const providers = gateway.providers as Map<string, unknown>;
+    const [outermost] = providers.values();
+    // P2-029: outermost provider is now ProviderTenantQuotaWrapper (resilience stack)
+    expect((outermost as { constructor: { name: string } }).constructor.name).toBe('ProviderTenantQuotaWrapper');
+    // The innermost provider should be the raw OpenAICompatibleProvider (not ShadowComparisonGateway)
+    const innermost = getInnermostProvider(outermost);
+    expect((innermost as { constructor: { name: string } }).constructor.name).toBe('OpenAICompatibleProvider');
   });
 
   it('wraps with ShadowComparisonGateway when SHADOW_LLM_ENABLED=true and key present', () => {
@@ -53,9 +73,11 @@ describe('createLLMGateway — shadow-comparison wiring', () => {
     const gateway = createLLMGateway(cfg(), { shadowStore: store });
 
     // @ts-expect-error reach into internals for structural verification
-    const providers = gateway.providers as Map<string, { constructor: { name: string } }>;
-    const [p] = providers.values();
-    expect(p.constructor.name).toBe('ShadowComparisonGateway');
+    const providers = gateway.providers as Map<string, unknown>;
+    const [outermost] = providers.values();
+    // The innermost provider should be a ShadowComparisonGateway (shadow is innermost)
+    const innermost = getInnermostProvider(outermost);
+    expect((innermost as { constructor: { name: string } }).constructor.name).toBe('ShadowComparisonGateway');
   });
 
   it('skips wrapping when SHADOW_LLM_ENABLED=true but API key is missing', () => {
@@ -64,9 +86,11 @@ describe('createLLMGateway — shadow-comparison wiring', () => {
 
     const gateway = createLLMGateway(cfg());
     // @ts-expect-error reach into internals
-    const providers = gateway.providers as Map<string, { constructor: { name: string } }>;
-    const [p] = providers.values();
-    expect(p.constructor.name).toBe('OpenAICompatibleProvider');
+    const providers = gateway.providers as Map<string, unknown>;
+    const [outermost] = providers.values();
+    // Without shadow API key the innermost should be OpenAICompatibleProvider
+    const innermost = getInnermostProvider(outermost);
+    expect((innermost as { constructor: { name: string } }).constructor.name).toBe('OpenAICompatibleProvider');
   });
 
   it('accepts legacy logger-only arg without breaking existing callers', () => {

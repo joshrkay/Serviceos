@@ -4,11 +4,12 @@ import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers'
 import { AppointmentRepository } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician, unassignTechnician } from '../../appointments/assignment';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
-import { detectOverlappingAppointments } from '../../dispatch/validation';
 import {
   DispatchAnalyticsRepository,
   captureDispatchEvent,
 } from '../../dispatch/analytics';
+import { checkFeasibility } from '../../scheduling/feasibility';
+import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 
 export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reassign_appointment';
@@ -17,6 +18,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
+    private readonly feasibilityDeps?: FeasibilityDependencies,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -31,6 +33,8 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
     if (!toTechnicianId || typeof toTechnicianId !== 'string') {
       return { success: false, error: 'Payload must include a valid toTechnicianId' };
     }
+
+    let trailingWarnings: FeasibilityIssue[] = [];
 
     // Validate appointment exists if repo available
     if (this.appointmentRepo) {
@@ -54,39 +58,29 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         if (!freshness.fresh) {
           return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
         }
+      }
 
-        // Conflict check — ensure target technician has no overlapping appointments
-        const targetAssignments = await this.assignmentRepo.findByTechnician(
-          context.tenantId,
-          toTechnicianId,
+      // Feasibility gate — delegates to scheduling/feasibility.ts so creation- and
+      // execution-time checks are identical. Only `blocking[]` short-circuits.
+      if (this.feasibilityDeps) {
+        const feasibility = await checkFeasibility(
+          {
+            tenantId: context.tenantId,
+            appointment,
+            proposedTechnicianId: toTechnicianId,
+            proposedScheduledStart: appointment.scheduledStart,
+            proposedScheduledEnd: appointment.scheduledEnd,
+          },
+          this.feasibilityDeps,
         );
-        if (targetAssignments.length > 0) {
-          const targetAppointments = await Promise.all(
-            targetAssignments.map((a) =>
-              this.appointmentRepo!.findById(context.tenantId, a.appointmentId)
-            )
-          );
-          const existingAppts = targetAppointments
-            .filter((a): a is NonNullable<typeof a> => a !== null)
-            .map((a) => ({
-              id: a.id,
-              technicianId: toTechnicianId,
-              scheduledStart: a.scheduledStart,
-              scheduledEnd: a.scheduledEnd,
-              status: a.status,
-            }));
-          const conflicts = detectOverlappingAppointments(
-            toTechnicianId,
-            appointment.scheduledStart,
-            appointment.scheduledEnd,
-            existingAppts,
-            appointmentId,
-          );
-          const blocking = conflicts.filter((c) => c.severity === 'blocking');
-          if (blocking.length > 0) {
-            return { success: false, error: blocking[0].message };
-          }
+        if (feasibility.blocking.length > 0) {
+          return {
+            success: false,
+            error: feasibility.blocking[0].message,
+            ...({ warnings: feasibility.warnings } as Record<string, unknown>),
+          };
         }
+        trailingWarnings = feasibility.warnings;
       }
     }
 
@@ -113,7 +107,11 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         (a) => a.technicianId === toTechnicianId && a.isPrimary,
       );
       if (alreadyAssigned) {
-        return { success: true, resultEntityId: alreadyAssigned.id };
+        return {
+          success: true,
+          resultEntityId: alreadyAssigned.id,
+          ...({ warnings: trailingWarnings } as Record<string, unknown>),
+        };
       }
 
       const assignment = await assignTechnician({
@@ -133,10 +131,18 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         });
       }
 
-      return { success: true, resultEntityId: assignment.id };
+      return {
+        success: true,
+        resultEntityId: assignment.id,
+        ...({ warnings: trailingWarnings } as Record<string, unknown>),
+      };
     }
 
     // Without repos, just validate payload
-    return { success: true, resultEntityId: uuidv4() };
+    return {
+      success: true,
+      resultEntityId: uuidv4(),
+      ...({ warnings: trailingWarnings } as Record<string, unknown>),
+    };
   }
 }

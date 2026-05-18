@@ -1,11 +1,23 @@
 import { useState, useCallback } from 'react';
 import { DragResult } from './useDragDrop';
 import { apiFetch } from '../../utils/api-fetch';
+import type { FeasibilityIssue } from './feasibility-types';
+
+export type ScheduleProposalErrorKind =
+  | 'STALE'
+  | 'INFEASIBLE'
+  | 'MISSING_VERSION'
+  | 'INVALID_VERSION'
+  | 'NOT_FOUND'
+  | 'NETWORK'
+  | 'BAD_INPUT';
 
 export interface ScheduleProposalResult {
   success: boolean;
   proposalId?: string;
-  error?: string;
+  error?: ScheduleProposalErrorKind | string;
+  blocking?: FeasibilityIssue[];
+  warnings?: FeasibilityIssue[];
 }
 
 export interface UseCreateScheduleProposalResult {
@@ -20,7 +32,6 @@ function buildProposalPayload(dragResult: DragResult): {
   summary: string;
 } | null {
   if (dragResult.sourceType === 'queue') {
-    // Unassigned → Lane = reassignment
     return {
       proposalType: 'reassign_appointment',
       payload: {
@@ -32,7 +43,6 @@ function buildProposalPayload(dragResult: DragResult): {
   }
 
   if (dragResult.sourceTechnicianId === dragResult.targetTechnicianId) {
-    // Within-lane reorder = reschedule — requires explicit new times
     if (!dragResult.proposedScheduledStart || !dragResult.proposedScheduledEnd) {
       return null;
     }
@@ -48,7 +58,6 @@ function buildProposalPayload(dragResult: DragResult): {
     };
   }
 
-  // Lane → Different Lane = reassignment
   return {
     proposalType: 'reassign_appointment',
     payload: {
@@ -79,22 +88,52 @@ export function useCreateScheduleProposal(): UseCreateScheduleProposalResult {
         return result;
       }
       const { proposalType, payload, summary } = proposalData;
+      const version = dragResult.appointmentVersion;
 
       const response = await apiFetch('/api/proposals', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(version ? { 'If-Match': version } : {}),
+        },
         body: JSON.stringify({
           proposalType,
           payload,
           summary,
+          ...(version ? { appointmentVersion: version } : {}),
         }),
       });
 
       if (!response.ok) {
-        const error = await response.text();
+        if (response.status === 409) {
+          const result: ScheduleProposalResult = { success: false, error: 'STALE' };
+          setLastResult(result);
+          return result;
+        }
+        if (response.status === 422) {
+          const body = await response.json().catch(() => ({} as { blocking?: FeasibilityIssue[]; warnings?: FeasibilityIssue[] }));
+          const result: ScheduleProposalResult = {
+            success: false,
+            error: 'INFEASIBLE',
+            blocking: body.blocking ?? [],
+            warnings: body.warnings ?? [],
+          };
+          setLastResult(result);
+          return result;
+        }
+        if (response.status === 400) {
+          const body = await response.json().catch(() => ({} as { error?: string }));
+          const kind = body.error === 'MISSING_VERSION' || body.error === 'INVALID_VERSION'
+            ? body.error
+            : 'BAD_INPUT';
+          const result: ScheduleProposalResult = { success: false, error: kind };
+          setLastResult(result);
+          return result;
+        }
+        const text = await response.text().catch(() => '');
         const result: ScheduleProposalResult = {
           success: false,
-          error: `Failed to create proposal: ${error}`,
+          error: `Failed to create proposal${text ? `: ${text}` : ''}`,
         };
         setLastResult(result);
         return result;
@@ -110,7 +149,7 @@ export function useCreateScheduleProposal(): UseCreateScheduleProposalResult {
     } catch (err) {
       const result: ScheduleProposalResult = {
         success: false,
-        error: err instanceof Error ? err.message : 'Failed to create proposal',
+        error: err instanceof Error ? err.message : 'NETWORK',
       };
       setLastResult(result);
       return result;

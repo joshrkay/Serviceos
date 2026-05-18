@@ -70,3 +70,88 @@ describe('intent_capture low-confidence reprompt', () => {
     expect(ttsText).toContain('say that again');
   });
 });
+
+describe('intent_capture operator_request fast-path', () => {
+  it('transitions directly to escalating with reason operator_request', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 0.95 },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('operator_request');
+    // Should NOT have entity_resolution or intent_confirm side effects.
+    const sideEffectTypes = result.sideEffects.map((fx) => fx.type);
+    expect(sideEffectTypes).not.toContain('create_proposal');
+    expect(sideEffectTypes).toContain('tts_play');
+    expect(sideEffectTypes).toContain('notify_oncall');
+  });
+
+  it('does not require confidence threshold for operator_request (treats any confidence as valid)', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 0.2 },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+  });
+});
+
+describe('operator_request fast-path from any state', () => {
+  it('escalates from intent_confirm when caller asks for human', () => {
+    const ctx: CallingAgentContext = {
+      ...baseContext,
+      currentIntent: 'create_appointment',
+      extractedEntities: { service: 'HVAC repair' },
+    };
+    const result = transition(
+      'intent_confirm',
+      { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 0.9 },
+      ctx
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('operator_request');
+  });
+
+  it('escalates from closing when caller asks for human', () => {
+    const result = transition(
+      'closing',
+      { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 0.9 },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('operator_request');
+  });
+});
+
+describe('frustration_detected handler', () => {
+  it('escalates from any non-terminal state with keyword source', () => {
+    const result = transition(
+      'intent_capture',
+      { type: 'frustration_detected', source: 'keyword', detail: 'this is ridiculous' },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('keyword_frustration');
+  });
+
+  it('escalates from any non-terminal state with llm_sentiment source', () => {
+    const result = transition(
+      'intent_confirm',
+      { type: 'frustration_detected', source: 'llm_sentiment', detail: '0.82' },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.updatedContext.escalationReason).toBe('llm_sentiment');
+  });
+
+  it('is idempotent when already in escalating state', () => {
+    const result = transition(
+      'escalating',
+      { type: 'frustration_detected', source: 'keyword' },
+      baseContext
+    );
+    expect(result.nextState).toBe('escalating');
+    expect(result.sideEffects).toEqual([]);
+  });
+});
