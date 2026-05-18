@@ -206,6 +206,30 @@ function checkGlobalGuards(
     };
   }
 
+  // operator_request from any non-terminal state fast-paths to escalation.
+  // Idempotent: skip if already in a terminal/escalating state.
+  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
+    if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    const updatedContext: CallingAgentContext = {
+      ...context,
+      currentIntent: event.intentType,
+      extractedEntities: event.entities,
+      retryCount: 0,
+      escalationReason: 'operator_request',
+    };
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(updatedContext, state, 'escalating', 'operator_request'),
+        ttsPlay("Of course — let me connect you with a person right now."),
+        notifyOncall(updatedContext, 'operator_request'),
+      ],
+      updatedContext,
+    };
+  }
+
   // frustration_detected fires from keyword detector or LLM sentiment classifier.
   // Idempotent: skip if already in a terminal/escalating state.
   if (event.type === 'frustration_detected') {
@@ -418,26 +442,7 @@ function transitionIntentCapture(
       };
     }
 
-    // operator_request → fast-path directly to escalating (skip entity_resolution and intent_confirm)
-    if (event.intentType === 'operator_request') {
-      const updatedContext: CallingAgentContext = {
-        ...context,
-        currentIntent: event.intentType,
-        extractedEntities: event.entities,
-        retryCount: 0,
-        escalationReason: 'operator_request',
-      };
-      return {
-        nextState: 'escalating',
-        sideEffects: [
-          auditLog(updatedContext, 'intent_capture', 'escalating', 'operator_request'),
-          ttsPlay("Of course — let me connect you with a person right now."),
-          notifyOncall(updatedContext, 'operator_request'),
-        ],
-        updatedContext,
-      };
-    }
-
+    // operator_request is handled by checkGlobalGuards and never reaches here.
     // Confidence at or above threshold → entity_resolution
     if (event.confidence >= TAU_INT) {
       const updatedContext: CallingAgentContext = {
@@ -665,26 +670,7 @@ function transitionIntentConfirm(
     };
   }
 
-  // operator_request in intent_confirm → fast-path to escalating (skip looping back to intent_capture)
-  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
-    const updatedContext: CallingAgentContext = {
-      ...context,
-      currentIntent: event.intentType,
-      extractedEntities: event.entities,
-      retryCount: 0,
-      escalationReason: 'operator_request',
-    };
-    return {
-      nextState: 'escalating',
-      sideEffects: [
-        auditLog(updatedContext, 'intent_confirm', 'escalating', 'operator_request'),
-        ttsPlay("Of course — let me connect you with a person right now."),
-        notifyOncall(updatedContext, 'operator_request'),
-      ],
-      updatedContext,
-    };
-  }
-
+  // operator_request is handled by checkGlobalGuards and never reaches here.
   // intent_classified in intent_confirm → treat as correction
   if (event.type === 'intent_classified') {
     return {
@@ -759,26 +745,7 @@ function transitionClosing(
     };
   }
 
-  // operator_request in closing → fast-path to escalating (skip looping back to intent_capture)
-  if (event.type === 'intent_classified' && event.intentType === 'operator_request') {
-    const updatedContext: CallingAgentContext = {
-      ...context,
-      currentIntent: event.intentType,
-      extractedEntities: event.entities,
-      retryCount: 0,
-      escalationReason: 'operator_request',
-    };
-    return {
-      nextState: 'escalating',
-      sideEffects: [
-        auditLog(updatedContext, 'closing', 'escalating', 'operator_request'),
-        ttsPlay("Of course — let me connect you with a person right now."),
-        notifyOncall(updatedContext, 'operator_request'),
-      ],
-      updatedContext,
-    };
-  }
-
+  // operator_request is handled by checkGlobalGuards and never reaches here.
   // intent_classified in closing → treat as second intent (loop back)
   if (event.type === 'intent_classified') {
     return {
