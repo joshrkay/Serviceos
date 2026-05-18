@@ -483,7 +483,11 @@ export function createVoiceTurnProcessor(
       });
 
       if (result.transfer) {
-        pendingTransferTwiml.set(session.id, result.transfer.fallbackTwiml);
+        // fallbackTwiml is undefined when callControl was not wired (summary-only
+        // path). Only populate the map when we have actual TwiML to emit.
+        if (result.transfer.fallbackTwiml !== undefined) {
+          pendingTransferTwiml.set(session.id, result.transfer.fallbackTwiml);
+        }
         logger.info('notify_oncall: dialing dispatcher', {
           sessionId: session.id,
           rotationIndex: result.transfer.rotationIndex,

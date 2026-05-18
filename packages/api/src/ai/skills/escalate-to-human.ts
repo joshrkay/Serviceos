@@ -80,6 +80,36 @@ export type EscalationReason =
   | 'max_retries_exceeded';
 
 /**
+ * Maps the skill-layer EscalationReason (internal system categorisation)
+ * to the builder-layer EscalationContext['reason'] (dispatcher-facing UX
+ * vocabulary). The two unions describe different things: the skill captures
+ * *why the system decided to escalate*; the builder captures *what to tell
+ * the dispatcher*. They overlap only on `emergency_dispatch`.
+ *
+ * Exported for unit-testing.
+ */
+export function mapSkillReasonToBuilderReason(
+  reason: EscalationReason,
+): EscalationContext['reason'] {
+  switch (reason) {
+    case 'emergency_dispatch':
+      return 'emergency_dispatch';
+    case 'caller_requested':
+      return 'operator_request';
+    case 'low_confidence':
+    case 'max_retries_exceeded':
+      return 'low_confidence_intent';
+    case 'cost_cap_exceeded':
+    case 'abuse_detected':
+    case 'provider_failure':
+      // No semantically clean dispatcher-facing reason for these;
+      // group with low_confidence_intent so the dispatcher knows the AI
+      // gave up rather than the caller demanding a human.
+      return 'low_confidence_intent';
+  }
+}
+
+/**
  * Resolve a dispatcher's outbound phone number.
  *
  * The on-call rotation table only carries `userId`; today there is no
@@ -179,8 +209,10 @@ export interface TransferDescriptor {
   /**
    * Complete `<Response>` TwiML the adapter should hand back to
    * Twilio. Built via `TwilioCallControl.dialDispatcher`.
+   * `undefined` when `callControl` was not wired (summary-only path) —
+   * the adapter MUST NOT send an empty string to Twilio (400 error).
    */
-  fallbackTwiml: string;
+  fallbackTwiml: string | undefined;
   /** Rotation entry that produced this transfer. */
   rotationEntryId: string;
   /** Dispatcher's userId (FK to users.id). */
@@ -351,28 +383,44 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     // Build escalation summary if the caller supplied both a builder
     // callback and caller context. The escalationId is generated here
     // so it can be shared with the whisper cache and SMS deep-link.
+    // summary and escalationId are always present together or both absent.
     let summary: EscalationSummary | undefined;
     let escalationId: string | undefined;
     if (buildSummary && callerContext) {
-      escalationId = `esc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      escalationId = `esc_${uuidv4()}`;
       const ctx: EscalationContext = {
         shopName: shopName ?? 'Our shop',
         caller: callerContext.caller,
         customer: callerContext.customer,
         intent: callerContext.intent,
-        reason: reason as EscalationContext['reason'],
+        reason: mapSkillReasonToBuilderReason(reason),
         transcriptSnapshot: callerContext.transcriptSnapshot,
       };
-      summary = buildSummary(ctx);
+      try {
+        summary = buildSummary(ctx);
+      } catch (err) {
+        // buildSummary threw (e.g. missing template). Log and proceed
+        // without a summary — the telephony transfer still succeeds;
+        // only the dispatcher context is degraded.
+        // eslint-disable-next-line no-console
+        console.warn('[escalate] buildSummary threw — proceeding without summary', {
+          tenantId,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Reset escalationId too since we have no summary to pair it with.
+        escalationId = undefined;
+      }
     }
 
     // Build the dial TwiML. Action URL is required so Twilio POSTs the
     // outcome to /dial-result. Caller passes it via `dialActionUrl`;
     // when missing we still produce a transfer descriptor with a
     // best-effort placeholder so the adapter can recover.
-    // When callControl is not wired (summary-only path), use an empty
-    // TwiML string — the adapter is expected not to emit <Dial> in that case.
-    const fallbackTwiml = callControl
+    // When callControl is not wired (summary-only path), fallbackTwiml is
+    // undefined — adapters must guard on this and not send an empty string
+    // to Twilio (which would return HTTP 400).
+    const fallbackTwiml: string | undefined = callControl
       ? callControl.dialDispatcher(
           callSid ?? sessionId,
           chosen.phone,
@@ -380,7 +428,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
             actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
           },
         )
-      : '';
+      : undefined;
 
     if (auditRepo) {
       await auditRepo.create(
