@@ -21,6 +21,8 @@ Three gaps remain:
 2. **No travel-time awareness.** Two appointments scheduled 9:00–10:00 and 10:00–11:00 across town are flagged as fine by the overlap check (they don't overlap) but are physically impossible.
 3. **No concurrent-edit protection at creation time.** Two dispatchers can grab the same card and create competing proposals. Today the *execution* `checkSchedulingProposalFreshness` catches stale proposals at approval, but at *creation* there's no version check — two pending proposals can stack on the same appointment.
 
+(And a discovered bug, addressed in §4: the dispatcher proposal-create endpoint `POST /api/proposals` doesn't exist on the server today. The web client posts to it and gets a 404. This work creates the route.)
+
 A fourth dimension — **technician skill matching** — comes from product intent. The codebase has no skill data model today; this spec adds a seam for it and defers the data model to a follow-up spec.
 
 ## 2. Goals & non-goals
@@ -161,23 +163,29 @@ Concurrent-edit is not part of the feasibility preview — it's detected only at
 | 400  | Malformed request, invalid ISO dates |
 | 404  | Appointment or technician not found |
 
-### Extended endpoint: `POST /api/proposals` (existing)
+### New endpoint: `POST /api/proposals` (created in this work)
 
-Backwards-incompatible additions for `proposalType ∈ {reschedule_appointment, reassign_appointment}` only. Other proposal types are unchanged.
+**Spec correction:** the prior version of this spec described this as "extending an existing endpoint." That was wrong. The proposals router at `packages/api/src/routes/proposals.ts` has handlers for `GET /`, `GET /inbox`, `GET /:id`, `POST /approve-batch`, `POST /:id/approve`, `POST /:id/reject`, `POST /:id/undo`, and a `PUT` — but **no `POST /` create handler**. The web hook `packages/web/src/components/dispatch/useCreateScheduleProposal.ts:83` already issues `POST /api/proposals`, which returns 404 today. The dispatcher drag-drop UI is broken in production for proposal creation. This work fixes that bug as a prerequisite to adding the version-token gate.
 
-**New required inputs:**
+**Scope:** the new `POST /` handler accepts `proposalType ∈ {reschedule_appointment, reassign_appointment}` only. Other proposal types return `400 { error: 'UNSUPPORTED_PROPOSAL_TYPE' }` for now; future work can broaden the set as needed. (Non-dispatcher proposal types are created via direct `proposalRepo.create(...)` calls from AI tasks today and don't need the HTTP route.)
 
+**Required inputs:**
+
+- Body: existing `CreateProposalInput` shape (`proposalType`, `payload`, `summary`)
 - Header `If-Match: <appointment.updatedAt as ISO 8601>` (preferred)
 - Body field `appointmentVersion: string` (mirror of `If-Match`; required so JSON parsing alone is sufficient on the server. If both are present and disagree, header wins.)
 
-**Server flow for these proposal types:**
+**Server flow:**
 
-1. Load the appointment referenced by `payload.appointmentId`.
-2. Compare expected version to `appointment.updatedAt.toISOString()` (millisecond precision, see §8 risks).
-3. Mismatch → `409 Conflict` with body `{ error: 'STALE_APPOINTMENT', currentVersion, providedVersion }`.
-4. Run `feasibility.checkFeasibility(...)`.
-5. `blocking.length > 0` → `422 Unprocessable Entity` with full `FeasibilityResult` in body and `{ error: 'INFEASIBLE' }`.
-6. Otherwise: create the proposal as today.
+1. Auth: `requireAuth + requireTenant` + `requirePermission('proposals:write')` (new permission scope — `proposals:approve` already exists, this matches the convention).
+2. Validate `proposalType` is in the supported set; otherwise 400.
+3. Load the appointment referenced by `payload.appointmentId` (the route handler owns this read — `feasibility.ts` does not re-fetch; see §5).
+4. Absent → `404 { error: 'APPOINTMENT_NOT_FOUND' }`.
+5. Resolve `expectedVersion` from `If-Match` header or `body.appointmentVersion`. Missing both → `400 { error: 'MISSING_VERSION' }`. Non-ISO string → `400 { error: 'INVALID_VERSION' }`.
+6. Compare `expectedVersion` to `appointment.updatedAt.toISOString()` (ms precision). Mismatch → `409 { error: 'STALE_APPOINTMENT', currentVersion, providedVersion }`.
+7. Run `feasibility.checkFeasibility(...)` with the pre-loaded appointment.
+8. `blocking.length > 0` → `422 { error: 'INFEASIBLE', ...FeasibilityResult }`.
+9. Otherwise: `proposalRepo.create(...)` and respond `201 { id, ... }`.
 
 ### Read path: board response gains `updatedAt`
 
@@ -397,7 +405,9 @@ Flagged so they're not lost:
 
 ## 10. Rollout
 
-Single PR; no flags. The new endpoint is additive. The breaking change is on `POST /api/proposals` for the two scheduling types.
+Single PR; no flags. Two new endpoints are additive: `POST /api/dispatch/check-feasibility` (new) and `POST /api/proposals` (new — see §4 spec correction). There is **no breaking change** to existing endpoints; the prior version of this spec incorrectly described the proposals create route as "existing." Existing proposal routes (`/approve-batch`, `/:id/approve`, `/:id/reject`, `/:id/undo`, GETs) are unaffected.
+
+This PR also incidentally fixes a 404 bug: `useCreateScheduleProposal.ts` has been posting to `/api/proposals` since it was written, with no server handler. Dispatcher proposal creation via drag-drop has been broken in production. Tests added in this work assert the route exists and behaves correctly.
 
 ### Enforcement boundary
 
