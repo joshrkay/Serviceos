@@ -6,6 +6,7 @@
  */
 
 import type { RepairTemplate } from '../../../verticals/registry';
+import type { EscalationSummary } from './escalation-summary-builder';
 
 // ─── States ──────────────────────────────────────────────────────────────────
 
@@ -62,7 +63,8 @@ export type CallingAgentEvent =
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }
   | { type: 'closed' }
-  | { type: 'second_intent' };
+  | { type: 'second_intent' }
+  | { type: 'frustration_detected'; source: 'keyword' | 'llm_sentiment'; detail?: string };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 
@@ -104,11 +106,21 @@ export type SideEffectType =
   | 'notify_oncall'
   | 'start_transcription'
   | 'end_session'
-  | 'emit_quality_event';
+  | 'emit_quality_event'
+  | 'escalate_with_context';
 
 export interface SideEffect {
   type: SideEffectType;
   payload: Record<string, unknown>;
+}
+
+export interface EscalateWithContextPayload {
+  escalationId: string;
+  summary: EscalationSummary;
+  dispatcher: { userId: string; phone: string };
+  callSid: string;
+  tenantId: string;
+  channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean };
 }
 
 // ─── Transition result ────────────────────────────────────────────────────────
