@@ -2,6 +2,7 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { SchedulingConfirmationNotifier } from './scheduling-notifications';
 
 /**
  * Confirms a tentative held appointment when its `create_booking`
@@ -21,6 +22,7 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly auditRepo?: AuditRepository,
+    private readonly confirmationNotifier?: SchedulingConfirmationNotifier,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -102,6 +104,15 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
           metadata: { proposalId: proposal.id, jobId: appointment.jobId },
         }),
       );
+    }
+
+    if (this.confirmationNotifier) {
+      await this.confirmationNotifier.enqueue({
+        tenantId: context.tenantId,
+        appointmentId,
+        jobId: appointment.jobId,
+        channels: ['sms', 'email'],
+      });
     }
 
     return { success: true, resultEntityId: appointmentId };

@@ -12,6 +12,7 @@ import {
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -22,6 +23,7 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
     private readonly feasibilityDeps?: FeasibilityDependencies,
+    private readonly transactionalComms?: TransactionalCommsService,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -161,6 +163,10 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
             },
           }),
         );
+      }
+
+      if (this.transactionalComms) {
+        await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
       }
 
       return {

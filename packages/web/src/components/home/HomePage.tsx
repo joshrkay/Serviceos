@@ -7,7 +7,13 @@ import {
 } from 'lucide-react';
 import { leads } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
-import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
+import {
+  normalizeJobStatus,
+  normalizeEstimateStatus,
+  centsToDisplay,
+  normalizeJobMoneyState,
+  JOB_MONEY_STATE_LABEL,
+} from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { ErrorState } from '../ErrorState';
@@ -18,6 +24,7 @@ interface ApiJob {
   jobNumber: string;
   summary: string;
   status: string;
+  moneyState?: string;
   priority?: string;
   serviceType?: string;
   scheduledStart?: string;
@@ -144,6 +151,16 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
     : null;
   const techColor = job.technician?.color ?? '#94a3b8';
   const scheduledTime = formatTime(job.scheduledStart);
+  const moneyState = normalizeJobMoneyState(job.moneyState);
+  const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
+  const moneyBadgeClass =
+    moneyState === 'overdue'
+      ? 'bg-red-100 text-red-700'
+      : moneyState === 'paid'
+        ? 'bg-green-100 text-green-700'
+        : moneyState === 'invoiced' || moneyState === 'estimate_sent'
+          ? 'bg-amber-100 text-amber-800'
+          : 'bg-violet-100 text-violet-700';
 
   return (
     <button
@@ -156,7 +173,14 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm text-slate-900 truncate">{name}</p>
-          <StatusBadge status={uiStatus} size="sm" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            {moneyLabel && (
+              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${moneyBadgeClass}`}>
+                {moneyLabel}
+              </span>
+            )}
+            <StatusBadge status={uiStatus} size="sm" />
+          </div>
         </div>
         <div className="flex items-center gap-2 mt-0.5">
           {scheduledTime && (
