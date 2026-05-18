@@ -49,7 +49,12 @@ function buildApp(opts: {
         subaccountSid: 'AC-real',
         authTokenPrimary: 'token',
       }),
-      webhookEventRepo: opts.webhookEventRepo,
+      // The tsconfig.test.json includes tests so plain `vi.fn()` infers
+      // `Mock<any[], unknown>` which doesn't quite line up with the
+      // WebhookEventRepo signature in the deps object. The same `as any`
+      // escape hatch is used by webhooks-tenant-binding.route.test.ts —
+      // the runtime shape is the contract that matters here.
+      webhookEventRepo: opts.webhookEventRepo as any,
       auditRepo: opts.auditRepo,
     }),
   );
@@ -86,7 +91,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
       }),
     });
 
-    const app = buildApp({ webhookEventRepo: repo });
+    const app = buildApp({ webhookEventRepo: repo as any });
     const res = await request(app)
       .post('/webhooks/twilio/sms/t1')
       .set('x-twilio-signature', 'ok')
@@ -104,7 +109,7 @@ describe('P2-034 — Twilio SMS webhook → keyword dispatcher integration', () 
       recordReceipt: vi.fn().mockResolvedValue({ inserted: false }),
       markProcessed: vi.fn().mockResolvedValue(undefined),
     };
-    const app = buildApp({ webhookEventRepo: repo });
+    const app = buildApp({ webhookEventRepo: repo as any });
 
     const res = await request(app)
       .post('/webhooks/twilio/sms/t1')
