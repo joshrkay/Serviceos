@@ -219,6 +219,15 @@ function checkGlobalGuards(
       nextState: 'escalating',
       sideEffects: [
         auditLog(updatedContext, state, 'escalating', escalationReason),
+        {
+          type: 'emit_quality_event',
+          payload: {
+            eventType: 'frustration_escalation',
+            trigger: escalationReason,
+            keyword: event.detail ?? null,
+            source: event.source,
+          },
+        },
         ttsPlay("I understand. Let me get a person on the line for you right away."),
         notifyOncall(updatedContext, escalationReason),
       ],

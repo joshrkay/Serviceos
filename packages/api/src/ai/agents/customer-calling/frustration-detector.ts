@@ -15,12 +15,10 @@ export const FRUSTRATION_KEYWORDS: ReadonlyArray<string> = [
   // Explicit / declarative frustration
   'this is ridiculous',
   'this is stupid',
-  'forget it',
-  'never mind',
-  // Demand for human
-  'i want a human',
-  'real person',
+  // Demand for human (specific, low false-positive)
   'speak to a person',
+  'real person',
+  'talk to a human',
   // Generic frustration markers
   "i'm frustrated",
   "this isn't working",
