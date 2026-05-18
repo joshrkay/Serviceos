@@ -100,10 +100,21 @@ echo "==> [3/3] Deployed voice path (real call)"
 # resolves it (kept in sync so an `--env=` invocation actually exercises
 # Layer 3 against the named environment instead of silently skipping).
 TARGET_BASE="${API_BASE_URL:-}"
+# --base= must take precedence over --env=* so Layer 1 and Layer 3
+# resolve to the SAME target (smoke-test.ts Layer 1 prefers --base
+# unconditionally). A naïve single-pass loop would let whichever
+# arg appeared later overwrite the earlier one, splitting layers
+# across environments (e.g. probe staging but mutate prod).
 if [ -z "$TARGET_BASE" ]; then
   for arg in "${SMOKE_ARGS[@]}"; do
     case "$arg" in
-      --base=*) TARGET_BASE="${arg#--base=}" ;;
+      --base=*) TARGET_BASE="${arg#--base=}"; break ;;
+    esac
+  done
+fi
+if [ -z "$TARGET_BASE" ]; then
+  for arg in "${SMOKE_ARGS[@]}"; do
+    case "$arg" in
       --env=staging) TARGET_BASE="${STAGING_API_URL:-}" ;;
       --env=prod|--env=production) TARGET_BASE="${PRODUCTION_API_URL:-}" ;;
     esac
