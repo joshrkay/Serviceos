@@ -188,6 +188,7 @@ export interface EscalationStartedEvent {
   escalationId: string;
   reason: string;
   dispatcherUserId: string;
+  tenantId: string;
   ts: number;
 }
 
@@ -229,12 +230,14 @@ export const escalationStartedEvent = (opts: {
   escalationId: string;
   reason: string;
   dispatcherUserId: string;
+  tenantId: string;
   ts?: number;
 }): EscalationStartedEvent => ({
   type: 'escalation_started',
   escalationId: opts.escalationId,
   reason: opts.reason,
   dispatcherUserId: opts.dispatcherUserId,
+  tenantId: opts.tenantId,
   ts: opts.ts ?? Date.now(),
 });
 

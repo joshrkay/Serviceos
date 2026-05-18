@@ -823,6 +823,7 @@ export class TwilioMediaStreamAdapter {
           escalationId,
           reason: summary.panel.reason.code,
           dispatcherUserId: dispatcher.userId,
+          tenantId: payload.tenantId,
         }),
       );
     }

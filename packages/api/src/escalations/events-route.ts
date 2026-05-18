@@ -5,11 +5,14 @@ import type { VoiceSessionEvent } from '../ai/agents/customer-calling/voice-sess
 // Reuse the existing SSE-by-session pattern but per-user.
 // Frontend hits /api/escalations/events; backend subscribes to all
 // escalation_started events on the voice event bus FILTERED by the
-// requesting user's userId (matched against dispatcherUserId in the event).
+// requesting user's userId AND tenantId (matched against dispatcherUserId
+// and tenantId in the event) to prevent cross-tenant data leaks.
 
 export interface EscalationEventsDeps {
   /** Extract the authenticated userId from the request (Clerk middleware). */
   authUserIdFromRequest: (req: Request) => Promise<string | null>;
+  /** Extract the authenticated tenantId from the request (Clerk middleware). */
+  authTenantIdFromRequest: (req: Request) => Promise<string | null>;
   /** Subscribe to all voice events across all active sessions. */
   subscribeToVoiceEvents: (callback: (evt: VoiceSessionEvent) => void) => () => void;
 }
@@ -19,14 +22,16 @@ export interface EscalationEventsDeps {
  *
  * Long-lived SSE stream. Emits `escalation_started` events to the
  * authenticated dispatcher whenever an AI agent escalates a call to them.
- * Filtered by dispatcherUserId so each dispatcher only receives their own
- * incoming transfers.
+ * Filtered by dispatcherUserId AND tenantId so each dispatcher only receives
+ * their own incoming transfers within their tenant. Includes a 25-second
+ * heartbeat comment to keep connections alive through proxies/load balancers.
  */
 export function escalationEventsRouter(deps: EscalationEventsDeps): Router {
   const router = Router();
   router.get('/events', async (req, res) => {
     const userId = await deps.authUserIdFromRequest(req);
-    if (!userId) {
+    const tenantId = await deps.authTenantIdFromRequest(req);
+    if (!userId || !tenantId) {
       res.status(401).end();
       return;
     }
@@ -35,16 +40,24 @@ export function escalationEventsRouter(deps: EscalationEventsDeps): Router {
     res.set('Connection', 'keep-alive');
     res.flushHeaders();
 
+    const heartbeat = setInterval(() => {
+      res.write(': hb\n\n');
+    }, 25_000);
+    if (typeof (heartbeat as unknown as { unref?: () => void }).unref === 'function') {
+      (heartbeat as unknown as { unref: () => void }).unref();
+    }
+
     const unsubscribe = deps.subscribeToVoiceEvents((evt) => {
       if (evt.type === 'escalation_started') {
         const startedEvt = evt as Extract<VoiceSessionEvent, { type: 'escalation_started' }>;
-        if (startedEvt.dispatcherUserId === userId) {
+        if (startedEvt.dispatcherUserId === userId && startedEvt.tenantId === tenantId) {
           res.write(`data: ${JSON.stringify(startedEvt)}\n\n`);
         }
       }
     });
 
     req.on('close', () => {
+      clearInterval(heartbeat);
       unsubscribe();
       res.end();
     });

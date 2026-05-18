@@ -311,6 +311,7 @@ import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
 import { whisperRouter } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
+import { requireTwilioSignature } from './telephony/twilio-signature';
 import { InMemoryOnCallRepository, PgOnCallRepository } from './oncall/rotation';
 import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
@@ -1925,7 +1926,16 @@ export function createApp(): express.Express {
   // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's
   // signed GETs (no Clerk session) are accepted. Path is under
   // /api/telephony so it's co-located with the main telephony webhook.
-  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+  // Twilio signature verification is enforced to prevent unauthenticated
+  // access to whisper TwiML (which contains PII: caller name, phone, intent).
+  app.use(
+    '/api/telephony',
+    requireTwilioSignature(
+      ({ accountSid }) => resolveTwilioAuthTokenForSubaccount(accountSid),
+      { publicBaseUrl: () => process.env.PUBLIC_API_URL },
+    ),
+    whisperRouter({ whisperCache: sharedWhisperCache }),
+  );
 
   // P8-012: attach the Media Streams WebSocketServer to the http.Server
   // returned by app.listen(). We override `app.listen` so the bare
@@ -2657,6 +2667,9 @@ export function createApp(): express.Express {
     escalationEventsRouter({
       authUserIdFromRequest: async (req) => {
         return (req as unknown as { auth?: { userId?: string } }).auth?.userId ?? null;
+      },
+      authTenantIdFromRequest: async (req) => {
+        return (req as unknown as { auth?: { tenantId?: string } }).auth?.tenantId ?? null;
       },
       subscribeToVoiceEvents: (cb) => voiceSessionStore.subscribeGlobal(cb),
     }),
