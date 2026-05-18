@@ -15,6 +15,10 @@ import {
   onboardingTeamMemberPayloadSchema,
   onboardingSchedulePayloadSchema,
 } from './contracts/onboarding';
+// P7-026 PR c — review_response_proposal schema lives in the shared
+// package (per the spec — single source of truth, re-exported via the
+// shared barrel). Do NOT redefine it locally.
+import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -198,6 +202,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,
   onboarding_team_member: onboardingTeamMemberPayloadSchema,
   onboarding_schedule: onboardingSchedulePayloadSchema,
+  review_response_proposal: reviewResponseProposalPayloadSchema,
 };
 
 export function validateProposalPayload(

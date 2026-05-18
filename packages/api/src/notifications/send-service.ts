@@ -6,6 +6,7 @@ import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { DispatchRepository } from './dispatch-repository';
+import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
   EmailMessage,
   MessageDeliveryProvider,
@@ -62,6 +63,13 @@ export interface SendServiceDeps {
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   dispatchRepo: DispatchRepository;
+  /**
+   * §7 Phase 1 compliance gate. SMS sends consult this to suppress
+   * delivery when the recipient is on the tenant DNC list or has
+   * sms_consent=false on the customer record. Email sends are
+   * unaffected.
+   */
+  dncRepo: DncRepository;
   publicBaseUrl: string;
 }
 
@@ -140,6 +148,7 @@ export class SendService {
           entityType: 'estimate',
           entityId: estimate.id,
           target,
+          customerSmsConsent: customer.smsConsent,
           idempotencyKey: this.buildIdempotencyKey(
             'estimate',
             estimate.id,
@@ -262,6 +271,7 @@ export class SendService {
           entityType: 'invoice',
           entityId: invoice.id,
           target,
+          customerSmsConsent: customer.smsConsent,
           idempotencyKey: this.buildIdempotencyKey(
             'invoice',
             invoice.id,
@@ -335,6 +345,27 @@ export class SendService {
     return settings?.businessName ?? 'Your service team';
   }
 
+  /**
+   * Returns null when SMS is allowed; otherwise a human-readable reason
+   * suitable for the dispatch row's error_message. The reason is also
+   * surfaced into the thrown Error so client-facing error mapping has
+   * the same string.
+   */
+  private async assertSmsAllowed(
+    tenantId: string,
+    customerSmsConsent: boolean | undefined,
+    recipient: string,
+  ): Promise<string | null> {
+    if (customerSmsConsent !== true) {
+      return 'customer sms_consent is not granted';
+    }
+    const onDnc = await this.deps.dncRepo.isOnDnc(tenantId, normalizePhone(recipient));
+    if (onDnc) {
+      return 'phone on DNC list (opted out)';
+    }
+    return null;
+  }
+
   private buildViewUrl(prefix: 'e' | 'pay', token: string): string {
     const base = this.deps.publicBaseUrl.replace(/\/$/, '');
     return `${base}/${prefix}/${token}`;
@@ -396,7 +427,46 @@ export class SendService {
     render: () => SmsMessage | EmailMessage;
     /** Stable dedupe key — provider should reject identical retries within ~24h. */
     idempotencyKey: string;
+    /**
+     * Customer's stored sms_consent flag. SMS sends require an explicit
+     * true here. Undefined is treated as not-yet-asked — also blocked.
+     */
+    customerSmsConsent?: boolean;
   }): Promise<SendResult['channelsSent'][number]> {
+    // §7 phase 1: SMS suppression gate. Two conditions block SMS:
+    //   1. The customer's stored sms_consent is false (or never captured).
+    //   2. The recipient phone appears on the tenant DNC list (from STOP).
+    // On block, we audit a failed dispatch row with provider="suppressed" so
+    // the audit trail records the attempt + reason, then throw so the
+    // Promise.allSettled in sendEstimate/sendInvoice surfaces it as a
+    // partial failure rather than a silent skip.
+    if (args.target.channel === 'sms') {
+      const reason = await this.assertSmsAllowed(
+        args.tenantId,
+        args.customerSmsConsent,
+        args.target.recipient,
+      );
+      if (reason) {
+        const errorMessage = `SMS suppressed: ${reason}`;
+        await this.deps.dispatchRepo
+          .create({
+            tenantId: args.tenantId,
+            entityType: args.entityType,
+            entityId: args.entityId,
+            channel: 'sms',
+            recipient: args.target.recipient,
+            provider: 'suppressed',
+            status: 'failed',
+            errorMessage,
+            idempotencyKey: args.idempotencyKey,
+          })
+          .catch(() => {
+            // Best-effort audit; never let an audit failure mask suppression.
+          });
+        throw new Error(errorMessage);
+      }
+    }
+
     const message = args.render();
     let providerMessageId: string;
     let provider: string;

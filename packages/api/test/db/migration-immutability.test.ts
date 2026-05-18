@@ -158,7 +158,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['098_tenant_settings_onboarding_fields', 'cc5d352de051b7687fb2f379aa9dc247671aff5909f1a3a9d9c1f96af0830ad4'],
   ['099_proposal_executions_idempotency_index', '90549c0a15f7b54d35f70d02ee741b3c562eb9ed5d7119c4826e3ae36bf86f99'],
   ['100_payments_refund_tracking', '242a61a9e99abd1dfc793c6cd53962beeab7c15d283fa37d84004dfe1bf940ed'],
-  ['101_create_shadow_comparisons', 'c8da571db116b8c05cab38b18e76cb90286141891e9776c0db63f67985c51e5c'],
+  ['101_google_reviews', 'ee39147f5eb59b0455ea40290a3592f70068907e13fa0d2c392ba4a3acd6d8f8'],
+  ['102_review_poll_state', 'b069f6a315219c16ac432f1854b1865d337efa6a8fa66a12efc6c89d18ebb207'],
+  ['103_service_credits', 'd4a6951eb9a1afe53bc92e1b81b7594e8f084d48765580ecae3065325198e102'],
+  ['104_service_credits_review_fk', '3774d608685bc1c9fa21706ec1905be65a0fc9496c49aeac7b938422371ef97c'],
 ];
 
 function hashMigration(value: string): string {
