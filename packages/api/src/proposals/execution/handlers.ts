@@ -210,6 +210,7 @@ export function createExecutionHandlerRegistry(deps?: {
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
   jobRepo?: JobRepository;
+  feasibilityDeps?: import('../../scheduling/feasibility-types').FeasibilityDependencies;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -236,8 +237,8 @@ export function createExecutionHandlerRegistry(deps?: {
     new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
-    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo),
+    new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo, deps?.feasibilityDeps),
     new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo, deps?.auditRepo),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is
