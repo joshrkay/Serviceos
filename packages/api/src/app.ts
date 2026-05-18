@@ -239,6 +239,10 @@ import { createPublicPaymentsRouter } from './routes/public-payments';
 import { createFeedbackSendWorker } from './workers/feedback-send';
 import { runRecurringAgreementsSweep } from './workers/recurring-agreements-worker';
 import { runOverdueInvoiceSweep } from './workers/overdue-invoice-worker';
+import { runGoogleReviewsSweep } from './workers/google-reviews';
+import { PgReviewRepository } from './reputation/pg-review';
+import { PgReviewPollStateRepository } from './reputation/poll-state';
+import { createCredentialResolver } from './integrations/credentials';
 import { InMemoryAgreementRepository } from './agreements/agreement';
 import { PgAgreementRepository } from './agreements/pg-agreement';
 import { InMemoryAgreementRunRepository } from './agreements/agreement-run';
@@ -2438,6 +2442,55 @@ export function createApp(): express.Express {
       });
     }
   }, 60 * 60_000);
+
+  // P7-026 PR a: Google Business reviews polling. Every 15 minutes
+  // we sweep every tenant with an active `google_business`
+  // integration and persist new reviews idempotently. One tenant's
+  // failure never stops the loop (per-tenant try/catch inside the
+  // sweep). Per-tenant exponential backoff on 429 lives in
+  // review_poll_state; tenants currently throttled are skipped
+  // entirely until the window lifts.
+  //
+  // When `pool` is unset (in-memory dev), the sweep no-ops cleanly:
+  // the worker short-circuits on a null credential resolver and
+  // returns all-zero metrics.
+  const googleReviewsLogger = createLogger({
+    service: 'google-reviews-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const googleReviewsReviewRepo = pool ? new PgReviewRepository(pool) : null;
+  const googleReviewsPollStateRepo = pool
+    ? new PgReviewPollStateRepository(pool)
+    : null;
+  const googleReviewsCredResolver = pool
+    ? createCredentialResolver({ pool })
+    : null;
+  setInterval(async () => {
+    if (
+      !googleReviewsReviewRepo ||
+      !googleReviewsPollStateRepo ||
+      !googleReviewsCredResolver
+    ) {
+      return;
+    }
+    try {
+      await runGoogleReviewsSweep({
+        reviewRepo: googleReviewsReviewRepo,
+        pollStateRepo: googleReviewsPollStateRepo,
+        credentialResolver: googleReviewsCredResolver,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: googleReviewsLogger,
+      });
+    } catch (err) {
+      googleReviewsLogger.error('Google reviews sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 15 * 60_000);
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.

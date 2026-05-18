@@ -2633,6 +2633,66 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_payments_refunded_at
       ON payments(refunded_at) WHERE refunded_at IS NOT NULL;
   `,
+
+  // P7-026 PR a — Google Business reviews monitoring foundation.
+  // Mirror of upstream review rows; the worker polls every 15 minutes
+  // and upserts on (tenant_id, external_review_id). PR b adds PII
+  // redaction (separate column for redacted_text) and PR c hangs the
+  // proposal pipeline off inserts. Indexed for "recent reviews per
+  // tenant" + "freshly fetched" queries that the UI and reporting
+  // will run.
+  '101_google_reviews': `
+    CREATE TABLE IF NOT EXISTS google_reviews (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      external_review_id TEXT NOT NULL,
+      location_id TEXT NOT NULL,
+      reviewer_display_name TEXT,
+      reviewer_profile_url TEXT,
+      rating SMALLINT NOT NULL CHECK (rating BETWEEN 0 AND 5),
+      comment_text TEXT,
+      review_create_time TIMESTAMPTZ NOT NULL,
+      review_update_time TIMESTAMPTZ,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, external_review_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_create_time
+      ON google_reviews(tenant_id, review_create_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_google_reviews_tenant_fetched_at
+      ON google_reviews(tenant_id, fetched_at DESC);
+    ALTER TABLE google_reviews ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE google_reviews FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_google_reviews ON google_reviews;
+    CREATE POLICY tenant_isolation_google_reviews ON google_reviews
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P7-026 PR a — per-tenant poll watermark + 429 exponential backoff.
+  // Single row per tenant. `cursor` is the ISO timestamp of the
+  // newest review.updateTime we've persisted (the watermark). When
+  // `backoff_until` is in the future, the worker skips this tenant
+  // entirely. `consecutive_429_count` resets on the first successful
+  // poll. The exponential math lives in reputation/poll-state.ts;
+  // recordQuotaError() mirrors it in SQL so the increment is
+  // race-free.
+  '102_review_poll_state': `
+    CREATE TABLE IF NOT EXISTS review_poll_state (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id),
+      cursor TEXT,
+      last_successful_poll_at TIMESTAMPTZ,
+      backoff_until TIMESTAMPTZ,
+      consecutive_429_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_review_poll_state_backoff
+      ON review_poll_state(backoff_until)
+      WHERE backoff_until IS NOT NULL;
+    ALTER TABLE review_poll_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE review_poll_state FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_review_poll_state ON review_poll_state;
+    CREATE POLICY tenant_isolation_review_poll_state ON review_poll_state
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

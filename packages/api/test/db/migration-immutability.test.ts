@@ -158,6 +158,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['098_tenant_settings_onboarding_fields', 'cc5d352de051b7687fb2f379aa9dc247671aff5909f1a3a9d9c1f96af0830ad4'],
   ['099_proposal_executions_idempotency_index', '90549c0a15f7b54d35f70d02ee741b3c562eb9ed5d7119c4826e3ae36bf86f99'],
   ['100_payments_refund_tracking', '242a61a9e99abd1dfc793c6cd53962beeab7c15d283fa37d84004dfe1bf940ed'],
+  ['101_google_reviews', '54dd63654e62a9b9ab9af81188cec4cf4cf66df13ab13abb6568743343cfb222'],
+  ['102_review_poll_state', 'b069f6a315219c16ac432f1854b1865d337efa6a8fa66a12efc6c89d18ebb207'],
 ];
 
 function hashMigration(value: string): string {
