@@ -14,12 +14,28 @@
  *      sends `{ kind: 'subscribe', channel: 'voice', targetId: id }`
  *      so the gateway forwards `voice.event` frames for that session.
  *
- * Tests should mock this module if they need a non-empty session list
- * to drive a particular UI state (see `ModeSwitchModal.test.tsx` and
+ * The state lives on a Context provider (`ActiveSessionsProvider`)
+ * mounted inside `Shell`. Every consumer (`Shell`, `CompressedSession
+ * Strip`, ...) calls `useActiveSessions()` which reads from that
+ * single provider — so each operator opens exactly one WS connection
+ * and one /active poller regardless of how many components subscribe.
+ *
+ * Tests that mount components directly without the provider see an
+ * inert empty result, which matches what unprivileged users get in
+ * production. Tests that need a non-empty list should mock this
+ * module (see `ModeSwitchModal.test.tsx` and
  * `CompressedSessionStrip.test.tsx`).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { useMe } from './useMe';
 import { useResilientStream, type WsServerFrame } from './useResilientStream';
@@ -72,7 +88,7 @@ async function fetchActiveSessions(token: string): Promise<ActiveSessionDTO[]> {
   return Array.isArray(body.sessions) ? body.sessions : [];
 }
 
-export function useActiveSessions(): UseActiveSessionsResult {
+function useActiveSessionsInternal(): UseActiveSessionsResult {
   const { getToken } = useAuth();
   const { me } = useMe();
   // The /active route + the voice WS channel both require `ai:run`.
@@ -254,4 +270,22 @@ export function useActiveSessions(): UseActiveSessionsResult {
     isConnecting: status === 'connecting',
     pendingProposalCount: 0,
   };
+}
+
+const INERT_RESULT: UseActiveSessionsResult = {
+  sessions: [],
+  isConnecting: false,
+  pendingProposalCount: 0,
+};
+
+const ActiveSessionsContext = createContext<UseActiveSessionsResult | null>(null);
+
+export function ActiveSessionsProvider({ children }: { children: React.ReactNode }) {
+  const value = useActiveSessionsInternal();
+  return React.createElement(ActiveSessionsContext.Provider, { value }, children);
+}
+
+export function useActiveSessions(): UseActiveSessionsResult {
+  const ctx = useContext(ActiveSessionsContext);
+  return ctx ?? INERT_RESULT;
 }

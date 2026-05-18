@@ -17,7 +17,10 @@ import {
   shouldShowModeSwitchModal,
 } from '../mode/ModeSwitchModal';
 import { CompressedSessionStrip } from '../sessions/CompressedSessionStrip';
-import { useActiveSessions } from '../../hooks/useActiveSessions';
+import {
+  ActiveSessionsProvider,
+  useActiveSessions,
+} from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
 import {
   usePendingProposals,
@@ -203,6 +206,19 @@ function ModeToggle({ current, onSwitch, variant }: ModeToggleProps) {
 }
 
 export function Shell() {
+  // ActiveSessionsProvider singletonizes the supervisor-wall WS + the
+  // /api/voice/sessions/active poller — `useActiveSessions()` is
+  // called in both ShellInner and CompressedSessionStrip, and both
+  // now read from the same provider instance instead of opening
+  // duplicate connections per consumer.
+  return (
+    <ActiveSessionsProvider>
+      <ShellInner />
+    </ActiveSessionsProvider>
+  );
+}
+
+function ShellInner() {
   const location = useLocation();
   const [cameraOpen, setCameraOpen] = useState(false);
   const voiceBarRef = useRef<VoiceBarHandle>(null);
