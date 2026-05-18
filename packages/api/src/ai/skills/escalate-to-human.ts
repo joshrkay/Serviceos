@@ -200,6 +200,12 @@ export interface EscalateToHumanInput {
    * default to enabled (matches pre-F8 single-channel behavior).
    */
   channelPreferences?: { sms: boolean; in_app: boolean; whisper: boolean };
+  /**
+   * Public web app base URL used to build the SMS short-link in the
+   * escalation summary. Passed through to `EscalationContext.publicWebBaseUrl`.
+   * Defaults to `process.env.PUBLIC_WEB_URL` (or `app.serviceos.app` as last resort).
+   */
+  publicWebBaseUrl?: string;
 }
 
 /**
@@ -308,6 +314,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     buildSummary,
     callerContext,
     shopName,
+    publicWebBaseUrl,
   } = input;
   const lang: Language = input.language ?? 'en';
   const transferringText = t('escalate.transferring', lang);
@@ -406,6 +413,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         intent: callerContext.intent,
         reason: mapSkillReasonToBuilderReason(reason),
         transcriptSnapshot: callerContext.transcriptSnapshot,
+        ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
       };
       try {
         summary = buildSummary(ctx);

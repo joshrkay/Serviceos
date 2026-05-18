@@ -47,6 +47,12 @@ export interface EscalationContext {
   reasonDetail?: string;
   /** Last 4-6 turns before escalation fires. Caller-first ordering. */
   transcriptSnapshot: ReadonlyArray<TranscriptTurn>;
+  /**
+   * Public web app base URL (no trailing slash). Used to construct the
+   * SMS short-link. Defaults to `app.serviceos.app` if not provided.
+   * Pass `process.env.PUBLIC_WEB_URL` or equivalent at the call site.
+   */
+  publicWebBaseUrl?: string;
 }
 
 export interface PanelData {
@@ -201,7 +207,10 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   }
 
   // SMS: target ≤160 chars. Always reserve space for the link; truncate core at word boundary.
-  const linkPlaceholder = `app.serviceos.app/c/<escalationId>`;
+  const baseUrl = (ctx.publicWebBaseUrl ?? process.env.PUBLIC_WEB_URL ?? 'app.serviceos.app')
+    .replace(/^https?:\/\//, '')
+    .replace(/\/$/, '');
+  const linkPlaceholder = `${baseUrl}/c/<escalationId>`;
   const linkBudget = linkPlaceholder.length + 1; // space before link
   const coreBudget = 160 - linkBudget;
 

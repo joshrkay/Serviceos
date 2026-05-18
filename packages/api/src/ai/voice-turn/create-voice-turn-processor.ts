@@ -509,6 +509,7 @@ export function createVoiceTurnProcessor(
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
         channelPreferences,
+        ...(deps.publicBaseUrl ? { publicWebBaseUrl: deps.publicBaseUrl } : {}),
       });
 
       if (result.transfer) {
