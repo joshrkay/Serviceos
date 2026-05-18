@@ -73,6 +73,23 @@ export function useResilientStream(opts: UseResilientStreamOptions): {
   const attemptRef = useRef(0);
   const [reconnectTrigger, setReconnectTrigger] = useState(0);
 
+  // Mirror the callbacks into refs so the WS event handlers always
+  // dispatch to the *latest* function. The socket effect intentionally
+  // omits these from its dep list (rebinding the socket every render
+  // would tear down the connection on every parent state change), so
+  // without refs the handlers would call the stale closure captured at
+  // socket-open time — in `useActiveSessions`, `onOpen` closes over
+  // `knownSessionIds`, and discovery typically populates that list
+  // *after* the WS opens.
+  const onOpenRef = useRef(opts.onOpen);
+  const onFrameRef = useRef(opts.onFrame);
+  const onCloseRef = useRef(opts.onClose);
+  useEffect(() => {
+    onOpenRef.current = opts.onOpen;
+    onFrameRef.current = opts.onFrame;
+    onCloseRef.current = opts.onClose;
+  });
+
   useEffect(() => {
     if (!opts.enabled) {
       setStatus('idle');
@@ -106,12 +123,12 @@ export function useResilientStream(opts: UseResilientStreamOptions): {
     ws.onopen = () => {
       attemptRef.current = 0;
       setStatus('open');
-      opts.onOpen?.();
+      onOpenRef.current?.();
     };
     ws.onmessage = (ev) => {
       try {
         const frame = JSON.parse(ev.data) as WsServerFrame;
-        opts.onFrame?.(frame);
+        onFrameRef.current?.(frame);
       } catch {
         /* ignore malformed */
       }
@@ -119,7 +136,7 @@ export function useResilientStream(opts: UseResilientStreamOptions): {
     ws.onclose = (ev) => {
       if (unmounted) return;
       setStatus('closed');
-      opts.onClose?.(ev.reason || 'closed');
+      onCloseRef.current?.(ev.reason || 'closed');
       scheduleReconnect();
     };
     ws.onerror = () => {
