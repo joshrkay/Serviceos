@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { CreateCustomerVoiceExecutionHandler, splitName } from '../../../src/proposals/execution/create-customer-handler';
+import { createExecutionHandlerRegistry } from '../../../src/proposals/execution/handlers';
 import { createProposal } from '../../../src/proposals/proposal';
 import {
   InMemoryCustomerRepository,
@@ -150,6 +151,19 @@ describe('P18-001 create_customer execution handler', () => {
     expect(result.success).toBe(true);
     const created = await customerRepo.findById(TENANT, result.resultEntityId!);
     expect(created!.preferredChannel).toBe('phone');
+  });
+});
+
+describe('createExecutionHandlerRegistry — create_customer wiring', () => {
+  it('uses CreateCustomerVoiceExecutionHandler when customerRepo is provided', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const registry = createExecutionHandlerRegistry({ customerRepo });
+    const handler = registry.get('create_customer')!;
+    const proposal = makeProposal({ name: 'Registry Jane', phone: '+15550001111' });
+    const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: EXECUTOR });
+    expect(result.success).toBe(true);
+    const persisted = await customerRepo.findById(TENANT, result.resultEntityId!);
+    expect(persisted?.firstName).toBe('Registry');
   });
 });
 

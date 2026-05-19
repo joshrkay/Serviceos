@@ -11,12 +11,9 @@
  *      `entries` (real LLM exchanges are recorded later via
  *      `npm run voice-quality:record`).
  *
- * A fourth assertion documents `create-customer-new-signup` as a v1
- * known failure pre-P17-001 (the classifier returns `unknown` for
- * "I'd like to sign up as a new customer" until P17-001 ships). We
- * pin the script's grading config so the failure mode is the
- * documented one (criterion 9 — disposition intent — is in scope and
- * will fail) rather than something else slipping through.
+ * P18-001 closed the `create-customer-new-signup` classifier leak;
+ * the script is Layer-2 eligible and must grade `create_customer` on
+ * the signup phrasing plus a name-bearing proposal payload.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -78,12 +75,7 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     },
   );
 
-  it('VQ-012 — create-customer-new-signup is documented as v1 known failure (P17-001)', () => {
-    // Pin the grading config so the documented-known-failure stays
-    // accurately documented. P17-001 will fix the `create_customer`
-    // classifier branch; until it ships, criterion 9 (disposition
-    // intent) is expected to fail on this single script. The launch
-    // gate accommodates this with a per-script exemption on bucket 3.
+  it('VQ-012 — create-customer-new-signup is P18-001-ready (layer2 + create_customer intent)', () => {
     const file = path.join(
       CORPUS_ROOT,
       'scripts',
@@ -93,10 +85,11 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     const script = loadScript(file);
     expect(script.grading.appliesFloor).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(script.grading.appliesDisposition).toEqual([9, 10, 11, 12]);
-    // Layer 2 corpus selection drops this script until P17-001 lands.
-    expect(script.layer2Eligible).toBe(false);
-    // The script's expected intent is `create_customer`, which the
-    // classifier currently maps to `unknown` (P17-001).
+    expect(script.layer2Eligible).toBe(true);
     expect(script.turns[0].expected.intent).toBe('create_customer');
+    expect(script.turns[0].expected.proposalType).toBe('create_customer');
+
+    const golden = loadGoldenForScript(script.id, CORPUS_ROOT);
+    expect(golden).toEqual([{ phone: '+15555550302' }]);
   });
 });
