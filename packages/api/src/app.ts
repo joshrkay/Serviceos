@@ -1228,7 +1228,14 @@ export function createApp(): express.Express {
   // executor stays exercised in dev/test without sending bytes.
   const invoiceDeliveryProvider = sendService
     ? new SendServiceInvoiceDeliveryProvider(sendService)
-    : new NoopInvoiceDeliveryProvider();
+    : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
+      ? (() => {
+          throw new Error(
+            'No invoice delivery provider configured. Voice "send invoice" would silently drop in production. ' +
+              'Configure message delivery (SendService) or block the send_invoice intent at the router.',
+          );
+        })()
+      : new NoopInvoiceDeliveryProvider();
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
@@ -1281,6 +1288,9 @@ export function createApp(): express.Express {
       )
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
+    customerRepo,
+    jobRepo,
+    locationRepo,
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
@@ -1293,7 +1303,6 @@ export function createApp(): express.Express {
     schedulingNotifier: schedulingConfirmationNotifier,
     expenseRepo,
     auditRepo,
-    jobRepo,
     feasibilityDeps,
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
