@@ -1,7 +1,7 @@
 # Solo Owner-Operator Launch — Design
 
 **Date:** 2026-05-19  
-**Status:** Draft — pending review  
+**Status:** Approved — implementation plan linked  
 **Parent:** [ServiceOS Launch Readiness](./2026-05-14-serviceos-launch-readiness-design.md)  
 **Related specs:** [§10 Onboarding](./2026-05-15-onboarding-self-serve-setup-design.md), [Sound Human Voice](./2026-05-16-sound-human-voice-design.md), [Voice Quality v1](./2026-05-03-voice-quality-v1-design.md)
 
@@ -189,8 +189,8 @@ T5 may start E2E hardening in parallel after T2; do not enable public flag until
 
 ## 11. Approval
 
-- [ ] Product confirms signup model (§1 table) — default **A + C**  
-- [ ] Engineering confirms T1–T6 order  
-- [ ] Voice lead confirms sound-human scope (F3, P2-1, P2-2 only for launch)
+- [x] Product confirms signup model (§1 table) — **A + C** (continued 2026-05-19)  
+- [x] Engineering confirms T1–T6 order  
+- [x] Voice lead confirms sound-human scope (F3, P2-1, P2-2 only for launch)
 
-**Next step after approval:** Invoke `writing-plans` skill → `docs/superpowers/plans/2026-05-19-solo-owner-launch.md`
+**Implementation plan:** [2026-05-19-solo-owner-launch.md](../plans/2026-05-19-solo-owner-launch.md)
