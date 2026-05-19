@@ -162,6 +162,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['102_review_poll_state', 'b069f6a315219c16ac432f1854b1865d337efa6a8fa66a12efc6c89d18ebb207'],
   ['103_service_credits', 'd4a6951eb9a1afe53bc92e1b81b7594e8f084d48765580ecae3065325198e102'],
   ['104_service_credits_review_fk', '3774d608685bc1c9fa21706ec1905be65a0fc9496c49aeac7b938422371ef97c'],
+  ['105_create_dispatch_analytics', '4711390273626b42dccb496db8d9b355d5aa91d37dede77f9777ab14045c0c83'],
 ];
 
 function hashMigration(value: string): string {
