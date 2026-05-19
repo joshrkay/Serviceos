@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test';
 import { setupClerkTestingToken, hasClerkTestingCreds } from '../helpers/clerk-testing';
+import {
+  createOnboardingMockState,
+  installOnboardingV2ApiMocks,
+  signUpAndReachOnboarding,
+  type OnboardingMockTrackers,
+} from '../helpers/onboarding-v2-mock';
 
 /**
  * Journey — §10 onboarding v2 (self-serve setup).
@@ -15,12 +21,10 @@ import { setupClerkTestingToken, hasClerkTestingCreds } from '../helpers/clerk-t
  *     (because state is derived from real entities, no separate
  *     onboarding_progress table to get stale).
  *
+ * Identity submit + HVAC pack selection use route mocks when the
+ * journey DB cannot persist tenant_settings (see onboarding-v2-mock.ts).
+ *
  * What's deliberately NOT covered here (deferred to follow-up):
- *   - Submitting the identity form end-to-end (requires PG seed of
- *     the new tenant_settings columns or a real backend that has
- *     migration 098 applied — the journey infra seeds a different
- *     fixture set).
- *   - Picking a pack and asserting the sidebar advances.
  *   - Twilio readiness UI (depends on the worker actually purchasing
  *     a number; covered by the integration test suite).
  *   - Stripe Checkout (would hit live Stripe sandbox; covered by the
@@ -109,6 +113,56 @@ test.describe('Journey — §10 onboarding v2', () => {
 
     // Submit button is present and labeled correctly.
     await expect(page.getByRole('button', { name: /Save and continue/i })).toBeVisible();
+  });
+
+  test('identity form submit advances to pack step', async ({ page }) => {
+    await setupClerkTestingToken(page);
+    const state = createOnboardingMockState();
+    const trackers: OnboardingMockTrackers = { identityPut: false, packPost: null };
+    await installOnboardingV2ApiMocks(page, state, trackers);
+
+    await signUpAndReachOnboarding(page, 'v2identity-submit');
+
+    await expect(page.getByRole('heading', { name: /Tell us about your business/i })).toBeVisible();
+    await page.getByLabel(/Business name/i).fill('E2E Acme HVAC');
+    // Mon–Fri hours are on by default; satisfies "at least one business hours day".
+    await page.getByRole('button', { name: /Save and continue/i }).click();
+
+    await expect.poll(() => trackers.identityPut).toBe(true);
+    await expect(page.getByRole('heading', { name: /Pick your trade/i })).toBeVisible({
+      timeout: 15_000,
+    });
+    const packSidebar = page.getByRole('button', { name: /Pick your trade/i });
+    await expect(packSidebar).toBeVisible();
+    await expect(packSidebar).toContainText('→');
+  });
+
+  test('HVAC pack selection activates pack', async ({ page }) => {
+    await setupClerkTestingToken(page);
+    const state = createOnboardingMockState();
+    state.identityDone = true;
+    const trackers: OnboardingMockTrackers = { identityPut: false, packPost: null };
+    await installOnboardingV2ApiMocks(page, state, trackers);
+
+    await signUpAndReachOnboarding(page, 'v2pack-hvac');
+
+    await expect(page.getByRole('heading', { name: /Pick your trade/i })).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const packRequest = page.waitForRequest(
+      (req) =>
+        req.method() === 'POST' &&
+        req.url().includes('/api/onboarding/pack') &&
+        req.postDataJSON()?.packId === 'hvac',
+    );
+    await page.locator('button', { has: page.getByText('HVAC', { exact: true }) }).click();
+    await packRequest;
+
+    expect(trackers.packPost).toEqual({ packId: 'hvac' });
+    await expect(page.getByRole('button', { name: /Pick your trade/i })).toContainText('✓', {
+      timeout: 15_000,
+    });
   });
 
   test('resumability: reload mid-flow stays on /onboarding', async ({ page }) => {
