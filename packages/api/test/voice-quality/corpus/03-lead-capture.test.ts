@@ -11,12 +11,9 @@
  *      `entries` (real LLM exchanges are recorded later via
  *      `npm run voice-quality:record`).
  *
- * A fourth assertion documents `create-customer-new-signup` as a v1
- * known failure pre-P17-001 (the classifier returns `unknown` for
- * "I'd like to sign up as a new customer" until P17-001 ships). We
- * pin the script's grading config so the failure mode is the
- * documented one (criterion 9 — disposition intent — is in scope and
- * will fail) rather than something else slipping through.
+ * create-customer-new-signup: bucket-03 script; disposition grading
+ * depends on P18-001 classifier + persisted create_customer execution.
+ * Cassettes must be recorded (Phase 2) before expecting launchGate pass.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
