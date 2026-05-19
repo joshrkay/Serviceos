@@ -18,16 +18,16 @@
 | app.ts production wiring | grep `CreateCustomerVoiceExecutionHandler`, `proposalIdempotencyGuard`, `PgAssignmentRepository` | **PASS** | lines ~878, 1309, 1315 |
 | Onboarding status API | `test/integration/onboarding-status.test.ts` | **PENDING** | excluded from default vitest `include`; run in integration CI |
 | Voice quality launch gate | Layer 1 corpus | **PENDING** | Phase 2 — cassettes need recording |
-| Invoice delivery prod fail-fast | `resolveInvoiceDeliveryProvider` | **PENDING** | Phase 1 Task 1.2 |
+| Lead-capture corpus comment | `test/voice-quality/corpus/03-lead-capture.test.ts` | **PASS** | `c86b33ad` — stale P17-001 comment updated |
+| Invoice delivery prod fail-fast | `test/proposals/execution/invoice-delivery-boot.test.ts` | **PASS** | `da3d085b` — `resolveInvoiceDeliveryProvider` throws in prod/staging without SendService |
 | Onboarding v2 flag in prod | `VITE_ONBOARDING_V2_ENABLED` | **PENDING** | Phase 4 — still `false` in `.env.example` |
 
 ## Gaps for launch (ordered)
 
-1. Phase 1.2 — prod/staging boot fail-fast when SendService missing  
-2. Phase 2 — record cassettes + `launchGate.pass` + human sign-off  
-3. Phase 3 — sound-human test suite + deployment env docs  
-4. Phase 4 — enable onboarding v2 default + E2E extension  
-5. Phase 5 — public launch runbook + final checklist  
+1. Phase 2 — record cassettes + `launchGate.pass` + human sign-off  
+2. Phase 3 — sound-human test suite + deployment env docs  
+3. Phase 4 — enable onboarding v2 default + E2E extension  
+4. Phase 5 — final checklist in [solo-owner-public-launch.md](../runbooks/solo-owner-public-launch.md)  
 
 ## Human sign-off
 
