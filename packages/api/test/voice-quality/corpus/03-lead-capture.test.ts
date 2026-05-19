@@ -75,12 +75,10 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     },
   );
 
-  it('VQ-012 — create-customer-new-signup is documented as v1 known failure (P17-001)', () => {
-    // Pin the grading config so the documented-known-failure stays
-    // accurately documented. P17-001 will fix the `create_customer`
-    // classifier branch; until it ships, criterion 9 (disposition
-    // intent) is expected to fail on this single script. The launch
-    // gate accommodates this with a per-script exemption on bucket 3.
+  it('VQ-012 — create-customer-new-signup grading config (P18-001 shipped)', () => {
+    // P18-001: deterministic create_customer classifier + voice handler
+    // shipped. Cassettes must still be recorded (Phase 2) before the
+    // Layer 1 launch gate can pass in CI replay mode.
     const file = path.join(
       CORPUS_ROOT,
       'scripts',
@@ -90,10 +88,7 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     const script = loadScript(file);
     expect(script.grading.appliesFloor).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(script.grading.appliesDisposition).toEqual([9, 10, 11, 12]);
-    // Layer 2 corpus selection drops this script until P17-001 lands.
-    expect(script.layer2Eligible).toBe(false);
-    // The script's expected intent is `create_customer`, which the
-    // classifier currently maps to `unknown` (P17-001).
+    expect(script.layer2Eligible).toBe(true);
     expect(script.turns[0].expected.intent).toBe('create_customer');
   });
 });

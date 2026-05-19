@@ -239,6 +239,28 @@ Confirm inbound test call hits the rollback handler (not Media Streams agent) be
 
 ---
 
+## Phase 2 — Voice quality cassettes (blocked without API keys)
+
+Full cassette recording requires a live `ANTHROPIC_API_KEY`. Cloud agents and CI do not have this secret; Phase 2 must be completed on a trusted engineer machine.
+
+**Prerequisite:** `ANTHROPIC_API_KEY` set locally (`echo $ANTHROPIC_API_KEY | head -c 8` prints a prefix). See [voice-quality-cassette-refresh.md](./voice-quality-cassette-refresh.md).
+
+**Commands** (from `packages/api`):
+
+```bash
+npm run voice-quality:refresh
+npm run voice-quality:check-cassettes
+npx vitest run -c vitest.voice-quality.config.ts
+```
+
+1. `voice-quality:refresh` — re-records all cassettes against the current model (8–15 minutes).
+2. `voice-quality:check-cassettes` — exits 0 only when every file under `src/ai/voice-quality/corpus/cassettes/` has a non-empty `entries` array.
+3. Full Layer 1 suite — confirms replay passes and `voice-quality-report.json` has `launchGate.pass === true`.
+
+Cannot complete cassette refresh in a cloud agent environment without the Anthropic secret.
+
+---
+
 ## Related documents
 
 | Document | Purpose |
