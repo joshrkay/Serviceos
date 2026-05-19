@@ -16,7 +16,7 @@ envsubst '${PORT} ${API_URL}' \
     nginx -t
 
     # Render frontend runtime config
-    envsubst '${VITE_CLERK_PUBLISHABLE_KEY} ${VITE_STRIPE_PUBLISHABLE_KEY}' \
+    envsubst '${VITE_CLERK_PUBLISHABLE_KEY} ${VITE_STRIPE_PUBLISHABLE_KEY} ${VITE_ONBOARDING_V2_ENABLED}' \
       < /etc/nginx/templates/env.js.template \
         > /usr/share/nginx/html/env.js
 

@@ -2,8 +2,7 @@ import { useAuth } from '@clerk/clerk-react';
 import { Navigate, Outlet, useLocation } from 'react-router';
 import { Zap } from 'lucide-react';
 import { useOnboardingStatus } from '../../hooks/useOnboardingStatus';
-
-const ONBOARDING_V2 = import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true';
+import { isOnboardingV2Enabled } from '../../lib/runtimeConfig';
 
 export function ProtectedRoute() {
   const { isLoaded, isSignedIn } = useAuth();
@@ -39,10 +38,11 @@ export function ProtectedRoute() {
  */
 function OnboardingGuard() {
   const location = useLocation();
-  const { data, isLoading } = useOnboardingStatus(ONBOARDING_V2 ? 30_000 : 0);
+  const onboardingV2 = isOnboardingV2Enabled();
+  const { data, isLoading } = useOnboardingStatus(onboardingV2 ? 30_000 : 0);
 
   // Flag off → never gate (preserves legacy behavior).
-  if (!ONBOARDING_V2) return <Outlet />;
+  if (!onboardingV2) return <Outlet />;
 
   // While loading, render outlet — letting the user see the app one render
   // late is preferable to blocking the whole shell on a status fetch.

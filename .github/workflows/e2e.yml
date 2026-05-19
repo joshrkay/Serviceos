@@ -34,6 +34,13 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
+      - name: Onboarding API integration (migration 098)
+        if: secrets.E2E_CLERK_SECRET_KEY != ''
+        run: npx vitest run test/integration/onboarding-
+        working-directory: packages/api
+        env:
+          TEST_DB: testcontainers
+
       - name: Run E2E tests
         run: npm run e2e
         env:
@@ -48,6 +55,8 @@ jobs:
           # The Vite dev server needs the same pk_test_ value at boot
           # (main.tsx throws without it). Reuse the same secret.
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+          # §10 onboarding v2 — exercise OnboardingShell + guard when Clerk E2E runs.
+          VITE_ONBOARDING_V2_ENABLED: ${{ secrets.E2E_CLERK_SECRET_KEY != '' && 'true' || 'false' }}
           # --- END: Clerk testing-tokens block ---
 
           # --- BEGIN: Ephemeral test DB block ---

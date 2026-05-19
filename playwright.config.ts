@@ -14,6 +14,24 @@ const isCI = !!process.env.CI;
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:5173';
 const apiURL = process.env.E2E_API_URL ?? 'http://localhost:3000';
 const skipWebServer = !!process.env.E2E_BASE_URL;
+
+// §10 — when Clerk journey tests run, default v2 on for the Vite dev server unless
+// the caller already set the flag explicitly.
+if (
+  process.env.E2E_CLERK_SECRET_KEY &&
+  process.env.VITE_ONBOARDING_V2_ENABLED === undefined
+) {
+  process.env.VITE_ONBOARDING_V2_ENABLED = 'true';
+}
+
+const webServerEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  DATABASE_URL: process.env.DATABASE_URL,
+  E2E_USE_TEST_DB: process.env.E2E_USE_TEST_DB,
+  VITE_ONBOARDING_V2_ENABLED: process.env.VITE_ONBOARDING_V2_ENABLED,
+  VITE_CLERK_PUBLISHABLE_KEY:
+    process.env.VITE_CLERK_PUBLISHABLE_KEY ?? process.env.E2E_CLERK_PUBLISHABLE_KEY,
+};
 const includeQaMatrix = process.env.QA_MATRIX === '1';
 // Lever 3 of the QA strategy — see qa/reports/2026-05-11/coverage-sweep-runbook.md.
 // Opt-in to avoid running it on every PR; it visits every authenticated route
@@ -104,6 +122,7 @@ export default defineConfig({
           timeout: 120_000,
           stdout: 'pipe',
           stderr: 'pipe',
+          env: webServerEnv,
         },
         {
           command: 'cd packages/web && npm run dev',
@@ -112,6 +131,7 @@ export default defineConfig({
           timeout: 120_000,
           stdout: 'pipe',
           stderr: 'pipe',
+          env: webServerEnv,
         },
       ],
 });

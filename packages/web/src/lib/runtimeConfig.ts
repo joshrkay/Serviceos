@@ -39,3 +39,8 @@ export function getRuntimeConfigValue(name: string): string | undefined {
     readProcessValue(name)
   );
 }
+
+/** §10 onboarding v2 — sidebar shell, derived status, app-shell guard. */
+export function isOnboardingV2Enabled(): boolean {
+  return getRuntimeConfigValue('VITE_ONBOARDING_V2_ENABLED') === 'true';
+}
