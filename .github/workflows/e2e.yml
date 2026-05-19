@@ -36,7 +36,7 @@ jobs:
 
       - name: Onboarding API integration (migration 098)
         if: secrets.E2E_CLERK_SECRET_KEY != ''
-        run: npx vitest run test/integration/onboarding-
+        run: npm run test:integration -- onboarding
         working-directory: packages/api
         env:
           TEST_DB: testcontainers
