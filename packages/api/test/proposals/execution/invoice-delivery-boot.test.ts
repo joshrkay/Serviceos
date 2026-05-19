@@ -11,6 +11,15 @@ describe('invoice delivery provider', () => {
     ).toThrow(/SendService|delivery/i);
   });
 
+  it('throws in staging when SendService is not configured', () => {
+    expect(() =>
+      resolveInvoiceDeliveryProvider({
+        nodeEnv: 'staging',
+        sendService: undefined,
+      }),
+    ).toThrow(/SendService|delivery/i);
+  });
+
   it('returns noop in test env when SendService is not configured', () => {
     const provider = resolveInvoiceDeliveryProvider({
       nodeEnv: 'test',

@@ -1220,11 +1220,9 @@ export function createApp(): express.Express {
     }
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
-  // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above. Invoice delivery
-  // routes through the unified SendService when delivery credentials
-  // are configured; otherwise falls back to the Noop so the proposal
-  // executor stays exercised in dev/test without sending bytes.
+  // against real domain repositories. Invoice delivery uses SendService
+  // when configured; resolveInvoiceDeliveryProvider throws at boot in
+  // production/staging without credentials; dev/test uses Noop.
   const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
     nodeEnv: process.env.NODE_ENV ?? 'development',
     sendService,
