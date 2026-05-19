@@ -1,6 +1,6 @@
 # Phase 6 — Dispatch Board + Scheduling: Launch Readiness Gaps
 
-> **3 stories** | Continues from P6-024
+> **4 stories** | Continues from P6-024
 
 ---
 
@@ -104,3 +104,36 @@ npm test -- --grep "P6-027"
 - [ ] Rejection — board unchanged, toast shown
 - [ ] Scroll position — preserved during refresh
 - [ ] Concurrent — two dispatchers see consistent state
+
+---
+
+### P6-028 — Tech "I'm out today" SMS
+
+> **Size:** M | **Layer:** SMS / Scheduling | **AI Build:** Medium | **Human Review:** Heavy | **Wave:** 2 (Wave-C1)
+
+> **PRD codename:** N-010 (PRD v2 §9)
+> **Day-in-the-life moments:** Mike bad-day 5:00pm (Carlos no-shows because there's no way to mark out).
+
+**Dependencies:** P1-008 (technician assignment), P2-034 (SMS dispatcher), P1-022 (users.mobile_number), P2-035 (APPROVE ALL), P4-015 (brand voice), P7-001 (Twilio)
+
+**Allowed files:** `packages/api/src/sms/tech-status/**`, `packages/api/src/scheduling/reschedule/**`, `packages/api/src/availability/pg-unavailable-block.ts`, `packages/api/src/db/schema.ts`, `packages/shared/src/contracts/tech-status-event.ts`
+
+**Build prompt:** Allow a technician to mark themselves out for the current day by replying `OUT`, `SICK`, or `UNAVAILABLE` to the shop's SMS number from their registered mobile. On receipt: (a) update the tech's status for today; (b) for each of the tech's remaining appointments today, generate a `reschedule_appointment` proposal routed to the owner; (c) draft a customer-facing reschedule SMS in brand voice (P4-015) attached to each proposal — the owner approves and the customer is notified atomically. The owner can approve all in one tap if multiple proposals are pending ("APPROVE ALL"). Use P2-034's keyword dispatcher to register `OUT|SICK|UNAVAILABLE`. Use P1-022's `findByMobileNumber()` for identity binding. Use P2-035's batch endpoint for owner UX. Persist tech status to a new PG-backed `unavailable_blocks` table (migration 103) and a daily idempotency key in `tech_status_today` (migration 104).
+
+**Review prompt:** Verify tech identity is bound to the inbound number (no spoofing via owner's own number). Verify same-day scope only. Verify reschedule proposals are batched if 3+ for one-tap approval. Verify customer SMS uses brand voice. Verify the appointment status transitions atomically with proposal approval. Confirm "midnight clear" emerges from the `local_date` PK (no cron needed).
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P6-028"
+```
+
+**Required tests:**
+- [ ] Tech replies OUT → status updates and reschedule proposals fire
+- [ ] Owner APPROVE ALL applies to all pending tech-status reschedules
+- [ ] Customer SMS uses brand voice
+- [ ] Wrong-number inbound is rejected (not a registered tech)
+- [ ] Idempotent — second OUT reply same day is a no-op
+- [ ] Status auto-clears at midnight tenant-local
+
+**Non-goals:** Multi-day out status (V2); partial-day (e.g., "out after 2pm"); auto-rescheduling without owner approval.

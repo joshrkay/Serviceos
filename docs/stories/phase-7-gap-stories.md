@@ -234,42 +234,32 @@ npm run load-test -- --env staging
 
 ### P7-026 — Google Business review monitoring + draft response
 
-> **Size:** L | **Layer:** Reputation | **AI Build:** Medium | **Human Review:** Heavy
+> **Size:** M | **Layer:** Reputation | **AI Build:** Medium | **Human Review:** Heavy | **Wave:** 2 (Wave-C1)
 
-**Dependencies:** P4-015 (brand voice)
+> **PRD codename:** N-006 (PRD v2 §9)
+> **Day-in-the-life moments:** Mike bad-day 5:00pm (1-star review from Mrs. Donovan after Carlos no-show; system drafts public response + private apology + service credit within the hour).
 
-**Allowed files:** `packages/api/src/reputation/**, packages/api/src/workers/google-reviews.ts, packages/api/src/proposals/proposal.ts, packages/api/src/proposals/execution/review-response-handler.ts, packages/shared/src/contracts/review-response-proposal.ts, packages/api/src/db/schema.ts`
+**Dependencies:** P0-014 (webhook base), P2-034 (SMS dispatcher), P2-002 (proposal contracts), P4-015 (brand voice)
 
-**Build prompt:** Poll Google Business Profile reviews per tenant and, when a new review arrives, draft an owner-approved response proposal with three independently-approvable components: a public reply, a private follow-up, and an optional service credit. Implementation splits into three sequential PRs:
+**Allowed files:** `packages/api/src/reputation/**`, `packages/api/src/workers/google-reviews.ts`, `packages/api/src/proposals/execution/review-response-handler.ts`, `packages/api/src/proposals/proposal.ts` (additive `ProposalType` only), `packages/api/src/db/schema.ts`, `packages/shared/src/contracts/review-response-proposal.ts`
 
-(a) **Poll + model.** Build `packages/api/src/reputation/` with a `Review` model, repository, and a Google Business Profile OAuth client. Add `packages/api/src/workers/google-reviews.ts` running every 15 minutes per tenant. Persist a `review_poll_state` row per tenant carrying the last-seen cursor and a `backoff_until` timestamp. On 429, write `backoff_until = NOW() + min(2^n * 30s, 60min)` and increment `consecutive_429_count`; reset on first success. Reserve migrations `105_google_reviews` and `106_review_poll_state`.
+**Build prompt:** Poll Google Business Profile API for new reviews on a 15-minute interval per connected tenant. For each new review, classify into `praise` / `specific_complaint` / `vague_complaint` / `wrong_business`. For non-praise reviews, attempt to match the reviewer to an existing customer (name, recent visit date). Draft a public response in the locked brand voice (P4-015) that addresses the specific complaint where possible. If the customer is matched, also draft a private apology SMS or email and propose an optional service credit amount ($25 / $50 / $100 tiers). Create a `review_response_proposal` containing the public draft, private draft, and credit suggestion; route to owner. Owner can approve, edit, or reject each component independently. Service credit issuance is tracked in a `service_credits` table (migration 107) so the 12-month $100 cap is enforced before each draft. **Split into 3 PRs:** (a) poll + model (migrations 105+106, google-business-client, classifier-stub, worker with 429 backoff); (b) classifier + match (real classifier, conservative match, content-level PII redactor); (c) proposal + credit + execution (migration 107, credit-tier with cap, build-proposal, drafts, handler, ProposalType enum addition).
 
-(b) **Classifier + match + redact.** Classify each new review into `praise | specific_complaint | vague_complaint` via deterministic regex first, LLM fallback for ambiguous cases (confidence < 0.8 falls into `vague_complaint`). Match the reviewer to a customer using the existing `customers/dedup.ts` name-score helper joined to appointments within the last 60 days; require name score ≥ 0.8 AND a recent visit, else return `null`. Build `packages/api/src/reputation/pii-redact.ts` (content-level: last names, addresses, phones, emails) — this is separate from the infra key-redactor in `packages/api/src/logging/redact.ts`.
-
-(c) **Proposal + credit + execution.** Define the `review_response_proposal` Zod payload in `packages/shared/src/contracts/review-response-proposal.ts` with three component flags. Compute a service-credit tier as a pure function: praise → $0, 1-star specific → $100, 1-star vague → $50, 2-star → $25. Enforce a $100 / 12-month cap per customer at draft time via `SELECT COALESCE(SUM(amount_cents), 0) FROM service_credits WHERE customer_id = $1 AND issued_at > NOW() - INTERVAL '12 months'` — downgrade or omit the credit component if the cap would be exceeded. Reserve migration `107_service_credits`. Add `'review_response_proposal'` to `ProposalType` (bucket: `'comms'`). Build an idempotent execution handler that runs only the sub-actions whose `approved` flag is set (public-only, private-only, credit-only, or any combination must all work).
-
-The PII redactor must run on the final public-response draft (not just the input) so any leaked PII from the source review gets stripped before the proposal reaches the owner. Review responses are always owner-approved — never auto-approve. See `docs/superpowers/contracts/p7-dispatch-addendum.md` for per-PR allowed/forbidden file lists, dispatch wave metadata, and additional risk notes.
-
-**Review prompt:** Verify the worker honors `backoff_until` and does not hammer Google during quota errors. Verify the classifier's LLM fallback rejects low-confidence outputs into `vague_complaint` rather than guessing. Verify the customer matcher returns `null` on ambiguous matches — false positives are brand-damaging. Verify the PII redactor scrubs the final draft, not just the input. Verify the $100/12-month cap is enforced at draft time. Verify the execution handler dispatches only approved sub-actions and is idempotent (re-executing an already-shipped sub-action is a no-op). Confirm review responses are never routed through `proposals/auto-approve.ts`.
+**Review prompt:** Verify polling backs off on Google API limits. Verify customer matching is conservative (flag uncertain matches rather than guess). Verify public response cannot leak private customer data (e.g., addresses, phone numbers) even if the AI is tempted to include them. Verify brand voice is enforced (P4-015). Verify service credit amount is bounded ($100 max in V1 to limit blast radius). Verify the content-level PII redactor is separate from `packages/api/src/logging/redact.ts` (key-pattern infra-redactor).
 
 **Automated checks:**
 ```bash
-cd /home/user/Serviceos && \
-  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
-  npm test --workspace=packages/api -- --run -t "P7-026"
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P7-026"
 ```
 
 **Required tests:**
-- [ ] Worker skips tenants where `NOW() < backoff_until`
-- [ ] 429 response writes exponential backoff and increments counter; reset on success
-- [ ] Classifier — regex paths for praise + specific complaint patterns
-- [ ] Classifier — LLM fallback with confidence ≥ 0.8 → category; else `vague_complaint`
-- [ ] Matcher — name score < 0.8 returns `null`
-- [ ] Matcher — visit > 60 days returns `null`
-- [ ] PII redactor — strips last names, addresses, phones, emails from the final draft
-- [ ] Credit tier — pure function returns $0/$25/$50/$100 by classification + rating
-- [ ] Credit cap — sum + tier > $100 within 12 months downgrades or omits the credit
-- [ ] Execution handler — runs only approved sub-actions
-- [ ] Execution handler — re-running an already-executed sub-action is a no-op
-- [ ] Proposal type — `review_response_proposal` added to `ProposalType`, bucketed as `'comms'`
-- [ ] Review responses never reach `proposals/auto-approve.ts`
+- [ ] New review detected within 30 minutes of posting (mocked API)
+- [ ] Classifier accuracy >85% on labeled fixture set
+- [ ] Customer matching — high-confidence match attaches private draft; low-confidence flags as unverified
+- [ ] Public response does not include PII (no address, phone, last name)
+- [ ] Brand voice applied (golden examples)
+- [ ] Credit suggestion capped at $100
+- [ ] Owner can approve public, private, credit independently
+
+**Non-goals:** Yelp, Facebook, Nextdoor monitoring (Wave 3); proactive review-request sending (Wave 3); automatic credit application (always owner-approved).

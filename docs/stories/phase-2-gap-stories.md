@@ -1,6 +1,6 @@
 # Phase 2 — Proposal Engine + AI Safety: Launch Readiness Gaps
 
-> **2 stories** | Continues from P2-031
+> **4 stories** | Continues from P2-031
 
 ---
 
@@ -76,3 +76,59 @@ npm test -- --grep "P2-033"
 - [ ] Toast — new proposal notification links to detail
 - [ ] Tab inactive — polling paused when tab hidden
 - [ ] Action — badge count decrements after approval
+
+---
+
+### P2-034 — Inbound SMS content dispatcher
+
+> **Size:** S | **Layer:** SMS | **AI Build:** High | **Human Review:** Heavy | **Wave:** Wave-C blocker B3
+
+**Dependencies:** P0-014, P7-001
+
+**Allowed files:** `packages/api/src/sms/inbound-dispatch.ts`, `packages/api/src/webhooks/routes.ts`
+
+**Build prompt:** The Twilio inbound-SMS webhook at `packages/api/src/webhooks/routes.ts` (the `recordTwilio('sms')` arm of `POST /twilio/sms/:tenantId`) today verifies the Twilio signature, records the receipt for idempotency, and returns 200. The message body is never parsed and there is no dispatch surface for downstream features (P6-028 tech-status keywords first, future stories second). Create `packages/api/src/sms/inbound-dispatch.ts` exporting: (1) a `KeywordHandler` interface `{keywords: readonly string[]; handle(ctx: InboundSmsContext): Promise<HandlerResult>}`; (2) a `registerKeywordHandler(handler)` function; (3) `dispatchInboundSms({tenantId, fromE164, body, messageSid}): Promise<{handled: boolean, handler?: string, reason?: string}>` that case-insensitively matches the first whitespace-trimmed token of `body` against registered keywords. Modify `webhooks/routes.ts` to call `dispatchInboundSms` after `markProcessed` succeeds. The dispatcher must not throw — failed handlers log/audit and return `{handled: false, reason: 'handler_error'}` so Twilio never sees a 500. Unmatched messages return `{handled: false, reason: 'no_matching_handler'}` and are audited but not 5xx'd.
+
+**Review prompt:** Verify the dispatcher is invoked only AFTER `markProcessed` so duplicates short-circuit before dispatch. Verify signature verification is unaffected — the existing flow remains the first gate. Verify two handlers cannot register the same keyword (registration throws). Verify the dispatcher is concurrency-safe (a registry that's mutated only at module-init time is sufficient — but assert it). Confirm no handler can crash the webhook 500.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P2-034"
+```
+
+**Required tests:**
+- [ ] Keyword router: `OUT` (case-insensitive, trimmed) routes to a registered handler
+- [ ] Unmatched keyword returns `{handled: false}` without throwing
+- [ ] Handler that throws is caught and audited; webhook still returns 200
+- [ ] Duplicate keyword registration throws at module-init time
+- [ ] Existing signature + idempotency path stays green
+- [ ] Cross-tenant isolation — handler invocation includes `tenantId` and `fromE164` only
+
+---
+
+### P2-035 — Batch proposal approval (APPROVE ALL)
+
+> **Size:** S | **Layer:** Proposals/API | **AI Build:** High | **Human Review:** Heavy | **Wave:** Wave-C blocker B2
+
+**Dependencies:** P2-002
+
+**Allowed files:** `packages/api/src/proposals/actions.ts`, `packages/api/src/routes/proposals.ts`
+
+**Build prompt:** Today proposals are approved one at a time via POST `/api/proposals/:id/approve` (see `packages/api/src/routes/proposals.ts`). P6-028's "tech goes out, four customers need rescheduling" scenario requires the owner to APPROVE ALL in one tap. Add `approveProposalsBatch(proposalRepo, tenantId, proposalIds: string[], actorId, actorRole, auditRepo): Promise<{approved: string[], failed: {id: string, reason: string}[]}>` in `packages/api/src/proposals/actions.ts`. It iterates the IDs (no transaction across proposals — partial success is the desired outcome) and delegates each to the existing `approveProposal()`. Add POST `/api/proposals/approve-batch` in `routes/proposals.ts` accepting `{proposalIds: string[]}` (Zod-validated, max 50 IDs to bound blast radius), enforcing the same RBAC as the singular endpoint, and emitting one audit event per approved proposal (do NOT collapse to a single batch audit — the singular events are what downstream consumers index). The 3+ threshold for showing the APPROVE ALL affordance is client-side, not a server constraint.
+
+**Review prompt:** Verify partial-success semantics: one stale/rejected ID does not block the rest. Verify RBAC is enforced per proposal (not just at the route boundary). Verify the audit trail still has one event per approval. Verify the 50-ID cap is enforced and surfaces a clear validation error. Confirm `approveProposal` is reused — no duplicated approval logic.
+
+**Automated checks:**
+```bash
+cd packages/api && npx tsc --project tsconfig.build.json --noEmit
+cd packages/api && npm test -- --grep "P2-035"
+```
+
+**Required tests:**
+- [ ] Happy path — 5 proposals, all approved, 5 audit events
+- [ ] Partial failure — one ID has wrong status; others succeed; failed reports `{id, reason}`
+- [ ] Empty array → 400
+- [ ] Over 50 IDs → 400
+- [ ] Non-owner role → 403 (per-proposal RBAC enforced)
+- [ ] Cross-tenant ID in the batch → that ID returns `failed` with reason `not_found` (does NOT 500)

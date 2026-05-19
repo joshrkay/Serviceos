@@ -63,13 +63,11 @@ PR c (proposal + credit + execution):
 - corresponding `.test.ts` files
 
 **Verification gate (single command, per PR):**
-
 ```bash
 cd /home/user/Serviceos && \
   npx tsc --project packages/api/tsconfig.build.json --noEmit && \
   npm test --workspace=packages/api -- --run -t "P7-026"
 ```
-
 
 **Pre-flight (for the first PR):**
 - P4-015 (brand voice) has merged on main (PR c needs it; PR a/b don't, but coordinating sub-PR pre-flights is harder than just gating the whole story)
