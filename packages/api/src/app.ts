@@ -238,7 +238,6 @@ import {
   InMemoryDispatchRepository,
   PgDispatchRepository,
 } from './notifications/dispatch-repository';
-import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -328,7 +327,7 @@ import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
-import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -1226,9 +1225,10 @@ export function createApp(): express.Express {
   // routes through the unified SendService when delivery credentials
   // are configured; otherwise falls back to the Noop so the proposal
   // executor stays exercised in dev/test without sending bytes.
-  const invoiceDeliveryProvider = sendService
-    ? new SendServiceInvoiceDeliveryProvider(sendService)
-    : new NoopInvoiceDeliveryProvider();
+  const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
+    nodeEnv: process.env.NODE_ENV ?? 'development',
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
