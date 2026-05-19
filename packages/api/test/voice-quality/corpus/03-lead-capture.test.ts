@@ -12,8 +12,9 @@
  *      `npm run voice-quality:record`).
  *
  * P18-001 closed the `create-customer-new-signup` classifier leak;
- * the script is Layer-2 eligible and must grade `create_customer` on
- * the signup phrasing plus a name-bearing proposal payload.
+ * the script is Layer-2 eligible and must classify `create_customer` on
+ * the signup phrasing. The caller turn includes a name; hard-slot
+ * grading only pins caller-id `phone` (name is a soft slot for VQ-022).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';

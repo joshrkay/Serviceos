@@ -164,6 +164,18 @@ describe('createExecutionHandlerRegistry — create_customer wiring', () => {
     expect(result.success).toBe(true);
     const persisted = await customerRepo.findById(TENANT, result.resultEntityId!);
     expect(persisted?.firstName).toBe('Registry');
+    expect(persisted?.lastName).toBe('Jane');
+  });
+
+  it('falls back to the synthetic-id stub when customerRepo is omitted', async () => {
+    const customerRepo = new InMemoryCustomerRepository();
+    const registry = createExecutionHandlerRegistry();
+    const handler = registry.get('create_customer')!;
+    const proposal = makeProposal({ name: 'Stub Only' });
+    const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: EXECUTOR });
+    expect(result.success).toBe(true);
+    expect(result.resultEntityId).toBeDefined();
+    expect(await customerRepo.findById(TENANT, result.resultEntityId!)).toBeNull();
   });
 });
 
