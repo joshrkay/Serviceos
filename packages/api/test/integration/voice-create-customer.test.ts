@@ -95,6 +95,7 @@ describe('Integration — voice create_customer via ProposalExecutor', () => {
     const res = await request(app).get(`/api/customers/${result.resultEntityId}`);
 
     expect(res.status).toBe(200);
+    expect(res.body.id).toBe(result.resultEntityId);
     expect(res.body.displayName).toBe('Jane Doe');
     expect(res.body.firstName).toBe('Jane');
     expect(res.body.lastName).toBe('Doe');
