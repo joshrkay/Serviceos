@@ -39,7 +39,7 @@ export function ProtectedRoute() {
 function OnboardingGuard() {
   const location = useLocation();
   const onboardingV2 = isOnboardingV2Enabled();
-  const { data, isLoading } = useOnboardingStatus(onboardingV2 ? 30_000 : 0);
+  const { data, isLoading } = useOnboardingStatus(30_000, onboardingV2);
 
   // Flag off → never gate (preserves legacy behavior).
   if (!onboardingV2) return <Outlet />;

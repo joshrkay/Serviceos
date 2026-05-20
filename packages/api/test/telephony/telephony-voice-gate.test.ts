@@ -90,10 +90,7 @@ describe('POST /api/telephony/voice — §10 voiceGate', () => {
       tenantId: TENANT_ID,
       callSid: 'CA-gate-1',
     });
-    const ids = Array.from(
-      (store as unknown as { sessions: Map<string, unknown> }).sessions.keys(),
-    );
-    expect(ids).toHaveLength(1);
+    expect(store.size()).toBe(1);
   });
 
   it('returns voicemail TwiML when Gate A blocks (no_billing)', async () => {
@@ -108,9 +105,7 @@ describe('POST /api/telephony/voice — §10 voiceGate', () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Record');
     expect(res.text).not.toContain('<Gather');
-    expect(
-      (store as unknown as { sessions: Map<string, unknown> }).sessions.size,
-    ).toBe(0);
+    expect(store.size()).toBe(0);
   });
 
   it('returns voicemail TwiML when Gate B blocks (trial_cap_daily)', async () => {
