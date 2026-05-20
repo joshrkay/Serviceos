@@ -40,13 +40,16 @@ import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
 import {
+  CreateCustomerVoiceExecutionHandler,
+  splitName,
+} from './create-customer-handler';
+import {
   CustomerRepository,
   UpdateCustomerInput,
   updateCustomer,
 } from '../../customers/customer';
 import { LocationRepository } from '../../locations/location';
 import { LineItem } from '../../shared/billing-engine';
-import { splitName } from './create-customer-handler';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -422,7 +425,9 @@ export function createExecutionHandlerRegistry(deps?: {
       : undefined;
 
   const handlers: ExecutionHandler[] = [
-    new CreateCustomerExecutionHandler(),
+    deps?.customerRepo
+      ? new CreateCustomerVoiceExecutionHandler(deps.customerRepo, deps.auditRepo)
+      : new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
