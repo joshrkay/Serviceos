@@ -97,7 +97,7 @@ describe('VQ-019 — Bucket 10 adversarial', () => {
   );
 
   it.each(SCRIPT_IDS)(
-    'VQ-019 — cassette stub for %s is valid JSON with empty entries',
+    'VQ-019 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -109,7 +109,7 @@ describe('VQ-019 — Bucket 10 adversarial', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 });
