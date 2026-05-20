@@ -31,7 +31,7 @@ describe('ProposalExecutor — concurrent idempotency (§11 H1)', () => {
   });
 
   it('parallel execute collapses to one handler invocation', async () => {
-    const tenantId = await createTestTenant(pool);
+    const tenant = await createTestTenant(pool);
     let handlerInvocations = 0;
     const handler: ExecutionHandler = {
       proposalType: 'create_customer',
@@ -54,11 +54,11 @@ describe('ProposalExecutor — concurrent idempotency (§11 H1)', () => {
     });
 
     let proposal = await proposalRepo.create({
-      tenantId,
+      tenantId: tenant.tenantId,
       proposalType: 'create_customer',
       payload: { name: 'Concurrent Test' },
       summary: 'concurrent',
-      createdBy: 'test',
+      createdBy: tenant.userId,
       idempotencyKey: `concurrent-${randomUUID()}`,
     });
     proposal = transitionProposal(proposal, 'ready_for_review', 'test');
@@ -68,14 +68,17 @@ describe('ProposalExecutor — concurrent idempotency (§11 H1)', () => {
       approvedAt: new Date(Date.now() - 10_000),
     };
 
-    const ctx: ExecutionContext = { executedBy: 'test', tenantId };
+    const ctx: ExecutionContext = {
+      tenantId: tenant.tenantId,
+      executedBy: tenant.userId,
+    };
     await Promise.all([
       executor.execute(proposal, ctx),
       executor.execute(proposal, ctx),
     ]);
 
     expect(handlerInvocations).toBe(1);
-    const rows = await executionRepo.listByProposal(tenantId, proposal.id);
+    const rows = await executionRepo.listByProposal(tenant.tenantId, proposal.id);
     const succeeded = rows.filter((r) => r.status === 'succeeded');
     expect(succeeded.length).toBeGreaterThanOrEqual(1);
   });
