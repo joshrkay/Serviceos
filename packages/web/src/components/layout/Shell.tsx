@@ -53,6 +53,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers', icon: Users    },
         { to: '/estimates',      label: 'Estimates', icon: FileText },
         { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+        { to: '/inbox',          label: 'Inbox',     icon: Bell     },
+        { to: '/reports/money',  label: 'Money',     icon: TrendingUp },
         { to: '/settings',       label: 'Settings',  icon: Settings },
       ];
     case 'both':
@@ -65,6 +67,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText      },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
+        { to: '/inbox',          label: 'Inbox',        icon: Bell          },
+        { to: '/reports/money',  label: 'Money',        icon: TrendingUp    },
         { to: '/settings',       label: 'Settings',     icon: Settings      },
       ];
     case 'supervisor':
@@ -79,6 +83,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
+        { to: '/inbox',         label: 'Inbox',        icon: Bell          },
+        { to: '/reports/money', label: 'Money',        icon: TrendingUp    },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
         { to: '/settings',      label: 'Settings',     icon: Settings      },
       ];

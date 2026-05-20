@@ -497,12 +497,34 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
   );
 }
 
+type RecordPaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
+
+const UI_METHOD_TO_API: Record<'card' | 'ach' | 'cash' | 'check', RecordPaymentMethod> = {
+  card: 'credit_card',
+  ach: 'bank_transfer',
+  cash: 'cash',
+  check: 'check',
+};
+
 // ─── Mark Paid Sheet ──────────────────────────────────────────────────────
-function MarkPaidSheet({ inv, total, onClose, onPaid }: {
-  inv: InvCompat; total: number; onClose: () => void; onPaid: () => void;
+function MarkPaidSheet({
+  invoiceId,
+  amountDueCents,
+  inv,
+  total,
+  onClose,
+  onPaid,
+}: {
+  invoiceId: string;
+  amountDueCents: number;
+  inv: InvCompat;
+  total: number;
+  onClose: () => void;
+  onPaid: () => void | Promise<void>;
 }) {
-  const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('card');
+  const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('cash');
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const METHODS = [
     { key: 'card',  label: 'Credit / Debit card', icon: CreditCard },
@@ -511,9 +533,37 @@ function MarkPaidSheet({ inv, total, onClose, onPaid }: {
     { key: 'check', label: 'Check',                 icon: FileText },
   ] as const;
 
-  function handleSave() {
+  async function handleSave() {
+    const amountCents = amountDueCents > 0 ? amountDueCents : Math.round(total * 100);
+    if (amountCents <= 0) {
+      setError('Nothing due on this invoice.');
+      return;
+    }
     setSaving(true);
-    setTimeout(() => { setSaving(false); onPaid(); onClose(); }, 1200);
+    setError(null);
+    try {
+      const res = await apiFetch('/api/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          invoiceId,
+          amountCents,
+          method: UI_METHOD_TO_API[method],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          typeof body?.message === 'string' ? body.message : `Payment failed (HTTP ${res.status})`,
+        );
+      }
+      await onPaid();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to record payment');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -560,8 +610,11 @@ function MarkPaidSheet({ inv, total, onClose, onPaid }: {
             />
           </div>
 
+          {error && <p className="text-xs text-red-600">{error}</p>}
+
           <button
-            onClick={handleSave}
+            type="button"
+            onClick={() => void handleSave()}
             disabled={saving}
             className="flex items-center justify-center gap-2 w-full rounded-xl bg-green-600 text-white py-3.5 text-sm hover:bg-green-700 transition-colors"
           >
@@ -900,12 +953,14 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       )}
       {markOpen && (
         <MarkPaidSheet
+          invoiceId={inv.id}
+          amountDueCents={inv.amountDueCents ?? Math.round(total * 100)}
           inv={invCompat}
           total={total}
           onClose={() => setMarkOpen(false)}
           onPaid={async () => {
             setPaid(true);
-            await transitionInvoice({ status: 'paid' });
+            await refetch();
           }}
         />
       )}
