@@ -439,12 +439,27 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     // When callControl is not wired (summary-only path), fallbackTwiml is
     // undefined — adapters must guard on this and not send an empty string
     // to Twilio (which would return HTTP 400).
+    const channelPrefs = input.channelPreferences ?? {
+      sms: true,
+      in_app: true,
+      whisper: true,
+    };
+    const baseUrl = publicWebBaseUrl?.replace(/\/$/, '');
+    const whisperUrl =
+      escalationId &&
+      summary &&
+      channelPrefs.whisper &&
+      baseUrl
+        ? `${baseUrl}/api/telephony/whisper/${escalationId}`
+        : undefined;
+
     const fallbackTwiml: string | undefined = callControl
       ? callControl.dialDispatcher(
           callSid ?? sessionId,
           chosen.phone,
           {
             actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+            ...(whisperUrl ? { whisperUrl } : {}),
           },
         )
       : undefined;
@@ -487,7 +502,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         rotationIndex: chosen.index,
         summary,
         escalationId,
-        channelPreferences: input.channelPreferences ?? { sms: true, in_app: true, whisper: true },
+        channelPreferences: channelPrefs,
       },
     };
   }

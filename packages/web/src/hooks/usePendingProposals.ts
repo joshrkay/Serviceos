@@ -6,6 +6,7 @@ export interface PendingProposalSummary {
   summary: string;
   proposalType: string;
   createdAt: string;
+  expiresAt?: string;
 }
 
 interface ListProposalsResponse {
@@ -22,8 +23,18 @@ export interface UsePendingProposalsOptions {
    * baseline, so mount doesn't surface a toast for every existing item.
    */
   onNewProposal?: (proposal: PendingProposalSummary) => void;
+  /** Fired when an existing proposal crosses into critical urgency (expiring within 2h). */
+  onCriticalProposal?: (proposal: PendingProposalSummary) => void;
   /** Skip the hook entirely (e.g., unauthenticated routes). */
   enabled?: boolean;
+}
+
+const CRITICAL_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+function isCriticalProposal(p: PendingProposalSummary): boolean {
+  if (!p.expiresAt) return false;
+  const ms = new Date(p.expiresAt).getTime() - Date.now();
+  return ms > 0 && ms <= CRITICAL_WINDOW_MS;
 }
 
 export interface UsePendingProposalsResult {
@@ -55,7 +66,7 @@ const DEFAULT_POLL_MS = 30_000;
 export function usePendingProposals(
   options: UsePendingProposalsOptions = {},
 ): UsePendingProposalsResult {
-  const { pollIntervalMs = DEFAULT_POLL_MS, onNewProposal, enabled = true } = options;
+  const { pollIntervalMs = DEFAULT_POLL_MS, onNewProposal, onCriticalProposal, enabled = true } = options;
   const apiFetch = useApiClient();
   const [proposals, setProposals] = useState<PendingProposalSummary[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -75,6 +86,13 @@ export function usePendingProposals(
     onNewProposalRef.current = onNewProposal;
   }, [onNewProposal]);
 
+  const onCriticalProposalRef = useRef(onCriticalProposal);
+  useEffect(() => {
+    onCriticalProposalRef.current = onCriticalProposal;
+  }, [onCriticalProposal]);
+
+  const wasCriticalRef = useRef<Set<string>>(new Set());
+
   const apiFetchRef = useRef(apiFetch);
   useEffect(() => {
     apiFetchRef.current = apiFetch;
@@ -87,14 +105,39 @@ export function usePendingProposals(
     try {
       const res = await apiFetchRef.current('/api/proposals?status=ready_for_review&limit=100');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = (await res.json()) as ListProposalsResponse;
-      const list = body.data ?? [];
+      const body = (await res.json()) as ListProposalsResponse & {
+        data?: Array<PendingProposalSummary & { expiresAt?: string | Date }>;
+      };
+      const list: PendingProposalSummary[] = (body.data ?? []).map((p) => ({
+        id: p.id,
+        summary: p.summary,
+        proposalType: p.proposalType,
+        createdAt: typeof p.createdAt === 'string' ? p.createdAt : new Date(p.createdAt).toISOString(),
+        expiresAt: p.expiresAt
+          ? typeof p.expiresAt === 'string'
+            ? p.expiresAt
+            : new Date(p.expiresAt).toISOString()
+          : undefined,
+      }));
 
       const previous = knownIdsRef.current;
       if (previous !== null) {
         for (const p of list) {
           if (!previous.has(p.id)) {
             onNewProposalRef.current?.(p);
+          }
+          const critical = isCriticalProposal(p);
+          if (critical && !wasCriticalRef.current.has(p.id)) {
+            onCriticalProposalRef.current?.(p);
+          }
+          if (critical) {
+            wasCriticalRef.current.add(p.id);
+          }
+        }
+      } else {
+        for (const p of list) {
+          if (isCriticalProposal(p)) {
+            wasCriticalRef.current.add(p.id);
           }
         }
       }

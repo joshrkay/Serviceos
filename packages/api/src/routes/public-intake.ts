@@ -176,6 +176,18 @@ export function createPublicIntakeRouter(
         }
       }
 
+      let businessPhone = settings?.businessPhone?.trim() || null;
+      if (!businessPhone && pool) {
+        const twilioRow = await pool.query<{ phone: string | null }>(
+          `SELECT provider_data->>'phoneE164' AS phone
+           FROM tenant_integrations
+           WHERE tenant_id = $1 AND provider = 'twilio'
+           LIMIT 1`,
+          [tenantId],
+        );
+        businessPhone = twilioRow.rows[0]?.phone?.trim() || null;
+      }
+
       let businessHours: unknown = null;
       if (pool) {
         const tsRow = await pool.query<{ business_hours: unknown }>(
@@ -185,15 +197,31 @@ export function createPublicIntakeRouter(
         businessHours = tsRow.rows[0]?.business_hours ?? null;
       }
 
+      let averageRating: number | undefined;
+      let reviewCount: number | undefined;
+      if (pool) {
+        const rev = await pool.query<{ avg: string | null; c: string }>(
+          `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS c
+           FROM google_reviews WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const count = Number(rev.rows[0]?.c ?? 0);
+        if (count > 0) {
+          reviewCount = count;
+          averageRating = Math.round(Number(rev.rows[0]?.avg ?? 0) * 10) / 10;
+        }
+      }
+
       res.status(200).json({
         businessName: settings?.businessName ?? tenant.name,
-        businessPhone: settings?.businessPhone ?? null,
+        businessPhone,
         serviceTypes,
         businessHoursSummary: formatBusinessHoursSummary(
           businessHours,
           settings?.timezone,
         ),
         intakeTagline: null,
+        ...(averageRating !== undefined ? { averageRating, reviewCount } : {}),
       });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);

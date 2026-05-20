@@ -18,6 +18,8 @@ export interface BoardAppointment {
   arrivalWindowStart?: string;
   arrivalWindowEnd?: string;
   status: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
   lateness?: DispatchLatenessResult;
 }
 
@@ -101,6 +103,12 @@ function toBoardAppointment(
     arrivalWindowStart: appointment.arrivalWindowStart ? toISOString(appointment.arrivalWindowStart) : undefined,
     arrivalWindowEnd: appointment.arrivalWindowEnd ? toISOString(appointment.arrivalWindowEnd) : undefined,
     status: appointment.status,
+    ...(appointment.holdPendingApproval
+      ? { holdPendingApproval: true }
+      : {}),
+    ...(appointment.holdExpiryAt
+      ? { holdExpiryAt: toISOString(appointment.holdExpiryAt) }
+      : {}),
     lateness,
   };
 }

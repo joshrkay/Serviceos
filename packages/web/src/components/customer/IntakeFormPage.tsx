@@ -252,7 +252,11 @@ export function IntakeFormPage() {
         <div>
           <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
           <p className="text-xs text-slate-400 mt-0.5">
-            {tenantInfo?.intakeTagline ?? 'Request service online'}
+            {tenantInfo?.intakeTagline
+              ?? (tenantInfo?.reviewCount && tenantInfo.averageRating
+                ? `${tenantInfo.averageRating} · ${tenantInfo.reviewCount} reviews`
+                : tenantInfo?.businessHoursSummary ?? 'Request service online')}
+            {tenantInfo?.businessPhone ? ` · ${tenantInfo.businessPhone}` : ''}
           </p>
         </div>
       </div>
@@ -523,20 +527,40 @@ export function IntakeFormPage() {
                     }]
                   : []),
                 ...(tenantInfo?.businessPhone
-                  ? [{ icon: Phone, label: 'Call us directly', sub: tenantInfo.businessPhone }]
+                  ? [{
+                      icon: Phone,
+                      label: 'Call us directly',
+                      sub: tenantInfo.businessPhone,
+                      href: `tel:${tenantInfo.businessPhone.replace(/\s/g, '')}`,
+                    }]
                   : []),
                 { icon: Star, label: 'We look forward to helping you', sub: tenantInfo?.businessName ?? 'Your service team' },
-              ].map(({ icon: Icon, label, sub }) => (
-                <div key={label} className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5">
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
-                    <Icon size={15} className="text-slate-500" />
-                  </span>
-                  <div className="text-left">
-                    <p className="text-sm text-slate-800">{label}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">{sub}</p>
+              ].map(({ icon: Icon, label, sub, href }) => {
+                const content = (
+                  <>
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-slate-100">
+                      <Icon size={15} className="text-slate-500" />
+                    </span>
+                    <div className="text-left">
+                      <p className="text-sm text-slate-800">{label}</p>
+                      <p className={`text-xs mt-0.5 ${href ? 'text-blue-600' : 'text-slate-400'}`}>{sub}</p>
+                    </div>
+                  </>
+                );
+                return href ? (
+                  <a
+                    key={label}
+                    href={href}
+                    className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5 hover:border-blue-300"
+                  >
+                    {content}
+                  </a>
+                ) : (
+                  <div key={label} className="flex items-center gap-4 rounded-xl bg-white border border-slate-200 px-4 py-3.5">
+                    {content}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

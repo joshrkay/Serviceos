@@ -12,6 +12,8 @@ export interface AppointmentCardData {
   arrivalWindowStart?: string;
   arrivalWindowEnd?: string;
   status: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
   paymentIndicator?: string;
   /** Optimistic-concurrency token — server's appointment.updatedAt ISO string. */
   updatedAt?: string;
@@ -70,11 +72,24 @@ export function AppointmentCard({
     appointment.arrivalWindowEnd
   );
 
+  const isHold = appointment.holdPendingApproval === true;
+  let holdExpiryLabel: string | null = null;
+  if (isHold && appointment.holdExpiryAt) {
+    const ms = new Date(appointment.holdExpiryAt).getTime() - Date.now();
+    if (ms > 0) {
+      const hours = Math.floor(ms / (60 * 60 * 1000));
+      holdExpiryLabel =
+        hours < 2 ? 'Hold expires soon' : `Hold · ${hours}h left`;
+    } else {
+      holdExpiryLabel = 'Hold expired';
+    }
+  }
+
   return (
     <div
       className={`appointment-card ${isDragging ? 'appointment-card--dragging' : ''} ${
         hasConflict ? 'appointment-card--conflict' : ''
-      }`}
+      } ${isHold ? 'border-dashed border-amber-400 bg-amber-50/80' : ''}`}
       data-testid="appointment-card"
       data-appointment-id={appointment.id}
       data-has-conflict={hasConflict ? 'true' : 'false'}
@@ -85,6 +100,14 @@ export function AppointmentCard({
         <span className="appointment-card__time" data-testid="appointment-time">
           {formatTime(appointment.scheduledStart)} - {formatTime(appointment.scheduledEnd)}
         </span>
+        {isHold && (
+          <span
+            className="appointment-card__badge text-xs font-medium text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded"
+            data-testid="appointment-hold-badge"
+          >
+            {holdExpiryLabel ?? 'Tentative hold'}
+          </span>
+        )}
         {hasConflict && (
           <span
             className="appointment-card__badge appointment-card__badge--conflict"

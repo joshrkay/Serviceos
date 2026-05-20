@@ -23,6 +23,8 @@ interface ApiAppointment {
   status: string;
   notes?: string;
   timezone: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
 }
 
 interface EnrichedAppointment extends ApiAppointment {
@@ -478,9 +480,23 @@ export function SchedulePage() {
                 <div
                   key={appt.id}
                   className={`rounded-xl bg-white border px-4 py-4 transition-all ${
-                    appt.hasConflict ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200'
+                    appt.holdPendingApproval
+                      ? 'border-dashed border-amber-400 bg-amber-50/80'
+                      : appt.hasConflict
+                        ? 'border-amber-300 bg-amber-50/30'
+                        : 'border-slate-200'
                   }`}
                 >
+                  {appt.holdPendingApproval && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-800 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
+                      Tentative hold
+                      {appt.holdExpiryAt && (
+                        <span>
+                          · expires {new Date(appt.holdExpiryAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Conflict badge */}
                   {appt.hasConflict && (
                     <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
