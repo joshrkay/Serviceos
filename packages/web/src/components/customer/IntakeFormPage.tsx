@@ -54,8 +54,8 @@ interface ServicePresentation {
   placeholder: string;
 }
 
-// Presentation only — emoji + copy for known verticalType values from the API.
-// Unknown packs still render using displayName + default styling.
+// Presentation only — emoji + copy keyed by known verticalType values.
+// Unknown packs from the API still render using displayName + defaults.
 const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   hvac: {
     emoji: '❄️',
@@ -79,6 +79,12 @@ const DEFAULT_SERVICE_PRESENTATION: ServicePresentation = {
   desc: 'Describe what you need and we will match you with the right technician',
   placeholder: 'e.g. "Briefly describe what you need help with."',
 };
+
+const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
+
+function presentationForVertical(verticalType: string): ServicePresentation {
+  return SERVICE_PRESENTATION[verticalType] ?? DEFAULT_SERVICE_PRESENTATION;
+}
 
 const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
 
@@ -135,12 +141,15 @@ export function IntakeFormPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
 
-  // Service options = tenant packs from the API + local emoji/copy when available.
-  const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => ({
-    verticalType: st.verticalType,
-    label: st.displayName,
-    ...presentationForVertical(st.verticalType, st.displayName),
-  }));
+  // Service options = tenant packs from the API + optional local emoji/copy.
+  const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => {
+    const presentation = presentationForVertical(st.verticalType);
+    return {
+      verticalType: st.verticalType,
+      label: st.displayName,
+      ...presentation,
+    };
+  });
 
   // Attribution captured once on mount. Storing in a ref so re-renders
   // don't lose or duplicate it.

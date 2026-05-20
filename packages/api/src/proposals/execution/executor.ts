@@ -107,9 +107,30 @@ export class ProposalExecutor {
     // Idempotency gate (§11 H1). Keys default to `proposal-run:{tenant}:{id}`
     // when callers omit `idempotencyKey`, so every execution is lockable.
     const keyedProposal = withResolvedIdempotencyKey(proposal);
-    const outcome = await this.idempotency.checkAndExecute(keyedProposal, () =>
-      handler.execute(keyedProposal, context)
-    );
+    let executionId: string | undefined;
+    let executionRecordedInGuard = false;
+    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async () => {
+      const handlerResult = await handler.execute(keyedProposal, context);
+
+      // Critical race fix (§11 H1): write the idempotency marker while we still
+      // hold the advisory lock. If this insert happened later (after
+      // checkAndExecute returns), a second concurrent caller could acquire the
+      // lock, fail to find a prior execution, and run the handler a second time.
+      if (this.executionRepo && handlerResult.success) {
+        const row = await this.executionRepo.recordExecution({
+          tenantId: keyedProposal.tenantId,
+          proposalId: keyedProposal.id,
+          executedPayload: keyedProposal.payload,
+          executedBy: context.executedBy,
+          status: 'succeeded',
+          idempotencyKey: keyedProposal.idempotencyKey,
+        });
+        executionId = row.id;
+        executionRecordedInGuard = true;
+      }
+
+      return handlerResult;
+    });
     const result: ExecutionResult = outcome.result;
     const alreadyExecuted = outcome.alreadyExecuted;
 
@@ -182,8 +203,7 @@ export class ProposalExecutor {
     // blocks: failures are logged via console (no logger threaded yet)
     // but never rethrown — the proposal is already in 'executed' state
     // and the user-visible side effect succeeded.
-    let executionId: string | undefined;
-    if (this.executionRepo && !alreadyExecuted) {
+    if (this.executionRepo && !alreadyExecuted && !executionRecordedInGuard) {
       try {
         const row = await this.executionRepo.recordExecution({
           tenantId: updatedProposal.tenantId,
