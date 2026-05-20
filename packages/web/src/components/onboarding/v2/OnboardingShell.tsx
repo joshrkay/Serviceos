@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router';
+import { toast } from 'sonner';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { Sidebar } from './Sidebar';
 import { IdentityStep } from './steps/IdentityStep';
@@ -19,8 +20,25 @@ import type { OnboardingStepId } from '../../../types/onboarding';
  */
 export function OnboardingShell() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { data, isLoading, error, refetch } = useOnboardingStatus(3000);
   const [override, setOverride] = useState<OnboardingStepId | null>(null);
+  const billingToastShown = useRef(false);
+
+  useEffect(() => {
+    const billing = searchParams.get('billing');
+    if (!billing || billingToastShown.current) return;
+    billingToastShown.current = true;
+    if (billing === 'ok') {
+      toast.success('Trial started — your card is on file for after the 14-day trial.');
+      void refetch();
+    } else if (billing === 'cancel') {
+      toast.message('Checkout canceled — you can subscribe when you are ready.');
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('billing');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, refetch]);
 
   if (isLoading && !data) {
     return (
@@ -64,7 +82,11 @@ export function OnboardingShell() {
         {activeId === 'identity' && <IdentityStep onSaved={() => void refetch()} />}
         {activeId === 'pack' && <PackStep onSaved={() => void refetch()} />}
         {activeId === 'phone' && (
-          <PhoneStep status={data} onAdvance={() => setOverride('billing')} />
+          <PhoneStep
+            status={data}
+            onAdvance={() => setOverride('billing')}
+            onRetryComplete={() => void refetch()}
+          />
         )}
         {activeId === 'billing' && <BillingStep />}
         {activeId === 'test_call' && (

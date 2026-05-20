@@ -1,9 +1,11 @@
 import { useState } from 'react';
+import { useApiClient } from '../../../../lib/apiClient';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
 interface PhoneStepProps {
   status: OnboardingStatusResponse;
   onAdvance: () => void;
+  onRetryComplete?: () => void;
 }
 
 interface CarrierTip {
@@ -19,12 +21,15 @@ const CARRIERS: CarrierTip[] = [
   { name: 'Other', code: 'Ask your carrier', note: 'Most carriers support unconditional call forwarding.' },
 ];
 
-export function PhoneStep({ status, onAdvance }: PhoneStepProps) {
+export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps) {
+  const apiFetch = useApiClient();
   const phoneStep = status.steps.find((s) => s.id === 'phone');
   const meta = (phoneStep?.metadata ?? {}) as { phoneNumber?: string };
   const phoneNumber = meta.phoneNumber ?? null;
   const [forwardingOpen, setForwardingOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
 
   if (!phoneStep) return null;
 
@@ -40,9 +45,33 @@ export function PhoneStep({ status, onAdvance }: PhoneStepProps) {
             {(phoneStep.blockers ?? []).join(', ') || 'twilio_provisioning_failed'}
           </p>
         </div>
-        <p className="text-sm text-slate-500">
-          You can come back to this step once it's resolved — provisioning will auto-retry.
-        </p>
+        {retryError && (
+          <p className="text-sm text-red-600">{retryError}</p>
+        )}
+        <button
+          type="button"
+          disabled={retrying}
+          onClick={async () => {
+            setRetrying(true);
+            setRetryError(null);
+            try {
+              const res = await apiFetch('/api/onboarding/phone/retry', { method: 'POST' });
+              if (!res.ok) {
+                const body = (await res.json().catch(() => ({}))) as { message?: string };
+                setRetryError(body.message ?? `Retry failed (${res.status})`);
+                return;
+              }
+              onRetryComplete?.();
+            } catch (err) {
+              setRetryError(err instanceof Error ? err.message : 'Retry failed');
+            } finally {
+              setRetrying(false);
+            }
+          }}
+          className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+        >
+          {retrying ? 'Retrying…' : 'Retry provisioning'}
+        </button>
       </div>
     );
   }

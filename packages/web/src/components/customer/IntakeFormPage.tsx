@@ -45,7 +45,6 @@ function captureAttributionFromUrl(): CapturedAttribution {
 }
 
 type Step = 1 | 2 | 3 | 4 | 'done';
-type VerticalType = 'hvac' | 'plumbing';
 type Urgency = 'Emergency' | 'ASAP' | 'Flexible';
 
 interface ServicePresentation {
@@ -56,7 +55,7 @@ interface ServicePresentation {
 
 // Presentation only — emoji + copy keyed by the backend's verticalType.
 // The list of services a tenant actually offers comes from the API.
-const SERVICE_PRESENTATION: Record<VerticalType, ServicePresentation> = {
+const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   hvac: {
     emoji: '❄️',
     desc: 'AC, furnace, heat pumps, ventilation',
@@ -67,9 +66,24 @@ const SERVICE_PRESENTATION: Record<VerticalType, ServicePresentation> = {
     desc: 'Leaks, drains, water heaters, pipes',
     placeholder: `e.g. "Kitchen sink is draining very slowly and there's a bad smell."`,
   },
+  electrical: {
+    emoji: '⚡',
+    desc: 'Panels, wiring, outlets, and lighting',
+    placeholder: 'e.g. "A breaker keeps tripping when we run the dryer."',
+  },
 };
 
 const FALLBACK_PLACEHOLDER = 'e.g. "Briefly describe what you need help with."';
+
+function presentationFor(verticalType: string, displayName: string): ServicePresentation {
+  return (
+    SERVICE_PRESENTATION[verticalType] ?? {
+      emoji: '🔧',
+      desc: displayName,
+      placeholder: FALLBACK_PLACEHOLDER,
+    }
+  );
+}
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
   { value: 'Emergency', label: '🚨 Emergency',    desc: 'Need someone today',                   color: 'border-red-300    bg-red-50    text-red-700'    },
@@ -85,7 +99,7 @@ const STEPS_LABEL: Record<Exclude<Step, 'done'>, string> = {
 };
 
 interface FormData {
-  serviceType: VerticalType | null;
+  serviceType: string | null;
   description: string;
   urgency: Urgency | null;
   preferredDates: string;
@@ -114,16 +128,11 @@ export function IntakeFormPage() {
   // Service options shown in step 1 = the tenant's packs (from the API)
   // joined with local presentation (emoji/copy). Packs with no local
   // presentation entry are skipped rather than rendered blank.
-  const serviceOptions = (tenantInfo?.serviceTypes ?? [])
-    .filter(
-      (st): st is { verticalType: VerticalType; displayName: string } =>
-        st.verticalType === 'hvac' || st.verticalType === 'plumbing',
-    )
-    .map((st) => ({
-      verticalType: st.verticalType,
-      label: st.displayName,
-      ...SERVICE_PRESENTATION[st.verticalType],
-    }));
+  const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => ({
+    verticalType: st.verticalType,
+    label: st.displayName,
+    ...presentationFor(st.verticalType, st.displayName),
+  }));
 
   // Attribution captured once on mount. Storing in a ref so re-renders
   // don't lose or duplicate it.
@@ -228,7 +237,9 @@ export function IntakeFormPage() {
         </div>
         <div>
           <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
-          <p className="text-xs text-slate-400 mt-0.5">Request service online</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            {tenantInfo?.intakeTagline ?? 'Request service online'}
+          </p>
         </div>
       </div>
 
@@ -389,10 +400,10 @@ export function IntakeFormPage() {
             </div>
 
             {[
-              { icon: null,   label: 'Full name *',         key: 'name',    placeholder: 'Sandra Wu',         type: 'text' },
-              { icon: Phone,  label: 'Phone number *',      key: 'phone',   placeholder: '(512) 555-0191',    type: 'tel'  },
-              { icon: Mail,   label: 'Email',               key: 'email',   placeholder: 'you@email.com',     type: 'email'},
-              { icon: MapPin, label: 'Service address',     key: 'address', placeholder: '4821 Burnet Rd, Austin TX', type: 'text' },
+              { icon: null,   label: 'Full name *',         key: 'name',    placeholder: 'Your name',              type: 'text' },
+              { icon: Phone,  label: 'Phone number *',      key: 'phone',   placeholder: '(555) 000-0000',         type: 'tel'  },
+              { icon: Mail,   label: 'Email',               key: 'email',   placeholder: 'you@email.com',          type: 'email'},
+              { icon: MapPin, label: 'Service address',     key: 'address', placeholder: 'Street, city, state',    type: 'text' },
             ].map(({ label, key, placeholder, type }) => (
               <div key={key}>
                 <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
@@ -458,14 +469,18 @@ export function IntakeFormPage() {
                 </div>
               </div>
 
-              <div className="rounded-xl bg-blue-50 border border-blue-100 px-4 py-3.5">
-                <div className="flex items-start gap-2.5">
-                  <Clock size={13} className="text-blue-500 shrink-0 mt-0.5" />
-                  <p className="text-xs text-blue-700">
-                    We typically respond within <span className="text-blue-900">2 hours</span> during business hours (Mon–Sat, 7 AM – 6 PM).
-                  </p>
+              {tenantInfo?.businessHoursSummary && (
+                <div className="rounded-xl bg-blue-50 border border-blue-100 px-4 py-3.5">
+                  <div className="flex items-start gap-2.5">
+                    <Clock size={13} className="text-blue-500 shrink-0 mt-0.5" />
+                    <p className="text-xs text-blue-700">
+                      We respond during business hours:
+                      {' '}
+                      <span className="text-blue-900">{tenantInfo.businessHoursSummary}</span>
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         )}
@@ -486,7 +501,13 @@ export function IntakeFormPage() {
             </div>
             <div className="w-full flex flex-col gap-3">
               {[
-                { icon: Clock, label: 'Expect a call or text within 2 hours', sub: 'Mon–Sat · 7 AM – 6 PM' },
+                ...(tenantInfo?.businessHoursSummary
+                  ? [{
+                      icon: Clock,
+                      label: 'We will reach out during business hours',
+                      sub: tenantInfo.businessHoursSummary,
+                    }]
+                  : []),
                 ...(tenantInfo?.businessPhone
                   ? [{ icon: Phone, label: 'Call us directly', sub: tenantInfo.businessPhone }]
                   : []),

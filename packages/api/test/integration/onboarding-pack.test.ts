@@ -67,6 +67,13 @@ describe('POST /api/onboarding/pack', () => {
       [currentTenant.tenantId]
     );
     expect(dbRow.rows[0].terminology_preferences._activeVerticalPacks).toEqual(['hvac']);
+
+    const packRow = await pool.query(
+      `SELECT pack_id, status FROM pack_activations WHERE tenant_id=$1 AND pack_id=$2`,
+      [currentTenant.tenantId, 'hvac'],
+    );
+    expect(packRow.rows).toHaveLength(1);
+    expect(packRow.rows[0].status).toBe('active');
   });
 
   it('is idempotent: activating hvac twice results in single entry', async () => {

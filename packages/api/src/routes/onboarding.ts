@@ -10,6 +10,8 @@ import { loadOnboardingFacts } from '../onboarding/load-facts';
 import { deriveOnboardingStatus } from '../onboarding/derive-status';
 import { BusinessIdentityInputSchema, PackPickInputSchema } from '../onboarding/contracts';
 import { BillingService } from '../billing/subscription';
+import type { Queue } from '../queues/queue';
+import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 
 interface OnboardingConfigureBody {
   name: string;
@@ -37,10 +39,11 @@ export interface OnboardingRouterDeps {
   auditRepo: AuditRepository;
   pool?: Pool;
   billingService?: BillingService;
+  queue?: Queue;
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
-  const { settingsRepo, packActivationRepo, auditRepo, pool, billingService } = deps;
+  const { settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue } = deps;
   const router = Router();
 
   router.get(
@@ -284,6 +287,15 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           });
         }
 
+        try {
+          await activatePack({ tenantId, packId }, packActivationRepo);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : '';
+          if (!msg.includes('already activated')) {
+            throw err;
+          }
+        }
+
         // Emit audit event
         await auditRepo.create(
           createAuditEvent({
@@ -376,6 +388,66 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         });
       }
     }
+  );
+
+  router.post(
+    '/phone/retry',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Phone retry requires a database connection',
+          });
+          return;
+        }
+        if (!queue) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'Phone retry requires a job queue',
+          });
+          return;
+        }
+
+        const tenantId = req.auth!.tenantId;
+        const userId = req.auth!.userId;
+        const callbackBaseUrl =
+          process.env.PUBLIC_API_URL ??
+          process.env.APP_PUBLIC_URL ??
+          'http://localhost:3000';
+        const payload: ProvisionTwilioPayload = {
+          tenantId,
+          region: null,
+          baseUrl: callbackBaseUrl,
+        };
+        await queue.send(
+          PROVISION_TWILIO_JOB_TYPE,
+          payload,
+          `provision-twilio-${tenantId}`,
+        );
+
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: userId,
+            actorRole: 'owner',
+            eventType: 'tenant.phone_provisioning_retry',
+            entityType: 'tenant_integrations',
+            entityId: tenantId,
+            metadata: {},
+          }),
+        );
+
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'PHONE_RETRY_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to retry phone provisioning',
+        });
+      }
+    },
   );
 
   /**

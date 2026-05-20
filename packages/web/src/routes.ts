@@ -21,6 +21,7 @@ import { IntakeFormPage } from './components/customer/IntakeFormPage';
 import { FeedbackPage } from './components/customer/FeedbackPage';
 import { InteractionsPage } from './components/interactions/InteractionsPage';
 import { DispatchLogPage } from './components/interactions/DispatchLogPage';
+import { DispatchBoard } from './pages/dispatch/DispatchBoard';
 import { LeadList } from './pages/leads/LeadList';
 import { LeadDetail } from './pages/leads/LeadDetail';
 import { LeadCreate } from './pages/leads/LeadCreate';
@@ -150,6 +151,7 @@ export const router = createBrowserRouter([
       { path: 'jobs/new',       Component: JobCreate       },
       { path: 'jobs/:id',       Component: JobsPage        },
       { path: 'schedule',       Component: SchedulePage    },
+      { path: 'dispatch',       Component: DispatchBoard   },
       { path: 'customers',      Component: CustomersPage   },
       { path: 'customers/:id',  Component: CustomerDetailRoute },
       { path: 'customers/:id/edit', Component: CustomerEditRoute },
