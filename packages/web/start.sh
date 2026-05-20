@@ -1,5 +1,8 @@
 #!/bin/sh
-set -e
+set -eu
+
+# Keep log ordering deterministic in container log aggregators.
+exec 2>&1
 
 echo "=== DEBUG: PORT=${PORT} API_URL=${API_URL} ==="
 
