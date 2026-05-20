@@ -33,18 +33,20 @@ export default defineConfig({
     // `test/voice-quality/*.test.ts`, which run under the default
     // config.
     include: ['test/voice-quality/**/voice-quality.test.ts'],
+    // Single fork so all 40 script verdict shards land in one merge pass.
     pool: 'forks',
     poolOptions: {
       forks: {
-        maxForks: 4,
-        minForks: 4,
+        maxForks: 1,
+        minForks: 1,
       },
     },
     testTimeout: 30000,
     hookTimeout: 60000,
     globals: false,
     reporters: ['default', 'json'],
-    outputFile: { json: './voice-quality-report.json' },
+    // VQ-023 aggregator writes `voice-quality-report.json` in globalTeardown.
+    outputFile: { json: './voice-quality-vitest.json' },
     passWithNoTests: true,
   },
 });
