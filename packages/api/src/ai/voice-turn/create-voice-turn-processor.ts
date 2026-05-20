@@ -56,7 +56,13 @@ import {
   intentClassifiedEvent,
   costIncurredEvent,
   sessionTerminatedEvent,
+  escalationStartedEvent,
 } from '../voice-quality/events';
+import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
+import { buildEscalationSummary } from '../agents/customer-calling/escalation-summary-builder';
+import { buildCallerContextFromSession } from '../agents/customer-calling/escalation-context-from-session';
+import type { WhisperCache } from '../../telephony/whisper-cache';
+import type { PanelData } from '../agents/customer-calling/escalation-summary-builder';
 import { TAU_INT } from '../agents/customer-calling/transitions';
 import type {
   CallingAgentEvent,
@@ -98,6 +104,7 @@ import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
 import type { SpeechTurnHandler } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
+import { scheduleDroppedCallRecovery } from '../../telephony/dropped-call-recovery';
 
 const logger = createLogger({
   service: 'ai.voice-turn.processor',
@@ -109,6 +116,20 @@ const logger = createLogger({
  * locally so this module never imports back from `telephony/twilio-adapter`,
  * which would create a circular import once the adapter delegates here.
  */
+function mapNotifyReasonToSkillReason(
+  reason: string,
+): Parameters<typeof escalateToHuman>[0]['reason'] {
+  if (reason === 'operator_request') return 'caller_requested';
+  if (reason === 'emergency_dispatch') return 'emergency_dispatch';
+  if (reason === 'cost_cap_exceeded') return 'cost_cap_exceeded';
+  if (reason.startsWith('abuse')) return 'abuse_detected';
+  if (reason === 'keyword_frustration' || reason === 'llm_sentiment') {
+    return 'caller_requested';
+  }
+  if (reason === 'max_retries_exceeded') return 'max_retries_exceeded';
+  return 'low_confidence';
+}
+
 function xmlEscape(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -221,6 +242,15 @@ export interface VoiceTurnProcessorDeps {
    * Optional: when absent, all three channels default to enabled.
    */
   settingsRepo?: SettingsRepository;
+  /** F3 — whisper TwiML cache for dispatcher ear-only context. */
+  whisperCache?: WhisperCache;
+  /** F4 — outbound SMS to dispatcher on escalation. */
+  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * Caller E.164 for the active leg. When set, used to build escalation
+   * summaries; otherwise a placeholder is used.
+   */
+  callerPhoneResolver?: (session: VoiceSession) => string | undefined;
 }
 
 export interface VoiceTurnProcessor {
@@ -471,8 +501,9 @@ export function createVoiceTurnProcessor(
       });
       return;
     }
-    const reason =
+    const rawReason =
       typeof fx.payload.reason === 'string' ? fx.payload.reason : 'low_confidence';
+    const skillReason = mapNotifyReasonToSkillReason(rawReason);
     try {
       // F8: resolve per-tenant channel preferences for this escalation.
       let channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean } = {
@@ -494,10 +525,22 @@ export function createVoiceTurnProcessor(
         }
       }
 
+      const callerPhone =
+        deps.callerPhoneResolver?.(session) ??
+        (typeof fx.payload.callerPhone === 'string'
+          ? fx.payload.callerPhone
+          : 'unknown');
+
+      const callerBundle = buildCallerContextFromSession(
+        session,
+        callerPhone,
+        rawReason,
+      );
+
       const result = await escalateToHuman({
         tenantId,
         sessionId: session.id,
-        reason: reason as Parameters<typeof escalateToHuman>[0]['reason'],
+        reason: skillReason,
         channel: 'telephony',
         onCallRepo: deps.onCallRepo,
         auditRepo: deps.auditRepo,
@@ -509,25 +552,76 @@ export function createVoiceTurnProcessor(
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
         channelPreferences,
+        buildSummary: buildEscalationSummary,
+        callerContext: {
+          caller: callerBundle.caller,
+          customer: callerBundle.customer,
+          intent: callerBundle.intent,
+          transcriptSnapshot: callerBundle.transcriptSnapshot,
+        },
+        shopName: deps.businessName,
         ...(deps.publicBaseUrl ? { publicWebBaseUrl: deps.publicBaseUrl } : {}),
       });
 
       if (result.transfer) {
+        const { transfer } = result;
+        const escalationId = transfer.escalationId;
+        const summary = transfer.summary;
+
+        if (
+          escalationId &&
+          summary &&
+          channelPreferences.whisper &&
+          deps.whisperCache
+        ) {
+          deps.whisperCache.set(escalationId, summary.whisper);
+        }
+
+        if (
+          channelPreferences.sms &&
+          deps.deliveryProvider &&
+          summary
+        ) {
+          const smsBody = summary.sms.replace('<escalationId>', escalationId ?? '');
+          void deps.deliveryProvider
+            .sendSms({ to: transfer.dispatcherPhone, body: smsBody })
+            .catch((err) => {
+              logger.warn('notify_oncall: SMS dispatch failed', {
+                sessionId: session.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+        }
+
+        if (channelPreferences.in_app && escalationId && summary) {
+          session.events.emit(
+            VOICE_EVENT_CHANNEL,
+            escalationStartedEvent({
+              escalationId,
+              reason: summary.panel.reason.code,
+              dispatcherUserId: transfer.dispatcherUserId,
+              tenantId,
+              panel: summary.panel as unknown as PanelData,
+            }),
+          );
+        }
+
         // fallbackTwiml is undefined when callControl was not wired (summary-only
         // path). Only populate the map when we have actual TwiML to emit.
-        if (result.transfer.fallbackTwiml !== undefined) {
-          pendingTransferTwiml.set(session.id, result.transfer.fallbackTwiml);
+        if (transfer.fallbackTwiml !== undefined) {
+          pendingTransferTwiml.set(session.id, transfer.fallbackTwiml);
         }
         logger.info('notify_oncall: dialing dispatcher', {
           sessionId: session.id,
-          rotationIndex: result.transfer.rotationIndex,
-          dispatcherPhone: maskPhone(result.transfer.dispatcherPhone),
+          rotationIndex: transfer.rotationIndex,
+          dispatcherPhone: maskPhone(transfer.dispatcherPhone),
+          hasSummary: Boolean(summary),
         });
       } else if (!result.escalated && deps.callControl) {
         await queueCallbackProposalInternal(
           session,
           tenantId,
-          reason,
+          rawReason,
           'rotation_empty',
         );
         const safeName = xmlEscape(deps.businessName);
@@ -708,6 +802,24 @@ export function createVoiceTurnProcessor(
     session.terminalOutcome = outcome;
     session.terminalReason = reason;
     void persistSessionEnded(session, reason, outcome);
+
+    if (
+      outcome === 'dropped' &&
+      deps.deliveryProvider &&
+      deps.callerPhoneResolver &&
+      session.channel === 'telephony'
+    ) {
+      const callerE164 = deps.callerPhoneResolver(session);
+      if (callerE164 && callerE164.length >= 7) {
+        scheduleDroppedCallRecovery({
+          tenantId: session.tenantId,
+          sessionId: session.id,
+          callerE164,
+          shopName: deps.businessName,
+          sendSms: (args) => deps.deliveryProvider!.sendSms(args),
+        });
+      }
+    }
   }
 
   async function runSummary(session: VoiceSession): Promise<void> {

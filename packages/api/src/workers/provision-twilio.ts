@@ -243,6 +243,18 @@ export function createProvisionTwilioWorker(deps: {
           [tenantId, STATUS_ACTIVE]
         );
 
+        if (phoneE164) {
+          await tenantQuery(
+            pool,
+            tenantId,
+            `UPDATE tenant_settings
+             SET business_phone = COALESCE(NULLIF(TRIM(business_phone), ''), $1),
+                 updated_at = NOW()
+             WHERE tenant_id = $2`,
+            [phoneE164, tenantId],
+          );
+        }
+
         logger.info('Twilio provisioning complete', { tenantId, subaccountSid, phoneE164 });
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);

@@ -11,6 +11,7 @@ interface EscalationSettings {
   trigger_keyword_frustration: boolean;
   trigger_llm_sentiment: boolean;
   llm_sentiment_threshold: number;
+  after_hours_voice_mode: 'voicemail' | 'ai_answering';
 }
 
 const DEFAULTS: EscalationSettings = {
@@ -22,6 +23,7 @@ const DEFAULTS: EscalationSettings = {
   trigger_keyword_frustration: true,
   trigger_llm_sentiment: false,
   llm_sentiment_threshold: 0.7,
+  after_hours_voice_mode: 'voicemail',
 };
 
 interface Props {
@@ -124,6 +126,23 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
               <span className={`text-sm ${key === 'trigger_low_confidence' ? 'text-gray-400' : ''}`}>{label}</span>
             </label>
           ))}
+        </section>
+
+        <section className="mb-6">
+          <h3 className="text-sm font-medium mb-2">When closed (after hours)</h3>
+          <label className="block text-sm text-slate-600 mb-1">Inbound call behavior</label>
+          <select
+            value={settings.after_hours_voice_mode}
+            onChange={(e) =>
+              void update({
+                after_hours_voice_mode: e.target.value as 'voicemail' | 'ai_answering',
+              })
+            }
+            className="w-full border border-slate-200 rounded px-2 py-2 text-sm"
+          >
+            <option value="voicemail">Voicemail (recommended)</option>
+            <option value="ai_answering">AI answering</option>
+          </select>
         </section>
 
         {settings.trigger_llm_sentiment && (

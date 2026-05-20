@@ -10,9 +10,19 @@ interface InboxProposalRow {
     summary: string;
     status: string;
     createdAt: string;
+    expiresAt?: string;
   };
   urgency: Urgency;
   reason?: string;
+}
+
+function holdExpiryLine(row: InboxProposalRow): string | null {
+  if (row.proposal.proposalType !== 'create_booking' || !row.proposal.expiresAt) {
+    return null;
+  }
+  const at = new Date(row.proposal.expiresAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return `Hold expires ${at.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
 }
 
 interface InboxSummary {
@@ -126,6 +136,9 @@ export function InboxPage() {
                       <span className="text-xs text-slate-500">{row.proposal.proposalType}</span>
                     </div>
                     <p className="text-sm text-slate-900 font-medium truncate">{row.proposal.summary}</p>
+                    {holdExpiryLine(row) && (
+                      <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row)}</p>
+                    )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

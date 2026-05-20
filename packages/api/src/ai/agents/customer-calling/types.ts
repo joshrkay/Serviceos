@@ -96,6 +96,15 @@ export interface CallingAgentContext {
    * back to the generic "say that again" reprompt.
    */
   repairTemplates?: ReadonlyArray<RepairTemplate>;
+  /**
+   * F8 — per-tenant escalation trigger toggles (from CallRoutingSheet).
+   * When absent, all triggers default to enabled.
+   */
+  escalationTriggers?: {
+    trigger_low_confidence: boolean;
+    trigger_explicit_request: boolean;
+    trigger_keyword_frustration: boolean;
+  };
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────

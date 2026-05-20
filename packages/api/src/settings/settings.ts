@@ -21,6 +21,8 @@ export interface EscalationSettings {
   trigger_llm_sentiment: boolean;
   /** Frustration score (0..1) above which `frustration_detected` is dispatched. */
   llm_sentiment_threshold: number;
+  /** B6 — inbound behavior when outside business hours. */
+  after_hours_voice_mode?: 'voicemail' | 'ai_answering';
 }
 
 export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
@@ -32,6 +34,7 @@ export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
   trigger_keyword_frustration: true,
   trigger_llm_sentiment: false,
   llm_sentiment_threshold: 0.7,
+  after_hours_voice_mode: 'voicemail',
 };
 
 /**
