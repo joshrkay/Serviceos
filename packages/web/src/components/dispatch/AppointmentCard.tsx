@@ -1,5 +1,11 @@
 import React from 'react';
 
+export interface AppointmentEditingInfo {
+  userId: string;
+  displayName: string;
+  mode: 'viewing' | 'dragging';
+}
+
 export interface AppointmentCardData {
   id: string;
   jobId: string;
@@ -17,6 +23,7 @@ export interface AppointmentCardData {
   paymentIndicator?: string;
   /** Optimistic-concurrency token — server's appointment.updatedAt ISO string. */
   updatedAt?: string;
+  editing?: AppointmentEditingInfo | null;
 }
 
 export interface AppointmentCardProps {
@@ -37,6 +44,8 @@ export interface AppointmentCardProps {
    * through. Tracked as a follow-up.
    */
   hasConflict?: boolean;
+  /** Current Clerk user — hides own presence chip. */
+  currentUserId?: string;
 }
 
 function formatTime(iso: string): string {
@@ -66,7 +75,14 @@ export function AppointmentCard({
   draggable = false,
   onDragStart,
   hasConflict = false,
+  currentUserId,
 }: AppointmentCardProps) {
+  const editing =
+    appointment.editing &&
+    appointment.editing.mode === 'dragging' &&
+    appointment.editing.userId !== currentUserId
+      ? appointment.editing
+      : null;
   const arrivalWindow = formatArrivalWindow(
     appointment.arrivalWindowStart,
     appointment.arrivalWindowEnd
@@ -126,6 +142,15 @@ export function AppointmentCard({
           {appointment.status.replace('_', ' ')}
         </span>
       </div>
+
+      {editing && (
+        <div
+          className="appointment-card__editing-chip text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 mb-1"
+          data-testid="appointment-editing-chip"
+        >
+          {editing.displayName} is moving this
+        </div>
+      )}
 
       <div className="appointment-card__customer" data-testid="appointment-customer">
         {appointment.customerName}

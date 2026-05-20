@@ -3,6 +3,14 @@ import { AssignmentRepository, AppointmentAssignment } from '../appointments/ass
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { DispatchLatenessResult } from './lateness';
+import { getDispatchBoardRevision } from './board-revision';
+import { getEditingOnAppointment } from './presence-store';
+
+export interface BoardAppointmentEditing {
+  userId: string;
+  displayName: string;
+  mode: 'viewing' | 'dragging';
+}
 
 export interface BoardAppointment {
   id: string;
@@ -21,6 +29,7 @@ export interface BoardAppointment {
   holdPendingApproval?: boolean;
   holdExpiryAt?: string;
   lateness?: DispatchLatenessResult;
+  editing?: BoardAppointmentEditing | null;
 }
 
 export interface TechnicianLane {
@@ -43,6 +52,7 @@ export interface BoardSummary {
 
 export interface DispatchBoardData {
   date: string;
+  boardRevision: string;
   unassignedAppointments: BoardAppointment[];
   technicianLanes: TechnicianLane[];
   summary: BoardSummary;
@@ -60,6 +70,8 @@ export interface BoardQueryDependencies {
     jobSummary?: string;
   }>;
   getAppointmentLateness?: (appointment: Appointment, technicianId?: string) => Promise<DispatchLatenessResult | undefined>;
+  /** When set, enriches appointments with `editing` from dispatch presence. */
+  viewingUserId?: string;
 }
 
 function getTimezoneOffsetMs(date: Date, timezone: string): number {
@@ -88,7 +100,12 @@ function toBoardAppointment(
   technicianId?: string,
   technicianName?: string,
   lateness?: DispatchLatenessResult,
+  boardDate?: string,
+  viewingUserId?: string,
 ): BoardAppointment {
+  const editing = boardDate
+    ? getEditingOnAppointment(appointment.tenantId, boardDate, appointment.id, viewingUserId)
+    : null;
   return {
     id: appointment.id,
     jobId: appointment.jobId,
@@ -110,6 +127,7 @@ function toBoardAppointment(
       ? { holdExpiryAt: toISOString(appointment.holdExpiryAt) }
       : {}),
     lateness,
+    editing,
   };
 }
 
@@ -194,7 +212,15 @@ export async function getDispatchBoardData(
   );
 
   const unassignedBoard: BoardAppointment[] = unassigned.map((appt) =>
-    toBoardAppointment(appt, displayContextMap.get(appt.id), undefined, undefined, unassignedLatenessMap.get(appt.id))
+    toBoardAppointment(
+      appt,
+      displayContextMap.get(appt.id),
+      undefined,
+      undefined,
+      unassignedLatenessMap.get(appt.id),
+      dateStr,
+      deps.viewingUserId,
+    ),
   );
 
   // Fetch technician names in parallel
@@ -231,7 +257,9 @@ export async function getDispatchBoardData(
         techId,
         techName,
         latenessByApptId.get(appointment.id),
-      )
+        dateStr,
+        deps.viewingUserId,
+      ),
     );
 
     const lane: TechnicianLane = {
@@ -270,6 +298,7 @@ export async function getDispatchBoardData(
 
   return {
     date: dateStr,
+    boardRevision: getDispatchBoardRevision(tenantId, dateStr),
     unassignedAppointments: unassignedBoard,
     technicianLanes: lanes,
     summary: computeSummary(unassignedBoard, lanes),

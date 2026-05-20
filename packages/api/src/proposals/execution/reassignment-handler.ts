@@ -10,6 +10,7 @@ import {
 } from '../../dispatch/analytics';
 import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
+import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
 
 export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reassign_appointment';
@@ -129,6 +130,11 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
           technicianId: toTechnicianId,
           metadata: { proposalId: proposal.id },
         });
+      }
+
+      if (this.appointmentRepo) {
+        const appt = await this.appointmentRepo.findById(context.tenantId, appointmentId);
+        if (appt) notifyDispatchBoardChanged(context.tenantId, appt.scheduledStart);
       }
 
       return {

@@ -13,6 +13,7 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
+import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -168,6 +169,8 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       if (this.transactionalComms) {
         await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
       }
+
+      notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
 
       return {
         success: true,

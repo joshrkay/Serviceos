@@ -8,6 +8,8 @@ import { LocationRepository } from '../locations/location';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
+import { createBoardEventsRouter, BoardEventsRouteDeps } from './board-events-route';
+import { createPresenceRouter } from './presence-routes';
 
 export function createDispatchRoutes(deps: {
   appointmentRepo: AppointmentRepository;
@@ -15,12 +17,15 @@ export function createDispatchRoutes(deps: {
   jobRepo?: JobRepository;
   customerRepo?: CustomerRepository;
   locationRepo?: LocationRepository;
+  boardEventsDeps?: BoardEventsRouteDeps;
 }): Router {
   const router = Router();
 
   router.get('/board', async (req: Request, res: Response) => {
     try {
-      const tenantId = req.headers['x-tenant-id'] as string;
+      const authReq = req as AuthenticatedRequest;
+      const tenantId =
+        authReq.auth?.tenantId ?? (req.headers['x-tenant-id'] as string | undefined);
       if (!tenantId) {
         return res.status(400).json({ error: 'x-tenant-id header is required' });
       }
@@ -35,6 +40,7 @@ export function createDispatchRoutes(deps: {
       const boardDeps: BoardQueryDependencies = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
+        viewingUserId: authReq.auth?.userId,
       };
 
       const boardData = await getDispatchBoardData(tenantId, date, boardDeps, timezone);
@@ -44,6 +50,11 @@ export function createDispatchRoutes(deps: {
       return res.status(500).json({ error: message });
     }
   });
+
+  if (deps.boardEventsDeps) {
+    router.use(createBoardEventsRouter(deps.boardEventsDeps));
+  }
+  router.use(createPresenceRouter());
 
   /**
    * GET /api/dispatch/technician/:id/appointments?date=YYYY-MM-DD
