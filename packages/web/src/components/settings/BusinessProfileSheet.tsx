@@ -40,9 +40,11 @@ const TIMEZONE_OPTIONS = [
 
 interface BusinessProfileSheetProps {
   onClose: () => void;
+  /** Called after a successful save so parent UI (e.g. Settings card) can refresh. */
+  onSaved?: (fields: BusinessProfileFields) => void;
 }
 
-export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
+export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetProps) {
   const [fields, setFields] = useState<BusinessProfileFields>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -108,6 +110,12 @@ export function BusinessProfileSheet({ onClose }: BusinessProfileSheetProps) {
         throw new Error(detail || `Save failed (${res.status})`);
       }
       toast.success('Business profile saved');
+      onSaved?.({
+        businessName: fields.businessName.trim(),
+        businessPhone: fields.businessPhone.trim(),
+        businessEmail: fields.businessEmail.trim(),
+        timezone: fields.timezone,
+      });
       onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Could not save';

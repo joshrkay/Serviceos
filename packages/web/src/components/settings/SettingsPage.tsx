@@ -669,7 +669,10 @@ export function SettingsPage() {
 
       {/* Business profile sheet — closes the first of the 13 settings stubs. */}
       {businessProfileOpen && (
-        <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
+        <BusinessProfileSheet
+          onClose={() => setBusinessProfileOpen(false)}
+          onSaved={(fields) => setBusinessName(fields.businessName)}
+        />
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}

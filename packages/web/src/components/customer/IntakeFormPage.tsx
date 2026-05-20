@@ -46,7 +46,6 @@ function captureAttributionFromUrl(): CapturedAttribution {
 }
 
 type Step = 1 | 2 | 3 | 4 | 'done';
-type VerticalType = 'hvac' | 'plumbing';
 type Urgency = 'Emergency' | 'ASAP' | 'Flexible';
 
 interface ServicePresentation {
@@ -55,9 +54,9 @@ interface ServicePresentation {
   placeholder: string;
 }
 
-// Presentation only — emoji + copy keyed by the backend's verticalType.
-// The list of services a tenant actually offers comes from the API.
-const SERVICE_PRESENTATION: Record<VerticalType, ServicePresentation> = {
+// Presentation only — emoji + copy keyed by known verticalType values.
+// Unknown packs from the API still render using displayName + defaults.
+const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   hvac: {
     emoji: '❄️',
     desc: 'AC, furnace, heat pumps, ventilation',
@@ -70,7 +69,17 @@ const SERVICE_PRESENTATION: Record<VerticalType, ServicePresentation> = {
   },
 };
 
-const FALLBACK_PLACEHOLDER = 'e.g. "Briefly describe what you need help with."';
+const DEFAULT_SERVICE_PRESENTATION: ServicePresentation = {
+  emoji: '🛠️',
+  desc: 'Describe what you need and we will match you with the right technician',
+  placeholder: 'e.g. "Briefly describe what you need help with."',
+};
+
+const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
+
+function presentationForVertical(verticalType: string): ServicePresentation {
+  return SERVICE_PRESENTATION[verticalType] ?? DEFAULT_SERVICE_PRESENTATION;
+}
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
   { value: 'Emergency', label: '🚨 Emergency',    desc: 'Need someone today',                   color: 'border-red-300    bg-red-50    text-red-700'    },
@@ -86,7 +95,7 @@ const STEPS_LABEL: Record<Exclude<Step, 'done'>, string> = {
 };
 
 interface FormData {
-  serviceType: VerticalType | null;
+  serviceType: string | null;
   description: string;
   urgency: Urgency | null;
   preferredDates: string;
@@ -112,19 +121,15 @@ export function IntakeFormPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
 
-  // Service options shown in step 1 = the tenant's packs (from the API)
-  // joined with local presentation (emoji/copy). Packs with no local
-  // presentation entry are skipped rather than rendered blank.
-  const serviceOptions = (tenantInfo?.serviceTypes ?? [])
-    .filter(
-      (st): st is { verticalType: VerticalType; displayName: string } =>
-        st.verticalType === 'hvac' || st.verticalType === 'plumbing',
-    )
-    .map((st) => ({
+  // Service options = tenant packs from the API + optional local emoji/copy.
+  const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => {
+    const presentation = presentationForVertical(st.verticalType);
+    return {
       verticalType: st.verticalType,
       label: st.displayName,
-      ...SERVICE_PRESENTATION[st.verticalType],
-    }));
+      ...presentation,
+    };
+  });
 
   // Attribution captured once on mount. Storing in a ref so re-renders
   // don't lose or duplicate it.
@@ -329,7 +334,7 @@ export function IntakeFormPage() {
                 onChange={e => update({ description: e.target.value })}
                 placeholder={
                   data.serviceType
-                    ? SERVICE_PRESENTATION[data.serviceType].placeholder
+                    ? presentationForVertical(data.serviceType).placeholder
                     : FALLBACK_PLACEHOLDER
                 }
                 rows={5}
