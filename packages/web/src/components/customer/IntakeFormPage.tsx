@@ -86,14 +86,19 @@ function presentationForVertical(verticalType: string): ServicePresentation {
   return SERVICE_PRESENTATION[verticalType] ?? DEFAULT_SERVICE_PRESENTATION;
 }
 
-function presentationFor(verticalType: string, displayName: string): ServicePresentation {
-  return (
-    SERVICE_PRESENTATION[verticalType] ?? {
-      emoji: '🔧',
-      desc: displayName,
-      placeholder: FALLBACK_PLACEHOLDER,
-    }
-  );
+const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
+
+function presentationForVertical(
+  verticalType: string,
+  displayName?: string,
+): ServicePresentation {
+  const known = SERVICE_PRESENTATION[verticalType];
+  if (known) return known;
+  return {
+    emoji: DEFAULT_SERVICE_PRESENTATION.emoji,
+    desc: displayName ?? DEFAULT_SERVICE_PRESENTATION.desc,
+    placeholder: DEFAULT_SERVICE_PRESENTATION.placeholder,
+  };
 }
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
