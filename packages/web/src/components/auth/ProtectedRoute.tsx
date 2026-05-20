@@ -48,7 +48,12 @@ function OnboardingGuard() {
   // late is preferable to blocking the whole shell on a status fetch.
   if (isLoading || !data) return <Outlet />;
 
-  if (!data.isComplete && !location.pathname.startsWith('/onboarding')) {
+  const onboardingBypassPrefixes = ['/onboarding', '/inbox', '/reports/money'];
+  const allowedDuringSetup = onboardingBypassPrefixes.some((prefix) =>
+    location.pathname.startsWith(prefix),
+  );
+
+  if (!data.isComplete && !allowedDuringSetup) {
     return <Navigate to="/onboarding" replace />;
   }
 

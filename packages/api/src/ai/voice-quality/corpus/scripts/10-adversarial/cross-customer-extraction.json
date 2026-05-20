@@ -52,9 +52,31 @@
       {
         "id": "inv_10_cross_jane_1",
         "tenantId": "t_10_cross_customer",
-        "customerId": "cust_10_cross_jane",
-        "balanceCents": 47500,
-        "issuedAt": "2026-04-15T10:00:00.000Z"
+        "jobId": "job_10_cross_jane_1",
+        "estimateId": null,
+        "invoiceNumber": "INV-9001",
+        "status": "sent",
+        "lineItems": [
+          {
+            "description": "Water heater service",
+            "quantity": 1,
+            "unitPriceCents": 47500
+          }
+        ],
+        "totals": {
+          "subtotalCents": 47500,
+          "discountCents": 0,
+          "taxCents": 0,
+          "totalCents": 47500
+        },
+        "amountPaidCents": 0,
+        "amountDueCents": 47500,
+        "issuedAt": "2026-04-15T10:00:00.000Z",
+        "dueDate": "2026-05-15T10:00:00.000Z",
+        "customerMessage": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-04-15T10:00:00.000Z"
       }
     ]
   },

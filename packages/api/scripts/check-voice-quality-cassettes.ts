@@ -6,6 +6,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { loadCorpus, loadLayer2Corpus } from '../src/ai/voice-quality/corpus/loader';
 
 const CASSETTES_DIR = path.resolve(
   __dirname,
@@ -40,6 +41,11 @@ function main(): void {
     process.exit(1);
   }
 
+  const layer2OnlyIds = new Set([
+    ...loadLayer2Corpus().map((s) => s.id),
+    ...loadCorpus().filter((s) => s.layer2Only).map((s) => s.id),
+  ]);
+
   const needingRecord: string[] = [];
 
   for (const file of files) {
@@ -53,12 +59,17 @@ function main(): void {
       process.exit(1);
     }
 
+    const scriptId =
+      typeof parsed.scriptId === 'string'
+        ? parsed.scriptId
+        : path.basename(file, '.json');
+
+    if (layer2OnlyIds.has(scriptId)) {
+      continue;
+    }
+
     const entries = parsed.entries;
     if (!Array.isArray(entries) || entries.length === 0) {
-      const scriptId =
-        typeof parsed.scriptId === 'string'
-          ? parsed.scriptId
-          : path.basename(file, '.json');
       needingRecord.push(scriptId);
     }
   }

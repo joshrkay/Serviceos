@@ -6,6 +6,10 @@ import { HomePage } from './HomePage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
 
+vi.mock('./MoneyLoopHomeCard', () => ({
+  MoneyLoopHomeCard: () => <div data-testid="money-loop-home-card" />,
+}));
+
 import { useListQuery } from '../../hooks/useListQuery';
 
 const today = new Date().toISOString().split('T')[0];
@@ -163,12 +167,13 @@ describe('HomePage', () => {
     expect(screen.getAllByText('$1,250').length).toBeGreaterThan(0);
   });
 
-  it('renders quick actions', () => {
+  it('renders money loop hub and quick actions', () => {
     renderPage();
-    expect(screen.getByText('New job')).toBeInTheDocument();
+    expect(screen.getByTestId('money-loop-home-card')).toBeInTheDocument();
+    expect(screen.getByText('Approval inbox')).toBeInTheDocument();
+    expect(screen.getAllByText('Money summary').length).toBeGreaterThan(0);
     expect(screen.getByText('New estimate')).toBeInTheDocument();
     expect(screen.getByText('New invoice')).toBeInTheDocument();
-    expect(screen.getByText('Schedule')).toBeInTheDocument();
   });
 
   it('queries /api/jobs with today scheduledDate filter', () => {

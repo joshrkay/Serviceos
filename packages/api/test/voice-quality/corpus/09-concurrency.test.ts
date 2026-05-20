@@ -82,7 +82,7 @@ describe('VQ-018 — Bucket 09 concurrency edges', () => {
   );
 
   it.each(SCRIPT_IDS)(
-    'VQ-018 — cassette stub for %s is valid JSON with empty entries',
+    'VQ-018 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -94,7 +94,7 @@ describe('VQ-018 — Bucket 09 concurrency edges', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 

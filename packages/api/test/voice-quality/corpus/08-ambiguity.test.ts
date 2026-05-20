@@ -117,7 +117,7 @@ describe('VQ-017 — Bucket 08 ambiguity / reprompt', () => {
   );
 
   it.each(SCRIPT_IDS)(
-    'VQ-017 — cassette stub for %s is valid JSON with empty entries',
+    'VQ-017 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -129,7 +129,7 @@ describe('VQ-017 — Bucket 08 ambiguity / reprompt', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 });
@@ -216,7 +216,7 @@ describe('VQ2-014 — Bucket 08 audio-only Layer-2 scripts', () => {
   );
 
   it.each(VQ2_014_SCRIPT_IDS)(
-    'VQ2-014 — cassette stub for %s is valid JSON with empty entries',
+    'VQ2-014 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -228,7 +228,7 @@ describe('VQ2-014 — Bucket 08 audio-only Layer-2 scripts', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 });

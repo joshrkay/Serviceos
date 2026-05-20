@@ -1042,11 +1042,24 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           onClose={() => setPreviewOpen(false)}
         />
       )}
-      {convertOpen && (
+      {convertOpen && est.jobId && (
         <ConvertToInvoiceSheet
-          est={estCompat}
+          input={{
+            estimateId: est.id,
+            jobId: est.jobId,
+            estimateNumber: est.estimateNumber,
+            customerName: estCompat.customer,
+            description: estCompat.description,
+            lineItems: uiLineItems,
+            discountCents: est.discountCents ?? 0,
+            taxRateBps: 0,
+            approvedLabel: status === 'Approved' ? 'Customer approved' : undefined,
+          }}
           onClose={() => setConvertOpen(false)}
-          onConverted={() => setConvertOpen(false)}
+          onConverted={(invoiceId) => {
+            setConvertOpen(false);
+            navigate(`/invoices/${invoiceId}`);
+          }}
         />
       )}
     </>

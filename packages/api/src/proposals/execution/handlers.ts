@@ -68,17 +68,12 @@ export interface ExecutionHandler {
   execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult>;
 }
 
-export class CreateCustomerExecutionHandler implements ExecutionHandler {
-  proposalType: ProposalType = 'create_customer';
-
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
-    const { payload } = proposal;
-    if (!payload.name || typeof payload.name !== 'string') {
-      return { success: false, error: 'Payload must include a valid name' };
-    }
-    return { success: true, resultEntityId: uuidv4() };
-  }
-}
+/**
+ * @deprecated Use {@link CreateCustomerVoiceExecutionHandler}. Kept as an
+ * alias so legacy imports/tests keep compiling; registry always wires the
+ * voice handler.
+ */
+export class CreateCustomerExecutionHandler extends CreateCustomerVoiceExecutionHandler {}
 
 export class UpdateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'update_customer';
@@ -427,9 +422,7 @@ export function createExecutionHandlerRegistry(deps?: {
       : undefined;
 
   const handlers: ExecutionHandler[] = [
-    deps?.customerRepo
-      ? new CreateCustomerVoiceExecutionHandler(deps.customerRepo, deps.auditRepo)
-      : new CreateCustomerExecutionHandler(),
+    new CreateCustomerVoiceExecutionHandler(deps?.customerRepo, deps?.auditRepo),
     new UpdateCustomerExecutionHandler(deps?.customerRepo),
     new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
