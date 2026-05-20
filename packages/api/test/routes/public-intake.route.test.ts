@@ -159,6 +159,8 @@ describe('public-intake route', () => {
         businessName: 'Ortega HVAC & Services',
         businessPhone: '(512) 555-0100',
         serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
+        businessHoursSummary: null,
+        intakeTagline: null,
       });
     });
 
@@ -170,6 +172,8 @@ describe('public-intake route', () => {
         businessName: 'Test Co',
         businessPhone: null,
         serviceTypes: [],
+        businessHoursSummary: null,
+        intakeTagline: null,
       });
     });
 

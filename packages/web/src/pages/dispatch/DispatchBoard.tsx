@@ -378,7 +378,7 @@ export function DispatchBoard() {
         | { id?: string }
         | null;
       const proposalId = json?.id;
-      const link = proposalId ? `/proposals/${proposalId}` : '/proposals';
+      const link = proposalId ? `/inbox?proposal=${proposalId}` : '/inbox';
 
       toast.success('Proposal created — pending review', {
         action: {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
-  Home, MessageSquare, Briefcase, Calendar,
+  Home, MessageSquare, Briefcase, Calendar, LayoutGrid,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
   Wrench,
 } from 'lucide-react';
@@ -42,10 +42,6 @@ interface NavItem {
  * underlying routes remain the existing ones (e.g. `/assistant` is
  * "Sessions" in supervisor mode, `/technician/day` is "Today" in tech).
  *
- * Routes that don't yet exist (e.g. `/dispatch`) are deliberately
- * omitted — the supervisor wall + DispatchBoard wiring lands in a
- * separate story. Adding them here would 404 and we'd rather hide
- * them until they're real.
  */
 function getNav(mode: Mode): NavItem[] {
   switch (mode) {
@@ -64,6 +60,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/technician/day', label: 'Today',        icon: Wrench        },
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
+        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText      },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
@@ -76,6 +73,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/assistant',     label: 'Sessions',     icon: MessageSquare },
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
+        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',     label: 'Customers',    icon: Users         },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
