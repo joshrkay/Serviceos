@@ -1093,7 +1093,7 @@ export function createApp(): express.Express {
             replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
           },
         })
-      : process.env.NODE_ENV === 'production'
+      : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
         ? null
         : new InMemoryDeliveryProvider();
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';

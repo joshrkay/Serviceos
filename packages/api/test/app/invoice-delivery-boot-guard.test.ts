@@ -16,5 +16,9 @@ describe('invoice delivery boot guard (source)', () => {
     expect(src).toMatch(
       /SendServiceInvoiceDeliveryProvider[\s\S]*config\.NODE_ENV === 'prod'[\s\S]*throw new Error/,
     );
+    // messageDelivery must not fall back to InMemory in prod/staging without creds
+    expect(src).toMatch(
+      /messageDelivery[\s\S]*config\.NODE_ENV === 'prod' \|\| config\.NODE_ENV === 'staging'[\s\S]*\? null/,
+    );
   });
 });

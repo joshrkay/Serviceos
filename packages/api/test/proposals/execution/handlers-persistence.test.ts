@@ -192,6 +192,24 @@ describe('DraftEstimateExecutionHandler persistence', () => {
     expect(estimate!.estimateNumber).toMatch(/^EST-/);
   });
 
+  it('fails when validUntil is not a parseable date', async () => {
+    const handler = new DraftEstimateExecutionHandler(
+      new InMemoryEstimateRepository(),
+      new InMemorySettingsRepository(),
+    );
+    const result = await handler.execute(
+      makeProposal('draft_estimate', {
+        customerId,
+        jobId,
+        lineItems: sampleLineItems,
+        validUntil: 'not-a-date',
+      }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid validUntil/i);
+  });
+
   it('fails when jobId is missing from the payload', async () => {
     const handler = new DraftEstimateExecutionHandler(
       new InMemoryEstimateRepository(),

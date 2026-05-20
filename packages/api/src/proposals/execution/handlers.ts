@@ -106,9 +106,7 @@ export class UpdateCustomerExecutionHandler implements ExecutionHandler {
     if (typeof payload.primaryPhone === 'string') input.primaryPhone = payload.primaryPhone;
     if (typeof payload.secondaryPhone === 'string') input.secondaryPhone = payload.secondaryPhone;
     if (typeof payload.notes === 'string') input.communicationNotes = payload.notes;
-    if (typeof payload.communicationNotes === 'string') {
-      input.communicationNotes = payload.communicationNotes;
-    }
+    if (typeof payload.communicationNotes === 'string') input.communicationNotes = payload.communicationNotes;
     if (typeof payload.smsConsent === 'boolean') input.smsConsent = payload.smsConsent;
 
     if (Object.keys(input).length === 0) {
@@ -346,6 +344,12 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 
     try {
       const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
+      const validUntil =
+        typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
+      if (validUntil && isNaN(validUntil.getTime())) {
+        return { success: false, error: 'Payload contains an invalid validUntil date' };
+      }
+
       const input: CreateEstimateInput = {
         tenantId: context.tenantId,
         jobId: payload.jobId,
@@ -354,10 +358,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
         discountCents:
           typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
         taxRateBps: typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
-        validUntil:
-          typeof payload.validUntil === 'string'
-            ? new Date(payload.validUntil)
-            : undefined,
+        validUntil,
         customerMessage:
           typeof payload.customerMessage === 'string' ? payload.customerMessage : undefined,
         internalNotes:
