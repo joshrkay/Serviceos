@@ -67,6 +67,11 @@ const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
     desc: 'Leaks, drains, water heaters, pipes',
     placeholder: `e.g. "Kitchen sink is draining very slowly and there's a bad smell."`,
   },
+  electrical: {
+    emoji: '⚡',
+    desc: 'Panels, wiring, outlets, and lighting',
+    placeholder: 'e.g. "A breaker keeps tripping when we run the dryer."',
+  },
 };
 
 const DEFAULT_SERVICE_PRESENTATION: ServicePresentation = {
@@ -79,6 +84,16 @@ const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
 
 function presentationForVertical(verticalType: string): ServicePresentation {
   return SERVICE_PRESENTATION[verticalType] ?? DEFAULT_SERVICE_PRESENTATION;
+}
+
+function presentationFor(verticalType: string, displayName: string): ServicePresentation {
+  return (
+    SERVICE_PRESENTATION[verticalType] ?? {
+      emoji: '🔧',
+      desc: displayName,
+      placeholder: FALLBACK_PLACEHOLDER,
+    }
+  );
 }
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
@@ -237,7 +252,9 @@ export function IntakeFormPage() {
         </div>
         <div>
           <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
-          <p className="text-xs text-slate-400 mt-0.5">Request service online</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            {tenantInfo?.intakeTagline ?? 'Request service online'}
+          </p>
         </div>
       </div>
 
@@ -398,10 +415,10 @@ export function IntakeFormPage() {
             </div>
 
             {[
-              { icon: null,   label: 'Full name *',         key: 'name',    placeholder: 'Sandra Wu',         type: 'text' },
-              { icon: Phone,  label: 'Phone number *',      key: 'phone',   placeholder: '(512) 555-0191',    type: 'tel'  },
-              { icon: Mail,   label: 'Email',               key: 'email',   placeholder: 'you@email.com',     type: 'email'},
-              { icon: MapPin, label: 'Service address',     key: 'address', placeholder: '4821 Burnet Rd, Austin TX', type: 'text' },
+              { icon: null,   label: 'Full name *',         key: 'name',    placeholder: 'Your name',              type: 'text' },
+              { icon: Phone,  label: 'Phone number *',      key: 'phone',   placeholder: '(555) 000-0000',         type: 'tel'  },
+              { icon: Mail,   label: 'Email',               key: 'email',   placeholder: 'you@email.com',          type: 'email'},
+              { icon: MapPin, label: 'Service address',     key: 'address', placeholder: 'Street, city, state',    type: 'text' },
             ].map(({ label, key, placeholder, type }) => (
               <div key={key}>
                 <label className="text-xs text-slate-500 mb-1.5 block">{label}</label>
@@ -467,14 +484,18 @@ export function IntakeFormPage() {
                 </div>
               </div>
 
-              <div className="rounded-xl bg-blue-50 border border-blue-100 px-4 py-3.5">
-                <div className="flex items-start gap-2.5">
-                  <Clock size={13} className="text-blue-500 shrink-0 mt-0.5" />
-                  <p className="text-xs text-blue-700">
-                    We typically respond within <span className="text-blue-900">2 hours</span> during business hours (Mon–Sat, 7 AM – 6 PM).
-                  </p>
+              {tenantInfo?.businessHoursSummary && (
+                <div className="rounded-xl bg-blue-50 border border-blue-100 px-4 py-3.5">
+                  <div className="flex items-start gap-2.5">
+                    <Clock size={13} className="text-blue-500 shrink-0 mt-0.5" />
+                    <p className="text-xs text-blue-700">
+                      We respond during business hours:
+                      {' '}
+                      <span className="text-blue-900">{tenantInfo.businessHoursSummary}</span>
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         )}
@@ -495,7 +516,13 @@ export function IntakeFormPage() {
             </div>
             <div className="w-full flex flex-col gap-3">
               {[
-                { icon: Clock, label: 'Expect a call or text within 2 hours', sub: 'Mon–Sat · 7 AM – 6 PM' },
+                ...(tenantInfo?.businessHoursSummary
+                  ? [{
+                      icon: Clock,
+                      label: 'We will reach out during business hours',
+                      sub: tenantInfo.businessHoursSummary,
+                    }]
+                  : []),
                 ...(tenantInfo?.businessPhone
                   ? [{ icon: Phone, label: 'Call us directly', sub: tenantInfo.businessPhone }]
                   : []),

@@ -1562,7 +1562,7 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
@@ -2587,7 +2587,7 @@ export function createApp(): express.Express {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
-  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService }));
+  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({

@@ -18,7 +18,7 @@ export interface LoadFactsDeps {
 export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string): Promise<OnboardingFacts> {
   const { pool, settingsRepo } = deps;
 
-  const [settings, integRes, tenantRes, callsRes, tsRes] = await Promise.all([
+  const [settings, integRes, tenantRes, callsRes, tsRes, packsRes] = await Promise.all([
     settingsRepo.findByTenant(tenantId),
     pool.query<{ status: string; phone_e164: string | null }>(
       `SELECT status, (provider_data->>'phoneE164') AS phone_e164
@@ -49,10 +49,17 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
          FROM tenant_settings WHERE tenant_id=$1`,
       [tenantId]
     ),
+    pool.query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM pack_activations
+         WHERE tenant_id=$1 AND status='active'`,
+      [tenantId]
+    ),
   ]);
 
   const tenant = tenantRes.rows[0];
   const ts = tsRes.rows[0];
+  const activePackCount = packsRes.rows[0]?.n ?? 0;
+  const settingsPacks = settings?.activeVerticalPacks?.length ?? 0;
 
   return {
     tenantExists: !!tenant,
@@ -62,7 +69,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       jobBufferMinutes: ts?.job_buffer_minutes ?? null,
       hourlyRateCents: ts?.hourly_rate_cents ?? null,
     },
-    packActivated: (settings?.activeVerticalPacks?.length ?? 0) > 0,
+    packActivated: activePackCount > 0 || settingsPacks > 0,
     twilioStatus: integRes.rows[0]?.status ?? null,
     twilioPhoneNumber: integRes.rows[0]?.phone_e164 ?? null,
     subscription: {
