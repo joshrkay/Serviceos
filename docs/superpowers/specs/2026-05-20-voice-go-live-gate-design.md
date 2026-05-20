@@ -47,7 +47,7 @@ Use this section when writing the implementation plan — **do not rebuild what 
 
 | Item | Notes |
 |------|--------|
-| `tenant_settings.voice_agent_live_at` | Migration `106_*` (`100_*`–`105_*` already used in `schema.ts`) |
+| `tenant_settings.voice_agent_live_at` | Migration `108_*` (`106`/`107` taken on main) |
 | Go-live gate in `createVoiceGate` | New reason `not_live` |
 | `POST /api/voice/go-live`, `POST /api/voice/pause` | New routes (owner RBAC) |
 | Auto go-live on first ended inbound | Extend existing `onSessionEnded` in `app.ts` |
@@ -92,7 +92,7 @@ Owners with a provisioned number and active trial/subscription **choose** when i
 
 ## 5. Data model
 
-### Migration `106_tenant_settings_voice_agent_live.sql`
+### Migration `108_tenant_settings_voice_agent_live.sql`
 
 ```sql
 ALTER TABLE tenant_settings
@@ -255,8 +255,8 @@ Prom: `voice_blocks_total{reason="not_live"}` (extend existing counter). Optiona
 
 ### New
 
-- `packages/api/src/db/migrations/106_tenant_settings_voice_agent_live.sql`
-- `packages/api/test/db/migration-106.test.ts`
+- `packages/api/src/db/migrations/108_tenant_settings_voice_agent_live.sql`
+- `packages/api/test/db/migration-108.test.ts`
 - `packages/api/src/voice/go-live.ts` (enable/pause/auto helpers)
 - `packages/api/test/voice/go-live.test.ts`
 - `packages/api/src/routes/voice-control.ts` (or extend `routes/voice-sessions.ts` — pick one router in plan)
