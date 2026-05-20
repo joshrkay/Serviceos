@@ -2797,6 +2797,19 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS voice_agent_live_at TIMESTAMPTZ;
   `,
+
+  // P1-022 — bind inbound communications (P6-028 tech "OUT" SMS reply,
+  // P8-016 emergency owner-cell paging) to a user by mobile number.
+  // Stored normalized to E.164 (`+15551234567`) by normalizeMobileE164().
+  // Partial unique index: tenant-scoped uniqueness while permitting many
+  // rows with NULL mobile (existing users have none on file). Idempotent
+  // (IF NOT EXISTS) so the migration is safely replayable on Postgres 14+.
+  '109_users_mobile_number': `
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_number TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_mobile_unique
+      ON users (tenant_id, mobile_number)
+      WHERE mobile_number IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
