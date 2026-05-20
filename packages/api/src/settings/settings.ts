@@ -66,6 +66,19 @@ export const UNSUPERVISED_PROPOSAL_ROUTING_VALUES: ReadonlyArray<UnsupervisedPro
   'escalate_to_oncall',
 ];
 
+/**
+ * P4-015 — per-tenant brand voice. Stored in the `tenant_settings.brand_voice`
+ * JSONB column (migration 110) and consumed by `composeBrandVoiceMessage` to
+ * keep customer-facing copy on-brand across SMS, voice, and review channels.
+ * All fields optional; a missing value falls back to a neutral default tone.
+ */
+export interface BrandVoiceSettings {
+  formality?: 'casual' | 'professional';
+  pronoun?: 'we' | 'i';
+  vibe_words?: string[];
+  business_name?: string;
+}
+
 export interface TenantSettings {
   id: string;
   tenantId: string;
@@ -176,6 +189,11 @@ export interface TenantSettings {
    * `resolveEscalationSettings` returns `DEFAULT_ESCALATION_SETTINGS`.
    */
   escalationSettings?: EscalationSettings;
+  /**
+   * P4-015 — per-tenant brand voice tone. Migration 110. When absent, the
+   * brand-voice composer uses a neutral default. Explicit `null` clears it.
+   */
+  brandVoice?: BrandVoiceSettings | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -231,6 +249,8 @@ export interface UpdateSettingsInput {
   voiceGreeting?: string | null;
   /** F8 — per-tenant escalation settings; partial — missing keys fall back to DEFAULT_ESCALATION_SETTINGS. */
   escalationSettings?: Partial<EscalationSettings>;
+  /** P4-015 — per-tenant brand voice tone; null clears the field. */
+  brandVoice?: BrandVoiceSettings | null;
 }
 
 export interface SettingsRepository {

@@ -2810,6 +2810,15 @@ export const MIGRATIONS = {
       ON users (tenant_id, mobile_number)
       WHERE mobile_number IS NOT NULL;
   `,
+
+  // P4-015 — per-tenant brand voice tone consumed by composeBrandVoiceMessage.
+  // JSONB so the shape (formality / pronoun / vibe_words / business_name) can
+  // evolve additively. Defaults to '{}' which mapRow surfaces as undefined,
+  // so the composer falls back to its neutral default tone for existing rows.
+  '110_tenant_settings_brand_voice': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

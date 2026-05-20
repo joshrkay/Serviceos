@@ -166,6 +166,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['106_tenant_settings_escalation_settings', '96affeb743beef4681931fb26f91441b50ddfe8139938028da862d9cefcd9ba0'],
   ['107_portal_sessions_system_lookup_rls', 'fd29a8fb3e536e27e307a1aa537e13bc4017525f8b08b2955d94078610da0eba'],
   ['108_tenant_settings_voice_agent_live', 'c030fc16ba92177b18589c7b3342ad945a0c6d2f0a59b0fa2449274d62b680e9'],
+  ['109_users_mobile_number', '84773bb91c016828430bdb2f5a8504edef06193ad201ce41051a4b15134d9f22'],
+  ['110_tenant_settings_brand_voice', '4d5499d20742415bb4852704a2fe3972446a3acc6efbfb050d4b57b573a6dc34'],
 ];
 
 function hashMigration(value: string): string {
