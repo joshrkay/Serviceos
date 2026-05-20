@@ -2,6 +2,6 @@
   "alerting_runbook_verified": null,
   "rollback_runbook_read": null,
   "migration_discipline_runbook_read": null,
-  "voice_capacity_run": "2026-05-18T00:20:42.845Z",
+  "voice_capacity_run": "2026-05-20T04:14:40.850Z",
   "voice_capacity_provenance": "harness-self-check (local mock WS server)"
 }
