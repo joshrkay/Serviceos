@@ -45,23 +45,6 @@ export function SettingsPage() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetch('/api/onboarding/status');
-        if (cancelled || !res.ok) return;
-        const data = (await res.json()) as { voiceAgentLive?: boolean };
-        setVoiceAgentLive(data.voiceAgentLive ?? false);
-      } catch {
-        // Settings still usable when onboarding status unavailable.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
         const res = await apiFetch('/api/settings');
         if (cancelled || !res.ok) return;
         const data = (await res.json()) as {
@@ -80,6 +63,14 @@ export function SettingsPage() {
         }
       } catch {
         /* network hiccup — defaults remain */
+      }
+      try {
+        const statusRes = await apiFetch('/api/onboarding/status');
+        if (cancelled || !statusRes.ok) return;
+        const status = (await statusRes.json()) as { voiceAgentLive?: boolean };
+        setVoiceAgentLive(status.voiceAgentLive ?? false);
+      } catch {
+        // Settings still usable when onboarding status unavailable.
       }
     })();
     (async () => {
