@@ -24,6 +24,7 @@ describe('P6-006 — Day-scoped dispatch board query', () => {
   it('returns empty board for day with no appointments', async () => {
     const result = await getDispatchBoardData(tenantId, '2026-03-14', deps);
     expect(result.date).toBe('2026-03-14');
+    expect(result.boardRevision).toBeTruthy();
     expect(result.unassignedAppointments).toHaveLength(0);
     expect(result.technicianLanes).toHaveLength(0);
     expect(result.summary.unassigned).toBe(0);

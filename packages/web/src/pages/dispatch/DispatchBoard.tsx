@@ -1,21 +1,32 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { toast } from 'sonner';
+import { useAuth, useUser } from '@clerk/clerk-react';
+import { AlertTriangle } from 'lucide-react';
 import { DateNavigation } from '../../components/dispatch/DateNavigation';
 import { SummaryStrip } from '../../components/dispatch/SummaryStrip';
 import { DispatchFilters, DispatchFilterValues } from '../../components/dispatch/DispatchFilters';
 import { UnassignedQueue } from '../../components/dispatch/UnassignedQueue';
 import { TechnicianLane } from '../../components/dispatch/TechnicianLane';
 import { useDispatchBoard } from '../../hooks/useDispatchBoard';
+import { useDispatchBoardStream } from '../../hooks/useDispatchBoardStream';
+import { useDispatchPresence } from '../../hooks/useDispatchPresence';
 import { AppointmentCardData } from '../../components/dispatch/AppointmentCard';
 import {
   ConfirmProposalDialog,
   ProposedProposalType,
+  TimeRangeDisplay,
 } from '../../components/dispatch/ConfirmProposalDialog';
 import { apiFetch } from '../../utils/api-fetch';
 import {
   useFeasibilityPreview,
   FeasibilityPreviewInput,
 } from '../../components/dispatch/useFeasibilityPreview';
+import {
+  computeProposedSlot,
+  SlotPlacement,
+} from '../../components/dispatch/compute-proposed-slot';
+import { emitProposalsChanged, PROPOSALS_CHANGED } from '../../lib/proposal-events';
+import type { FeasibilityResult } from '../../components/dispatch/feasibility-types';
 
 type DragSourceType = 'queue' | 'lane';
 
@@ -25,13 +36,22 @@ interface DragSource {
   sourceTechnicianId: string | null;
 }
 
+type DragOverTarget =
+  | { kind: 'lane'; technicianId: string; insertIndex: number }
+  | { kind: 'unassigned' }
+  | null;
+
 interface PendingDrop {
   source: DragSource;
   targetKind: 'lane' | 'unassigned';
   targetTechnicianId: string | null;
+  insertIndex?: number;
   proposalType: ProposedProposalType;
   appointment: AppointmentCardData | null;
   targetDescription: string;
+  proposedStart: string;
+  proposedEnd: string;
+  placement: SlotPlacement;
 }
 
 function generateIdempotencyKey(): string {
@@ -41,38 +61,68 @@ function generateIdempotencyKey(): string {
   return `dispatch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function toDateParam(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function dayStartIso(boardDate: string, workingHoursStart?: string): string {
+  const time = workingHoursStart?.slice(0, 5) ?? '08:00';
+  return `${boardDate}T${time}:00.000Z`;
+}
+
+function toDatetimeLocalValue(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fromDatetimeLocalValue(value: string): string {
+  if (!value) return '';
+  return new Date(value).toISOString();
+}
+
+function isSameLaneNoOp(sorted: AppointmentCardData[], draggedId: string, insertIndex: number): boolean {
+  const origIdx = sorted.findIndex((a) => a.id === draggedId);
+  if (origIdx < 0) return false;
+  return insertIndex === origIdx;
+}
+
 export function DispatchBoard() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [filters, setFilters] = useState<DispatchFilterValues>({});
+  const dateParam = toDateParam(selectedDate);
   const { data, isLoading, error, refetch } = useDispatchBoard(selectedDate);
+  const { user } = useUser();
+  const { userId: clerkUserId } = useAuth();
+  const currentUserId = clerkUserId ?? user?.id ?? undefined;
 
-  // Drag state — purely visual / intent. Never mutates appointment positions.
   const [dragSource, setDragSource] = useState<DragSource | null>(null);
-  const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
-
-  // Pending drop awaiting human confirmation. The appointment does NOT move
-  // until the user confirms AND the proposal is approved upstream.
+  const [dragOverTarget, setDragOverTarget] = useState<DragOverTarget>(null);
   const [pendingDrop, setPendingDrop] = useState<PendingDrop | null>(null);
   const [isSubmittingProposal, setIsSubmittingProposal] = useState(false);
+  const [editedStart, setEditedStart] = useState('');
+  const [editedEnd, setEditedEnd] = useState('');
 
-  // P6-027 — refetch when the tab regains focus or the document
-  // becomes visible. Catches the case where a dispatcher approves a
-  // proposal in another tab (the proposals review screen) and
-  // returns to the board expecting the updated lane state.
+  useDispatchBoardStream(dateParam, data?.boardRevision, refetch);
+  useDispatchPresence(selectedDate, dragSource?.appointmentId ?? null);
+
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void refetch();
-      }
+      if (document.visibilityState === 'visible') void refetch();
     };
-    const onFocus = () => {
-      void refetch();
-    };
+    const onFocus = () => void refetch();
+    const onProposalsChanged = () => void refetch();
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onFocus);
+    window.addEventListener(PROPOSALS_CHANGED, onProposalsChanged);
     return () => {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onFocus);
+      window.removeEventListener(PROPOSALS_CHANGED, onProposalsChanged);
     };
   }, [refetch]);
 
@@ -84,39 +134,62 @@ export function DispatchBoard() {
     setFilters(newFilters);
   }, []);
 
-  // ── Lookup helpers ────────────────────────────────────────────────────
   const allAppointments = useMemo<AppointmentCardData[]>(() => {
     if (!data) return [];
     const fromLanes = data.technicianLanes.flatMap((lane) => lane.appointments);
     return [...data.unassignedAppointments, ...fromLanes];
   }, [data]);
 
-  // ── Live feasibility preview during drag ──────────────────────────────
-  // Builds a debounced read-only query so the hovered lane can render
-  // red/yellow/green drop-zone feedback without committing a proposal.
+  const laneByTechId = useCallback(
+    (technicianId: string) =>
+      data?.technicianLanes.find((l) => l.technicianId === technicianId),
+    [data],
+  );
+
   const previewInput = useMemo<FeasibilityPreviewInput | null>(() => {
-    if (!dragSource) return null;
-    if (!dragOverTarget || dragOverTarget === '__unassigned__') return null;
+    if (!dragSource || dragOverTarget?.kind !== 'lane') return null;
     const appt = allAppointments.find((a) => a.id === dragSource.appointmentId);
     if (!appt) return null;
+    const lane = laneByTechId(dragOverTarget.technicianId);
+    const sorted = [...(lane?.appointments ?? [])].sort(
+      (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+    );
+    const withoutDragged = sorted.filter((a) => a.id !== dragSource.appointmentId);
+    const slot = computeProposedSlot({
+      appointments: withoutDragged,
+      insertIndex: dragOverTarget.insertIndex,
+      dragged: appt,
+      dayStartIso: dayStartIso(
+        data?.date ?? dateParam,
+        lane?.availabilitySummary?.workingHours?.start,
+      ),
+    });
+    if (slot.placement === 'overflow') return null;
     return {
       appointmentId: dragSource.appointmentId,
-      proposedTechnicianId: dragOverTarget,
-      proposedScheduledStart: appt.scheduledStart,
-      proposedScheduledEnd: appt.scheduledEnd,
+      proposedTechnicianId: dragOverTarget.technicianId,
+      proposedScheduledStart: slot.proposedScheduledStart,
+      proposedScheduledEnd: slot.proposedScheduledEnd,
     };
-  }, [dragSource, dragOverTarget, allAppointments]);
+  }, [dragSource, dragOverTarget, allAppointments, laneByTechId, data?.date, dateParam]);
+
   const { preview: feasibilityPreview } = useFeasibilityPreview(previewInput);
 
-  /**
-   * P6-026 — set of appointment ids whose time range overlaps another
-   * booking on the same technician's lane. Pairwise scan within each
-   * lane (O(n²) per lane, but lanes are small in practice — typically
-   * < 12 appointments per technician per day). Unassigned appointments
-   * don't conflict among themselves because no technician owns them.
-   * Two appointments overlap iff a.start < b.end AND b.start < a.end
-   * (strict inequality so back-to-back bookings don't flag).
-   */
+  const confirmPreviewInput = useMemo<FeasibilityPreviewInput | null>(() => {
+    if (!pendingDrop || pendingDrop.targetKind !== 'lane' || !pendingDrop.targetTechnicianId) {
+      return null;
+    }
+    if (!pendingDrop.proposedStart || !pendingDrop.proposedEnd) return null;
+    return {
+      appointmentId: pendingDrop.source.appointmentId,
+      proposedTechnicianId: pendingDrop.targetTechnicianId,
+      proposedScheduledStart: pendingDrop.proposedStart,
+      proposedScheduledEnd: pendingDrop.proposedEnd,
+    };
+  }, [pendingDrop]);
+
+  const { preview: confirmFeasibilityPreview } = useFeasibilityPreview(confirmPreviewInput);
+
   const conflictIds = useMemo<ReadonlySet<string>>(() => {
     if (!data) return new Set<string>();
     const conflicts = new Set<string>();
@@ -160,67 +233,37 @@ export function DispatchBoard() {
     [data],
   );
 
-  // ── Drag handlers ─────────────────────────────────────────────────────
-  const handleDragStartFromLane = useCallback(
-    (technicianId: string) =>
-      (e: React.DragEvent, appointmentId: string) => {
-        e.dataTransfer.setData('text/plain', appointmentId);
-        e.dataTransfer.effectAllowed = 'move';
-        setDragSource({
-          appointmentId,
-          sourceType: 'lane',
-          sourceTechnicianId: technicianId,
-        });
-      },
-    [],
-  );
-
-  const handleDragStartFromQueue = useCallback(
-    (e: React.DragEvent, appointmentId: string) => {
-      e.dataTransfer.setData('text/plain', appointmentId);
-      e.dataTransfer.effectAllowed = 'move';
-      setDragSource({
-        appointmentId,
-        sourceType: 'queue',
-        sourceTechnicianId: null,
-      });
-    },
-    [],
-  );
-
-  const handleDragOverTarget = useCallback(
-    (targetId: string) =>
-      (e: React.DragEvent) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        setDragOverTarget(targetId);
-      },
-    [],
-  );
-
-  const handleDragLeaveTarget = useCallback(
-    () =>
-      (e: React.DragEvent) => {
-        // Ignore events that fire when entering child elements
-        if (
-          e.currentTarget &&
-          e.relatedTarget &&
-          (e.currentTarget as Node).contains(e.relatedTarget as Node)
-        ) {
-          return;
-        }
-        setDragOverTarget(null);
-      },
-    [],
-  );
-
-  const classifyAndOpenConfirm = useCallback(
-    (target: { kind: 'lane' | 'unassigned'; technicianId: string | null }) => {
+  const openConfirmWithSlot = useCallback(
+    (target: {
+      kind: 'lane' | 'unassigned';
+      technicianId: string | null;
+      insertIndex?: number;
+    }) => {
       if (!dragSource) return;
       const appointment = findAppointment(dragSource.appointmentId);
+      if (!appointment) return;
+
+      if (target.kind === 'lane' && target.technicianId && target.insertIndex !== undefined) {
+        const lane = laneByTechId(target.technicianId);
+        const sorted = [...(lane?.appointments ?? [])].sort(
+          (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+        );
+        if (
+          dragSource.sourceTechnicianId === target.technicianId &&
+          isSameLaneNoOp(sorted, dragSource.appointmentId, target.insertIndex)
+        ) {
+          toast.info(
+            'Use the arrows on the card to reorder, or drag to another technician lane.',
+          );
+          return;
+        }
+      }
 
       let proposalType: ProposedProposalType;
       let targetDescription: string;
+      let proposedStart = appointment.scheduledStart;
+      let proposedEnd = appointment.scheduledEnd;
+      let placement: SlotPlacement = 'gap';
 
       if (target.kind === 'unassigned') {
         proposalType = 'cancel_appointment';
@@ -242,34 +285,108 @@ export function DispatchBoard() {
           : 'Reassign to selected technician';
       }
 
+      if (target.kind === 'lane' && target.technicianId && target.insertIndex !== undefined) {
+        const lane = laneByTechId(target.technicianId);
+        const sorted = [...(lane?.appointments ?? [])].sort(
+          (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+        );
+        const withoutDragged = sorted.filter((a) => a.id !== dragSource.appointmentId);
+        const slot = computeProposedSlot({
+          appointments: withoutDragged,
+          insertIndex: target.insertIndex,
+          dragged: appointment,
+          dayStartIso: dayStartIso(
+            data?.date ?? dateParam,
+            lane?.availabilitySummary?.workingHours?.start,
+          ),
+        });
+        placement = slot.placement;
+        if (slot.placement !== 'overflow') {
+          proposedStart = slot.proposedScheduledStart;
+          proposedEnd = slot.proposedScheduledEnd;
+        }
+      }
+
+      setEditedStart(toDatetimeLocalValue(proposedStart));
+      setEditedEnd(toDatetimeLocalValue(proposedEnd));
       setPendingDrop({
         source: dragSource,
         targetKind: target.kind,
         targetTechnicianId: target.technicianId,
+        insertIndex: target.insertIndex,
         proposalType,
         appointment,
         targetDescription,
+        proposedStart,
+        proposedEnd,
+        placement,
       });
     },
-    [dragSource, findAppointment, findTechnicianName],
+    [dragSource, findAppointment, findTechnicianName, laneByTechId, data?.date, dateParam],
   );
 
-  const handleDropOnLane = useCallback(
+  const handleDragStartFromLane = useCallback(
     (technicianId: string) =>
-      (e: React.DragEvent) => {
-        e.preventDefault();
-        // Reset visual drag state synchronously; the pending dialog drives
-        // confirmation. The appointment's source position is NEVER mutated.
-        setDragOverTarget(null);
-        if (!dragSource) return;
-        // Same source-tech, same drop-target tech, AND no time selection — we
-        // still surface the reschedule dialog. The actual time payload would
-        // be picked from a follow-up edit (out of scope here); for now the
-        // confirmation dialog explains the proposal and the user can cancel.
-        classifyAndOpenConfirm({ kind: 'lane', technicianId });
-        setDragSource(null);
+      (e: React.DragEvent, appointmentId: string) => {
+        e.dataTransfer.setData('text/plain', appointmentId);
+        e.dataTransfer.effectAllowed = 'move';
+        setDragSource({
+          appointmentId,
+          sourceType: 'lane',
+          sourceTechnicianId: technicianId,
+        });
       },
-    [classifyAndOpenConfirm, dragSource],
+    [],
+  );
+
+  const handleDragStartFromQueue = useCallback((e: React.DragEvent, appointmentId: string) => {
+    e.dataTransfer.setData('text/plain', appointmentId);
+    e.dataTransfer.effectAllowed = 'move';
+    setDragSource({
+      appointmentId,
+      sourceType: 'queue',
+      sourceTechnicianId: null,
+    });
+  }, []);
+
+  const handleDragOverUnassigned = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverTarget({ kind: 'unassigned' });
+  }, []);
+
+  const handleDragOverGap = useCallback(
+    (technicianId: string) => (insertIndex: number, e: React.DragEvent) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverTarget({ kind: 'lane', technicianId, insertIndex });
+    },
+    [],
+  );
+
+  const handleDragLeaveGap = useCallback(
+    () => (e: React.DragEvent) => {
+      if (
+        e.currentTarget &&
+        e.relatedTarget &&
+        (e.currentTarget as Node).contains(e.relatedTarget as Node)
+      ) {
+        return;
+      }
+      setDragOverTarget(null);
+    },
+    [],
+  );
+
+  const handleDropOnGap = useCallback(
+    (technicianId: string) => (insertIndex: number, e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOverTarget(null);
+      if (!dragSource) return;
+      openConfirmWithSlot({ kind: 'lane', technicianId, insertIndex });
+      setDragSource(null);
+    },
+    [dragSource, openConfirmWithSlot],
   );
 
   const handleDropOnUnassigned = useCallback(
@@ -277,56 +394,86 @@ export function DispatchBoard() {
       e.preventDefault();
       setDragOverTarget(null);
       if (!dragSource) return;
-      // Drops from the unassigned queue back onto itself are no-ops.
       if (dragSource.sourceType === 'queue') {
         setDragSource(null);
         return;
       }
-      classifyAndOpenConfirm({ kind: 'unassigned', technicianId: null });
+      openConfirmWithSlot({ kind: 'unassigned', technicianId: null });
       setDragSource(null);
     },
-    [classifyAndOpenConfirm, dragSource],
+    [dragSource, openConfirmWithSlot],
   );
 
-  // ── Proposal creation (only on user confirm) ──────────────────────────
+  const handleReorderWithinLane = useCallback(
+    (technicianId: string, appointmentId: string, fromIndex: number, toIndex: number) => {
+      if (fromIndex === toIndex) return;
+      const lane = laneByTechId(technicianId);
+      if (!lane) return;
+      const sorted = [...lane.appointments].sort(
+        (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
+      );
+      const appointment = sorted[fromIndex];
+      const neighbor = sorted[toIndex];
+      if (!appointment || !neighbor) return;
+
+      setPendingDrop({
+        source: {
+          appointmentId,
+          sourceType: 'lane',
+          sourceTechnicianId: technicianId,
+        },
+        targetKind: 'lane',
+        targetTechnicianId: technicianId,
+        proposalType: 'reschedule_appointment',
+        appointment,
+        targetDescription: `Swap time with ${neighbor.customerName ?? 'neighbor'}`,
+        proposedStart: neighbor.scheduledStart,
+        proposedEnd: neighbor.scheduledEnd,
+        placement: 'gap',
+      });
+      setEditedStart(toDatetimeLocalValue(neighbor.scheduledStart));
+      setEditedEnd(toDatetimeLocalValue(neighbor.scheduledEnd));
+    },
+    [laneByTechId],
+  );
+
   const submitProposal = useCallback(async () => {
     if (!pendingDrop) return;
     setIsSubmittingProposal(true);
 
-    const { source, targetKind, targetTechnicianId, proposalType, appointment } = pendingDrop;
-    const idempotencyKey = generateIdempotencyKey();
+    const { source, targetTechnicianId, proposalType, appointment } = pendingDrop;
+    const proposedStart =
+      pendingDrop.placement === 'overflow'
+        ? fromDatetimeLocalValue(editedStart)
+        : pendingDrop.proposedStart;
+    const proposedEnd =
+      pendingDrop.placement === 'overflow'
+        ? fromDatetimeLocalValue(editedEnd)
+        : pendingDrop.proposedEnd;
 
+    const idempotencyKey = generateIdempotencyKey();
     let payload: Record<string, unknown>;
     let summary: string;
 
     if (proposalType === 'reassign_appointment') {
       payload = {
         appointmentId: source.appointmentId,
-        ...(source.sourceTechnicianId
-          ? { fromTechnicianId: source.sourceTechnicianId }
-          : {}),
+        ...(source.sourceTechnicianId ? { fromTechnicianId: source.sourceTechnicianId } : {}),
         toTechnicianId: targetTechnicianId,
-        ...(appointment
-          ? {
-              scheduledStart: appointment.scheduledStart,
-              scheduledEnd: appointment.scheduledEnd,
-            }
-          : {}),
+        scheduledStart: proposedStart,
+        scheduledEnd: proposedEnd,
         reason: 'Reassigned via dispatch board drag-and-drop',
       };
       summary = 'Reassign appointment to a different technician';
     } else if (proposalType === 'reschedule_appointment') {
       payload = {
         appointmentId: source.appointmentId,
-        // Same-lane drop without explicit time — keep the existing window.
-        // The proposal review screen lets the approver tweak before approval.
-        newScheduledStart: appointment?.scheduledStart ?? '',
-        newScheduledEnd: appointment?.scheduledEnd ?? '',
+        newScheduledStart: proposedStart,
+        newScheduledEnd: proposedEnd,
         reason: 'Rescheduled via dispatch board drag-and-drop',
       };
       summary = 'Reschedule appointment within technician lane';
     } else {
-      // cancel_appointment
       payload = {
         appointmentId: source.appointmentId,
         reason: 'Removed from technician via dispatch board drag-and-drop',
@@ -355,9 +502,7 @@ export function DispatchBoard() {
 
       if (!response.ok) {
         if (response.status === 409) {
-          toast.warning(
-            'Someone else updated this appointment — refresh and try again.',
-          );
+          toast.warning('Someone else updated this appointment — refresh and try again.');
           void refetch();
           return;
         }
@@ -374,32 +519,18 @@ export function DispatchBoard() {
         return;
       }
 
-      const json = (await response.json().catch(() => null)) as
-        | { id?: string }
-        | null;
+      const json = (await response.json().catch(() => null)) as { id?: string } | null;
       const proposalId = json?.id;
       const link = proposalId ? `/inbox?proposal=${proposalId}` : '/inbox';
 
       toast.success('Proposal created — pending review', {
         action: {
           label: 'Review',
-          onClick: () => {
-            // Defer to react-router navigation if available; fall back to
-            // window.location to stay framework-agnostic in tests.
-            window.location.assign(link);
-          },
+          onClick: () => window.location.assign(link),
         },
       });
-      // P6-027 — refetch the board after a successful proposal POST.
-      // Auto-approved proposals (high-confidence schedule changes that
-      // clear the auto-approve threshold) execute immediately upstream,
-      // so the next refetch picks up the new state. Proposals that
-      // queue for human review return unchanged data — refetch is a
-      // no-op in that case but keeps the UI consistent if the proposal
-      // gets approved+executed in another tab while this one is open.
+      emitProposalsChanged();
       void refetch();
-      // Only dismiss the dialog on success. On error we keep `pendingDrop`
-      // so the user can retry without re-performing the drag.
       setPendingDrop(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -407,14 +538,30 @@ export function DispatchBoard() {
     } finally {
       setIsSubmittingProposal(false);
     }
-  }, [pendingDrop]);
+  }, [pendingDrop, editedStart, editedEnd, refetch]);
 
   const cancelPendingDrop = useCallback(() => {
     if (isSubmittingProposal) return;
     setPendingDrop(null);
   }, [isSubmittingProposal]);
 
-  // ── Filtering / projection ────────────────────────────────────────────
+  const updatePendingTimes = useCallback((start: string, end: string) => {
+    setEditedStart(start);
+    setEditedEnd(end);
+    const isoStart = fromDatetimeLocalValue(start);
+    const isoEnd = fromDatetimeLocalValue(end);
+    setPendingDrop((prev) =>
+      prev
+        ? {
+            ...prev,
+            proposedStart: isoStart,
+            proposedEnd: isoEnd,
+            placement: 'gap',
+          }
+        : null,
+    );
+  }, []);
+
   const filteredLanes = data?.technicianLanes.filter((lane) => {
     if (filters.technicianIds && filters.technicianIds.length > 0) {
       return filters.technicianIds.includes(lane.technicianId);
@@ -432,18 +579,46 @@ export function DispatchBoard() {
     name: lane.technicianName,
   })) ?? [];
 
-  const isQueueDropTarget = dragOverTarget === '__unassigned__';
+  const isQueueDropTarget = dragOverTarget?.kind === 'unassigned';
+
+  const confirmTimeRange: TimeRangeDisplay | undefined =
+    pendingDrop?.appointment && pendingDrop.proposedStart
+      ? {
+          fromStart: pendingDrop.appointment.scheduledStart,
+          fromEnd: pendingDrop.appointment.scheduledEnd,
+          toStart: pendingDrop.proposedStart,
+          toEnd: pendingDrop.proposedEnd,
+        }
+      : undefined;
+
+  const presenceWarning =
+    pendingDrop?.appointment?.editing &&
+    pendingDrop.appointment.editing.userId !== currentUserId
+      ? `${pendingDrop.appointment.editing.displayName} may be editing this appointment.`
+      : undefined;
+
+  const dialogFeasibility: FeasibilityResult | null =
+    confirmFeasibilityPreview ?? (pendingDrop ? feasibilityPreview : null);
 
   return (
     <div className="dispatch-board" data-testid="dispatch-board">
       <div className="dispatch-board__header">
-        <h1>Dispatch Board</h1>
+        <div>
+          <h1>Dispatch Board</h1>
+          {conflictIds.size > 0 && (
+            <p
+              className="text-xs text-amber-600 flex items-center gap-1 mt-0.5"
+              data-testid="dispatch-conflict-banner"
+            >
+              <AlertTriangle size={11} />
+              {conflictIds.size} scheduling conflict{conflictIds.size !== 1 ? 's' : ''} on this day
+            </p>
+          )}
+        </div>
         <DateNavigation selectedDate={selectedDate} onDateChange={handleDateChange} />
       </div>
 
-      {data?.summary && (
-        <SummaryStrip summary={data.summary} />
-      )}
+      {data?.summary && <SummaryStrip summary={data.summary} />}
 
       <DispatchFilters
         technicians={technicians}
@@ -467,8 +642,8 @@ export function DispatchBoard() {
               appointments={filterAppointmentsByStatus(data?.unassignedAppointments ?? [])}
               onDragStart={handleDragStartFromQueue}
               isDragOver={isQueueDropTarget}
-              onDragOver={handleDragOverTarget('__unassigned__')}
-              onDragLeave={handleDragLeaveTarget()}
+              onDragOver={handleDragOverUnassigned}
+              onDragLeave={handleDragLeaveGap()}
               onDrop={handleDropOnUnassigned}
               conflictIds={conflictIds}
             />
@@ -484,13 +659,24 @@ export function DispatchBoard() {
                 }}
                 appointments={filterAppointmentsByStatus(lane.appointments)}
                 onDragStart={handleDragStartFromLane(lane.technicianId)}
-                isDragOver={dragOverTarget === lane.technicianId}
-                onDragOver={handleDragOverTarget(lane.technicianId)}
-                onDragLeave={handleDragLeaveTarget()}
-                onDrop={handleDropOnLane(lane.technicianId)}
+                isDragOver={dragOverTarget?.kind === 'lane' && dragOverTarget.technicianId === lane.technicianId}
+                activeDropIndex={
+                  dragOverTarget?.kind === 'lane' && dragOverTarget.technicianId === lane.technicianId
+                    ? dragOverTarget.insertIndex
+                    : null
+                }
+                onDragOverGap={handleDragOverGap(lane.technicianId)}
+                onDragLeaveGap={handleDragLeaveGap()}
+                onDropGap={handleDropOnGap(lane.technicianId)}
+                onReorderWithinLane={(appointmentId, fromIndex, toIndex) =>
+                  handleReorderWithinLane(lane.technicianId, appointmentId, fromIndex, toIndex)
+                }
                 conflictIds={conflictIds}
+                currentUserId={currentUserId}
                 dragPreview={
-                  dragOverTarget === lane.technicianId && feasibilityPreview
+                  dragOverTarget?.kind === 'lane' &&
+                  dragOverTarget.technicianId === lane.technicianId &&
+                  feasibilityPreview
                     ? { targetTechnicianId: lane.technicianId, preview: feasibilityPreview }
                     : null
                 }
@@ -514,6 +700,13 @@ export function DispatchBoard() {
             : undefined
         }
         targetDescription={pendingDrop?.targetDescription}
+        timeRange={confirmTimeRange}
+        feasibility={dialogFeasibility}
+        presenceWarning={presenceWarning}
+        allowTimeEdit={pendingDrop?.placement === 'overflow'}
+        editedStart={editedStart}
+        editedEnd={editedEnd}
+        onEditedTimesChange={updatePendingTimes}
         isSubmitting={isSubmittingProposal}
         onConfirm={submitProposal}
         onCancel={cancelPendingDrop}

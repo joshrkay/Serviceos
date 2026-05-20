@@ -2378,7 +2378,22 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     }, auditRepo)
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
+  app.use(
+    '/api/dispatch',
+    createDispatchRoutes({
+      appointmentRepo,
+      assignmentRepo,
+      jobRepo,
+      customerRepo,
+      locationRepo,
+      boardEventsDeps: {
+        authUserIdFromRequest: async (req) =>
+          (req as { auth?: { userId?: string } }).auth?.userId ?? null,
+        authTenantIdFromRequest: async (req) =>
+          (req as { auth?: { tenantId?: string } }).auth?.tenantId ?? null,
+      },
+    }),
+  );
   app.use(
     '/api/estimates',
     createEstimateRouter(
