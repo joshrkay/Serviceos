@@ -14,7 +14,7 @@
   "callerIdBlocked": false,
   "turns": [
     {
-      "caller": "I'd like to sign up as a new customer.",
+      "caller": "I'd like to sign up as a new customer. My name is Jane Smith.",
       "expected": {
         "intent": "create_customer",
         "proposalType": "create_customer"

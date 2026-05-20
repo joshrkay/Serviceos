@@ -11,9 +11,11 @@
  *      `entries` (real LLM exchanges are recorded later via
  *      `npm run voice-quality:record`).
  *
- * create-customer-new-signup: bucket-03 script; disposition grading
- * depends on P18-001 classifier + persisted create_customer execution.
- * Cassettes must be recorded (Phase 2) before expecting launchGate pass.
+ * P18-001 closed the `create-customer-new-signup` classifier leak; the script
+ * is Layer-2 eligible and must classify `create_customer` on the signup
+ * phrasing. The caller turn includes a name; hard-slot grading only pins
+ * caller-id `phone` (name is a soft slot for VQ-022). Cassettes must still
+ * be recorded (Phase 2) before expecting Layer 1 `launchGate.pass`.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -75,10 +77,9 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     },
   );
 
-  it('VQ-012 — create-customer-new-signup grading config (P18-001 shipped)', () => {
-    // P18-001: deterministic create_customer classifier + voice handler
-    // shipped. Cassettes must still be recorded (Phase 2) before the
-    // Layer 1 launch gate can pass in CI replay mode.
+  it('VQ-012 — create-customer-new-signup is P18-001-ready (layer2 + create_customer intent)', () => {
+    // P18-001: classifier + voice handler shipped. Cassettes must still be
+    // recorded (Phase 2) before Layer 1 launch gate can pass in replay mode.
     const file = path.join(
       CORPUS_ROOT,
       'scripts',
@@ -90,5 +91,9 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     expect(script.grading.appliesDisposition).toEqual([9, 10, 11, 12]);
     expect(script.layer2Eligible).toBe(true);
     expect(script.turns[0].expected.intent).toBe('create_customer');
+    expect(script.turns[0].expected.proposalType).toBe('create_customer');
+
+    const golden = loadGoldenForScript(script.id, CORPUS_ROOT);
+    expect(golden).toEqual([{ phone: '+15555550302' }]);
   });
 });

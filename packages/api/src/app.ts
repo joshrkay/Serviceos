@@ -326,7 +326,6 @@ import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
-import { CreateCustomerVoiceExecutionHandler } from './proposals/execution/create-customer-handler';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
@@ -1279,6 +1278,7 @@ export function createApp(): express.Express {
       )
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
+    customerRepo,
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
@@ -1297,15 +1297,6 @@ export function createApp(): express.Express {
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
   });
-  // P18-001: replace the stub create_customer handler from the registry
-  // with the wired-up voice handler so an approved create_customer
-  // proposal actually persists a Customer row + audit trail. The base
-  // registry installs a synthetic-id stub so unit tests can run
-  // without a CustomerRepository dep; production overrides it here.
-  executionHandlers.set(
-    'create_customer',
-    new CreateCustomerVoiceExecutionHandler(customerRepo, auditRepo),
-  );
   // §11 H1: every executor wiring threads an IdempotencyGuard so
   // queue redelivery cannot double-execute side effects. The guard
   // looks up prior `proposal_executions` rows by (tenant_id,
