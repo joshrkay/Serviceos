@@ -53,6 +53,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers', icon: Users    },
         { to: '/estimates',      label: 'Estimates', icon: FileText },
         { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+        { to: '/inbox',          label: 'Inbox',     icon: Bell     },
+        { to: '/reports/money',  label: 'Money',     icon: TrendingUp },
         { to: '/settings',       label: 'Settings',  icon: Settings },
       ];
     case 'both':
@@ -65,6 +67,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText      },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
+        { to: '/inbox',          label: 'Inbox',        icon: Bell          },
+        { to: '/reports/money',  label: 'Money',        icon: TrendingUp    },
         { to: '/settings',       label: 'Settings',     icon: Settings      },
       ];
     case 'supervisor':
@@ -79,6 +83,8 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
         { to: '/invoices',      label: 'Invoices',     icon: Receipt       },
+        { to: '/inbox',         label: 'Inbox',        icon: Bell          },
+        { to: '/reports/money', label: 'Money',        icon: TrendingUp    },
         { to: '/interactions',  label: 'Interactions', icon: Layers        },
         { to: '/settings',      label: 'Settings',     icon: Settings      },
       ];
@@ -89,28 +95,28 @@ function getBottomNav(mode: Mode): NavItem[] {
   switch (mode) {
     case 'tech':
       return [
-        { to: '/technician/day', label: 'Today',     icon: Wrench   },
-        { to: '/jobs',           label: 'Jobs',      icon: Briefcase },
-        { to: '/customers',      label: 'Customers', icon: Users    },
-        { to: '/invoices',       label: 'Invoices',  icon: Receipt  },
+        { to: '/technician/day', label: 'Today',  icon: Wrench     },
+        { to: '/inbox',          label: 'Inbox',  icon: Bell       },
+        { to: '/reports/money',  label: 'Money',  icon: TrendingUp },
+        { to: '/invoices',       label: 'Bills',  icon: Receipt    },
+        { to: '/estimates',      label: 'Quotes', icon: FileText   },
       ];
     case 'both':
       return [
-        { to: '/assistant',      label: 'Sessions',  icon: MessageSquare },
-        { to: '/technician/day', label: 'Today',     icon: Wrench        },
-        { to: '/jobs',           label: 'Jobs',      icon: Briefcase     },
-        { to: '/customers',      label: 'Customers', icon: Users         },
-        { to: '/invoices',       label: 'Invoices',  icon: Receipt       },
+        { to: '/technician/day', label: 'Today',  icon: Wrench        },
+        { to: '/inbox',          label: 'Inbox',  icon: Bell          },
+        { to: '/reports/money',  label: 'Money',  icon: TrendingUp    },
+        { to: '/invoices',       label: 'Bills',  icon: Receipt       },
+        { to: '/assistant',      label: 'AI',     icon: MessageSquare },
       ];
     case 'supervisor':
     default:
       return [
-        { to: '/',           label: 'Home',      icon: Home          },
-        { to: '/assistant',  label: 'AI',        icon: MessageSquare },
-        { to: '/jobs',       label: 'Jobs',      icon: Briefcase     },
-        { to: '/leads',      label: 'Leads',     icon: TrendingUp    },
-        { to: '/customers',  label: 'Customers', icon: Users         },
-        { to: '/invoices',   label: 'Invoices',  icon: Receipt       },
+        { to: '/',              label: 'Home',   icon: Home          },
+        { to: '/inbox',         label: 'Inbox',  icon: Bell          },
+        { to: '/reports/money', label: 'Money',  icon: TrendingUp    },
+        { to: '/invoices',      label: 'Bills',  icon: Receipt       },
+        { to: '/assistant',     label: 'AI',     icon: MessageSquare },
       ];
   }
 }
@@ -402,14 +408,14 @@ function ShellInner() {
               >
                 <Icon size={16} className={active ? 'text-blue-600' : ''} />
                 {label}
-                {to === '/assistant' && (
-                  <span className="ml-auto flex size-4 items-center justify-center rounded-full bg-blue-100 text-blue-700" style={{ fontSize: 9 }}>4</span>
-                )}
-                {to === '/invoices' && (
-                  <span className="ml-auto flex size-4 items-center justify-center rounded-full bg-amber-100 text-amber-700" style={{ fontSize: 9 }}>2</span>
-                )}
-                {to === '/leads' && (
-                  <span className="ml-auto flex size-4 items-center justify-center rounded-full bg-blue-100 text-blue-700" style={{ fontSize: 9 }}>5</span>
+                {to === '/inbox' && pendingProposalCount > 0 && (
+                  <span
+                    className="ml-auto flex min-w-[18px] h-[18px] items-center justify-center rounded-full bg-blue-600 text-white px-1"
+                    style={{ fontSize: 9 }}
+                    data-testid="sidebar-inbox-badge"
+                  >
+                    {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                  </span>
                 )}
               </NavLink>
             );
@@ -517,15 +523,25 @@ function ShellInner() {
           <div className="flex">
             {bottomNav.map(({ to, label, icon: Icon }) => {
               const active = isExact(to);
+              const showInboxBadge = to === '/inbox' && pendingProposalCount > 0;
               return (
                 <NavLink
                   key={to}
                   to={to}
-                  className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
+                  className={`relative flex flex-1 flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
                     active ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'
                   }`}
                 >
                   <Icon size={18} />
+                  {showInboxBadge && (
+                    <span
+                      className="absolute top-1 right-[calc(50%-18px)] flex size-4 items-center justify-center rounded-full bg-blue-600 text-white"
+                      style={{ fontSize: 8 }}
+                      data-testid="mobile-inbox-badge"
+                    >
+                      {pendingProposalCount > 9 ? '9+' : pendingProposalCount}
+                    </span>
+                  )}
                   <span style={{ fontSize: 9 }}>{label}</span>
                 </NavLink>
               );

@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
-  AlertCircle, Clock, ChevronRight, ArrowRight, CalendarDays,
-  DollarSign, FileText, Zap, Send, Eye, Calendar, Plus,
-  CheckCircle2, Mic, TrendingUp,
+  AlertCircle, Clock, ChevronRight, ArrowRight,
+  DollarSign, FileText, Send, Eye, Plus,
+  CheckCircle2, Mic, TrendingUp, Bell,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import {
@@ -15,6 +15,7 @@ import {
 } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
+import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { ErrorState } from '../ErrorState';
 
 // ─── API Types ────────────────────────────────────────────────────────────
@@ -287,13 +288,13 @@ export function HomePage() {
       id: `inv-${i.id}`, type: 'overdue' as const,
       message: `${customerName(i.customer)} — invoice overdue`,
       sub: `${i.invoiceNumber} · ${centsToDisplay(i.totalCents)} · Was due ${i.dueDate ?? ''}`,
-      action: 'Remind', to: '/invoices',
+      action: 'Remind', to: `/invoices/${i.id}`,
     })),
     ...pendingEsts.filter(e => !dismissed.has(`est-${e.id}`)).map(e => ({
       id: `est-${e.id}`, type: 'followup' as const,
       message: `${customerName(e.customer)} estimate not yet opened`,
       sub: `${e.estimateNumber} · ${centsToDisplay(e.totalCents)}${e.sentAt ? ` · Sent ${formatDate(e.sentAt)}` : ''}`,
-      action: 'Follow up', to: '/estimates',
+      action: 'Follow up', to: `/estimates/${e.id}`,
     })),
   ].filter(item => !dismissed.has(item.id));
 
@@ -324,18 +325,44 @@ export function HomePage() {
 
           {/* 3-stat pulse */}
           <div className="grid grid-cols-3 gap-3 mt-4">
-            {[
-              { label: 'Active today',    value: `${activeCount} jobs`,             color: 'text-blue-700',  bg: 'bg-blue-50 border-blue-100'   },
-              { label: 'Outstanding',     value: `$${totalOut.toLocaleString()}`,   color: 'text-amber-700', bg: 'bg-amber-50 border-amber-100' },
-              { label: 'Needs attention', value: `${attentionItems.length} items`,  color: attentionItems.length > 0 ? 'text-red-600' : 'text-green-700', bg: attentionItems.length > 0 ? 'bg-red-50 border-red-100' : 'bg-green-50 border-green-100' },
-            ].map(({ label, value, color, bg }) => (
-              <div key={label} className={`rounded-xl border px-3 py-2.5 ${bg}`}>
-                <p className={`text-xs mb-0.5 ${color}`}>{label}</p>
-                <p className={`text-sm ${color}`}>{value}</p>
-              </div>
-            ))}
+            <button
+              type="button"
+              onClick={() => navigate('/jobs')}
+              className="rounded-xl border px-3 py-2.5 text-left bg-blue-50 border-blue-100 hover:border-blue-200 transition-colors"
+            >
+              <p className="text-xs mb-0.5 text-blue-700">Active today</p>
+              <p className="text-sm text-blue-700">{activeCount} jobs</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/reports/money')}
+              data-testid="home-stat-outstanding"
+              className="rounded-xl border px-3 py-2.5 text-left bg-amber-50 border-amber-100 hover:border-amber-200 transition-colors"
+            >
+              <p className="text-xs mb-0.5 text-amber-700">Outstanding</p>
+              <p className="text-sm text-amber-700">${totalOut.toLocaleString()}</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate(attentionItems.length > 0 ? '/invoices' : '/inbox')}
+              data-testid="home-stat-attention"
+              className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                attentionItems.length > 0
+                  ? 'bg-red-50 border-red-100 hover:border-red-200'
+                  : 'bg-green-50 border-green-100 hover:border-green-200'
+              }`}
+            >
+              <p className={`text-xs mb-0.5 ${attentionItems.length > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                Needs attention
+              </p>
+              <p className={`text-sm ${attentionItems.length > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                {attentionItems.length} items
+              </p>
+            </button>
           </div>
         </div>
+
+        <MoneyLoopHomeCard />
 
         {/* ── Time given back ── */}
         <TimeGivenBackCard />
@@ -489,7 +516,7 @@ export function HomePage() {
                     {pendingEsts.map(est => (
                       <button
                         key={est.id}
-                        onClick={() => navigate('/estimates')}
+                        onClick={() => navigate(`/estimates/${est.id}`)}
                         className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors group"
                       >
                         <div className="flex size-8 items-center justify-center rounded-xl shrink-0 bg-blue-100">
@@ -522,8 +549,8 @@ export function HomePage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-amber-700">${totalOut.toLocaleString()}</span>
-                    <button onClick={() => navigate('/invoices')} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700">
-                      View all <ArrowRight size={11} />
+                    <button onClick={() => navigate('/reports/money')} className="flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-700">
+                      Money summary <ArrowRight size={11} />
                     </button>
                   </div>
                 </div>
@@ -543,7 +570,7 @@ export function HomePage() {
                       return (
                         <button
                           key={inv.id}
-                          onClick={() => navigate('/invoices')}
+                          onClick={() => navigate(`/invoices/${inv.id}`)}
                           className="flex items-center gap-3 w-full px-4 py-3.5 text-left hover:bg-slate-50 transition-colors"
                         >
                           <div className={`flex size-8 items-center justify-center rounded-xl shrink-0 ${
@@ -575,10 +602,10 @@ export function HomePage() {
               <SectionHead label="Quick actions" />
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  { label: 'New job',      icon: Plus,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/jobs'      },
-                  { label: 'New estimate', icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates' },
-                  { label: 'New invoice',  icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'  },
-                  { label: 'Schedule',     icon: CalendarDays, color: 'text-green-600',  bg: 'bg-green-50',  to: '/schedule'  },
+                  { label: 'Approval inbox', icon: Bell,         color: 'text-blue-600',   bg: 'bg-blue-50',   to: '/inbox'          },
+                  { label: 'Money summary',  icon: TrendingUp,   color: 'text-amber-700',  bg: 'bg-amber-50',  to: '/reports/money'  },
+                  { label: 'New estimate',   icon: FileText,     color: 'text-indigo-600', bg: 'bg-indigo-50', to: '/estimates'      },
+                  { label: 'New invoice',    icon: DollarSign,   color: 'text-amber-600',  bg: 'bg-amber-50',  to: '/invoices'       },
                 ].map(({ label, icon: Icon, color, bg, to }) => (
                   <button
                     key={label}
