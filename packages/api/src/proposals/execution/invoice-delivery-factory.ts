@@ -10,7 +10,11 @@ export function resolveInvoiceDeliveryProvider(opts: {
   if (opts.sendService) {
     return new SendServiceInvoiceDeliveryProvider(opts.sendService);
   }
-  if (opts.nodeEnv === 'production' || opts.nodeEnv === 'staging') {
+  if (
+    opts.nodeEnv === 'prod' ||
+    opts.nodeEnv === 'production' ||
+    opts.nodeEnv === 'staging'
+  ) {
     throw new Error(
       'Invoice delivery requires SendService in production/staging. Configure Twilio/SendGrid credentials.',
     );

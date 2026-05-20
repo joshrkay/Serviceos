@@ -1090,7 +1090,7 @@ export function createApp(): express.Express {
             replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
           },
         })
-      : process.env.NODE_ENV === 'production'
+      : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
         ? null
         : new InMemoryDeliveryProvider();
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
@@ -1218,11 +1218,11 @@ export function createApp(): express.Express {
     }
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
-  // against real domain repositories. Invoice delivery uses SendService
-  // when configured; resolveInvoiceDeliveryProvider throws at boot in
-  // production/staging without credentials; dev/test uses Noop.
+  // against real domain repositories. Invoice delivery routes through
+  // SendService when configured; resolveInvoiceDeliveryProvider throws at
+  // boot in prod/staging without credentials; dev/test uses Noop.
   const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
-    nodeEnv: process.env.NODE_ENV ?? 'development',
+    nodeEnv: config.NODE_ENV,
     sendService,
   });
   const dispatchAnalyticsRepo = pool
@@ -1282,6 +1282,8 @@ export function createApp(): express.Express {
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
+    jobRepo,
+    locationRepo,
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
@@ -1295,7 +1297,6 @@ export function createApp(): express.Express {
     transactionalComms,
     expenseRepo,
     auditRepo,
-    jobRepo,
     feasibilityDeps,
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),

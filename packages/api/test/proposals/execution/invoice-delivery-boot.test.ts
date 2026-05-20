@@ -5,7 +5,7 @@ describe('invoice delivery provider', () => {
   it('throws in production when SendService is not configured', () => {
     expect(() =>
       resolveInvoiceDeliveryProvider({
-        nodeEnv: 'production',
+        nodeEnv: 'prod',
         sendService: undefined,
       }),
     ).toThrow(/SendService|delivery/i);
