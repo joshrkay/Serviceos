@@ -33,6 +33,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Install infra dependencies
+        run: npm ci
+        working-directory: infra
+
       - name: Infra CDK tests
         run: npm test
         working-directory: infra
