@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
 import { Proposal, ProposalRepository, ProposalStatus } from './proposal';
@@ -56,6 +57,10 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         ? 'ON CONFLICT (tenant_id, idempotency_key) DO NOTHING'
         : '';
 
+      const status: ProposalStatus = proposal.status ?? 'draft';
+      const createdAt = proposal.createdAt ?? new Date();
+      const updatedAt = proposal.updatedAt ?? createdAt;
+
       const result = await client.query(
         `INSERT INTO proposals (
           id, tenant_id, proposal_type, status, payload, summary, explanation,
@@ -73,10 +78,10 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           $25, $26, $27
         ) ${conflictClause} RETURNING *`,
         [
-          proposal.id,
+          proposal.id ?? uuidv4(),
           proposal.tenantId,
           proposal.proposalType,
-          proposal.status,
+          status,
           JSON.stringify(proposal.payload),
           proposal.summary,
           proposal.explanation ?? null,
@@ -98,8 +103,8 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           proposal.undoneAt ?? null,
           proposal.undoneBy ?? null,
           proposal.createdBy,
-          proposal.createdAt,
-          proposal.updatedAt,
+          createdAt,
+          updatedAt,
         ]
       );
       if (result.rows.length === 0) {

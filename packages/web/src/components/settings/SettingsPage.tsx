@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useClerk } from '@clerk/clerk-react';
 import {
@@ -25,6 +25,7 @@ import {
   fetchLanguageSettings,
   updateLanguageSettings,
 } from '../../api/settings';
+import { businessInitial } from '../../utils/business-initial';
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -36,6 +37,7 @@ export function SettingsPage() {
   const [aiAuto, setAiAuto]         = useState(false);
   const [reminders, setReminders]   = useState(true);
   const [spanishMode, setSpanishMode] = useState(false);
+  const [businessName, setBusinessName] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,12 +48,16 @@ export function SettingsPage() {
         const data = (await res.json()) as {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
+          businessName?: string;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
         }
         if (typeof data.autoSendAppointmentReminders === 'boolean') {
           setReminders(data.autoSendAppointmentReminders);
+        }
+        if (typeof data.businessName === 'string' && data.businessName.trim()) {
+          setBusinessName(data.businessName.trim());
         }
       } catch {
         /* network hiccup — defaults remain */
@@ -223,10 +229,26 @@ export function SettingsPage() {
     }
   }
 
-  const intakeUrl = 'fieldly.app/intake/ortega-hvac';
+  const intakePath = useMemo(() => {
+    if (!me?.tenant_id) return null;
+    return `/intake?t=${me.tenant_id}`;
+  }, [me?.tenant_id]);
+
+  const intakeUrlDisplay = useMemo(() => {
+    if (!intakePath) return 'Sign in to generate your intake link';
+    if (typeof window === 'undefined') return intakePath;
+    return `${window.location.host}${intakePath}`;
+  }, [intakePath]);
+
+  const intakeUrlAbsolute = useMemo(() => {
+    if (!intakePath) return '';
+    if (typeof window === 'undefined') return intakePath;
+    return `${window.location.origin}${intakePath}`;
+  }, [intakePath]);
 
   function copyIntakeUrl() {
-    navigator.clipboard.writeText(`https://${intakeUrl}`).catch(() => {});
+    if (!intakeUrlAbsolute) return;
+    navigator.clipboard.writeText(intakeUrlAbsolute).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
@@ -381,11 +403,14 @@ export function SettingsPage() {
 
         {/* Business card */}
         <div className="rounded-2xl bg-slate-900 text-white px-5 py-5 mb-6 flex items-center gap-4">
-          <span className="flex size-12 items-center justify-center rounded-xl bg-white/10 text-2xl shrink-0">🔧</span>
+          <span className="flex size-12 items-center justify-center rounded-xl bg-white/10 text-lg font-medium shrink-0">
+            {businessInitial(businessName)}
+          </span>
           <div className="flex-1 min-w-0">
-            <p className="text-white">Ortega HVAC &amp; Services</p>
-            <p className="text-xs text-slate-400 mt-0.5">HVAC · Plumbing · Painting · Austin, TX</p>
-            <p className="text-xs text-slate-400 mt-0.5">Owner</p>
+            <p className="text-white">{businessName ?? 'Your business'}</p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {me?.role ? me.role.charAt(0).toUpperCase() + me.role.slice(1) : 'Owner'}
+            </p>
           </div>
           <button
             onClick={() => setBusinessProfileOpen(true)}
@@ -406,16 +431,18 @@ export function SettingsPage() {
               <p className="text-xs text-slate-400 mt-0.5">Share this link so customers can request service</p>
             </div>
             <button
-              onClick={() => navigate('/intake')}
-              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0"
+              onClick={() => intakePath && navigate(intakePath)}
+              disabled={!intakePath}
+              className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors shrink-0 disabled:opacity-40"
             >
               <ExternalLink size={11} /> Preview
             </button>
           </div>
           <div className="px-4 py-3 bg-slate-50 flex items-center gap-3">
-            <p className="flex-1 text-xs text-slate-500 truncate font-mono">{intakeUrl}</p>
+            <p className="flex-1 text-xs text-slate-500 truncate font-mono">{intakeUrlDisplay}</p>
             <button
               onClick={copyIntakeUrl}
+              disabled={!intakeUrlAbsolute}
               className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs transition-all shrink-0 ${
                 copied
                   ? 'bg-green-100 text-green-700'
@@ -642,7 +669,10 @@ export function SettingsPage() {
 
       {/* Business profile sheet — closes the first of the 13 settings stubs. */}
       {businessProfileOpen && (
-        <BusinessProfileSheet onClose={() => setBusinessProfileOpen(false)} />
+        <BusinessProfileSheet
+          onClose={() => setBusinessProfileOpen(false)}
+          onSaved={(fields) => setBusinessName(fields.businessName)}
+        />
       )}
 
       {/* Terminology sheet — entity-label overrides (Quote vs Estimate, etc.) */}

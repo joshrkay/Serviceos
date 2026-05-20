@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Zap, ChevronRight, Check, AlertCircle, Phone, Mail,
+  ChevronRight, Check, AlertCircle, Phone, Mail,
   MapPin, Camera, ArrowLeft, Clock, Star,
 } from 'lucide-react';
 import { submitIntakeLead, fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
+import { businessInitial } from '../../utils/business-initial';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -53,8 +54,8 @@ interface ServicePresentation {
   placeholder: string;
 }
 
-// Presentation only — emoji + copy keyed by the backend's verticalType.
-// The list of services a tenant actually offers comes from the API.
+// Presentation only — emoji + copy keyed by known verticalType values.
+// Unknown packs from the API still render using displayName + defaults.
 const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   hvac: {
     emoji: '❄️',
@@ -73,16 +74,25 @@ const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   },
 };
 
-const FALLBACK_PLACEHOLDER = 'e.g. "Briefly describe what you need help with."';
+const DEFAULT_SERVICE_PRESENTATION: ServicePresentation = {
+  emoji: '🛠️',
+  desc: 'Describe what you need and we will match you with the right technician',
+  placeholder: 'e.g. "Briefly describe what you need help with."',
+};
 
-function presentationFor(verticalType: string, displayName: string): ServicePresentation {
-  return (
-    SERVICE_PRESENTATION[verticalType] ?? {
-      emoji: '🔧',
-      desc: displayName,
-      placeholder: FALLBACK_PLACEHOLDER,
-    }
-  );
+const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
+
+function presentationForVertical(
+  verticalType: string,
+  displayName?: string,
+): ServicePresentation {
+  const known = SERVICE_PRESENTATION[verticalType];
+  if (known) return known;
+  return {
+    emoji: DEFAULT_SERVICE_PRESENTATION.emoji,
+    desc: displayName ?? DEFAULT_SERVICE_PRESENTATION.desc,
+    placeholder: DEFAULT_SERVICE_PRESENTATION.placeholder,
+  };
 }
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
@@ -125,14 +135,15 @@ export function IntakeFormPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
 
-  // Service options shown in step 1 = the tenant's packs (from the API)
-  // joined with local presentation (emoji/copy). Packs with no local
-  // presentation entry are skipped rather than rendered blank.
-  const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => ({
-    verticalType: st.verticalType,
-    label: st.displayName,
-    ...presentationFor(st.verticalType, st.displayName),
-  }));
+  // Service options = tenant packs from the API + optional local emoji/copy.
+  const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => {
+    const presentation = presentationForVertical(st.verticalType);
+    return {
+      verticalType: st.verticalType,
+      label: st.displayName,
+      ...presentation,
+    };
+  });
 
   // Attribution captured once on mount. Storing in a ref so re-renders
   // don't lose or duplicate it.
@@ -232,8 +243,11 @@ export function IntakeFormPage() {
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Business header */}
       <div className="bg-white border-b border-slate-100 px-5 py-4 flex items-center gap-3">
-        <div className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0">
-          <Zap size={16} className="text-white" />
+        <div
+          className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0 text-sm font-medium text-white"
+          aria-hidden
+        >
+          {businessInitial(tenantInfo?.businessName)}
         </div>
         <div>
           <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>
@@ -336,7 +350,7 @@ export function IntakeFormPage() {
                 onChange={e => update({ description: e.target.value })}
                 placeholder={
                   data.serviceType
-                    ? SERVICE_PRESENTATION[data.serviceType].placeholder
+                    ? presentationForVertical(data.serviceType).placeholder
                     : FALLBACK_PLACEHOLDER
                 }
                 rows={5}
