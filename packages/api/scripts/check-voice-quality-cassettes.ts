@@ -1,6 +1,8 @@
 /**
  * Fail fast when any voice-quality cassette has no recorded entries.
  * Used before/after cassette refresh to list scripts still needing record.
+ *
+ * Usage: npm run voice-quality:check-cassettes
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -16,10 +18,27 @@ interface CassetteFile {
 }
 
 function main(): void {
-  const files = fs
-    .readdirSync(CASSETTES_DIR)
-    .filter((f) => f.endsWith('.json'))
-    .sort();
+  if (!fs.existsSync(CASSETTES_DIR)) {
+    console.error(`Cassettes directory not found: ${CASSETTES_DIR}`);
+    process.exit(1);
+  }
+
+  let files: string[];
+  try {
+    files = fs
+      .readdirSync(CASSETTES_DIR)
+      .filter((f) => f.endsWith('.json'))
+      .sort();
+  } catch (err) {
+    console.error(`Failed to read cassettes directory: ${CASSETTES_DIR}`);
+    console.error(err);
+    process.exit(1);
+  }
+
+  if (files.length === 0) {
+    console.error(`No cassette JSON files found in ${CASSETTES_DIR}`);
+    process.exit(1);
+  }
 
   const needingRecord: string[] = [];
 
