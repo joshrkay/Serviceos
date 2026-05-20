@@ -31,7 +31,7 @@ describe('ProposalExecutor — concurrent idempotency (§11 H1)', () => {
   });
 
   it('parallel execute collapses to one handler invocation', async () => {
-    const tenantId = await createTestTenant(pool);
+    const { tenantId } = await createTestTenant(pool);
     let handlerInvocations = 0;
     const handler: ExecutionHandler = {
       proposalType: 'create_customer',
