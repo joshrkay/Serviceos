@@ -90,7 +90,11 @@ export function OnboardingShell() {
         )}
         {activeId === 'billing' && <BillingStep />}
         {activeId === 'test_call' && (
-          <TestCallStep status={data} onSkipped={() => void refetch()} />
+          <TestCallStep
+            status={data}
+            onSkipped={() => void refetch()}
+            onRefresh={() => void refetch()}
+          />
         )}
         {activeId === 'signup' && (
           <div className="text-slate-500">

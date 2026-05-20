@@ -24,6 +24,7 @@ export interface OnboardingFacts {
   testCallSkippedAt: Date | null;
   /** Timestamp of the one-time 30-minute upgrade prompt (when shown). null until trial usage crosses the threshold. */
   upgradePromptShownAt?: Date | null;
+  voiceAgentLiveAt: Date | null;
 }
 
 const isIdentityDone = (i: OnboardingFacts['identity']): boolean =>
@@ -76,6 +77,7 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
     steps,
     currentStep: firstNotDone,
     isComplete: firstNotDone === null,
+    voiceAgentLive: f.voiceAgentLiveAt != null,
     ...(f.upgradePromptShownAt
       ? { upgradePromptShownAt: f.upgradePromptShownAt.toISOString() }
       : {}),

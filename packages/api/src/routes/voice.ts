@@ -1,7 +1,13 @@
 import { Router, Request, Response } from 'express';
+import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import {
+  enableVoiceAgentLive,
+  pauseVoiceAgentLive,
+  subscriptionAllowsVoice,
+} from '../voice/go-live';
 import {
   createVoiceRecording,
   validateVoiceIngest,
@@ -36,12 +42,17 @@ function isAllowedMimeType(contentType: string): boolean {
   return ALLOWED_MIME_TYPES.has(base) || base.startsWith('audio/');
 }
 
+export interface VoiceRouterOpts {
+  pool?: Pool;
+}
+
 export function createVoiceRouter(
   voiceRepo: VoiceRepository,
   queue: Queue,
   transcribeAudio?: TranscribeAudioFn,
   auditRepo?: AuditRepository,
-  logger?: Logger
+  logger?: Logger,
+  opts?: VoiceRouterOpts,
 ): Router {
   const router = Router();
 
@@ -257,6 +268,50 @@ export function createVoiceRouter(
       }
       res.json(recording);
     })
+  );
+
+  router.post(
+    '/go-live',
+    requireAuth,
+    requireTenant,
+    requirePermission('tenant:manage'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const pool = opts?.pool;
+      if (!pool || !auditRepo) {
+        res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Voice go-live requires database' });
+        return;
+      }
+      const tenantId = req.auth!.tenantId;
+      const userId = req.auth!.userId;
+      if (!(await subscriptionAllowsVoice(pool, tenantId))) {
+        res.status(402).json({ error: 'BILLING_REQUIRED', message: 'Active subscription required' });
+        return;
+      }
+      const body = await enableVoiceAgentLive(
+        { pool, auditRepo },
+        { tenantId, actorId: userId, source: 'manual' },
+      );
+      res.json(body);
+    }),
+  );
+
+  router.post(
+    '/pause',
+    requireAuth,
+    requireTenant,
+    requirePermission('tenant:manage'),
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const pool = opts?.pool;
+      if (!pool || !auditRepo) {
+        res.status(503).json({ error: 'NOT_CONFIGURED', message: 'Voice pause requires database' });
+        return;
+      }
+      const body = await pauseVoiceAgentLive(
+        { pool, auditRepo },
+        { tenantId: req.auth!.tenantId, actorId: req.auth!.userId },
+      );
+      res.json(body);
+    }),
   );
 
   router.post(

@@ -51,6 +51,7 @@ import { createVoicemailStatusRouter } from '../telephony/voicemail-status-route
 import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
+import type { GateReason } from '../voice/trial-limits';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -154,7 +155,7 @@ export interface TelephonyRouterDeps {
    */
   voiceGate?: (input: { tenantId: string; callSid: string }) => Promise<{
     allowed: boolean;
-    reason?: 'no_billing' | 'trial_cap_daily' | 'trial_cap_total' | 'trial_cap_concurrent';
+    reason?: GateReason;
   }>;
   /**
    * Optional health snapshot factory. When set, mounts a public
@@ -318,28 +319,21 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // §10 voice gates — subscription status + trial usage caps. Logged
-    // via voiceBlocksTotal counter inside the gate; emits an audit event
-    // per block. Returns voicemail TwiML on block so leads can still leave
-    // a message (Twilio still bills the minute, but AI/OpenAI cost is zero).
+    // §10 voice gates — subscription, go-live, trial caps. Voicemail on block.
     if (deps.voiceGate) {
       try {
         const gate = await deps.voiceGate({ tenantId, callSid });
         if (!gate.allowed) {
-          res
-            .status(200)
-            .type('text/xml')
-            .send(
-              `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">This number is being set up. Please leave a message after the tone.</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`,
-            );
+          res.status(200).type('text/xml').send(voicemailTwimlForGateReason(gate.reason));
           return;
         }
       } catch (err) {
-        // Gate failures must not block real calls — log and fall through.
-        logger.error('telephony/voice: voiceGate failed open', {
+        logger.error('telephony/voice: voiceGate failed closed', {
           callSid,
           error: err instanceof Error ? err.message : String(err),
         });
+        res.status(200).type('text/xml').send(voicemailTwimlForGateReason('not_live'));
+        return;
       }
     }
 
@@ -763,3 +757,13 @@ async function resolveInboundTenantId(opts: {
   return undefined;
 }
 
+/** Voicemail TwiML when inbound voice gates block AI routing. */
+export function voicemailTwimlForGateReason(reason: GateReason | undefined): string {
+  const say =
+    reason === 'not_live'
+      ? "This line isn't using our AI assistant yet. Please leave a message after the tone."
+      : reason === 'no_billing'
+        ? "We're finishing account setup. Please leave a message after the tone."
+        : 'This number is being set up. Please leave a message after the tone.';
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">${xmlEscape(say)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
+}

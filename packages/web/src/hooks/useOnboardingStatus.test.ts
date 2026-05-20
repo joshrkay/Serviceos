@@ -21,6 +21,7 @@ describe('useOnboardingStatus', () => {
         ],
         currentStep: 'identity',
         isComplete: false,
+        voiceAgentLive: false,
       }),
     } as Response);
 

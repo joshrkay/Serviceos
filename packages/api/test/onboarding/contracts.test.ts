@@ -78,6 +78,7 @@ describe('OnboardingStatusResponseSchema', () => {
       ],
       currentStep: 'pack' as const,
       isComplete: false,
+      voiceAgentLive: false,
     };
     expect(OnboardingStatusResponseSchema.parse(value)).toEqual(value);
   });

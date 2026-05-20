@@ -5,14 +5,19 @@ import type { AuditRepository } from '../../src/audit/audit';
 
 function mockPool(opts: {
   subscriptionStatus: string | null;
+  voiceAgentLiveAt?: Date | null;
   dailyMinutes?: number;
   totalMinutes?: number;
   concurrent?: number;
 }): Pool {
+  const liveAt = opts.voiceAgentLiveAt === undefined ? new Date() : opts.voiceAgentLiveAt;
   return {
     query: vi.fn(async (sql: string) => {
       if (sql.includes('FROM tenants')) {
         return { rows: [{ subscription_status: opts.subscriptionStatus }] };
+      }
+      if (sql.includes('voice_agent_live_at')) {
+        return { rows: [{ voice_agent_live_at: liveAt }] };
       }
       if (sql.includes('FROM voice_sessions')) {
         return {
@@ -108,6 +113,19 @@ describe('createVoiceGate', () => {
     });
     const result = await gate({ tenantId: 't1', callSid: 'CA1' });
     expect(result.reason).toBe('trial_cap_concurrent');
+  });
+
+  it('blocks with not_live when trialing but voice_agent_live_at is null', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({ subscriptionStatus: 'trialing', voiceAgentLiveAt: null }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('not_live');
+    expect(auditRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'voice_blocked_not_live' }),
+    );
   });
 
   it('treats unknown subscription_status as no_billing', async () => {
