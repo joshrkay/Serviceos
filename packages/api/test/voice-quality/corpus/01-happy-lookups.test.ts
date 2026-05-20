@@ -63,7 +63,7 @@ describe('VQ-010 — Bucket 01 happy lookups', () => {
   );
 
   it.each(SCRIPT_IDS)(
-    'VQ-010 — cassette stub for %s is valid JSON with empty entries',
+    'VQ-010 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -75,7 +75,7 @@ describe('VQ-010 — Bucket 01 happy lookups', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 });

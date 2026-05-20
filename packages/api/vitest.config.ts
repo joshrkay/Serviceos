@@ -10,7 +10,13 @@ export default defineConfig({
     // the testcontainer lifecycle via globalSetup. Excluding them here means
     // `npm test` (and `npm run test:coverage`) cover unit tests only and
     // don't need Docker.
-    exclude: ['node_modules/**', 'dist/**', 'test/integration/**'],
+    exclude: [
+      'node_modules/**',
+      'dist/**',
+      'test/integration/**',
+      // Layer 1 corpus runner — only via vitest.voice-quality.config.ts + npm run voice-quality
+      'test/voice-quality/voice-quality.test.ts',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

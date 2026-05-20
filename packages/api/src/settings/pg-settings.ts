@@ -1,6 +1,11 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { SettingsRepository, TenantSettings } from './settings';
+import {
+  DEFAULT_ESCALATION_SETTINGS,
+  EscalationSettings,
+  SettingsRepository,
+  TenantSettings,
+} from './settings';
 
 function mapRow(row: Record<string, unknown>): TenantSettings {
   const terminologyRaw = row.terminology_preferences as Record<string, unknown> | null;
@@ -76,6 +81,13 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // convention as all other nullable optional columns here).
     voiceAgentName: (row.voice_agent_name as string | null) ?? undefined,
     voiceGreeting: (row.voice_greeting as string | null) ?? undefined,
+    escalationSettings: (() => {
+      const raw = row.escalation_settings as Partial<EscalationSettings> | null | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) {
+        return undefined;
+      }
+      return { ...DEFAULT_ESCALATION_SETTINGS, ...raw };
+    })(),
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -210,6 +222,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // B1 — migration 088.
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',
+        escalationSettings: 'escalation_settings',
         updatedAt: 'updated_at',
       };
 
@@ -227,6 +240,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           setClauses.push(`auto_approve_threshold = $${paramIndex}::jsonb`);
           const v = value as Record<string, number> | undefined | null;
           params.push(v && Object.keys(v).length > 0 ? JSON.stringify(v) : '{}');
+          paramIndex++;
+          continue;
+        }
+        if (key === 'escalationSettings') {
+          setClauses.push(`escalation_settings = $${paramIndex}::jsonb`);
+          const v = value as Partial<EscalationSettings> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
           paramIndex++;
           continue;
         }

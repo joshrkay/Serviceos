@@ -11,6 +11,8 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
+import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
@@ -1779,6 +1781,7 @@ export function createApp(): express.Express {
     if (!isValidVerticalType(base)) return [];
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
+  const telephonyCallControl = new DefaultTwilioCallControl();
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1786,6 +1789,18 @@ export function createApp(): express.Express {
     proposalRepo,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
+    callControl: telephonyCallControl,
+    dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+    settingsRepo,
+    whisperCache: sharedWhisperCache,
+    ...(messageDelivery
+      ? {
+          deliveryProvider: {
+            sendSms: (args: { to: string; body: string }) =>
+              messageDelivery.sendSms({ to: args.to, body: args.body }),
+          },
+        }
+      : {}),
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*
@@ -2025,6 +2040,11 @@ export function createApp(): express.Express {
       ...(pool && auditRepo
         ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
         : {}),
+      ...(pool ? { pool } : {}),
+      settingsRepo,
+      leadRepo,
+      auditRepo,
+      businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
   );
 
@@ -2358,7 +2378,22 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     }, auditRepo)
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
+  app.use(
+    '/api/dispatch',
+    createDispatchRoutes({
+      appointmentRepo,
+      assignmentRepo,
+      jobRepo,
+      customerRepo,
+      locationRepo,
+      boardEventsDeps: {
+        authUserIdFromRequest: async (req) =>
+          (req as { auth?: { userId?: string } }).auth?.userId ?? null,
+        authTenantIdFromRequest: async (req) =>
+          (req as { auth?: { tenantId?: string } }).auth?.tenantId ?? null,
+      },
+    }),
+  );
   app.use(
     '/api/estimates',
     createEstimateRouter(
@@ -2371,7 +2406,20 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
     ),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      sendService,
+      jobRepo,
+      estimateRepo,
+      paymentLinkProvider,
+    ),
+  );
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's

@@ -86,7 +86,7 @@ describe('VQ-016 — Bucket 07 out-of-scope escalation', () => {
   );
 
   it.each(SCRIPT_IDS)(
-    'VQ-016 — cassette stub for %s is valid JSON with empty entries',
+    'VQ-016 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
         CORPUS_ROOT,
@@ -98,7 +98,7 @@ describe('VQ-016 — Bucket 07 out-of-scope escalation', () => {
       expect(parsed.scriptId).toBe(scriptId);
       expect(parsed.version).toBe(1);
       expect(parsed.rubricVersion).toBe('v1');
-      expect(parsed.entries).toEqual([]);
+      expect(Array.isArray(parsed.entries)).toBe(true);
     },
   );
 });

@@ -13,7 +13,6 @@ import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNorma
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
-import { customers } from '../../data/mock-data';
 import { useNavigate } from 'react-router';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
@@ -478,7 +477,6 @@ function LineItemsEditor({ items, editable, onChange, onAddRow }: {
 function EstimateDocPreview({ est, lineItems, onClose }: {
   est: EstCompat; lineItems: LineItem[]; onClose: () => void;
 }) {
-  const customer = customers.find(c => c.id === est.customerId);
   const total    = lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const [copied, setCopied] = useState(false);
   const link = `fieldly.app/e/${est.estimateNumber.toLowerCase().replace('-', '')}`;
@@ -521,8 +519,7 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
           {/* Bill to */}
           <div className="mb-5">
             <p className="text-xs text-slate-400 mb-1">Prepared for</p>
-            <p className="text-sm text-slate-900">{customer?.name ?? est.customer}</p>
-            <p className="text-xs text-slate-500">{customer?.address}</p>
+            <p className="text-sm text-slate-900">{est.customer}</p>
           </div>
 
           <p className="text-xs text-slate-600 mb-4 italic">{est.description}</p>
@@ -581,9 +578,8 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
   /** When set, the sheet calls the real /api/estimates/:id/send endpoint. */
   apiId?: string;
 }) {
-  const customer = customers.find(c => c.id === est.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
-  const [recipient, setRecipient] = useState<string>(customer?.phone ?? '');
+  const [recipient, setRecipient] = useState<string>('');
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -658,7 +654,7 @@ function SendEstimateSheet({ est, total, onClose, onSent, apiId }: {
                   key={c}
                   onClick={() => {
                     setChannel(c);
-                    setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
+                    if (c !== channel) setRecipient('');
                   }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
                     channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -1046,11 +1042,24 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
           onClose={() => setPreviewOpen(false)}
         />
       )}
-      {convertOpen && (
+      {convertOpen && est.jobId && (
         <ConvertToInvoiceSheet
-          est={estCompat}
+          input={{
+            estimateId: est.id,
+            jobId: est.jobId,
+            estimateNumber: est.estimateNumber,
+            customerName: estCompat.customer,
+            description: estCompat.description,
+            lineItems: uiLineItems,
+            discountCents: est.discountCents ?? 0,
+            taxRateBps: 0,
+            approvedLabel: status === 'Approved' ? 'Customer approved' : undefined,
+          }}
           onClose={() => setConvertOpen(false)}
-          onConverted={() => setConvertOpen(false)}
+          onConverted={(invoiceId) => {
+            setConvertOpen(false);
+            navigate(`/invoices/${invoiceId}`);
+          }}
         />
       )}
     </>

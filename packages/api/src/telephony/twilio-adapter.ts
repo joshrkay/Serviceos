@@ -51,7 +51,11 @@ import {
   lookupExecutedEvent,
 } from '../ai/voice-quality/events';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
-import type { CallingAgentEvent, SideEffect } from '../ai/agents/customer-calling/types';
+import type {
+  CallingAgentContext,
+  CallingAgentEvent,
+  SideEffect,
+} from '../ai/agents/customer-calling/types';
 import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 // Aliased to avoid name collision with the private `deriveCallOutcome` method
 // on this class — see line 1828. The imported function takes the typed
@@ -73,6 +77,8 @@ import type { TenantCredentialResolver } from '../integrations/credentials';
 import { MEDIA_STREAM_PATH } from './media-streams/twilio-mediastream-server';
 import type { VoiceRepository, CallOutcome } from '../voice/voice-service';
 import type { VoicePersona, VoicePersonaResolver } from '../settings/voice-persona-resolver';
+import { resolveEscalationSettings } from '../settings/settings';
+import type { WhisperCache } from './whisper-cache';
 import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
@@ -229,6 +235,8 @@ export interface TwilioAdapterDeps {
    * call. Optional so existing test fixtures continue to work.
    */
   settingsRepo?: SettingsRepository;
+  whisperCache?: WhisperCache;
+  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
 }
 
 /**
@@ -474,6 +482,7 @@ export class TwilioGatherAdapter {
     this.processor = createVoiceTurnProcessor({
       ...this.deps,
       pendingTransferTwiml: this.pendingTransferTwiml,
+      callerPhoneResolver: (session) => this.callerIdBySession.get(session.id),
       // Wire the existing fire-and-forget summary path. Preserves the
       // legacy behavior where a terminated turn kicks off the
       // end-of-call summary in the background. The `async` wrapper is
@@ -489,6 +498,23 @@ export class TwilioGatherAdapter {
         });
       },
     });
+  }
+
+  private async resolveEscalationTriggers(
+    tenantId: string,
+  ): Promise<CallingAgentContext['escalationTriggers'] | undefined> {
+    if (!this.deps.settingsRepo) return undefined;
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+      const esc = resolveEscalationSettings(settings);
+      return {
+        trigger_low_confidence: esc.trigger_low_confidence,
+        trigger_explicit_request: esc.trigger_explicit_request,
+        trigger_keyword_frustration: esc.trigger_keyword_frustration,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -520,9 +546,11 @@ export class TwilioGatherAdapter {
     const repairTemplates = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
+    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
+      ...(escalationTriggers ? { escalationTriggers } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -745,7 +773,11 @@ export class TwilioGatherAdapter {
     // side effects added by the FSM) actually fire — the mediastream
     // adapter's emitSideEffects only handles tts_play/quality events.
     const frustration = detectFrustration(opts.speechResult);
-    if (frustration.matched) {
+    const triggers = session.machine.currentContext.escalationTriggers;
+    if (
+      frustration.matched &&
+      (!triggers || triggers.trigger_keyword_frustration)
+    ) {
       const sideEffects = session.machine.dispatch({
         type: 'frustration_detected',
         source: 'keyword',
@@ -793,9 +825,11 @@ export class TwilioGatherAdapter {
     const repairTemplatesForInbound = this.deps.repairTemplatesResolver
       ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
       : [];
+    const escalationTriggers = await this.resolveEscalationTriggers(opts.tenantId);
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
       ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
+      ...(escalationTriggers ? { escalationTriggers } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 

@@ -27,6 +27,7 @@ import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import { InMemoryQueue } from '../../src/queues/queue';
 import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { MockPaymentLinkProvider } from '../../src/payments/payment-link-provider';
 
 export const TEST_TENANT_ID = 'tenant-test-1';
 export const TEST_USER_ID = 'user-test-1';
@@ -115,6 +116,7 @@ export async function buildTestApp(): Promise<TestApp> {
       undefined,
       jobRepo,
       estimateRepo,
+      new MockPaymentLinkProvider(),
     ),
   );
   app.use(

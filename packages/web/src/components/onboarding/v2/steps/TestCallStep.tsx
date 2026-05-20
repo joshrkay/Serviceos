@@ -62,10 +62,28 @@ export function TestCallStep({ status, onSkipped }: TestCallStepProps) {
         </p>
       </header>
 
-      <div className="border-2 border-blue-500 rounded-lg p-6 text-center">
-        <div className="text-3xl font-mono text-slate-900">
-          {phoneNumber ?? '(provisioning…)'}
-        </div>
+      <div className="border-2 border-blue-500 rounded-lg p-6 text-center space-y-3">
+        {phoneNumber ? (
+          <a
+            href={`tel:${phoneNumber.replace(/\s/g, '')}`}
+            className="block text-3xl font-mono text-blue-700 hover:underline"
+          >
+            {phoneNumber}
+          </a>
+        ) : (
+          <p className="text-3xl font-mono text-slate-900">(provisioning…)</p>
+        )}
+        {phoneNumber && (
+          <button
+            type="button"
+            className="text-xs text-slate-500 underline"
+            onClick={() => {
+              void navigator.clipboard.writeText(phoneNumber);
+            }}
+          >
+            Copy number
+          </button>
+        )}
       </div>
 
       <div className="flex items-center gap-3 text-sm text-slate-600">

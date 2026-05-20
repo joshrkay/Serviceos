@@ -1,5 +1,11 @@
 import React from 'react';
 
+export interface AppointmentEditingInfo {
+  userId: string;
+  displayName: string;
+  mode: 'viewing' | 'dragging';
+}
+
 export interface AppointmentCardData {
   id: string;
   jobId: string;
@@ -12,9 +18,12 @@ export interface AppointmentCardData {
   arrivalWindowStart?: string;
   arrivalWindowEnd?: string;
   status: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
   paymentIndicator?: string;
   /** Optimistic-concurrency token — server's appointment.updatedAt ISO string. */
   updatedAt?: string;
+  editing?: AppointmentEditingInfo | null;
 }
 
 export interface AppointmentCardProps {
@@ -35,6 +44,8 @@ export interface AppointmentCardProps {
    * through. Tracked as a follow-up.
    */
   hasConflict?: boolean;
+  /** Current Clerk user — hides own presence chip. */
+  currentUserId?: string;
 }
 
 function formatTime(iso: string): string {
@@ -64,17 +75,37 @@ export function AppointmentCard({
   draggable = false,
   onDragStart,
   hasConflict = false,
+  currentUserId,
 }: AppointmentCardProps) {
+  const editing =
+    appointment.editing &&
+    appointment.editing.mode === 'dragging' &&
+    appointment.editing.userId !== currentUserId
+      ? appointment.editing
+      : null;
   const arrivalWindow = formatArrivalWindow(
     appointment.arrivalWindowStart,
     appointment.arrivalWindowEnd
   );
 
+  const isHold = appointment.holdPendingApproval === true;
+  let holdExpiryLabel: string | null = null;
+  if (isHold && appointment.holdExpiryAt) {
+    const ms = new Date(appointment.holdExpiryAt).getTime() - Date.now();
+    if (ms > 0) {
+      const hours = Math.floor(ms / (60 * 60 * 1000));
+      holdExpiryLabel =
+        hours < 2 ? 'Hold expires soon' : `Hold · ${hours}h left`;
+    } else {
+      holdExpiryLabel = 'Hold expired';
+    }
+  }
+
   return (
     <div
       className={`appointment-card ${isDragging ? 'appointment-card--dragging' : ''} ${
         hasConflict ? 'appointment-card--conflict' : ''
-      }`}
+      } ${isHold ? 'border-dashed border-amber-400 bg-amber-50/80' : ''}`}
       data-testid="appointment-card"
       data-appointment-id={appointment.id}
       data-has-conflict={hasConflict ? 'true' : 'false'}
@@ -85,6 +116,14 @@ export function AppointmentCard({
         <span className="appointment-card__time" data-testid="appointment-time">
           {formatTime(appointment.scheduledStart)} - {formatTime(appointment.scheduledEnd)}
         </span>
+        {isHold && (
+          <span
+            className="appointment-card__badge text-xs font-medium text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded"
+            data-testid="appointment-hold-badge"
+          >
+            {holdExpiryLabel ?? 'Tentative hold'}
+          </span>
+        )}
         {hasConflict && (
           <span
             className="appointment-card__badge appointment-card__badge--conflict"
@@ -103,6 +142,15 @@ export function AppointmentCard({
           {appointment.status.replace('_', ' ')}
         </span>
       </div>
+
+      {editing && (
+        <div
+          className="appointment-card__editing-chip text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 mb-1"
+          data-testid="appointment-editing-chip"
+        >
+          {editing.displayName} is moving this
+        </div>
+      )}
 
       <div className="appointment-card__customer" data-testid="appointment-customer">
         {appointment.customerName}

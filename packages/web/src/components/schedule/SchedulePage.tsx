@@ -3,9 +3,9 @@ import {
   ChevronLeft, ChevronRight, Plus, Clock, User, AlertTriangle,
   Bell, CheckCircle, X, MapPin, Briefcase,
 } from 'lucide-react';
-import { technicians } from '../../data/mock-data';
 import { useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -23,6 +23,8 @@ interface ApiAppointment {
   status: string;
   notes?: string;
   timezone: string;
+  holdPendingApproval?: boolean;
+  holdExpiryAt?: string;
 }
 
 interface EnrichedAppointment extends ApiAppointment {
@@ -131,13 +133,17 @@ function DelaySheet({ appointmentId, onClose }: { appointmentId: string; onClose
 }
 
 /** New appointment form panel */
-function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
+function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   selectedDate: string;
   onCreated: () => void;
   onClose: () => void;
+  technicians: { id: string; name: string }[];
 }) {
   const [jobId,    setJobId]    = useState('');
-  const [techId,   setTechId]   = useState(technicians[0]?.id ?? '');
+  const [techId,   setTechId]   = useState('');
+  useEffect(() => {
+    if (!techId && technicians[0]?.id) setTechId(technicians[0].id);
+  }, [technicians, techId]);
   const [startTime, setStartTime] = useState('10:00');
   const [endTime,   setEndTime]   = useState('12:00');
   const [saving, setSaving]     = useState(false);
@@ -250,6 +256,7 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose }: {
 
 export function SchedulePage() {
   const navigate = useNavigate();
+  const { technicians } = useTechnicianRoster();
   const today = useMemo(() => new Date(), []);
   const weekDays = useMemo(() => buildWeekDays(today), [today]);
   const [selectedIso, setSelectedIso] = useState(weekDays[1].isoDate);
@@ -336,6 +343,23 @@ export function SchedulePage() {
   }, [selectedIso]);
 
   useEffect(() => { loadAppointments(); }, [loadAppointments]);
+
+  // Re-apply technician names when the roster loads after appointments.
+  const technicianIdsKey = technicians.map((t) => t.id).join(',');
+  useEffect(() => {
+    if (technicians.length === 0) return;
+    setEnriched((prev) => {
+      let changed = false;
+      const next = prev.map((a) => {
+        if (!a.technicianId) return a;
+        const tech = technicians.find((t) => t.id === a.technicianId);
+        if (!tech || a.technicianName === tech.name) return a;
+        changed = true;
+        return { ...a, technicianName: tech.name };
+      });
+      return changed ? next : prev;
+    });
+  }, [technicianIdsKey, technicians]);
 
   function buildFallback(appt: ApiAppointment): EnrichedAppointment {
     return { ...appt, customerName: 'Customer', jobSummary: appt.jobId, serviceAddress: '', technicianId: '', technicianName: 'Unassigned', serviceType: '', hasConflict: false };
@@ -424,6 +448,7 @@ export function SchedulePage() {
           selectedDate={selectedIso}
           onCreated={loadAppointments}
           onClose={() => setShowNew(false)}
+          technicians={technicians}
         />
       )}
 
@@ -478,9 +503,23 @@ export function SchedulePage() {
                 <div
                   key={appt.id}
                   className={`rounded-xl bg-white border px-4 py-4 transition-all ${
-                    appt.hasConflict ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200'
+                    appt.holdPendingApproval
+                      ? 'border-dashed border-amber-400 bg-amber-50/80'
+                      : appt.hasConflict
+                        ? 'border-amber-300 bg-amber-50/30'
+                        : 'border-slate-200'
                   }`}
                 >
+                  {appt.holdPendingApproval && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-800 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
+                      Tentative hold
+                      {appt.holdExpiryAt && (
+                        <span>
+                          · expires {new Date(appt.holdExpiryAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* Conflict badge */}
                   {appt.hasConflict && (
                     <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-1 mb-3 w-fit">
