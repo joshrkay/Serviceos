@@ -24,20 +24,33 @@ import { NoteRepository } from '../../notes/note';
 import { PaymentRepository } from '../../invoices/payment';
 import { ExpenseRepository } from '../../expenses/expense';
 import { AuditRepository } from '../../audit/audit';
-import { JobRepository } from '../../jobs/job';
+import { JobRepository, createJob } from '../../jobs/job';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
 import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
 import { AssignmentRepository, assignTechnician } from '../../appointments/assignment';
 import { InvoiceRepository } from '../../invoices/invoice';
-import { EstimateRepository } from '../../estimates/estimate';
-import { SettingsRepository } from '../../settings/settings';
+import {
+  EstimateRepository,
+  createEstimate,
+  CreateEstimateInput,
+} from '../../estimates/estimate';
+import { SettingsRepository, getNextEstimateNumber } from '../../settings/settings';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
-import { CreateCustomerVoiceExecutionHandler } from './create-customer-handler';
-import { CustomerRepository } from '../../customers/customer';
+import {
+  CreateCustomerVoiceExecutionHandler,
+  splitName,
+} from './create-customer-handler';
+import {
+  CustomerRepository,
+  UpdateCustomerInput,
+  updateCustomer,
+} from '../../customers/customer';
+import { LocationRepository } from '../../locations/location';
+import { LineItem } from '../../shared/billing-engine';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -70,27 +83,139 @@ export class CreateCustomerExecutionHandler implements ExecutionHandler {
 export class UpdateCustomerExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'update_customer';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(private readonly customerRepo?: CustomerRepository) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
-    return { success: true };
+
+    if (!this.customerRepo) {
+      return { success: true };
+    }
+
+    const input: UpdateCustomerInput = {};
+    if (typeof payload.name === 'string' && payload.name.trim().length > 0) {
+      const { firstName, lastName, companyName } = splitName(payload.name);
+      input.firstName = firstName;
+      input.lastName = lastName;
+      if (companyName) input.companyName = companyName;
+    }
+    if (typeof payload.firstName === 'string') input.firstName = payload.firstName;
+    if (typeof payload.lastName === 'string') input.lastName = payload.lastName;
+    if (typeof payload.companyName === 'string') input.companyName = payload.companyName;
+    if (typeof payload.email === 'string') input.email = payload.email;
+    if (typeof payload.phone === 'string') input.primaryPhone = payload.phone;
+    if (typeof payload.primaryPhone === 'string') input.primaryPhone = payload.primaryPhone;
+    if (typeof payload.secondaryPhone === 'string') input.secondaryPhone = payload.secondaryPhone;
+    if (typeof payload.notes === 'string') input.communicationNotes = payload.notes;
+    if (typeof payload.communicationNotes === 'string') input.communicationNotes = payload.communicationNotes;
+    if (typeof payload.smsConsent === 'boolean') input.smsConsent = payload.smsConsent;
+
+    if (Object.keys(input).length === 0) {
+      return { success: false, error: 'Payload must include at least one field to update' };
+    }
+
+    try {
+      const updated = await updateCustomer(
+        context.tenantId,
+        payload.customerId,
+        input,
+        this.customerRepo,
+        context.executedBy,
+      );
+      if (!updated) {
+        return { success: false, error: 'Customer not found' };
+      }
+      return { success: true, resultEntityId: updated.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
 export class CreateJobExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'create_job';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(
+    private readonly jobRepo?: JobRepository,
+    private readonly locationRepo?: LocationRepository,
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
-    if (!payload.title || typeof payload.title !== 'string') {
+    const summary =
+      typeof payload.title === 'string'
+        ? payload.title
+        : typeof payload.summary === 'string'
+          ? payload.summary
+          : undefined;
+    if (!summary || summary.trim().length === 0) {
       return { success: false, error: 'Payload must include a valid title' };
     }
-    return { success: true, resultEntityId: uuidv4() };
+
+    if (proposal.resultEntityId) {
+      return { success: true, resultEntityId: proposal.resultEntityId };
+    }
+
+    if (!this.jobRepo || !this.locationRepo) {
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    let locationId: string | undefined =
+      typeof payload.locationId === 'string' ? payload.locationId : undefined;
+    if (!locationId) {
+      const locations = await this.locationRepo.findByCustomer(
+        context.tenantId,
+        payload.customerId,
+      );
+      const primary = locations.find((loc) => loc.isPrimary && !loc.isArchived);
+      const fallback = locations.find((loc) => !loc.isArchived);
+      locationId = primary?.id ?? fallback?.id;
+    }
+    if (!locationId) {
+      return {
+        success: false,
+        error: 'Customer has no service location — add one before opening a job',
+      };
+    }
+
+    try {
+      const job = await createJob(
+        {
+          tenantId: context.tenantId,
+          customerId: payload.customerId,
+          locationId,
+          summary: summary.trim(),
+          problemDescription:
+            typeof payload.problemDescription === 'string'
+              ? payload.problemDescription
+              : undefined,
+          priority:
+            payload.priority === 'low' ||
+            payload.priority === 'normal' ||
+            payload.priority === 'high' ||
+            payload.priority === 'urgent'
+              ? payload.priority
+              : undefined,
+          createdBy: context.executedBy,
+        },
+        this.jobRepo,
+      );
+      return { success: true, resultEntityId: job.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
@@ -193,20 +318,76 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(
+    private readonly estimateRepo?: EstimateRepository,
+    private readonly settingsRepo?: SettingsRepository,
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
     if (!payload.customerId || typeof payload.customerId !== 'string') {
       return { success: false, error: 'Payload must include a valid customerId' };
     }
+    if (!payload.jobId || typeof payload.jobId !== 'string') {
+      return {
+        success: false,
+        error: 'Estimate requires a jobId — pick a job before drafting',
+      };
+    }
     if (!Array.isArray(payload.lineItems) || payload.lineItems.length === 0) {
       return { success: false, error: 'Payload must include at least one lineItem' };
     }
-    return { success: true, resultEntityId: uuidv4() };
+
+    if (proposal.resultEntityId) {
+      return { success: true, resultEntityId: proposal.resultEntityId };
+    }
+
+    if (!this.estimateRepo || !this.settingsRepo) {
+      return { success: true, resultEntityId: uuidv4() };
+    }
+
+    try {
+      const estimateNumber = await getNextEstimateNumber(context.tenantId, this.settingsRepo);
+      const validUntil =
+        typeof payload.validUntil === 'string' ? new Date(payload.validUntil) : undefined;
+      if (validUntil && isNaN(validUntil.getTime())) {
+        return { success: false, error: 'Payload contains an invalid validUntil date' };
+      }
+
+      const input: CreateEstimateInput = {
+        tenantId: context.tenantId,
+        jobId: payload.jobId,
+        estimateNumber,
+        lineItems: payload.lineItems as LineItem[],
+        discountCents:
+          typeof payload.discountCents === 'number' ? payload.discountCents : undefined,
+        taxRateBps: typeof payload.taxRateBps === 'number' ? payload.taxRateBps : undefined,
+        validUntil,
+        customerMessage:
+          typeof payload.customerMessage === 'string' ? payload.customerMessage : undefined,
+        internalNotes:
+          typeof payload.notes === 'string'
+            ? payload.notes
+            : typeof payload.internalNotes === 'string'
+              ? payload.internalNotes
+              : undefined,
+        createdBy: context.executedBy,
+      };
+      const estimate = await createEstimate(input, this.estimateRepo);
+      return { success: true, resultEntityId: estimate.id };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 }
 
 export function createExecutionHandlerRegistry(deps?: {
   customerRepo?: CustomerRepository;
+  jobRepo?: JobRepository;
+  locationRepo?: LocationRepository;
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
@@ -220,7 +401,6 @@ export function createExecutionHandlerRegistry(deps?: {
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
-  jobRepo?: JobRepository;
   feasibilityDeps?: import('../../scheduling/feasibility-types').FeasibilityDependencies;
   // P7-026 PR c — review-response wiring. All three are optional;
   // when absent the handler degrades sub-actions to passthrough so
@@ -250,15 +430,11 @@ export function createExecutionHandlerRegistry(deps?: {
     deps?.customerRepo
       ? new CreateCustomerVoiceExecutionHandler(deps.customerRepo, deps.auditRepo)
       : new CreateCustomerExecutionHandler(),
-    new UpdateCustomerExecutionHandler(),
-    new CreateJobExecutionHandler(),
+    new UpdateCustomerExecutionHandler(deps?.customerRepo),
+    new CreateJobExecutionHandler(deps?.jobRepo, deps?.locationRepo),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
-    new CreateBookingExecutionHandler(
-      deps?.appointmentRepo,
-      deps?.auditRepo,
-      deps?.schedulingNotifier ?? deps?.transactionalComms,
-    ),
-    new DraftEstimateExecutionHandler(),
+    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
+    new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
     new RescheduleAppointmentExecutionHandler(

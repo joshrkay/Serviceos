@@ -82,4 +82,9 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     expect(sql).toContain('UNIQUE (tenant_id, provider)');
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS tenant_provisioning_costs');
   });
+
+  it('dispatch analytics — migration 105 creates dispatch_analytics table', () => {
+    expect(Object.keys(MIGRATIONS)).toContain('105_create_dispatch_analytics');
+    expect(getMigrationSQL()).toContain('CREATE TABLE IF NOT EXISTS dispatch_analytics');
+  });
 });

@@ -21,6 +21,12 @@ jobs:
         run: npx tsc --noEmit
         working-directory: packages/web
 
+      - name: Owner-loop critical path
+        run: npx vitest run test/owner-loop-critical-path.test.ts
+        working-directory: packages/api
+        env:
+          NODE_ENV: test
+
       - name: Voice smoke (synthetic) — §11 H2 Layer A
         # Fast structural gate: Media Streams server attaches and the
         # documented upgrade contract is stable. Tier-2 promotion will
