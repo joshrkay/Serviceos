@@ -1,6 +1,23 @@
 import { Proposal, ProposalRepository } from '../proposal';
 import { ProposalExecutionRepository } from '../proposal-execution';
 import { ExecutionResult } from './handlers';
+import {
+  IdempotencyLockProvider,
+  NoOpIdempotencyLockProvider,
+} from './idempotency-lock';
+
+/** Stable per-proposal key when callers omit `idempotencyKey` (§11 H1). */
+export function resolveProposalIdempotencyKey(proposal: Proposal): string {
+  return (
+    proposal.idempotencyKey ?? `proposal-run:${proposal.tenantId}:${proposal.id}`
+  );
+}
+
+export function withResolvedIdempotencyKey(proposal: Proposal): Proposal {
+  const idempotencyKey = resolveProposalIdempotencyKey(proposal);
+  if (proposal.idempotencyKey === idempotencyKey) return proposal;
+  return { ...proposal, idempotencyKey };
+}
 
 /**
  * Guards proposal execution against duplicate side effects when callers
@@ -14,31 +31,32 @@ export class IdempotencyGuard {
   constructor(
     private readonly executionRepo: ProposalExecutionRepository,
     private readonly proposalRepo: ProposalRepository,
+    private readonly lock: IdempotencyLockProvider = new NoOpIdempotencyLockProvider(),
   ) {}
 
   async checkAndExecute(
     proposal: Proposal,
     executeFn: () => Promise<ExecutionResult>
   ): Promise<{ result: ExecutionResult; alreadyExecuted: boolean }> {
-    if (!proposal.idempotencyKey) {
+    const keyed = withResolvedIdempotencyKey(proposal);
+    const idempotencyKey = keyed.idempotencyKey!;
+
+    return this.lock.withLock(keyed.tenantId, idempotencyKey, async () => {
+      const previous = await this.findPreviousExecution(
+        keyed.tenantId,
+        idempotencyKey,
+      );
+
+      if (previous) {
+        return {
+          result: { success: true, resultEntityId: previous.resultEntityId },
+          alreadyExecuted: true,
+        };
+      }
+
       const result = await executeFn();
       return { result, alreadyExecuted: false };
-    }
-
-    const previous = await this.findPreviousExecution(
-      proposal.tenantId,
-      proposal.idempotencyKey,
-    );
-
-    if (previous) {
-      return {
-        result: { success: true, resultEntityId: previous.resultEntityId },
-        alreadyExecuted: true,
-      };
-    }
-
-    const result = await executeFn();
-    return { result, alreadyExecuted: false };
+    });
   }
 
   /**

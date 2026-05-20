@@ -56,6 +56,14 @@ async function completeWizard(beforeSubmit?: () => void): Promise<void> {
 }
 
 describe('IntakeFormPage', () => {
+  it('shows business initial in header when tenant info loads', async () => {
+    vi.mocked(fetchIntakeTenantInfo).mockResolvedValue(TENANT_INFO);
+    setTenantQueryParam(TENANT_ID);
+    render(<IntakeFormPage />);
+    expect(await screen.findByText('O')).toBeInTheDocument();
+    expect(screen.getByText('Ortega HVAC & Services')).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.mocked(submitIntakeLead).mockReset();
     vi.mocked(submitIntakeLead).mockResolvedValue({ ok: true, leadId: 'lead-1' });
