@@ -7,9 +7,9 @@ import { SendService } from './send-service';
 /**
  * Adapter from the proposal-execution `InvoiceDeliveryProvider`
  * interface (used by `SendInvoiceExecutionHandler`) to the new
- * unified `SendService`. Wired in `app.ts` when delivery credentials
- * are configured. When credentials are absent the existing Noop
- * provider stays in place — handlers stay tested and never crash.
+ * unified `SendService`. Wired via `resolveInvoiceDeliveryProvider` in
+ * `app.ts`: real sends when `SendService` exists; prod/staging boot
+ * fails if missing; dev/test uses Noop.
  */
 export class SendServiceInvoiceDeliveryProvider implements InvoiceDeliveryProvider {
   constructor(private readonly sendService: SendService) {}

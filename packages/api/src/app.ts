@@ -238,7 +238,6 @@ import {
   InMemoryDispatchRepository,
   PgDispatchRepository,
 } from './notifications/dispatch-repository';
-import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -331,7 +330,7 @@ import {
   PgIdempotencyLockProvider,
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
-import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -1223,21 +1222,13 @@ export function createApp(): express.Express {
     }
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
-  // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above. Invoice delivery
-  // routes through the unified SendService when delivery credentials
-  // are configured; otherwise falls back to the Noop so the proposal
-  // executor stays exercised in dev/test without sending bytes.
-  const invoiceDeliveryProvider = sendService
-    ? new SendServiceInvoiceDeliveryProvider(sendService)
-    : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
-      ? (() => {
-          throw new Error(
-            'No invoice delivery provider configured. Voice "send invoice" would silently drop in production. ' +
-              'Configure message delivery (SendService) or block the send_invoice intent at the router.',
-          );
-        })()
-      : new NoopInvoiceDeliveryProvider();
+  // against real domain repositories. Invoice delivery routes through
+  // SendService when configured; resolveInvoiceDeliveryProvider throws at
+  // boot in prod/staging without credentials; dev/test uses Noop.
+  const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
