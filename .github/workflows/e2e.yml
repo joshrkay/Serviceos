@@ -34,12 +34,18 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
+      # GitHub Actions forbids `secrets` in step-level `if:` — gate in-shell instead.
       - name: Onboarding API integration (migration 098)
-        if: secrets.E2E_CLERK_SECRET_KEY != ''
-        run: npm run test:integration -- onboarding
+        run: |
+          if [ -z "$E2E_CLERK_SECRET_KEY" ]; then
+            echo "Skipping onboarding integration — E2E_CLERK_SECRET_KEY not configured"
+            exit 0
+          fi
+          npm run test:integration -- onboarding
         working-directory: packages/api
         env:
           TEST_DB: testcontainers
+          E2E_CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
 
       - name: Run E2E tests
         run: npm run e2e
