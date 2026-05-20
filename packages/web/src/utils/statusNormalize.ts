@@ -38,20 +38,6 @@ export function normalizeInvoiceStatus(apiStatus: string): InvoiceStatus {
   return (INVOICE_STATUS_MAP[apiStatus] ?? apiStatus) as InvoiceStatus;
 }
 
-const JOB_MONEY_STATE_MAP: Record<string, string> = {
-  estimate_sent: 'Estimate sent',
-  estimate_accepted: 'Estimate approved',
-  invoiced: 'Unpaid',
-  overdue: 'Overdue',
-};
-
-/** Owner-facing cash badge for today's job board; null when not actionable. */
-export function normalizeJobMoneyState(state?: string): string | null {
-  if (!state) return null;
-  if (state === 'paid' || state === 'no_estimate') return null;
-  return JOB_MONEY_STATE_MAP[state] ?? null;
-}
-
 /** Convert integer cents to display string: 15000 → "$150.00" */
 export function centsToDisplay(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
