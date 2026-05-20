@@ -10,9 +10,9 @@ import {
   captureDispatchEvent,
 } from '../../dispatch/analytics';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import type { TransactionalCommsListener } from '../../notifications/transactional-comms-listener';
 import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -23,7 +23,7 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
     private readonly feasibilityDeps?: FeasibilityDependencies,
-    private readonly transactionalComms?: TransactionalCommsListener,
+    private readonly transactionalComms?: TransactionalCommsService,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -146,25 +146,27 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
       // is the only audit event for this action, and silently losing it would be
       // worse than failing the execution after the appointment was rescheduled.
       if (this.auditRepo) {
-        const rescheduledEvent = createAuditEvent({
-          tenantId: context.tenantId,
-          actorId: context.executedBy,
-          actorRole: 'system',
-          eventType: 'appointment.rescheduled',
-          entityType: 'appointment',
-          entityId: appointmentId,
-          metadata: {
-            proposalId: proposal.id,
-            oldScheduledStart: appointment.scheduledStart.toISOString(),
-            oldScheduledEnd: appointment.scheduledEnd.toISOString(),
-            newScheduledStart,
-            newScheduledEnd,
-          },
-        });
-        await this.auditRepo.create(rescheduledEvent);
-        if (this.transactionalComms) {
-          await this.transactionalComms.handleAuditEventSafe(rescheduledEvent);
-        }
+        await this.auditRepo.create(
+          createAuditEvent({
+            tenantId: context.tenantId,
+            actorId: context.executedBy,
+            actorRole: 'system',
+            eventType: 'appointment.rescheduled',
+            entityType: 'appointment',
+            entityId: appointmentId,
+            metadata: {
+              proposalId: proposal.id,
+              oldScheduledStart: appointment.scheduledStart.toISOString(),
+              oldScheduledEnd: appointment.scheduledEnd.toISOString(),
+              newScheduledStart,
+              newScheduledEnd,
+            },
+          }),
+        );
+      }
+
+      if (this.transactionalComms) {
+        await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
       }
 
       return {

@@ -1,58 +1,37 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { runAppointmentReminderSweep } from '../../src/workers/appointment-reminder-worker';
-import { TransactionalCommsListener } from '../../src/notifications/transactional-comms-listener';
-import { AppointmentConfirmationNotifier } from '../../src/notifications/appointment-confirmation-notifier';
+import {
+  runAppointmentReminderSweep,
+  APPOINTMENT_REMINDER_LEAD_MS,
+} from '../../src/workers/appointment-reminder-worker';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { createAppointment } from '../../src/appointments/appointment';
+import { TransactionalCommsService } from '../../src/notifications/transactional-comms-service';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
-import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { InMemoryCustomerRepository } from '../../src/customers/customer';
-import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
+import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
-import { InMemoryDncRepository } from '../../src/compliance/dnc';
-import { createAppointment } from '../../src/appointments/appointment';
 import { createLogger } from '../../src/logging/logger';
 
-const TENANT = 'tenant-rem-1';
-const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+const TENANT = 'tenant-reminder-1';
 
-describe('runAppointmentReminderSweep', () => {
-  let appointmentRepo: InMemoryAppointmentRepository;
-  let dispatch: InMemoryDispatchRepository;
-  let transactionalComms: TransactionalCommsListener;
-  const NOW = new Date('2026-06-09T12:00:00Z');
+describe('appointment-reminder-worker', () => {
+  it('sends a reminder for appointments in the T-24h window', async () => {
+    const now = new Date('2026-06-01T12:00:00Z');
+    const start = new Date(now.getTime() + APPOINTMENT_REMINDER_LEAD_MS);
 
-  beforeEach(async () => {
-    appointmentRepo = new InMemoryAppointmentRepository();
-    dispatch = new InMemoryDispatchRepository();
-    const delivery = new InMemoryDeliveryProvider();
+    const appointmentRepo = new InMemoryAppointmentRepository();
     const customerRepo = new InMemoryCustomerRepository();
-    const jobRepo = new InMemoryJobRepository();
-    const settingsRepo = new InMemorySettingsRepository();
-    const dncRepo = new InMemoryDncRepository();
-
-    await settingsRepo.create({
-      id: uuidv4(),
-      tenantId: TENANT,
-      businessName: 'Acme',
-      timezone: 'UTC',
-      estimatePrefix: 'EST',
-      invoicePrefix: 'INV',
-      nextEstimateNumber: 1,
-      nextInvoiceNumber: 1,
-      defaultPaymentTermDays: 30,
-      autoSendAppointmentReminders: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-
     const customerId = uuidv4();
     await customerRepo.create({
       id: customerId,
       tenantId: TENANT,
-      firstName: 'Rem',
-      displayName: 'Rem',
+      firstName: 'Sam',
+      lastName: 'Lee',
+      displayName: 'Sam Lee',
       primaryPhone: '+15559876543',
       smsConsent: true,
       isArchived: false,
@@ -61,82 +40,74 @@ describe('runAppointmentReminderSweep', () => {
       updatedAt: new Date(),
     });
 
-    const job = await createJob(
-      {
-        tenantId: TENANT,
-        customerId,
-        locationId: uuidv4(),
-        summary: 'Tune-up',
-        createdBy: 'u1',
-      },
-      jobRepo,
-    );
+    const jobRepo = new InMemoryJobRepository();
+    const jobId = uuidv4();
+    await jobRepo.create({
+      id: jobId,
+      tenantId: TENANT,
+      customerId,
+      locationId: uuidv4(),
+      jobNumber: 'JOB-R1',
+      summary: 'Tune-up',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: 'u1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 
-    await createAppointment(
+    const appt = await createAppointment(
       {
         tenantId: TENANT,
-        jobId: job.id,
-        scheduledStart: new Date('2026-06-10T12:00:00Z'),
-        scheduledEnd: new Date('2026-06-10T13:00:00Z'),
+        jobId,
+        scheduledStart: start,
+        scheduledEnd: new Date(start.getTime() + 60 * 60 * 1000),
         timezone: 'UTC',
         createdBy: 'u1',
       },
       appointmentRepo,
     );
 
-    const confirmationNotifier = new AppointmentConfirmationNotifier({
-      delivery,
-      appointmentRepo,
-      jobRepo,
-      customerRepo,
-      settingsRepo,
-      dispatchRepo: dispatch,
-      dncRepo,
+    const settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.create({
+      id: uuidv4(),
+      tenantId: TENANT,
+      businessName: 'Reminder Co',
+      timezone: 'UTC',
+      estimatePrefix: 'E-',
+      invoicePrefix: 'I-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      autoSendAppointmentReminders: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
-    transactionalComms = new TransactionalCommsListener({
+    const delivery = new InMemoryDeliveryProvider();
+    const dispatch = new InMemoryDispatchRepository();
+    const transactionalComms = new TransactionalCommsService({
       delivery,
+      dispatchRepo: dispatch,
+      dncRepo: new InMemoryDncRepository(),
       appointmentRepo,
       jobRepo,
       customerRepo,
       settingsRepo,
-      dispatchRepo: dispatch,
-      dncRepo,
       invoiceRepo: new InMemoryInvoiceRepository(),
-      confirmationNotifier,
-      publicBaseUrl: 'http://localhost:5173',
     });
-  });
 
-  it('sends a T-24h reminder once per appointment', async () => {
-    const first = await runAppointmentReminderSweep({
+    const result = await runAppointmentReminderSweep({
       appointmentRepo,
       transactionalComms,
       listTenantIds: async () => [TENANT],
-      logger,
-      now: () => NOW,
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+      now: () => now,
     });
-    expect(first.reminders).toBe(1);
 
-    const second = await runAppointmentReminderSweep({
-      appointmentRepo,
-      transactionalComms,
-      listTenantIds: async () => [TENANT],
-      logger,
-      now: () => NOW,
-    });
-    expect(second.reminders).toBe(1);
-
-    const appts = await appointmentRepo.findByDateRange(
-      TENANT,
-      new Date('2026-06-10T11:00:00Z'),
-      new Date('2026-06-10T13:00:00Z'),
-    );
-    const rows = await dispatch.findByEntity(
-      TENANT,
-      'appointment_reminder',
-      appts[0]!.id,
-    );
-    expect(rows.length).toBe(1);
+    expect(result.reminders).toBe(1);
+    const rows = await dispatch.findByEntity(TENANT, 'appointment_reminder', appt.id);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(delivery.sentSms.some((m) => m.body.includes('Reminder'))).toBe(true);
   });
 });

@@ -9,7 +9,7 @@ import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
-import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
+import { PaymentReceiptNotifier } from '../invoices/payment';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -25,7 +25,7 @@ export function createPaymentRouter(
   jobRepo?: JobRepository,
   estimateRepo?: EstimateRepository,
   auditRepo?: AuditRepository,
-  transactionalComms?: TransactionalCommsListener,
+  paymentReceiptNotifier?: PaymentReceiptNotifier,
 ): Router {
   const router = Router();
 
@@ -37,7 +37,7 @@ export function createPaymentRouter(
   // is logged (not silently swallowed) at this call site.
   const refreshDeps: RefreshJobMoneyStateDeps | undefined =
     jobRepo && estimateRepo
-      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger, transactionalComms }
+      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger }
       : undefined;
 
   router.post(
@@ -56,6 +56,7 @@ export function createPaymentRouter(
         invoiceRepo,
         paymentRepo,
         refreshDeps,
+        paymentReceiptNotifier,
       );
       res.status(201).json(result);
     })

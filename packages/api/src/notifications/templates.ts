@@ -165,10 +165,48 @@ export function renderInvoiceEmail(ctx: InvoiceMessageContext): RenderedEmail {
   return { subject, text, html };
 }
 
-export interface SchedulingMessageContext {
+export interface AppointmentNoticeContext {
   customerName: string;
   businessName: string;
   dateTimeStr: string;
+}
+
+export function renderAppointmentConfirmationSms(ctx: AppointmentNoticeContext): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your appointment with ${ctx.businessName} is confirmed.`,
+      `Date & time: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export function renderAppointmentRescheduleSms(
+  ctx: AppointmentNoticeContext,
+): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your appointment with ${ctx.businessName} has been rescheduled.`,
+      `New date & time: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export function renderAppointmentCancelSms(ctx: AppointmentNoticeContext): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your appointment with ${ctx.businessName} has been canceled.`,
+      `Previously scheduled: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export function renderAppointmentReminderSms(ctx: AppointmentNoticeContext): RenderedSms {
+  return {
+    body: [
+      `Reminder: you have an appointment with ${ctx.businessName} tomorrow.`,
+      `Date & time: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
 }
 
 export interface PaymentReceiptContext {
@@ -176,69 +214,32 @@ export interface PaymentReceiptContext {
   businessName: string;
   invoiceNumber: string;
   amountCents: number;
-  viewUrl?: string;
 }
 
-export interface OverdueNudgeContext {
+export function renderPaymentReceiptSms(ctx: PaymentReceiptContext): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, we received your payment to ${ctx.businessName}.`,
+      `Invoice ${ctx.invoiceNumber}: ${formatMoney(ctx.amountCents)}. Thank you!`,
+    ].join('\n'),
+  };
+}
+
+export interface InvoiceOverdueContext {
   customerName: string;
   businessName: string;
   invoiceNumber: string;
   amountDueCents: number;
   dueDateIso?: string;
-  viewUrl?: string;
 }
 
-export function renderAppointmentReminderSms(ctx: SchedulingMessageContext): RenderedSms {
+export function renderInvoiceOverdueSms(ctx: InvoiceOverdueContext): RenderedSms {
+  const due = ctx.dueDateIso ? ` (due ${ctx.dueDateIso.slice(0, 10)})` : '';
   return {
     body: [
-      `Hi ${ctx.customerName} — reminder from ${ctx.businessName}.`,
-      `Your appointment is tomorrow: ${ctx.dateTimeStr}`,
+      `Hi ${ctx.customerName}, your invoice from ${ctx.businessName} is past due.`,
+      `Invoice ${ctx.invoiceNumber}: ${formatMoney(ctx.amountDueCents)}${due}.`,
+      'Please pay at your earliest convenience.',
     ].join('\n'),
   };
-}
-
-export function renderRescheduleSms(ctx: SchedulingMessageContext): RenderedSms {
-  return {
-    body: [
-      `Hi ${ctx.customerName} — ${ctx.businessName} rescheduled your appointment.`,
-      `New date & time: ${ctx.dateTimeStr}`,
-    ].join('\n'),
-  };
-}
-
-export function renderCancellationSms(
-  ctx: SchedulingMessageContext & { reason?: string },
-): RenderedSms {
-  const lines = [
-    `Hi ${ctx.customerName} — your appointment with ${ctx.businessName} has been canceled.`,
-  ];
-  if (ctx.reason?.trim()) {
-    lines.push(`Reason: ${ctx.reason.trim()}`);
-  }
-  return { body: lines.join('\n') };
-}
-
-export function renderPaymentReceiptSms(ctx: PaymentReceiptContext): RenderedSms {
-  const lines = [
-    `Hi ${ctx.customerName} — thank you for your payment to ${ctx.businessName}.`,
-    `Invoice ${ctx.invoiceNumber}: ${formatMoney(ctx.amountCents)} received.`,
-  ];
-  if (ctx.viewUrl) {
-    lines.push(`Receipt: ${ctx.viewUrl}`);
-  }
-  return { body: lines.join('\n') };
-}
-
-export function renderOverdueNudgeSms(ctx: OverdueNudgeContext): RenderedSms {
-  const lines = [
-    `Hi ${ctx.customerName} — your invoice from ${ctx.businessName} is past due.`,
-    `Invoice ${ctx.invoiceNumber}: ${formatMoney(ctx.amountDueCents)} due`,
-  ];
-  if (ctx.dueDateIso) {
-    lines.push(`Due date was ${ctx.dueDateIso.slice(0, 10)}`);
-  }
-  if (ctx.viewUrl) {
-    lines.push(`Pay online: ${ctx.viewUrl}`);
-  }
-  return { body: lines.join('\n') };
 }

@@ -7,7 +7,7 @@ import {
   captureDispatchEvent,
 } from '../../dispatch/analytics';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import type { TransactionalCommsListener } from '../../notifications/transactional-comms-listener';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
@@ -16,7 +16,7 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
-    private readonly transactionalComms?: TransactionalCommsListener,
+    private readonly transactionalComms?: TransactionalCommsService,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -77,19 +77,21 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
       // is the only audit event for this action, and silently losing it would be
       // worse than failing the execution after the appointment was canceled.
       if (this.auditRepo) {
-        const canceledEvent = createAuditEvent({
-          tenantId: context.tenantId,
-          actorId: context.executedBy,
-          actorRole: 'system',
-          eventType: 'appointment.canceled',
-          entityType: 'appointment',
-          entityId: appointmentId,
-          metadata: { proposalId: proposal.id, reason },
-        });
-        await this.auditRepo.create(canceledEvent);
-        if (this.transactionalComms) {
-          await this.transactionalComms.handleAuditEventSafe(canceledEvent);
-        }
+        await this.auditRepo.create(
+          createAuditEvent({
+            tenantId: context.tenantId,
+            actorId: context.executedBy,
+            actorRole: 'system',
+            eventType: 'appointment.canceled',
+            entityType: 'appointment',
+            entityId: appointmentId,
+            metadata: { proposalId: proposal.id, reason },
+          }),
+        );
+      }
+
+      if (this.transactionalComms) {
+        await this.transactionalComms.notifyCanceled(context.tenantId, appointmentId);
       }
 
       return { success: true, resultEntityId: appointmentId };

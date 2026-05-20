@@ -26,7 +26,6 @@ import { SendService } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
-import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -56,7 +55,6 @@ export function createInvoiceRouter(
   // money-state rollup fires only when both jobRepo + estimateRepo
   // are wired.
   estimateRepo?: EstimateRepository,
-  transactionalComms?: TransactionalCommsListener,
 ): Router {
   const router = Router();
 
@@ -65,7 +63,7 @@ export function createInvoiceRouter(
   // job.money_state_changed event.
   const refreshDeps: RefreshJobMoneyStateDeps | undefined =
     jobRepo && estimateRepo
-      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger, transactionalComms }
+      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger }
       : undefined;
 
   router.post(

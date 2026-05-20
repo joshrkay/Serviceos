@@ -37,6 +37,12 @@ jobs:
         env:
           NODE_ENV: test
 
+      - name: Owner loop critical path — §11 H2
+        run: npx vitest run test/owner-loop-critical-path.test.ts
+        working-directory: packages/api
+        env:
+          NODE_ENV: test
+
       - name: Lint
         run: npm run lint
 

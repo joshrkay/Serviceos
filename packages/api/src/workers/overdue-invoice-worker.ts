@@ -20,7 +20,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
+import { TransactionalCommsService } from '../notifications/transactional-comms-service';
 
 export interface OverdueInvoiceWorkerDeps {
   jobRepo: JobRepository;
@@ -32,7 +32,8 @@ export interface OverdueInvoiceWorkerDeps {
   logger: Logger;
   /** Injectable clock — defaults to `() => new Date()`. */
   now?: () => Date;
-  transactionalComms?: TransactionalCommsListener;
+  /** §7 Layer A — overdue dunning SMS/email when a job first crosses overdue. */
+  transactionalComms?: TransactionalCommsService;
 }
 
 export async function runOverdueInvoiceSweep(
@@ -90,22 +91,23 @@ export async function runOverdueInvoiceSweep(
         // `overdue`, refreshJobMoneyState reports changed:false.
         if (result.changed && result.current === 'overdue') {
           overdue++;
-          const overdueEvent = createAuditEvent({
-            tenantId,
-            actorId: 'overdue-invoice-worker',
-            actorRole: 'system',
-            eventType: 'invoice.overdue',
-            entityType: 'invoice',
-            entityId: invoice.id,
-            metadata: {
-              jobId: invoice.jobId,
-              dueDate: invoice.dueDate?.toISOString(),
-              amountDueCents: invoice.amountDueCents,
-            },
-          });
-          await deps.auditRepo.create(overdueEvent);
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: 'overdue-invoice-worker',
+              actorRole: 'system',
+              eventType: 'invoice.overdue',
+              entityType: 'invoice',
+              entityId: invoice.id,
+              metadata: {
+                jobId: invoice.jobId,
+                dueDate: invoice.dueDate?.toISOString(),
+                amountDueCents: invoice.amountDueCents,
+              },
+            }),
+          );
           if (deps.transactionalComms) {
-            await deps.transactionalComms.handleAuditEventSafe(overdueEvent);
+            await deps.transactionalComms.notifyInvoiceOverdue(tenantId, invoice.id);
           }
         }
       }

@@ -349,8 +349,7 @@ import {
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
-import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
-import { TransactionalCommsListener } from './notifications/transactional-comms-listener';
+import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
@@ -831,35 +830,33 @@ export function createApp(): express.Express {
       }
     : undefined;
 
-  app.use(
-    '/webhooks',
-    createWebhookRouter(config, {
-      tenantRepo,
-      settingsRepo: webhookSettingsRepo,
-      invoiceRepo: webhookInvoiceRepo,
-      estimateRepo: webhookEstimateRepo,
-      paymentRepo: webhookPaymentRepo,
-      jobRepo,
-      // Tier 4 (Team members — PR 3). Invitee join-tenant path on
-      // user.created. The same shared pending invitation repo + pool
-      // backs the /api/users invite routes so an invite written by
-      // the route is found by the webhook on accept.
-      pendingInvitationRepo,
-      pool: pool ?? undefined,
-      // Tier 4 (Subscription — PR 1). Same instance the route uses,
-      // so a customer.subscription.* webhook updates the cached
-      // status the GET /api/billing/subscription endpoint reads.
-      // Wired only when both pool and STRIPE_SECRET_KEY exist.
-      billingService,
-      connectService,
-      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-      queue,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-      auditRepo: webhookAuditRepo,
-      webhookEventRepo,
-      integrationResolver,
-    })
-  );
+  const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
+    tenantRepo,
+    settingsRepo: webhookSettingsRepo,
+    invoiceRepo: webhookInvoiceRepo,
+    estimateRepo: webhookEstimateRepo,
+    paymentRepo: webhookPaymentRepo,
+    jobRepo,
+    // Tier 4 (Team members — PR 3). Invitee join-tenant path on
+    // user.created. The same shared pending invitation repo + pool
+    // backs the /api/users invite routes so an invite written by
+    // the route is found by the webhook on accept.
+    pendingInvitationRepo,
+    pool: pool ?? undefined,
+    // Tier 4 (Subscription — PR 1). Same instance the route uses,
+    // so a customer.subscription.* webhook updates the cached
+    // status the GET /api/billing/subscription endpoint reads.
+    // Wired only when both pool and STRIPE_SECRET_KEY exist.
+    billingService,
+    connectService,
+    stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    queue,
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    auditRepo: webhookAuditRepo,
+    webhookEventRepo,
+    integrationResolver,
+  };
+  app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
@@ -1233,32 +1230,21 @@ export function createApp(): express.Express {
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
-  const schedulingConfirmationNotifier = messageDelivery
-    ? new AppointmentConfirmationNotifier({
+  const transactionalComms = messageDelivery
+    ? new TransactionalCommsService({
         delivery: messageDelivery,
         appointmentRepo,
         jobRepo,
         customerRepo,
         settingsRepo,
+        invoiceRepo,
         dispatchRepo,
         dncRepo,
       })
     : undefined;
-  const transactionalComms =
-    messageDelivery && schedulingConfirmationNotifier
-      ? new TransactionalCommsListener({
-          delivery: messageDelivery,
-          appointmentRepo,
-          jobRepo,
-          customerRepo,
-          settingsRepo,
-          dispatchRepo,
-          dncRepo,
-          invoiceRepo,
-          confirmationNotifier: schedulingConfirmationNotifier,
-          publicBaseUrl,
-        })
-      : undefined;
+  if (transactionalComms) {
+    webhookRouterDeps.paymentReceiptNotifier = transactionalComms;
+  }
   const feasibilityDeps: FeasibilityDependencies = {
     assignmentRepo,
     appointmentRepo,
@@ -1307,7 +1293,7 @@ export function createApp(): express.Express {
     paymentRepo,
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
-    schedulingNotifier: schedulingConfirmationNotifier,
+    schedulingNotifier: transactionalComms,
     transactionalComms,
     expenseRepo,
     auditRepo,
@@ -2380,20 +2366,7 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
     ),
   );
-  app.use(
-    '/api/invoices',
-    createInvoiceRouter(
-      invoiceRepo,
-      settingsRepo,
-      auditRepo,
-      ownership,
-      paymentRepo,
-      sendService,
-      jobRepo,
-      estimateRepo,
-      transactionalComms,
-    ),
-  );
+  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
@@ -2784,25 +2757,26 @@ export function createApp(): express.Express {
     service: 'appointment-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    if (!transactionalComms) return;
-    try {
-      await runAppointmentReminderSweep({
-        appointmentRepo,
-        transactionalComms,
-        listTenantIds: async () => {
-          if (!pool) return [];
-          const r = await pool.query('SELECT id FROM tenants');
-          return r.rows.map((row: { id: string }) => row.id);
-        },
-        logger: appointmentReminderLogger,
-      });
-    } catch (err) {
-      appointmentReminderLogger.error('Appointment-reminder sweep failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, 60 * 60_000);
+  if (transactionalComms) {
+    setInterval(async () => {
+      try {
+        await runAppointmentReminderSweep({
+          appointmentRepo,
+          transactionalComms,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: appointmentReminderLogger,
+        });
+      } catch (err) {
+        appointmentReminderLogger.error('Appointment-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 60 * 60_000);
+  }
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`

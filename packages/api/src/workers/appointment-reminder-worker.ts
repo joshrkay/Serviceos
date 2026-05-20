@@ -1,31 +1,31 @@
 /**
- * §7 Layer A — T−24h appointment reminder sweep.
+ * §7 Layer A — T-24h appointment reminder sweep.
  *
- * Finds confirmed appointments starting in ~24 hours and sends a
- * one-time SMS reminder per appointment (idempotent via message_dispatches).
+ * Hourly cross-tenant sweep: appointments starting in ~24 hours receive a
+ * one-shot reminder SMS/email (idempotent via dispatch idempotency keys).
  */
 import { Logger } from '../logging/logger';
 import { AppointmentRepository } from '../appointments/appointment';
-import { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
+import { TransactionalCommsService } from '../notifications/transactional-comms-service';
+
+/** Default reminder lead time (24 hours before start). */
+export const APPOINTMENT_REMINDER_LEAD_MS = 24 * 60 * 60 * 1000;
+
+/** Window width around the target fire time (±30 minutes). */
+export const APPOINTMENT_REMINDER_WINDOW_MS = 30 * 60 * 1000;
 
 export interface AppointmentReminderWorkerDeps {
   appointmentRepo: AppointmentRepository;
-  transactionalComms: TransactionalCommsListener;
+  transactionalComms: TransactionalCommsService;
   listTenantIds: () => Promise<string[]>;
   logger: Logger;
-  /** Injectable clock — defaults to `() => new Date()`. */
   now?: () => Date;
 }
-
-/** Window: 23h–25h ahead of `now` (2h band around T−24h). */
-const REMINDER_WINDOW_START_MS = 23 * 60 * 60 * 1000;
-const REMINDER_WINDOW_END_MS = 25 * 60 * 60 * 1000;
 
 export async function runAppointmentReminderSweep(
   deps: AppointmentReminderWorkerDeps,
 ): Promise<{ tenants: number; reminders: number; failed: number }> {
   const now = deps.now ?? (() => new Date());
-  const asOf = now();
 
   let tenantIds: string[];
   try {
@@ -37,11 +37,12 @@ export async function runAppointmentReminderSweep(
     return { tenants: 0, reminders: 0, failed: 0 };
   }
 
+  const asOf = now().getTime();
+  const windowStart = new Date(asOf + APPOINTMENT_REMINDER_LEAD_MS - APPOINTMENT_REMINDER_WINDOW_MS);
+  const windowEnd = new Date(asOf + APPOINTMENT_REMINDER_LEAD_MS + APPOINTMENT_REMINDER_WINDOW_MS);
+
   let reminders = 0;
   let failed = 0;
-
-  const windowStart = new Date(asOf.getTime() + REMINDER_WINDOW_START_MS);
-  const windowEnd = new Date(asOf.getTime() + REMINDER_WINDOW_END_MS);
 
   for (const tenantId of tenantIds) {
     try {
@@ -50,12 +51,11 @@ export async function runAppointmentReminderSweep(
         windowStart,
         windowEnd,
       );
-
       for (const appointment of appointments) {
-        if (appointment.status === 'canceled') continue;
-        if (appointment.holdPendingApproval) continue;
-
-        await deps.transactionalComms.sendAppointmentReminder(tenantId, appointment.id);
+        if (appointment.status === 'canceled' || appointment.holdPendingApproval) {
+          continue;
+        }
+        await deps.transactionalComms.notifyReminder(tenantId, appointment.id);
         reminders++;
       }
     } catch (err) {

@@ -2751,15 +2751,21 @@ export const MIGRATIONS = {
       FOREIGN KEY (review_id) REFERENCES google_reviews(id) ON DELETE SET NULL;
   `,
 
-  '105_extend_dispatch_layer_a_entity_types': `
+  '105_extend_dispatch_entity_types_transactional_comms': `
     ALTER TABLE message_dispatches
       DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
     ALTER TABLE message_dispatches
       ADD CONSTRAINT message_dispatches_entity_type_check
         CHECK (entity_type IN (
-          'estimate', 'invoice', 'appointment_confirmation', 'delay_notice',
-          'appointment_reminder', 'appointment_reschedule', 'appointment_cancel',
-          'payment_receipt', 'invoice_overdue_nudge'
+          'estimate',
+          'invoice',
+          'appointment_confirmation',
+          'appointment_reschedule',
+          'appointment_cancel',
+          'appointment_reminder',
+          'payment_receipt',
+          'invoice_overdue',
+          'delay_notice'
         ));
   `,
 };

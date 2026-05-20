@@ -14,12 +14,12 @@ export type DispatchEntityType =
   | 'estimate'
   | 'invoice'
   | 'appointment_confirmation'
-  | 'delay_notice'
-  | 'appointment_reminder'
   | 'appointment_reschedule'
   | 'appointment_cancel'
+  | 'appointment_reminder'
   | 'payment_receipt'
-  | 'invoice_overdue_nudge';
+  | 'invoice_overdue'
+  | 'delay_notice';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 
@@ -65,7 +65,6 @@ export interface DispatchListResult {
 
 export interface DispatchRepository {
   create(input: CreateDispatchInput): Promise<MessageDispatch>;
-  findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<MessageDispatch | null>;
   findById(tenantId: string, id: string): Promise<MessageDispatch | null>;
   findByEntity(
     tenantId: string,
@@ -84,18 +83,6 @@ export interface DispatchRepository {
 
 export class InMemoryDispatchRepository implements DispatchRepository {
   private readonly rows = new Map<string, MessageDispatch>();
-
-  async findByIdempotencyKey(
-    tenantId: string,
-    idempotencyKey: string,
-  ): Promise<MessageDispatch | null> {
-    for (const row of this.rows.values()) {
-      if (row.tenantId === tenantId && row.idempotencyKey === idempotencyKey) {
-        return { ...row };
-      }
-    }
-    return null;
-  }
 
   async create(input: CreateDispatchInput): Promise<MessageDispatch> {
     const row: MessageDispatch = {
@@ -174,21 +161,6 @@ export class InMemoryDispatchRepository implements DispatchRepository {
 export class PgDispatchRepository extends PgBaseRepository implements DispatchRepository {
   constructor(pool: Pool) {
     super(pool);
-  }
-
-  async findByIdempotencyKey(
-    tenantId: string,
-    idempotencyKey: string,
-  ): Promise<MessageDispatch | null> {
-    return this.withTenant(tenantId, async (client) => {
-      const { rows } = await client.query(
-        `SELECT * FROM message_dispatches
-         WHERE tenant_id = $1 AND idempotency_key = $2
-         LIMIT 1`,
-        [tenantId, idempotencyKey],
-      );
-      return rows.length ? mapRow(rows[0]) : null;
-    });
   }
 
   async create(input: CreateDispatchInput): Promise<MessageDispatch> {

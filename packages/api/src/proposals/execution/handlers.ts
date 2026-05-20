@@ -34,9 +34,8 @@ import { SettingsRepository } from '../../settings/settings';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
-import type { TransactionalCommsListener } from '../../notifications/transactional-comms-listener';
-import { createAuditEvent } from '../../audit/audit';
 import { CreateCustomerVoiceExecutionHandler } from './create-customer-handler';
 import { CustomerRepository } from '../../customers/customer';
 
@@ -102,8 +101,6 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly confirmationNotifier: SchedulingConfirmationNotifier = new NoopSchedulingConfirmationNotifier(),
-    private readonly auditRepo?: AuditRepository,
-    private readonly transactionalComms?: TransactionalCommsListener,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -181,26 +178,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       : ['sms', 'email'];
     const shouldSendConfirmation = payload.sendConfirmation !== false;
     if (shouldSendConfirmation && channels.length > 0) {
-      if (this.transactionalComms && this.auditRepo) {
-        const bookedEvent = createAuditEvent({
-          tenantId: context.tenantId,
-          actorId: context.executedBy,
-          actorRole: 'system',
-          eventType: 'appointment.booked',
-          entityType: 'appointment',
-          entityId: appointment.id,
-          metadata: { proposalId: proposal.id, jobId: appointment.jobId },
-        });
-        await this.auditRepo.create(bookedEvent);
-        await this.transactionalComms.handleAuditEventSafe(bookedEvent);
-      } else {
-        await this.confirmationNotifier.enqueue({
-          tenantId: context.tenantId,
-          appointmentId: appointment.id,
-          jobId: appointment.jobId,
-          channels,
-        });
-      }
+      await this.confirmationNotifier.enqueue({
+        tenantId: context.tenantId,
+        appointmentId: appointment.id,
+        jobId: appointment.jobId,
+        channels,
+      });
     }
 
     return { success: true, resultEntityId: appointment.id };
@@ -230,6 +213,7 @@ export function createExecutionHandlerRegistry(deps?: {
   estimateRepo?: EstimateRepository;
   settingsRepo?: SettingsRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
+  transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
@@ -244,7 +228,6 @@ export function createExecutionHandlerRegistry(deps?: {
   serviceCreditRepo?: ServiceCreditRepository;
   googleReplyResolver?: GoogleBusinessReplyResolver;
   reviewPrivateMessageSender?: ReviewPrivateMessageSender;
-  transactionalComms?: TransactionalCommsListener;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -269,17 +252,11 @@ export function createExecutionHandlerRegistry(deps?: {
       : new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(),
     new CreateJobExecutionHandler(),
-    new CreateAppointmentExecutionHandler(
-      deps?.appointmentRepo,
-      deps?.assignmentRepo,
-      deps?.schedulingNotifier,
-      deps?.auditRepo,
-      deps?.transactionalComms,
-    ),
+    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
     new CreateBookingExecutionHandler(
       deps?.appointmentRepo,
       deps?.auditRepo,
-      deps?.transactionalComms,
+      deps?.schedulingNotifier ?? deps?.transactionalComms,
     ),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
@@ -304,7 +281,12 @@ export function createExecutionHandlerRegistry(deps?: {
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
-    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo, moneyStateDeps),
+    new RecordPaymentExecutionHandler(
+      deps?.paymentRepo,
+      deps?.invoiceRepo,
+      moneyStateDeps,
+      deps?.transactionalComms,
+    ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep

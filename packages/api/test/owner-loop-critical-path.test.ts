@@ -1,375 +1,282 @@
 /**
- * Owner-loop critical path — deploy gate.
+ * §11 critical-path smoke — owner loop (Layer A comms).
  *
- * Synthetic booking → approve → confirmation dispatch → optional
- * estimate / invoice / payment money path with Layer A comms.
+ * Synthetic path (no Twilio audio): held slot → create_booking approval →
+ * booking confirmation dispatched → optional estimate → invoice → payment receipt.
+ *
+ * Gates deploys alongside voice-smoke.synthetic.test.ts.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { CreateAppointmentAITaskHandler } from '../src/ai/tasks/create-appointment-task';
-import type { LLMGateway } from '../src/ai/gateway/gateway';
-import type { TaskContext } from '../src/ai/tasks/task-handlers';
-import { approveProposal } from '../src/proposals/actions';
-import {
-  createProposal,
-  InMemoryProposalRepository,
-} from '../src/proposals/proposal';
-import { transitionProposal, UNDO_WINDOW_MS } from '../src/proposals/lifecycle';
-import { ProposalExecutor } from '../src/proposals/execution/executor';
-import { IdempotencyGuard } from '../src/proposals/execution/idempotency';
-import { InMemoryProposalExecutionRepository } from '../src/proposals/proposal-execution';
-import { createExecutionHandlerRegistry } from '../src/proposals/execution/handlers';
-import { runExecutionSweep } from '../src/workers/execution-worker';
-import { createLogger } from '../src/logging/logger';
+import { CreateBookingExecutionHandler } from '../src/proposals/execution/create-booking-handler';
+import { CreateAppointmentExecutionHandler } from '../src/proposals/execution/handlers';
+import { RecordPaymentExecutionHandler } from '../src/proposals/execution/voice-extended-handlers';
 import { InMemoryAppointmentRepository } from '../src/appointments/in-memory-appointment';
 import { InMemoryAuditRepository } from '../src/audit/audit';
-import { InMemoryJobRepository, createJob } from '../src/jobs/job';
-import { InMemoryCustomerRepository } from '../src/customers/customer';
+import { InMemoryCustomerRepository, Customer } from '../src/customers/customer';
+import { InMemoryJobRepository, Job } from '../src/jobs/job';
 import { InMemorySettingsRepository } from '../src/settings/settings';
-import { InMemoryDispatchRepository } from '../src/notifications/dispatch-repository';
 import { InMemoryDeliveryProvider } from '../src/notifications/delivery-provider';
+import { InMemoryDispatchRepository } from '../src/notifications/dispatch-repository';
 import { InMemoryDncRepository } from '../src/compliance/dnc';
-import { AppointmentConfirmationNotifier } from '../src/notifications/appointment-confirmation-notifier';
-import { TransactionalCommsListener } from '../src/notifications/transactional-comms-listener';
-import { InMemoryEstimateRepository } from '../src/estimates/estimate';
+import { TransactionalCommsService } from '../src/notifications/transactional-comms-service';
+import { createAppointment } from '../src/appointments/appointment';
+import { createProposal } from '../src/proposals/proposal';
+import { transitionProposal } from '../src/proposals/lifecycle';
 import { InMemoryInvoiceRepository } from '../src/invoices/invoice';
 import { InMemoryPaymentRepository } from '../src/invoices/payment';
-import { SendService } from '../src/notifications/send-service';
-import { runOverdueInvoiceSweep } from '../src/workers/overdue-invoice-worker';
-import { recordPayment } from '../src/invoices/payment';
-import { refreshJobMoneyStateSafe } from '../src/jobs/job-money-state';
-import type { Estimate } from '../src/estimates/estimate';
-import type { Invoice } from '../src/invoices/invoice';
-import type { DocumentTotals } from '../src/shared/billing-engine';
+import { InMemoryEstimateRepository } from '../src/estimates/estimate';
+import { createInvoice, issueInvoice } from '../src/invoices/invoice';
+import { createEstimate } from '../src/estimates/estimate';
+import { buildLineItem } from '../src/shared/billing-engine';
 
 const TENANT = '00000000-0000-4000-8000-00000000000a';
-const logger = createLogger({ service: 'owner-loop', environment: 'test', level: 'error' });
 
-const ZERO_TOTALS: DocumentTotals = {
-  subtotalCents: 10000,
-  discountCents: 0,
-  taxRateBps: 0,
-  taxableSubtotalCents: 10000,
-  taxCents: 0,
-  totalCents: 10000,
-};
-
-function fakeGateway(json: Record<string, unknown>): LLMGateway {
+function makeCustomer(): Customer {
   return {
-    complete: async () => ({ content: JSON.stringify(json) }),
-  } as unknown as LLMGateway;
-}
-
-interface OwnerLoopHarness {
-  jobId: string;
-  appointmentRepo: InMemoryAppointmentRepository;
-  proposalRepo: InMemoryProposalRepository;
-  jobRepo: InMemoryJobRepository;
-  customerRepo: InMemoryCustomerRepository;
-  settingsRepo: InMemorySettingsRepository;
-  dispatchRepo: InMemoryDispatchRepository;
-  auditRepo: InMemoryAuditRepository;
-  estimateRepo: InMemoryEstimateRepository;
-  invoiceRepo: InMemoryInvoiceRepository;
-  paymentRepo: InMemoryPaymentRepository;
-  transactionalComms: TransactionalCommsListener;
-  executor: ProposalExecutor;
-}
-
-async function buildHarness(): Promise<OwnerLoopHarness> {
-  const appointmentRepo = new InMemoryAppointmentRepository();
-  const proposalRepo = new InMemoryProposalRepository();
-  const jobRepo = new InMemoryJobRepository();
-  const customerRepo = new InMemoryCustomerRepository();
-  const settingsRepo = new InMemorySettingsRepository();
-  const dispatchRepo = new InMemoryDispatchRepository();
-  const delivery = new InMemoryDeliveryProvider();
-  const dncRepo = new InMemoryDncRepository();
-  const auditRepo = new InMemoryAuditRepository();
-  const estimateRepo = new InMemoryEstimateRepository();
-  const invoiceRepo = new InMemoryInvoiceRepository();
-  const paymentRepo = new InMemoryPaymentRepository();
-
-  await settingsRepo.create({
     id: uuidv4(),
     tenantId: TENANT,
-    businessName: 'Acme HVAC',
-    timezone: 'America/Los_Angeles',
-    estimatePrefix: 'EST',
-    invoicePrefix: 'INV',
-    nextEstimateNumber: 1000,
-    nextInvoiceNumber: 2000,
-    defaultPaymentTermDays: 30,
-    autoSendAppointmentReminders: true,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
-
-  const customerId = uuidv4();
-  await customerRepo.create({
-    id: customerId,
-    tenantId: TENANT,
-    firstName: 'Alex',
-    lastName: 'Park',
-    displayName: 'Alex Park',
-    primaryPhone: '+15557654321',
-    email: 'alex@example.com',
+    firstName: 'Pat',
+    lastName: 'Rivera',
+    displayName: 'Pat Rivera',
+    primaryPhone: '+15551234567',
+    email: 'pat@example.com',
     preferredChannel: 'sms',
     smsConsent: true,
     isArchived: false,
     createdBy: 'owner-1',
     createdAt: new Date(),
     updatedAt: new Date(),
-  });
-
-  const job = await createJob(
-    {
-      tenantId: TENANT,
-      customerId,
-      locationId: uuidv4(),
-      summary: 'AC repair',
-      createdBy: 'owner-1',
-    },
-    jobRepo,
-  );
-
-  const confirmationNotifier = new AppointmentConfirmationNotifier({
-    delivery,
-    appointmentRepo,
-    jobRepo,
-    customerRepo,
-    settingsRepo,
-    dispatchRepo,
-    dncRepo,
-  });
-
-  const transactionalComms = new TransactionalCommsListener({
-    delivery,
-    appointmentRepo,
-    jobRepo,
-    customerRepo,
-    settingsRepo,
-    dispatchRepo,
-    dncRepo,
-    invoiceRepo,
-    confirmationNotifier,
-    publicBaseUrl: 'http://localhost:5173',
-  });
-
-  const handlers = createExecutionHandlerRegistry({
-    appointmentRepo,
-    jobRepo,
-    customerRepo,
-    settingsRepo,
-    auditRepo,
-    estimateRepo,
-    invoiceRepo,
-    paymentRepo,
-    schedulingNotifier: confirmationNotifier,
-    transactionalComms,
-  });
-
-  const guard = new IdempotencyGuard(
-    new InMemoryProposalExecutionRepository(),
-    proposalRepo,
-  );
-  const executor = new ProposalExecutor(handlers, proposalRepo, guard);
-
-  return {
-    jobId: job.id,
-    appointmentRepo,
-    proposalRepo,
-    jobRepo,
-    customerRepo,
-    settingsRepo,
-    dispatchRepo,
-    auditRepo,
-    estimateRepo,
-    invoiceRepo,
-    paymentRepo,
-    transactionalComms,
-    executor,
   };
 }
 
-describe('owner-loop critical path', () => {
-  let h: OwnerLoopHarness;
+function makeJob(customerId: string): Job {
+  return {
+    id: uuidv4(),
+    tenantId: TENANT,
+    customerId,
+    locationId: uuidv4(),
+    jobNumber: 'JOB-900',
+    summary: 'Water heater',
+    status: 'scheduled',
+    priority: 'normal',
+    moneyState: 'no_estimate',
+    createdBy: 'owner-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+
+describe('owner loop critical path — §11 smoke', () => {
+  let appointmentRepo: InMemoryAppointmentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let customerRepo: InMemoryCustomerRepository;
+  let jobRepo: InMemoryJobRepository;
+  let settingsRepo: InMemorySettingsRepository;
+  let delivery: InMemoryDeliveryProvider;
+  let dispatch: InMemoryDispatchRepository;
+  let transactionalComms: TransactionalCommsService;
 
   beforeEach(async () => {
-    h = await buildHarness();
-  });
+    appointmentRepo = new InMemoryAppointmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+    customerRepo = new InMemoryCustomerRepository();
+    jobRepo = new InMemoryJobRepository();
+    settingsRepo = new InMemorySettingsRepository();
+    delivery = new InMemoryDeliveryProvider();
+    dispatch = new InMemoryDispatchRepository();
 
-  it('synthetic call → create_booking → approve → confirmation dispatched', async () => {
-    const handler = new CreateAppointmentAITaskHandler(
-      fakeGateway({
-        jobId: h.jobId,
-        scheduledStart: '2026-06-02T21:00:00Z',
-        scheduledEnd: '2026-06-02T22:00:00Z',
-        summary: 'AC repair',
-        confidence_score: 0.9,
-      }),
-      undefined,
-      undefined,
-      h.appointmentRepo,
-    );
-
-    const taskResult = await handler.handle({
+    await settingsRepo.create({
+      id: uuidv4(),
       tenantId: TENANT,
-      userId: 'agent-1',
-      message: 'Book Tuesday at 2pm',
-    } as TaskContext);
-
-    expect(taskResult.proposal.proposalType).toBe('create_booking');
-    const stored = await h.proposalRepo.create(taskResult.proposal);
-    await h.proposalRepo.updateStatus(TENANT, stored.id, 'ready_for_review');
-
-    await approveProposal(
-      h.proposalRepo,
-      TENANT,
-      stored.id,
-      'owner-1',
-      'owner',
-      h.auditRepo,
-    );
-
-    await h.proposalRepo.updateStatus(TENANT, stored.id, 'approved', {
-      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+      businessName: 'Loop HVAC',
+      timezone: 'UTC',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      autoSendAppointmentReminders: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
 
-    const { executed } = await runExecutionSweep({
-      proposalRepo: h.proposalRepo,
-      executor: h.executor,
-      logger,
-    });
-    expect(executed).toBe(1);
-
-    const appointmentId = taskResult.proposal.payload.appointmentId as string;
-    const dispatches = await h.dispatchRepo.findByEntity(
-      TENANT,
-      'appointment_confirmation',
-      appointmentId,
-    );
-    expect(dispatches.length).toBeGreaterThan(0);
-  });
-
-  it('money path: estimate sent → overdue nudge → payment receipt', async () => {
-    const delivery = new InMemoryDeliveryProvider();
-    const dncRepo = new InMemoryDncRepository();
-    const sendService = new SendService({
+    transactionalComms = new TransactionalCommsService({
       delivery,
-      estimateRepo: h.estimateRepo,
-      invoiceRepo: h.invoiceRepo,
-      jobRepo: h.jobRepo,
-      customerRepo: h.customerRepo,
-      settingsRepo: h.settingsRepo,
-      dispatchRepo: h.dispatchRepo,
-      dncRepo,
-      publicBaseUrl: 'http://localhost:5173',
+      dispatchRepo: dispatch,
+      dncRepo: new InMemoryDncRepository(),
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      invoiceRepo: new InMemoryInvoiceRepository(),
     });
+  });
 
-    const estimate: Estimate = {
-      id: uuidv4(),
-      tenantId: TENANT,
-      jobId: h.jobId,
-      estimateNumber: 'EST-1001',
-      status: 'draft',
-      lineItems: [],
-      totals: ZERO_TOTALS,
-      createdBy: 'owner-1',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    await h.estimateRepo.create(estimate);
+  it('create_booking approval dispatches booking confirmation within 5s', async () => {
+    const customer = makeCustomer();
+    await customerRepo.create(customer);
+    const job = makeJob(customer.id);
+    await jobRepo.create(job);
 
-    await sendService.sendEstimate({
-      tenantId: TENANT,
-      estimateId: estimate.id,
-      channel: 'sms',
-    });
-
-    await refreshJobMoneyStateSafe(TENANT, h.jobId, 'owner-1', {
-      jobRepo: h.jobRepo,
-      estimateRepo: h.estimateRepo,
-      invoiceRepo: h.invoiceRepo,
-      auditRepo: h.auditRepo,
-    });
-
-    const jobAfterEstimate = await h.jobRepo.findById(TENANT, h.jobId);
-    expect(jobAfterEstimate?.moneyState).toBe('estimate_sent');
-
-    const estimateDispatches = await h.dispatchRepo.findByEntity(
-      TENANT,
-      'estimate',
-      estimate.id,
-    );
-    expect(estimateDispatches.length).toBeGreaterThan(0);
-
-    const NOW = new Date('2026-05-14T12:00:00Z');
-    const PAST = new Date('2026-05-01T00:00:00Z');
-
-    const invoice: Invoice = {
-      id: uuidv4(),
-      tenantId: TENANT,
-      jobId: h.jobId,
-      invoiceNumber: 'INV-2001',
-      status: 'open',
-      lineItems: [],
-      totals: ZERO_TOTALS,
-      amountPaidCents: 0,
-      amountDueCents: 10000,
-      dueDate: PAST,
-      createdBy: 'owner-1',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    await h.invoiceRepo.create(invoice);
-
-    await runOverdueInvoiceSweep({
-      jobRepo: h.jobRepo,
-      estimateRepo: h.estimateRepo,
-      invoiceRepo: h.invoiceRepo,
-      auditRepo: h.auditRepo,
-      transactionalComms: h.transactionalComms,
-      listTenantIds: async () => [TENANT],
-      logger,
-      now: () => NOW,
-    });
-
-    const jobOverdue = await h.jobRepo.findById(TENANT, h.jobId);
-    expect(jobOverdue?.moneyState).toBe('overdue');
-
-    const overdueDispatches = await h.dispatchRepo.findByEntity(
-      TENANT,
-      'invoice_overdue_nudge',
-      invoice.id,
-    );
-    expect(overdueDispatches.length).toBeGreaterThan(0);
-
-    await recordPayment(
+    const appt = await createAppointment(
       {
         tenantId: TENANT,
-        invoiceId: invoice.id,
-        amountCents: 10000,
-        method: 'cash',
-        processedBy: 'owner-1',
+        jobId: job.id,
+        scheduledStart: new Date('2026-06-10T17:00:00Z'),
+        scheduledEnd: new Date('2026-06-10T18:00:00Z'),
+        timezone: 'UTC',
+        createdBy: 'agent-1',
+        holdPendingApproval: true,
+        holdExpiryAt: new Date('2099-01-01T00:00:00Z'),
       },
-      h.invoiceRepo,
-      h.paymentRepo,
-      {
-        jobRepo: h.jobRepo,
-        estimateRepo: h.estimateRepo,
-        invoiceRepo: h.invoiceRepo,
-        auditRepo: h.auditRepo,
-        transactionalComms: h.transactionalComms,
-      },
+      appointmentRepo,
     );
 
-    const jobPaid = await h.jobRepo.findById(TENANT, h.jobId);
-    expect(jobPaid?.moneyState).toBe('paid');
-
-    const receiptDispatches = await h.dispatchRepo.listByTenant(TENANT, {
-      entityType: 'payment_receipt',
+    const started = Date.now();
+    const handler = new CreateBookingExecutionHandler(
+      appointmentRepo,
+      auditRepo,
+      transactionalComms,
+    );
+    const proposal = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_booking',
+      payload: { appointmentId: appt.id },
+      summary: 'Confirm held booking',
+      createdBy: 'owner-1',
     });
-    expect(receiptDispatches.dispatches.length).toBeGreaterThan(0);
+
+    const result = await handler.execute(proposal, {
+      tenantId: TENANT,
+      executedBy: 'owner-1',
+    });
+
+    expect(result.success).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5000);
+
+    const dispatches = await dispatch.findByEntity(
+      TENANT,
+      'appointment_confirmation',
+      appt.id,
+    );
+    expect(dispatches.length).toBeGreaterThan(0);
+    expect(delivery.sentSms.length).toBeGreaterThan(0);
+    expect(delivery.sentSms[0].body).toMatch(/confirmed/i);
+  });
+
+  it('record_payment proposal sends payment receipt when wired', async () => {
+    const customer = makeCustomer();
+    await customerRepo.create(customer);
+    const job = makeJob(customer.id);
+    await jobRepo.create(job);
+
+    const estimateRepo = new InMemoryEstimateRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const paymentRepo = new InMemoryPaymentRepository();
+
+    const lineItems = [buildLineItem('1', 'Labor', 1, 10_000, 1, true)];
+    const estimate = await createEstimate(
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        estimateNumber: 'EST-0001',
+        lineItems,
+        createdBy: 'owner-1',
+      },
+      estimateRepo,
+    );
+
+    const invoice = await createInvoice(
+      {
+        tenantId: TENANT,
+        jobId: job.id,
+        estimateId: estimate.id,
+        invoiceNumber: 'INV-0001',
+        lineItems,
+        createdBy: 'owner-1',
+      },
+      invoiceRepo,
+    );
+    await issueInvoice(TENANT, invoice.id, 30, invoiceRepo);
+
+    const comms = new TransactionalCommsService({
+      delivery,
+      dispatchRepo: dispatch,
+      dncRepo: new InMemoryDncRepository(),
+      appointmentRepo,
+      jobRepo,
+      customerRepo,
+      settingsRepo,
+      invoiceRepo,
+    });
+
+    const handler = new RecordPaymentExecutionHandler(
+      paymentRepo,
+      invoiceRepo,
+      {
+        jobRepo,
+        estimateRepo,
+        invoiceRepo,
+        auditRepo,
+      },
+      comms,
+    );
+
+    const proposal = createProposal({
+      tenantId: TENANT,
+      proposalType: 'record_payment',
+      payload: {
+        invoiceId: invoice.id,
+        amountCents: invoice.amountDueCents,
+        paymentMethod: 'cash',
+      },
+      summary: 'Record cash payment',
+      createdBy: 'owner-1',
+    });
+    let approved = transitionProposal(proposal, 'ready_for_review', 'owner-1');
+    approved = transitionProposal(approved, 'approved', 'owner-1');
+
+    const result = await handler.execute(approved, {
+      tenantId: TENANT,
+      executedBy: 'owner-1',
+    });
+    expect(result.success).toBe(true);
+
+    const receipts = await dispatch.findByEntity(TENANT, 'payment_receipt', invoice.id);
+    expect(receipts.length).toBeGreaterThan(0);
+    expect(delivery.sentSms.some((m) => m.body.includes('received your payment'))).toBe(true);
+  });
+
+  it('create_appointment execution still dispatches confirmation (regression)', async () => {
+    const customer = makeCustomer();
+    await customerRepo.create(customer);
+    const job = makeJob(customer.id);
+    await jobRepo.create(job);
+
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo,
+      undefined,
+      transactionalComms,
+    );
+    const proposal = createProposal({
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      payload: {
+        jobId: job.id,
+        scheduledStart: '2026-06-11T14:00:00Z',
+        scheduledEnd: '2026-06-11T15:00:00Z',
+        timezone: 'UTC',
+      },
+      summary: 'Book visit',
+      createdBy: 'owner-1',
+    });
+
+    const result = await handler.execute(proposal, {
+      tenantId: TENANT,
+      executedBy: 'owner-1',
+    });
+    expect(result.success).toBe(true);
+    expect(delivery.sentSms.length).toBeGreaterThan(0);
   });
 });

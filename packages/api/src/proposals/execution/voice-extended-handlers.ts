@@ -10,6 +10,7 @@ import {
   PaymentRepository,
   PaymentMethod,
   recordPayment,
+  PaymentReceiptNotifier,
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
@@ -140,6 +141,7 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     private readonly paymentRepo?: PaymentRepository,
     private readonly invoiceRepo?: InvoiceRepository,
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
+    private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -179,6 +181,7 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
         this.invoiceRepo,
         this.paymentRepo,
         this.moneyStateDeps,
+        this.paymentReceiptNotifier,
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {

@@ -2,7 +2,7 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import type { TransactionalCommsListener } from '../../notifications/transactional-comms-listener';
+import { SchedulingConfirmationNotifier } from './scheduling-notifications';
 
 /**
  * Confirms a tentative held appointment when its `create_booking`
@@ -22,7 +22,7 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly auditRepo?: AuditRepository,
-    private readonly transactionalComms?: TransactionalCommsListener,
+    private readonly confirmationNotifier?: SchedulingConfirmationNotifier,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -93,19 +93,26 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
     // is the only audit event for this action, and silently losing it would be
     // worse than failing the execution after the appointment was confirmed.
     if (this.auditRepo) {
-      const bookedEvent = createAuditEvent({
+      await this.auditRepo.create(
+        createAuditEvent({
+          tenantId: context.tenantId,
+          actorId: context.executedBy,
+          actorRole: 'system',
+          eventType: 'appointment.booked',
+          entityType: 'appointment',
+          entityId: appointmentId,
+          metadata: { proposalId: proposal.id, jobId: appointment.jobId },
+        }),
+      );
+    }
+
+    if (this.confirmationNotifier) {
+      await this.confirmationNotifier.enqueue({
         tenantId: context.tenantId,
-        actorId: context.executedBy,
-        actorRole: 'system',
-        eventType: 'appointment.booked',
-        entityType: 'appointment',
-        entityId: appointmentId,
-        metadata: { proposalId: proposal.id, jobId: appointment.jobId },
+        appointmentId,
+        jobId: appointment.jobId,
+        channels: ['sms', 'email'],
       });
-      await this.auditRepo.create(bookedEvent);
-      if (this.transactionalComms) {
-        await this.transactionalComms.handleAuditEventSafe(bookedEvent);
-      }
     }
 
     return { success: true, resultEntityId: appointmentId };

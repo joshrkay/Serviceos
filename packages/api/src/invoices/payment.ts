@@ -2,7 +2,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
-import { createAuditEvent } from '../audit/audit';
+
+export interface PaymentReceiptNotifier {
+  notifyPaymentReceived(
+    tenantId: string,
+    invoiceId: string,
+    amountCents: number,
+  ): Promise<void>;
+}
 
 export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
@@ -139,6 +146,7 @@ export async function recordPayment(
   invoiceRepo: InvoiceRepository,
   paymentRepo: PaymentRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
+  paymentReceiptNotifier?: PaymentReceiptNotifier,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -205,25 +213,12 @@ export async function recordPayment(
     );
   }
 
-  if (updatedInvoice && moneyStateDeps?.auditRepo) {
-    const paymentEvent = createAuditEvent({
-      tenantId: input.tenantId,
-      actorId: input.processedBy,
-      actorRole: 'system',
-      eventType: 'payment.recorded',
-      entityType: 'invoice',
-      entityId: input.invoiceId,
-      metadata: {
-        paymentId: payment.id,
-        amountCents: payment.amountCents,
-        method: payment.method,
-        newInvoiceStatus: updatedInvoice.status,
-      },
-    });
-    await moneyStateDeps.auditRepo.create(paymentEvent);
-    if (moneyStateDeps.transactionalComms) {
-      await moneyStateDeps.transactionalComms.handleAuditEventSafe(paymentEvent);
-    }
+  if (updatedInvoice && paymentReceiptNotifier) {
+    await paymentReceiptNotifier.notifyPaymentReceived(
+      input.tenantId,
+      input.invoiceId,
+      input.amountCents,
+    );
   }
 
   return { payment, invoice: updatedInvoice! };

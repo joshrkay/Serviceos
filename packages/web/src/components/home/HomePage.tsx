@@ -9,9 +9,10 @@ import { leads } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
 import {
   normalizeJobStatus,
-  normalizeJobMoneyState,
   normalizeEstimateStatus,
   centsToDisplay,
+  normalizeJobMoneyState,
+  JOB_MONEY_STATE_LABEL,
 } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
@@ -145,12 +146,21 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
   const svc = SVC[job.serviceType ?? ''] ?? SVC.HVAC;
   const name = customerName(job.customer);
   const uiStatus = normalizeJobStatus(job.status);
-  const moneyLabel = normalizeJobMoneyState(job.moneyState);
   const techName = job.technician
     ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
     : null;
   const techColor = job.technician?.color ?? '#94a3b8';
   const scheduledTime = formatTime(job.scheduledStart);
+  const moneyState = normalizeJobMoneyState(job.moneyState);
+  const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
+  const moneyBadgeClasses: Record<string, string> = {
+    overdue: 'bg-red-100 text-red-700',
+    paid: 'bg-green-100 text-green-700',
+    invoiced: 'bg-amber-100 text-amber-800',
+    estimate_sent: 'bg-amber-100 text-amber-800',
+  };
+  const moneyBadgeClass =
+    (moneyState && moneyBadgeClasses[moneyState]) ?? 'bg-violet-100 text-violet-700';
 
   return (
     <button
@@ -165,7 +175,9 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
           <p className="text-sm text-slate-900 truncate">{name}</p>
           <div className="flex items-center gap-1.5 shrink-0">
             {moneyLabel && (
-              <StatusBadge status={moneyLabel as 'Estimate sent'} size="sm" />
+              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${moneyBadgeClass}`}>
+                {moneyLabel}
+              </span>
             )}
             <StatusBadge status={uiStatus} size="sm" />
           </div>
