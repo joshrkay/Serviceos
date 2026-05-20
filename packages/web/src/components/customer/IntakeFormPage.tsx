@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Zap, ChevronRight, Check, AlertCircle, Phone, Mail,
+  ChevronRight, Check, AlertCircle, Phone, Mail,
   MapPin, Camera, ArrowLeft, Clock, Star,
 } from 'lucide-react';
 import { submitIntakeLead, fetchIntakeTenantInfo, type IntakeTenantInfo } from '../../api/public-intake';
+import { businessInitial } from '../../utils/business-initial';
 
 /**
  * Marketing-attribution params we capture from the URL on mount and ship
@@ -223,8 +224,11 @@ export function IntakeFormPage() {
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Business header */}
       <div className="bg-white border-b border-slate-100 px-5 py-4 flex items-center gap-3">
-        <div className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0">
-          <Zap size={16} className="text-white" />
+        <div
+          className="flex size-9 items-center justify-center rounded-xl bg-slate-900 shrink-0 text-sm font-medium text-white"
+          aria-hidden
+        >
+          {businessInitial(tenantInfo?.businessName)}
         </div>
         <div>
           <p className="text-slate-900">{tenantInfo?.businessName ?? 'Service Request'}</p>

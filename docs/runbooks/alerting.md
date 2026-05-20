@@ -61,6 +61,8 @@ full pipeline (your code → Sentry → Slack):
    { "alerting_runbook_verified": "<ISO timestamp>" }
    ```
 
+Until this timestamp is set, H3 passes compile-time checks only (`instrument()` on four paths). Operators must complete the Slack verification above before opening self-serve to paying customers.
+
 ## Secrets required for `voice-smoke-real.yml`
 
 The daily real-call workflow (Task 16) needs these GitHub Actions secrets:

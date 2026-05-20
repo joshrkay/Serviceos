@@ -326,6 +326,10 @@ import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
+import {
+  NoOpIdempotencyLockProvider,
+  PgIdempotencyLockProvider,
+} from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
@@ -1311,13 +1315,15 @@ export function createApp(): express.Express {
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
   });
-  // §11 H1: every executor wiring threads an IdempotencyGuard so
-  // queue redelivery cannot double-execute side effects. The guard
-  // looks up prior `proposal_executions` rows by (tenant_id,
-  // idempotency_key) — passthrough when the proposal has no key.
+  // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
+  // default to `proposal-run:{tenant}:{id}` when callers omit one.
+  const proposalIdempotencyLock = pool
+    ? new PgIdempotencyLockProvider(pool)
+    : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
     proposalRepo,
+    proposalIdempotencyLock,
   );
   // Phase 4a-1: persist a proposal_executions row on success + fire the
   // proposal-correction-worker. The onExecuted callback is failure-soft
