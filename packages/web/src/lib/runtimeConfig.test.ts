@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { getRuntimeConfigValue } from './runtimeConfig';
+import { getRuntimeConfigValue, isOnboardingV2Enabled } from './runtimeConfig';
 
 describe('runtimeConfig', () => {
   afterEach(() => {
     delete window.__APP_CONFIG__;
     delete process.env.VITE_CLERK_PUBLISHABLE_KEY;
     delete process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+    delete process.env.VITE_ONBOARDING_V2_ENABLED;
   });
 
   it('prefers browser runtime config over process env', () => {
@@ -34,5 +35,13 @@ describe('runtimeConfig', () => {
     process.env.VITE_CLERK_PUBLISHABLE_KEY = '   ';
 
     expect(getRuntimeConfigValue('VITE_CLERK_PUBLISHABLE_KEY')).toBeUndefined();
+  });
+
+  it('isOnboardingV2Enabled is true only when flag is exactly "true"', () => {
+    window.__APP_CONFIG__ = { VITE_ONBOARDING_V2_ENABLED: 'true' };
+    expect(isOnboardingV2Enabled()).toBe(true);
+
+    window.__APP_CONFIG__ = { VITE_ONBOARDING_V2_ENABLED: 'false' };
+    expect(isOnboardingV2Enabled()).toBe(false);
   });
 });

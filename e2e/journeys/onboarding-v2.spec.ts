@@ -15,12 +15,11 @@ import { setupClerkTestingToken, hasClerkTestingCreds } from '../helpers/clerk-t
  *     (because state is derived from real entities, no separate
  *     onboarding_progress table to get stale).
  *
- * What's deliberately NOT covered here (deferred to follow-up):
- *   - Submitting the identity form end-to-end (requires PG seed of
- *     the new tenant_settings columns or a real backend that has
- *     migration 098 applied — the journey infra seeds a different
- *     fixture set).
- *   - Picking a pack and asserting the sidebar advances.
+ * What's covered when E2E_USE_TEST_DB=true (migrations incl. 098):
+ *   - Identity PUT via the form → sidebar advances to pack.
+ *   - Pack POST via HVAC card → sidebar advances past pack.
+ *
+ * What's deliberately NOT covered here (deferred):
  *   - Twilio readiness UI (depends on the worker actually purchasing
  *     a number; covered by the integration test suite).
  *   - Stripe Checkout (would hit live Stripe sandbox; covered by the
@@ -43,6 +42,7 @@ test.describe('Journey — §10 onboarding v2', () => {
   // off (the legacy /onboarding renders OnboardingPage which has different
   // selectors — those are covered by the existing 9-step wizard tests).
   const v2Enabled = process.env.VITE_ONBOARDING_V2_ENABLED === 'true';
+  const testDbReady = process.env.E2E_USE_TEST_DB === 'true' && !!process.env.DATABASE_URL;
 
   test.skip(
     !hasClerkTestingCreds(),
@@ -152,5 +152,40 @@ test.describe('Journey — §10 onboarding v2', () => {
     await page.goto('/');
     await page.waitForURL(/\/onboarding/, { timeout: 10_000 });
     await expect(page.getByText('Business identity')).toBeVisible();
+  });
+
+  test('identity submit and pack pick advance the sidebar', async ({ page }) => {
+    test.skip(
+      !testDbReady,
+      'E2E_USE_TEST_DB=true and DATABASE_URL required so the API has migration 098 and matches the Clerk-bootstrapped tenant.',
+    );
+
+    await setupClerkTestingToken(page);
+
+    await page.goto('/signup');
+    const testEmail = `e2e+clerk_test+v2api+${Date.now()}@serviceos-test.com`;
+    const emailInput = page.getByLabel(/email/i).first();
+    await emailInput.waitFor({ state: 'visible', timeout: 15_000 });
+    await emailInput.fill(testEmail);
+    await page.getByLabel(/password/i).first().fill('Test1234!Test1234!');
+    await page.getByRole('button', { name: /(continue|sign up)/i }).first().click();
+
+    await page.waitForURL(/\/onboarding/, { timeout: 30_000 });
+
+    await page.getByLabel(/Business name/i).fill('E2E Journey HVAC');
+    await page.getByLabel(/Hourly rate/i).fill('150');
+    await page.getByRole('button', { name: /Save and continue/i }).click();
+
+    // Step 3 — pack picker (identity step done).
+    await expect(page.getByRole('heading', { name: /Pick your trade/i })).toBeVisible({
+      timeout: 20_000,
+    });
+
+    await page.getByRole('button', { name: /^HVAC$/i }).click();
+
+    // Step 4 — phone provisioning (pack activated).
+    await expect(page.getByRole('heading', { name: /^Phone number$/i })).toBeVisible({
+      timeout: 20_000,
+    });
   });
 });
