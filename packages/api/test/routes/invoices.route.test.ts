@@ -406,3 +406,32 @@ describe('POST /api/invoices/:id/transition', () => {
     expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 });
+
+describe('POST /api/invoices/:id/payment-link (INV-04)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  it('returns 409 for draft invoice', async () => {
+    const created = await createInvoice(app);
+    expect(created.status).toBe(201);
+
+    const res = await request(app).post(`/api/invoices/${created.body.id}/payment-link`).send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('CONFLICT');
+  });
+
+  it('returns payment url for issued open invoice', async () => {
+    const created = await createInvoice(app);
+    await request(app)
+      .post(`/api/invoices/${created.body.id}/issue`)
+      .send({ paymentTermDays: 30 });
+
+    const res = await request(app).post(`/api/invoices/${created.body.id}/payment-link`).send({});
+    expect(res.status).toBe(200);
+    expect(typeof res.body.url).toBe('string');
+    expect(res.body.url.length).toBeGreaterThan(0);
+  });
+});

@@ -27,6 +27,8 @@ import { Job, JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { createLogger } from '../logging/logger';
+import { PaymentLinkProvider } from '../payments/payment-link-provider';
+import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
 
 const logger = createLogger({
   service: 'invoices-route',
@@ -55,6 +57,7 @@ export function createInvoiceRouter(
   // money-state rollup fires only when both jobRepo + estimateRepo
   // are wired.
   estimateRepo?: EstimateRepository,
+  paymentLinkProvider?: PaymentLinkProvider,
 ): Router {
   const router = Router();
 
@@ -282,6 +285,34 @@ export function createInvoiceRouter(
     requireTenant,
     requirePermission('invoices:update'),
     updateHandler
+  );
+
+  router.post(
+    '/:id/payment-link',
+    requireAuth,
+    requireTenant,
+    requirePermission('invoices:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!paymentLinkProvider) {
+          res.status(501).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Payment link provider is not configured on this router',
+          });
+          return;
+        }
+        const result = await createInvoicePaymentLink(
+          req.auth!.tenantId,
+          req.params.id,
+          invoiceRepo,
+          paymentLinkProvider,
+        );
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   router.post(
