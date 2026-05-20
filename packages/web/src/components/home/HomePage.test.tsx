@@ -5,12 +5,6 @@ import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
-vi.mock('../../data/mock-data', () => ({
-  leads: [
-    { id: 'l1', name: 'Dave Brown', status: 'New', description: 'Needs AC repair this summer', estimatedValue: 1200 },
-    { id: 'l2', name: 'Eve Clark',  status: 'Contacted', description: 'Bathroom remodel', estimatedValue: 4500 },
-  ],
-}));
 
 import { useListQuery } from '../../hooks/useListQuery';
 
@@ -51,6 +45,27 @@ const mockEstimates = [
   },
 ];
 
+const mockLeads = [
+  {
+    id: 'l1',
+    firstName: 'Dave',
+    lastName: 'Brown',
+    stage: 'new',
+    sourceDetail: 'Needs AC repair this summer',
+    estimatedValueCents: 120_000,
+    source: 'web_form',
+  },
+  {
+    id: 'l2',
+    firstName: 'Eve',
+    lastName: 'Clark',
+    stage: 'contacted',
+    sourceDetail: 'Bathroom remodel',
+    estimatedValueCents: 450_000,
+    source: 'phone_call',
+  },
+];
+
 const mockInvoices = [
   {
     id: 'inv1',
@@ -88,6 +103,7 @@ beforeEach(() => {
     if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
     if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
     if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+    if (path === '/api/leads')     return makeListResult(mockLeads) as ReturnType<typeof useListQuery>;
     return makeListResult([]) as ReturnType<typeof useListQuery>;
   });
 });
@@ -113,10 +129,18 @@ describe('HomePage', () => {
     expect(screen.getByText('Estimate sent')).toBeInTheDocument();
   });
 
-  it('renders leads from mock data', () => {
+  it('renders leads from /api/leads', () => {
     renderPage();
     expect(screen.getByText('Lead pipeline')).toBeInTheDocument();
     expect(screen.getByText('Dave Brown')).toBeInTheDocument();
+  });
+
+  it('queries /api/leads with limit filter', () => {
+    renderPage();
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/leads',
+      expect.objectContaining({ filters: expect.objectContaining({ limit: '50' }) }),
+    );
   });
 
   it('renders pending estimates section', () => {
