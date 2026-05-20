@@ -23,6 +23,7 @@ const mockJobs = [
     jobNumber: 'JOB-001',
     summary: 'Fix AC unit',
     status: 'scheduled',
+    moneyState: 'estimate_sent',
     serviceType: 'HVAC',
     scheduledStart: `${today}T09:00:00Z`,
     customer: { id: 'c1', displayName: 'Alice Smith' },
@@ -105,6 +106,11 @@ describe('HomePage', () => {
     expect(screen.getByText("Today's jobs")).toBeInTheDocument();
     expect(screen.getAllByText('Alice Smith').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Bob Jones').length).toBeGreaterThan(0);
+  });
+
+  it('shows job money-state badge when moneyState is set', () => {
+    renderPage();
+    expect(screen.getByText('Estimate sent')).toBeInTheDocument();
   });
 
   it('renders leads from mock data', () => {

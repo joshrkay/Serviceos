@@ -10,7 +10,16 @@ import { normalizeDispatchProvider } from './provider-names';
  * ("did the customer receive their estimate?").
  */
 
-export type DispatchEntityType = 'estimate' | 'invoice' | 'appointment_confirmation' | 'delay_notice';
+export type DispatchEntityType =
+  | 'estimate'
+  | 'invoice'
+  | 'appointment_confirmation'
+  | 'appointment_reschedule'
+  | 'appointment_cancel'
+  | 'appointment_reminder'
+  | 'payment_receipt'
+  | 'invoice_overdue'
+  | 'delay_notice';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

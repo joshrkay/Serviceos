@@ -7,6 +7,7 @@ import {
   captureDispatchEvent,
 } from '../../dispatch/analytics';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 
 export class CancelAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'cancel_appointment';
@@ -15,6 +16,7 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly auditRepo?: AuditRepository,
+    private readonly transactionalComms?: TransactionalCommsService,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -86,6 +88,10 @@ export class CancelAppointmentExecutionHandler implements ExecutionHandler {
             metadata: { proposalId: proposal.id, reason },
           }),
         );
+      }
+
+      if (this.transactionalComms) {
+        await this.transactionalComms.notifyCanceled(context.tenantId, appointmentId);
       }
 
       return { success: true, resultEntityId: appointmentId };

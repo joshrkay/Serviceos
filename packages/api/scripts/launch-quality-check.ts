@@ -161,7 +161,8 @@ check('D1', 'decisions.test green', () =>
 
 check('D2', 'smoke + synthetic voice tests present', () =>
   existsSync(join(API, 'scripts/smoke-test.ts')) &&
-  existsSync(join(API, 'test/voice/voice-smoke.synthetic.test.ts')),
+  existsSync(join(API, 'test/voice/voice-smoke.synthetic.test.ts')) &&
+  existsSync(join(API, 'test/owner-loop-critical-path.test.ts')),
 );
 
 check('D3', 'migration-immutability green', () =>
