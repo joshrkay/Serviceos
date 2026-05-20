@@ -25,7 +25,10 @@
 | Onboarding E2E (code) | `e2e/journeys/onboarding-v2.spec.ts` | **PASS** | `8ef2b704` — run Playwright with Clerk creds |
 | Launch runbook | `solo-owner-public-launch.md` | **PASS** | `2e8c8cee` |
 | Onboarding v2 in prod deploy | Railway/Vercel build env | **PENDING** | ops |
-| Voice quality full gate | All 40 scripts + cassettes | **PENDING** | Phase 2 — partial worker run passed 10/10 mock corpus |
+| VQ launch gate entry smoke | `voice-quality.launch-gate.entry.test.ts` | **PASS** | `b35efe4a` |
+| Cassette completeness checker | `npm run voice-quality:check-cassettes` | **PASS** | exits 1 until 42 cassettes recorded |
+| P18-001 script metadata | `create-customer-new-signup.json` | **PASS** | `layer2Eligible: true` |
+| Voice quality full gate | All 40 scripts + cassettes | **PENDING** | needs `ANTHROPIC_API_KEY` + `voice-quality:refresh` |
 
 ## Gaps for launch (ordered)
 

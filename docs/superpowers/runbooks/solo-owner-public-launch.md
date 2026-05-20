@@ -71,7 +71,14 @@ Copy from design spec §8 and implementation plan Phases 0–4. Record each resu
     --testNamePattern="create-customer-new-signup"
   ```
 
-  Repeat for remaining empty cassettes. Requires `OPENAI_API_KEY` and voice-quality env per `packages/api/fixtures/ai/README.md`.
+  Repeat for remaining empty cassettes, or run full refresh:
+
+  ```bash
+  cd packages/api && npm run voice-quality:refresh
+  cd packages/api && npm run voice-quality:check-cassettes
+  ```
+
+  Requires `ANTHROPIC_API_KEY` (see [voice-quality-cassette-refresh.md](./voice-quality-cassette-refresh.md) §2).
 
 - [ ] **Layer 1 corpus — `launchGate.pass`**
 
