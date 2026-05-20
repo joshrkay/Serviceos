@@ -61,7 +61,8 @@ jobs:
           # The Vite dev server needs the same pk_test_ value at boot
           # (main.tsx throws without it). Reuse the same secret.
           VITE_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
-          # §10 onboarding v2 — exercise OnboardingShell + guard when Clerk E2E runs.
+          # §10 onboarding v2 — OnboardingShell + guard (e2e/journeys/onboarding-v2.spec.ts).
+          # Enabled only when Clerk E2E secrets are configured (journey skips otherwise).
           VITE_ONBOARDING_V2_ENABLED: ${{ secrets.E2E_CLERK_SECRET_KEY != '' && 'true' || 'false' }}
           # --- END: Clerk testing-tokens block ---
 
