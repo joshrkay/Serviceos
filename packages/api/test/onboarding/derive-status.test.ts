@@ -10,6 +10,7 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
     subscription: { stripeSubscriptionId: null, status: null },
     inboundCallCount: 0,
     testCallSkippedAt: null,
+    voiceAgentLiveAt: null,
     ...overrides,
   };
 }

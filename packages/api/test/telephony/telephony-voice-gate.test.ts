@@ -93,6 +93,34 @@ describe('POST /api/telephony/voice — §10 voiceGate', () => {
     expect(store.size()).toBe(1);
   });
 
+  it('returns voicemail TwiML when go-live gate blocks (not_live)', async () => {
+    const voiceGate: VoiceGate = vi.fn(async () => ({
+      allowed: false,
+      reason: 'not_live' as const,
+    }));
+    const { app, store } = buildHarness(voiceGate);
+
+    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-not-live' });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('AI assistant yet');
+    expect(res.text).not.toContain('<Gather');
+    expect(store.size()).toBe(0);
+  });
+
+  it('returns voicemail TwiML when voiceGate throws (fail-closed)', async () => {
+    const voiceGate: VoiceGate = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    const { app, store } = buildHarness(voiceGate);
+
+    const res = await signedVoice(app, { ...baseParams, CallSid: 'CA-gate-throw' });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('AI assistant yet');
+    expect(store.size()).toBe(0);
+  });
+
   it('returns voicemail TwiML when Gate A blocks (no_billing)', async () => {
     const voiceGate: VoiceGate = vi.fn(async () => ({
       allowed: false,

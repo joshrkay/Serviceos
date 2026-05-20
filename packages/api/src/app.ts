@@ -80,6 +80,7 @@ import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
+import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -1830,8 +1831,18 @@ export function createApp(): express.Express {
     // inbound call ends. Pool-gated (no-op when running in-memory).
     ...(pool
       ? {
-          onSessionEnded: async ({ tenantId }: { tenantId: string }) => {
+          onSessionEnded: async ({
+            tenantId,
+            channel,
+          }: {
+            tenantId: string;
+            channel: 'voice_inbound' | 'inapp_voice';
+          }) => {
             await checkAndFireUpgradeNudge({ pool }, tenantId);
+            await maybeAutoGoLiveOnInboundEnd(
+              { pool, auditRepo },
+              { tenantId, channel },
+            );
           },
         }
       : {}),
@@ -2634,7 +2645,10 @@ export function createApp(): express.Express {
     environment: process.env.NODE_ENV || 'development',
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
+  app.use(
+    '/api/voice',
+    createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, pool ? { pool } : undefined),
+  );
   app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
   app.use(
     '/api/technician-location',

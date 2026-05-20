@@ -33,6 +33,7 @@ export interface OnboardingStatusResponse {
   steps: OnboardingStep[];
   currentStep: OnboardingStepId | null;
   isComplete: boolean;
+  voiceAgentLive: boolean;
   /** ISO-8601 timestamp of the 30-minute upgrade nudge fire-event. Drives the in-app banner. */
   upgradePromptShownAt?: string;
 }

@@ -61,6 +61,7 @@ describe('SettingsPage Quick toggles persistence (Tier 4 fix)', () => {
         autoSendAppointmentReminders: false,
       }),
     );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
     fetchLanguageMock.mockResolvedValueOnce({
       defaultLanguage: 'en',
       ttsVoiceEn: null,
@@ -80,6 +81,7 @@ describe('SettingsPage Quick toggles persistence (Tier 4 fix)', () => {
 
   it('hydrates spanishMode from /api/settings/language on mount', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
     fetchLanguageMock.mockResolvedValueOnce({
       defaultLanguage: 'es',
       ttsVoiceEn: null,
@@ -96,6 +98,7 @@ describe('SettingsPage Quick toggles persistence (Tier 4 fix)', () => {
     apiFetchMock.mockResolvedValueOnce(
       jsonResponse({ autoApplyInternalUpdates: false, autoSendAppointmentReminders: true }),
     );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
     fetchLanguageMock.mockResolvedValueOnce({
       defaultLanguage: 'en',
       ttsVoiceEn: null,
@@ -125,6 +128,7 @@ describe('SettingsPage Quick toggles persistence (Tier 4 fix)', () => {
 
   it('persists spanishMode via /api/settings/language when toggled', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
     fetchLanguageMock.mockResolvedValueOnce({
       defaultLanguage: 'en',
       ttsVoiceEn: null,
@@ -148,6 +152,7 @@ describe('SettingsPage Quick toggles persistence (Tier 4 fix)', () => {
     apiFetchMock.mockResolvedValueOnce(
       jsonResponse({ autoApplyInternalUpdates: false, autoSendAppointmentReminders: true }),
     );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ voiceAgentLive: false }));
     fetchLanguageMock.mockResolvedValueOnce({
       defaultLanguage: 'en',
       ttsVoiceEn: null,

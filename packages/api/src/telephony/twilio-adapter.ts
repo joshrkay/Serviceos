@@ -221,7 +221,11 @@ export interface TwilioAdapterDeps {
    * Failures are swallowed so call termination is never blocked by
    * the nudge check.
    */
-  onSessionEnded?: (event: { tenantId: string; callSid?: string }) => Promise<void>;
+  onSessionEnded?: (event: {
+    tenantId: string;
+    callSid?: string;
+    channel: 'voice_inbound' | 'inapp_voice';
+  }) => Promise<void>;
   /**
    * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
    * When present, the templates are threaded into the FSM context at
@@ -1863,6 +1867,7 @@ export class TwilioGatherAdapter {
       try {
         await this.deps.onSessionEnded({
           tenantId: session.tenantId,
+          channel: session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
           ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
         });
       } catch {

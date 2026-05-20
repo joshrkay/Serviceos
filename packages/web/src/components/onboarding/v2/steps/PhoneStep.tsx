@@ -115,6 +115,9 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
         <p className="text-sm text-slate-500 mt-1">
           Forward your existing business line to it, or share it with new customers directly.
         </p>
+        <p className="text-sm text-amber-800 mt-2">
+          Your number is ready. AI will not answer until you turn it on after billing.
+        </p>
       </header>
 
       <div className="border-2 border-blue-500 rounded-lg p-6 text-center">
