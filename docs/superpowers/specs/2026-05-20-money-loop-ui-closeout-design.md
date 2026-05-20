@@ -57,12 +57,15 @@ All money mutations that change state remain **proposal-first for AI** (D-004); 
 | Inbox "Review" | For `draft_estimate`, `draft_invoice`, `issue_invoice`, `record_payment`: open sheet with payload summary (reuse `InvoiceProposalReview` patterns) |
 | Deep link | After approve, link to created entity when `executionResult` returns ids |
 
-### Phase 3 — Discoverability (P1)
+### Phase 3 — Discoverability (P1) — **shipped 2026-05-20**
 
 | Change | Detail |
 |--------|--------|
-| Nav | Add **Inbox** and **Money** to `supervisor` + `tech` nav (Workstream D) |
-| Home | Pending money items deep-link to entity detail |
+| Nav | **Inbox** and **Money** in sidebar + mobile bottom tabs; inbox badge on sidebar/mobile |
+| Home | `MoneyLoopHomeCard` — inbox count + month revenue/outstanding/overdue; stat cards link to Money/Inbox |
+| Home | Pending estimates/invoices and attention rows deep-link to entity detail |
+| Onboarding | `/inbox` and `/reports/money` reachable during setup (proposals can pile up while onboarding) |
+| Quick actions | Inbox + Money summary replace Schedule/New job on Home |
 
 ### Phase 4 — Hardening (P2)
 
