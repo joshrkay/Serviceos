@@ -18,6 +18,8 @@ export interface IntakeTenantInfo {
   serviceTypes: IntakeServiceType[];
   businessHoursSummary?: string | null;
   intakeTagline?: string | null;
+  averageRating?: number;
+  reviewCount?: number;
 }
 
 export interface SubmitIntakeLeadPayload {

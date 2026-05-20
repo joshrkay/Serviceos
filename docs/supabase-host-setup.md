@@ -33,7 +33,7 @@ Use Supabase **only as managed Postgres** for `packages/api` + `packages/web`. A
 
 ## Portal token lookup
 
-Migration `106_portal_sessions_system_lookup_rls` requires token resolution to set:
+Migration `107_portal_sessions_system_lookup_rls` requires token resolution to set:
 
 ```sql
 SELECT set_config('app.portal_token_lookup', 'true', true);

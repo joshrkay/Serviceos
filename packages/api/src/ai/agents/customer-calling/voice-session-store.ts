@@ -255,7 +255,12 @@ export class VoiceSessionStore {
   create(
     tenantId: string,
     channel: CallingAgentChannel,
-    opts: { callSid?: string; conversationId?: string; repairTemplates?: ReadonlyArray<RepairTemplate> } = {}
+    opts: {
+      callSid?: string;
+      conversationId?: string;
+      repairTemplates?: ReadonlyArray<RepairTemplate>;
+      escalationTriggers?: CallingAgentContext['escalationTriggers'];
+    } = {}
   ): VoiceSession {
     const id = uuidv4();
     const machine = new CallingAgentStateMachine({
@@ -265,6 +270,9 @@ export class VoiceSessionStore {
       callSid: opts.callSid,
       conversationId: opts.conversationId,
       ...(opts.repairTemplates ? { repairTemplates: opts.repairTemplates } : {}),
+      ...(opts.escalationTriggers
+        ? { escalationTriggers: opts.escalationTriggers }
+        : {}),
     });
     const costTracker = new SessionCostTracker(
       channel === 'inapp' ? DEFAULT_INAPP_CAPS : DEFAULT_TELEPHONY_CAPS

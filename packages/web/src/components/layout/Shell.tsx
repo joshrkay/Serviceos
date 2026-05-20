@@ -263,11 +263,27 @@ function ShellInner() {
     [navigate],
   );
 
+  const handleCriticalProposal = useCallback(
+    (proposal: PendingProposalSummary) => {
+      const expiry = proposal.expiresAt
+        ? new Date(proposal.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : 'soon';
+      toast.warning(`Hold expiring ${expiry}: ${proposal.summary}`, {
+        action: {
+          label: 'Review',
+          onClick: () => navigate('/inbox'),
+        },
+      });
+    },
+    [navigate],
+  );
+
   const {
     count: pendingProposalCount,
   } = usePendingProposals({
     enabled: isLoaded && Boolean(user),
     onNewProposal: handleNewProposal,
+    onCriticalProposal: handleCriticalProposal,
   });
 
   // Prefer the live session feed when it's reporting (the supervisor
