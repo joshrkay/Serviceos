@@ -54,8 +54,8 @@ interface ServicePresentation {
   placeholder: string;
 }
 
-// Presentation only — emoji + copy keyed by the backend's verticalType.
-// The list of services a tenant actually offers comes from the API.
+// Presentation only — emoji + copy for known verticalType values from the API.
+// Unknown packs still render using displayName + default styling.
 const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   hvac: {
     emoji: '❄️',
@@ -74,16 +74,25 @@ const SERVICE_PRESENTATION: Record<string, ServicePresentation> = {
   },
 };
 
-const FALLBACK_PLACEHOLDER = 'e.g. "Briefly describe what you need help with."';
+const DEFAULT_SERVICE_PRESENTATION: ServicePresentation = {
+  emoji: '🛠️',
+  desc: 'Describe what you need and we will match you with the right technician',
+  placeholder: 'e.g. "Briefly describe what you need help with."',
+};
 
-function presentationFor(verticalType: string, displayName: string): ServicePresentation {
-  return (
-    SERVICE_PRESENTATION[verticalType] ?? {
-      emoji: '🔧',
-      desc: displayName,
-      placeholder: FALLBACK_PLACEHOLDER,
-    }
-  );
+const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
+
+function presentationForVertical(
+  verticalType: string,
+  displayName?: string,
+): ServicePresentation {
+  const known = SERVICE_PRESENTATION[verticalType];
+  if (known) return known;
+  return {
+    emoji: DEFAULT_SERVICE_PRESENTATION.emoji,
+    desc: displayName ?? DEFAULT_SERVICE_PRESENTATION.desc,
+    placeholder: DEFAULT_SERVICE_PRESENTATION.placeholder,
+  };
 }
 
 const URGENCY_OPTIONS: { value: Urgency; label: string; desc: string; color: string }[] = [
@@ -126,13 +135,11 @@ export function IntakeFormPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [tenantInfo, setTenantInfo] = useState<IntakeTenantInfo | null>(null);
 
-  // Service options shown in step 1 = the tenant's packs (from the API)
-  // joined with local presentation (emoji/copy). Packs with no local
-  // presentation entry are skipped rather than rendered blank.
+  // Service options = tenant packs from the API + local emoji/copy when available.
   const serviceOptions = (tenantInfo?.serviceTypes ?? []).map((st) => ({
     verticalType: st.verticalType,
     label: st.displayName,
-    ...presentationFor(st.verticalType, st.displayName),
+    ...presentationForVertical(st.verticalType, st.displayName),
   }));
 
   // Attribution captured once on mount. Storing in a ref so re-renders
@@ -340,7 +347,7 @@ export function IntakeFormPage() {
                 onChange={e => update({ description: e.target.value })}
                 placeholder={
                   data.serviceType
-                    ? SERVICE_PRESENTATION[data.serviceType].placeholder
+                    ? presentationForVertical(data.serviceType).placeholder
                     : FALLBACK_PLACEHOLDER
                 }
                 rows={5}
