@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useApiClient } from '../../lib/apiClient';
+import { emitProposalsChanged } from '../../lib/proposal-events';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -83,6 +84,7 @@ export function InboxPage() {
     try {
       const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      emitProposalsChanged();
     } catch (err) {
       if (removed) setRows((prev) => [removed, ...prev]);
       setError(err instanceof Error ? err.message : `${action} failed`);

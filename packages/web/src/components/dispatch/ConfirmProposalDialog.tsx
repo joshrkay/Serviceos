@@ -1,15 +1,10 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
+import { ConflictDisplay, ConflictInfo } from './ConflictDisplay';
+import type { FeasibilityResult } from './feasibility-types';
 
 /**
  * P6-025 — Confirmation dialog shown before a drag-drop schedule change is
- * converted into a proposal POST. This is the safety gate that makes drag the
- * *intent* and not the *execution* — the appointment stays in place until the
- * proposal is approved.
- *
- * Implementation note: kept as a self-contained Tailwind overlay rather than
- * pulling in Radix Dialog. The dispatch flow needs synchronous focus + simple
- * confirm/cancel semantics; portaling and animation aren't required and a
- * lighter component keeps the test surface small.
+ * converted into a proposal POST.
  */
 
 export type ProposedProposalType =
@@ -17,11 +12,25 @@ export type ProposedProposalType =
   | 'reschedule_appointment'
   | 'cancel_appointment';
 
+export interface TimeRangeDisplay {
+  fromStart: string;
+  fromEnd: string;
+  toStart: string;
+  toEnd: string;
+}
+
 export interface ConfirmProposalDialogProps {
   open: boolean;
   proposalType: ProposedProposalType | null;
   appointmentSummary?: string;
   targetDescription?: string;
+  timeRange?: TimeRangeDisplay;
+  feasibility?: FeasibilityResult | null;
+  presenceWarning?: string;
+  allowTimeEdit?: boolean;
+  editedStart?: string;
+  editedEnd?: string;
+  onEditedTimesChange?: (start: string, end: string) => void;
   isSubmitting?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -42,18 +51,50 @@ const PROPOSAL_DESCRIPTION: Record<ProposedProposalType, string> = {
     'A cancel-assignment proposal will be created. The appointment stays assigned until a teammate approves the proposal.',
 };
 
+function formatTime(iso: string): string {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function feasibilityToConflicts(result: FeasibilityResult): ConflictInfo[] {
+  return [
+    ...result.blocking.map((i) => ({
+      type: i.check,
+      severity: 'blocking' as const,
+      message: i.message,
+      conflictingEntityId: i.conflictingEntityId,
+    })),
+    ...result.warnings.map((i) => ({
+      type: i.check,
+      severity: 'warning' as const,
+      message: i.message,
+      conflictingEntityId: i.conflictingEntityId,
+    })),
+  ];
+}
+
 export function ConfirmProposalDialog({
   open,
   proposalType,
   appointmentSummary,
   targetDescription,
+  timeRange,
+  feasibility,
+  presenceWarning,
+  allowTimeEdit = false,
+  editedStart = '',
+  editedEnd = '',
+  onEditedTimesChange,
   isSubmitting = false,
   onConfirm,
   onCancel,
 }: ConfirmProposalDialogProps) {
-  // Standard a11y for modal dialogs: Escape dismisses unless a submit
-  // is in flight (don't let the user dismiss while we're waiting on the
-  // server — we'd lose the round-trip context).
+  const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
+
+  React.useEffect(() => {
+    if (!open) setWarningsAcknowledged(false);
+  }, [open]);
+
   React.useEffect(() => {
     if (!open) return;
     const handleEscape = (e: KeyboardEvent) => {
@@ -62,6 +103,21 @@ export function ConfirmProposalDialog({
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
   }, [open, isSubmitting, onCancel]);
+
+  const conflicts = useMemo(
+    () => (feasibility ? feasibilityToConflicts(feasibility) : []),
+    [feasibility],
+  );
+
+  const hasBlocking = (feasibility?.blocking.length ?? 0) > 0;
+  const hasWarningsOnly =
+    (feasibility?.warnings.length ?? 0) > 0 && !hasBlocking;
+
+  const confirmDisabled =
+    isSubmitting ||
+    hasBlocking ||
+    (hasWarningsOnly && !warningsAcknowledged) ||
+    (allowTimeEdit && (!editedStart || !editedEnd));
 
   if (!open || !proposalType) return null;
 
@@ -89,7 +145,12 @@ export function ConfirmProposalDialog({
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
           {PROPOSAL_DESCRIPTION[proposalType]}
         </p>
-        {(appointmentSummary || targetDescription) && (
+        {presenceWarning && (
+          <p className="mt-2 text-sm text-amber-700" data-testid="confirm-presence-warning">
+            {presenceWarning}
+          </p>
+        )}
+        {(appointmentSummary || targetDescription || timeRange) && (
           <div
             className="mt-4 rounded border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-700 dark:bg-gray-800"
             data-testid="confirm-proposal-summary"
@@ -104,6 +165,46 @@ export function ConfirmProposalDialog({
                 <span className="font-medium">Change:</span> {targetDescription}
               </div>
             )}
+            {timeRange && (
+              <div data-testid="confirm-time-range">
+                <span className="font-medium">Time:</span>{' '}
+                {formatTime(timeRange.fromStart)}–{formatTime(timeRange.fromEnd)}
+                {' → '}
+                {formatTime(timeRange.toStart)}–{formatTime(timeRange.toEnd)}
+              </div>
+            )}
+          </div>
+        )}
+        {allowTimeEdit && onEditedTimesChange && (
+          <div className="mt-4 space-y-2" data-testid="confirm-time-edit">
+            <label className="block text-xs font-medium text-gray-600">
+              New start
+              <input
+                type="datetime-local"
+                className="mt-1 w-full rounded border px-2 py-1 text-sm"
+                value={editedStart}
+                onChange={(e) => onEditedTimesChange(e.target.value, editedEnd)}
+              />
+            </label>
+            <label className="block text-xs font-medium text-gray-600">
+              New end
+              <input
+                type="datetime-local"
+                className="mt-1 w-full rounded border px-2 py-1 text-sm"
+                value={editedEnd}
+                onChange={(e) => onEditedTimesChange(editedStart, e.target.value)}
+              />
+            </label>
+          </div>
+        )}
+        {conflicts.length > 0 && (
+          <div className="mt-4">
+            <ConflictDisplay
+              conflicts={conflicts}
+              onAcknowledgeWarnings={
+                hasWarningsOnly ? () => setWarningsAcknowledged(true) : undefined
+              }
+            />
           </div>
         )}
         <div className="mt-6 flex justify-end gap-2">
@@ -121,7 +222,7 @@ export function ConfirmProposalDialog({
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             data-testid="confirm-proposal-confirm"
             onClick={onConfirm}
-            disabled={isSubmitting}
+            disabled={confirmDisabled}
           >
             {isSubmitting ? 'Creating proposal...' : 'Create proposal'}
           </button>
