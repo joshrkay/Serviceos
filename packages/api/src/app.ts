@@ -2391,7 +2391,20 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
     ),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      sendService,
+      jobRepo,
+      estimateRepo,
+      paymentLinkProvider,
+    ),
+  );
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's

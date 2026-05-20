@@ -5,3 +5,5 @@ export * from './contracts/voice-assistants.js';
 export * from './contracts/sms-templates.js';
 export * from './contracts/email-templates.js';
 export * from './contracts/review-response-proposal.js';
+export * from './contracts/proposal.js';
+export * from './contracts/messages.js';

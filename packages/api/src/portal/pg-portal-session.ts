@@ -59,8 +59,9 @@ export class PgPortalSessionRepository
   }
 
   async findByTokenHash(tokenHash: string): Promise<PortalSession | null> {
-    // System-level: no tenant context yet — the token is the auth.
+    // System-level: token-hash lookup uses app.portal_token_lookup (migration 106).
     return this.withClient(async (client) => {
+      await client.query("SELECT set_config('app.portal_token_lookup', 'true', true)");
       const result = await client.query(
         'SELECT * FROM portal_sessions WHERE token_hash = $1',
         [tokenHash],

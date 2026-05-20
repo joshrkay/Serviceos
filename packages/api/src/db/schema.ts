@@ -2771,9 +2771,26 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
   '106_tenant_settings_escalation_settings': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS escalation_settings JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `,
+
+  // Production-readiness — replace permissive NULL-tenant portal_sessions reads
+  // with an explicit system lookup GUC (mirrors 074 tenant_integrations).
+  // Bumped to 107 because main landed 106_tenant_settings_escalation_settings first.
+  '107_portal_sessions_system_lookup_rls': `
+    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
+    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
+      USING (
+        current_setting('app.portal_token_lookup', true) = 'true'
+        OR (
+          current_setting('app.current_tenant_id', true) IS NOT NULL
+          AND current_setting('app.current_tenant_id', true) <> ''
+          AND tenant_id::text = current_setting('app.current_tenant_id', true)
+        )
+      );
   `,
 };
 

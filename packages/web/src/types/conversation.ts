@@ -1,5 +1,11 @@
+import type { CreateMessageType, ProposalResponse } from '@ai-service-os/shared';
+
+export type { ProposalResponse };
+
 export type ConversationStatus = 'open' | 'closed' | 'archived';
-export type MessageType = 'text' | 'transcript' | 'system_event' | 'note' | 'clarification' | 'proposal';
+
+/** Aligned with API `createMessageSchema` via shared package (F-2). */
+export type MessageType = CreateMessageType;
 
 export interface Conversation {
   id: string;
@@ -61,6 +67,7 @@ export function hasPermission(role: Role, permission: Permission): boolean {
 
 export type ProposalStatus = 'pending' | 'approved' | 'rejected';
 
+/** Inbox card shape; map from `ProposalResponse` at fetch boundaries (F-1). */
 export interface Proposal {
   id: string;
   type: string;

@@ -5,11 +5,36 @@ import {
   ChevronRight, ClipboardList, Pencil, Zap, Send, FileText,
   Plus,
 } from 'lucide-react';
-import { customers, technicians } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
-import type { Customer, ServiceType } from '../../data/mock-data';
 import { useMutation } from '../../hooks/useMutation';
 import { useListQuery } from '../../hooks/useListQuery';
+import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+
+type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
+
+interface CustomerLocation {
+  id: string;
+  nickname: string;
+  address: string;
+  serviceTypes: ServiceType[];
+  isPrimary: boolean;
+  jobCount: number;
+}
+
+interface Customer {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  address: string;
+  serviceType: ServiceType;
+  locations: CustomerLocation[];
+  jobCount: number;
+  openJobs: number;
+  tags?: string[];
+  memberSince?: string;
+  notes?: string;
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FlowStep   = 'start' | 'voice' | 'customer' | 'details' | 'schedule' | 'done';
@@ -128,7 +153,11 @@ function markLocationAsOldAddress(customer: Customer, address: string): Customer
 }
 
 // ─── Voice parser (mock AI) ───────────────────────────────────────────────────
-function parseVoice(input: string, customerPool: Customer[]): ParsedJob {
+function parseVoice(
+  input: string,
+  customerPool: Customer[],
+  techRoster: { id: string; name: string }[],
+): ParsedJob {
   const t = input.toLowerCase();
 
   const matchedCustomer = customerPool.find(c =>
@@ -159,7 +188,7 @@ function parseVoice(input: string, customerPool: Customer[]): ParsedJob {
     ? `${timeMatch[1]}:${timeMatch[2] ?? '00'} ${timeMatch[3].toUpperCase()}`
     : '';
 
-  const matchedTech = technicians.find(tech =>
+  const matchedTech = techRoster.find(tech =>
     t.includes(tech.name.toLowerCase()) ||
     t.includes(tech.name.split(' ')[0].toLowerCase())
   );
@@ -309,17 +338,14 @@ export function NewJobFlow({
   onOpenEstimate?:  () => void;
   preSelectedCustomerId?: string;
 }) {
-  const preCustomer  = customers.find(c => c.id === preSelectedCustomerId);
-  const initialLocId = preCustomer?.locations.length === 1
-    ? preCustomer.locations[0].id : null;
-
+  const { technicians: techRoster } = useTechnicianRoster();
   const [step,     setStep]     = useState<FlowStep>('start');
-  const [customerOptions, setCustomerOptions] = useState<Customer[]>(customers);
+  const [customerOptions, setCustomerOptions] = useState<Customer[]>([]);
   const [draft,    setDraft]    = useState<JobDraft>({
     ...BLANK,
     customerId:  preSelectedCustomerId ?? null,
-    locationId:  initialLocId,
-    serviceType: preCustomer?.serviceType ?? null,
+    locationId:  null,
+    serviceType: null,
   });
   const [parsed,   setParsed]   = useState<ParsedJob | null>(null);
   const [search,   setSearch]   = useState('');
@@ -337,6 +363,19 @@ export function NewJobFlow({
   const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
   const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
+
+  useEffect(() => {
+    if (!preSelectedCustomerId || customerOptions.length === 0) return;
+    const pre = customerOptions.find((c) => c.id === preSelectedCustomerId);
+    if (!pre) return;
+    const locId = pre.locations.length === 1 ? pre.locations[0].id : null;
+    setDraft((d) => ({
+      ...d,
+      customerId: pre.id,
+      locationId: locId,
+      serviceType: pre.serviceType,
+    }));
+  }, [preSelectedCustomerId, customerOptions]);
 
   useEffect(() => {
     if (apiCustomers.length === 0) return;
@@ -428,7 +467,7 @@ export function NewJobFlow({
     recorder.stop();
   }
   function buildFromVoice() {
-    const result = parseVoice(vTranscript, customerOptions);
+    const result = parseVoice(vTranscript, customerOptions, techRoster);
     setParsed(result);
     setDraft(d => ({
       ...d,
@@ -450,7 +489,7 @@ export function NewJobFlow({
   const location   = customer?.locations.find(l => l.id === draft.locationId);
   const primaryLoc = customer?.locations.find(l => l.isPrimary) ?? customer?.locations[0];
   const address    = (draft.locationId ? location?.address : primaryLoc?.address) ?? customer?.address ?? '';
-  const tech       = technicians.find(t => t.name === draft.assignedTech);
+  const tech       = techRoster.find(t => t.name === draft.assignedTech);
 
   const filteredCustomers = search
     ? customerOptions.filter(c =>
@@ -1214,7 +1253,7 @@ export function NewJobFlow({
                     {draft.assignedTech === '' && <Check size={14} className="text-slate-700 shrink-0" />}
                   </button>
 
-                  {technicians.map(t => (
+                  {techRoster.map(t => (
                     <button key={t.id} onClick={() => setField('assignedTech', t.name)}
                       className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
                         draft.assignedTech === t.name

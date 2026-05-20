@@ -8,8 +8,8 @@ import {
   CheckCircle2, Circle, MoreHorizontal, Zap, Calendar, User, Clock,
   ChevronDown,
 } from 'lucide-react';
-import { calcMaterialsTotal, calcEstimateTotal, estimates } from '../../data/mock-data';
 import type { Job, JobActivity, MaterialItem, Customer, Technician } from '../../data/mock-data';
+import { calcMaterialsTotal, calcEstimateTotalFromLines } from '../../utils/job-ui-math';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
@@ -445,11 +445,42 @@ function DescriptionCard({ job }: { job: Job }) {
 
 // ─── Estimate Scope Card ──────────────────────────────────────────────────
 function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen: () => void }) {
-  const estimate = estimates.find(e => e.id === estimateId);
+  const [estimate, setEstimate] = useState<{
+    estimateNumber: string;
+    status: string;
+    lineItems: Array<{ description: string; qty: number; rate: number }>;
+  } | null>(null);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await apiFetch(`/api/estimates/${estimateId}`);
+      if (!res.ok || cancelled) return;
+      const body = await res.json();
+      const items = (body.lineItems ?? []).map(
+        (li: { description: string; quantity: number; unitPriceCents: number }) => ({
+          description: li.description,
+          qty: li.quantity,
+          rate: li.unitPriceCents / 100,
+        }),
+      );
+      if (!cancelled && items.length > 0) {
+        setEstimate({
+          estimateNumber: body.estimateNumber ?? estimateId,
+          status: body.status ?? 'draft',
+          lineItems: items,
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [estimateId]);
+
   if (!estimate) return null;
 
-  const total    = calcEstimateTotal(estimate);
-  const [open, setOpen] = useState(true);
+  const total = calcEstimateTotalFromLines(estimate.lineItems);
 
   return (
     <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
@@ -460,7 +491,7 @@ function EstimateScopeCard({ estimateId, onOpen }: { estimateId: string; onOpen:
           <span className="text-xs bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full px-2 py-0.5">
             {estimate.estimateNumber}
           </span>
-          <StatusBadge status={estimate.status} size="sm" />
+          <StatusBadge status={estimate.status as 'Draft'} size="sm" />
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button onClick={onOpen} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 transition-colors">
@@ -621,10 +652,7 @@ function MaterialsTable({ materials, onEdit, onSuppliers }: { materials: Materia
 }
 
 // ─── Site Media ───────────────────────────────────────────────────────────
-const MOCK_DOCUMENTS = [
-  { id: 'doc-1', name: 'Work order #1042.pdf',     size: '84 KB',  date: 'Mar 10' },
-  { id: 'doc-2', name: 'Permit – Austin HVAC.pdf', size: '210 KB', date: 'Mar 8'  },
-];
+const MOCK_DOCUMENTS: Array<{ id: string; name: string; size: string; date: string }> = [];
 
 function SiteMedia({ media, onAdd, onLightbox }: {
   media: CapturedMedia[]; onAdd: () => void; onLightbox: (i: number) => void;
