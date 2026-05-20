@@ -38,6 +38,7 @@ import { SettingsRepository, getNextEstimateNumber } from '../../settings/settin
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
+import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
 import {
   CreateCustomerVoiceExecutionHandler,
@@ -393,6 +394,7 @@ export function createExecutionHandlerRegistry(deps?: {
   estimateRepo?: EstimateRepository;
   settingsRepo?: SettingsRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
+  transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
@@ -435,15 +437,32 @@ export function createExecutionHandlerRegistry(deps?: {
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo, deps?.feasibilityDeps),
-    new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo, deps?.auditRepo),
+    new RescheduleAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
+      deps?.analyticsRepo,
+      deps?.auditRepo,
+      deps?.feasibilityDeps,
+      deps?.transactionalComms,
+    ),
+    new CancelAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.analyticsRepo,
+      deps?.auditRepo,
+      deps?.transactionalComms,
+    ),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is
     // absent (used by in-memory tests that don't exercise the
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
-    new RecordPaymentExecutionHandler(deps?.paymentRepo, deps?.invoiceRepo, moneyStateDeps),
+    new RecordPaymentExecutionHandler(
+      deps?.paymentRepo,
+      deps?.invoiceRepo,
+      moneyStateDeps,
+      deps?.transactionalComms,
+    ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep

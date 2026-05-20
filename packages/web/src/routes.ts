@@ -41,6 +41,7 @@ import { CustomerEdit } from './pages/customers/CustomerEdit';
 import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
 import { useParams, useNavigate } from 'react-router';
 import React from 'react';
+import { isOnboardingV2Enabled } from './lib/runtimeConfig';
 
 // P11-007 — wrappers that pull `:id` from the route and forward it to
 // the typed edit components.
@@ -127,7 +128,7 @@ export const router = createBrowserRouter([
   // §10 onboarding v2 — flag-gated. Off → legacy 9-step wizard.
   {
     path: '/onboarding',
-    Component: import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true' ? OnboardingShell : OnboardingPage,
+    Component: isOnboardingV2Enabled() ? OnboardingShell : OnboardingPage,
   },
   { path: '/e/:id',      Component: EstimateApprovalPage },
   { path: '/pay/:id',    Component: InvoicePaymentPage },

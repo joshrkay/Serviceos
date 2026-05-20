@@ -3,6 +3,14 @@ import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 
+export interface PaymentReceiptNotifier {
+  notifyPaymentReceived(
+    tenantId: string,
+    invoiceId: string,
+    amountCents: number,
+  ): Promise<void>;
+}
+
 export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
 
@@ -138,6 +146,7 @@ export async function recordPayment(
   invoiceRepo: InvoiceRepository,
   paymentRepo: PaymentRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
+  paymentReceiptNotifier?: PaymentReceiptNotifier,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -201,6 +210,14 @@ export async function recordPayment(
       updatedInvoice.jobId,
       input.processedBy,
       moneyStateDeps,
+    );
+  }
+
+  if (updatedInvoice && paymentReceiptNotifier) {
+    await paymentReceiptNotifier.notifyPaymentReceived(
+      input.tenantId,
+      input.invoiceId,
+      input.amountCents,
     );
   }
 

@@ -164,3 +164,82 @@ export function renderInvoiceEmail(ctx: InvoiceMessageContext): RenderedEmail {
 
   return { subject, text, html };
 }
+
+export interface AppointmentNoticeContext {
+  customerName: string;
+  businessName: string;
+  dateTimeStr: string;
+}
+
+export function renderAppointmentConfirmationSms(ctx: AppointmentNoticeContext): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your appointment with ${ctx.businessName} is confirmed.`,
+      `Date & time: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export function renderAppointmentRescheduleSms(
+  ctx: AppointmentNoticeContext,
+): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your appointment with ${ctx.businessName} has been rescheduled.`,
+      `New date & time: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export function renderAppointmentCancelSms(ctx: AppointmentNoticeContext): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your appointment with ${ctx.businessName} has been canceled.`,
+      `Previously scheduled: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export function renderAppointmentReminderSms(ctx: AppointmentNoticeContext): RenderedSms {
+  return {
+    body: [
+      `Reminder: you have an appointment with ${ctx.businessName} tomorrow.`,
+      `Date & time: ${ctx.dateTimeStr}`,
+    ].join('\n'),
+  };
+}
+
+export interface PaymentReceiptContext {
+  customerName: string;
+  businessName: string;
+  invoiceNumber: string;
+  amountCents: number;
+}
+
+export function renderPaymentReceiptSms(ctx: PaymentReceiptContext): RenderedSms {
+  return {
+    body: [
+      `Hi ${ctx.customerName}, we received your payment to ${ctx.businessName}.`,
+      `Invoice ${ctx.invoiceNumber}: ${formatMoney(ctx.amountCents)}. Thank you!`,
+    ].join('\n'),
+  };
+}
+
+export interface InvoiceOverdueContext {
+  customerName: string;
+  businessName: string;
+  invoiceNumber: string;
+  amountDueCents: number;
+  dueDateIso?: string;
+}
+
+export function renderInvoiceOverdueSms(ctx: InvoiceOverdueContext): RenderedSms {
+  const due = ctx.dueDateIso ? ` (due ${ctx.dueDateIso.slice(0, 10)})` : '';
+  return {
+    body: [
+      `Hi ${ctx.customerName}, your invoice from ${ctx.businessName} is past due.`,
+      `Invoice ${ctx.invoiceNumber}: ${formatMoney(ctx.amountDueCents)}${due}.`,
+      'Please pay at your earliest convenience.',
+    ].join('\n'),
+  };
+}
