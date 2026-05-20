@@ -657,7 +657,6 @@ function OriginAttributionLine({ leadId }: { leadId: string }) {
 function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () => void }) {
   const navigate = useNavigate();
   const { data: inv, isLoading, error } = useDetailQuery<ApiInvoice>('/api/invoices', invoiceId);
-  const { mutate: transitionInvoice } = useMutation<{ status: string }, ApiInvoice>('POST', `/api/invoices/${invoiceId}/transition`);
 
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [sendOpen,  setSendOpen]  = useState(false);
