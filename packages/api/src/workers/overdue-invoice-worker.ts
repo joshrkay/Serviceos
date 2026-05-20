@@ -20,6 +20,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
 
 export interface OverdueInvoiceWorkerDeps {
   jobRepo: JobRepository;
@@ -31,6 +32,7 @@ export interface OverdueInvoiceWorkerDeps {
   logger: Logger;
   /** Injectable clock — defaults to `() => new Date()`. */
   now?: () => Date;
+  transactionalComms?: TransactionalCommsListener;
 }
 
 export async function runOverdueInvoiceSweep(
@@ -88,21 +90,23 @@ export async function runOverdueInvoiceSweep(
         // `overdue`, refreshJobMoneyState reports changed:false.
         if (result.changed && result.current === 'overdue') {
           overdue++;
-          await deps.auditRepo.create(
-            createAuditEvent({
-              tenantId,
-              actorId: 'overdue-invoice-worker',
-              actorRole: 'system',
-              eventType: 'invoice.overdue',
-              entityType: 'invoice',
-              entityId: invoice.id,
-              metadata: {
-                jobId: invoice.jobId,
-                dueDate: invoice.dueDate?.toISOString(),
-                amountDueCents: invoice.amountDueCents,
-              },
-            }),
-          );
+          const overdueEvent = createAuditEvent({
+            tenantId,
+            actorId: 'overdue-invoice-worker',
+            actorRole: 'system',
+            eventType: 'invoice.overdue',
+            entityType: 'invoice',
+            entityId: invoice.id,
+            metadata: {
+              jobId: invoice.jobId,
+              dueDate: invoice.dueDate?.toISOString(),
+              amountDueCents: invoice.amountDueCents,
+            },
+          });
+          await deps.auditRepo.create(overdueEvent);
+          if (deps.transactionalComms) {
+            await deps.transactionalComms.handleAuditEventSafe(overdueEvent);
+          }
         }
       }
     } catch (err) {

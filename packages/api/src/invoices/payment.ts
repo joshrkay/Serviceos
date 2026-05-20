@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { createAuditEvent } from '../audit/audit';
 
 export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'refunded';
 export type PaymentMethod = 'cash' | 'check' | 'credit_card' | 'bank_transfer' | 'other';
@@ -202,6 +203,27 @@ export async function recordPayment(
       input.processedBy,
       moneyStateDeps,
     );
+  }
+
+  if (updatedInvoice && moneyStateDeps?.auditRepo) {
+    const paymentEvent = createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.processedBy,
+      actorRole: 'system',
+      eventType: 'payment.recorded',
+      entityType: 'invoice',
+      entityId: input.invoiceId,
+      metadata: {
+        paymentId: payment.id,
+        amountCents: payment.amountCents,
+        method: payment.method,
+        newInvoiceStatus: updatedInvoice.status,
+      },
+    });
+    await moneyStateDeps.auditRepo.create(paymentEvent);
+    if (moneyStateDeps.transactionalComms) {
+      await moneyStateDeps.transactionalComms.handleAuditEventSafe(paymentEvent);
+    }
   }
 
   return { payment, invoice: updatedInvoice! };

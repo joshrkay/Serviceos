@@ -350,6 +350,8 @@ import {
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { TransactionalCommsListener } from './notifications/transactional-comms-listener';
+import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -1242,6 +1244,21 @@ export function createApp(): express.Express {
         dncRepo,
       })
     : undefined;
+  const transactionalComms =
+    messageDelivery && schedulingConfirmationNotifier
+      ? new TransactionalCommsListener({
+          delivery: messageDelivery,
+          appointmentRepo,
+          jobRepo,
+          customerRepo,
+          settingsRepo,
+          dispatchRepo,
+          dncRepo,
+          invoiceRepo,
+          confirmationNotifier: schedulingConfirmationNotifier,
+          publicBaseUrl,
+        })
+      : undefined;
   const feasibilityDeps: FeasibilityDependencies = {
     assignmentRepo,
     appointmentRepo,
@@ -1291,6 +1308,7 @@ export function createApp(): express.Express {
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: schedulingConfirmationNotifier,
+    transactionalComms,
     expenseRepo,
     auditRepo,
     jobRepo,
@@ -2362,7 +2380,20 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
     ),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      sendService,
+      jobRepo,
+      estimateRepo,
+      transactionalComms,
+    ),
+  );
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
@@ -2425,7 +2456,17 @@ export function createApp(): express.Express {
       timeGivenBackReporter,
     }),
   );
-  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
+  app.use(
+    '/api/payments',
+    createPaymentRouter(
+      paymentRepo,
+      invoiceRepo,
+      jobRepo,
+      estimateRepo,
+      auditRepo,
+      transactionalComms,
+    ),
+  );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
@@ -2724,6 +2765,7 @@ export function createApp(): express.Express {
         estimateRepo,
         invoiceRepo,
         auditRepo,
+        transactionalComms,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');
@@ -2733,6 +2775,30 @@ export function createApp(): express.Express {
       });
     } catch (err) {
       overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60 * 60_000);
+
+  const appointmentReminderLogger = createLogger({
+    service: 'appointment-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    if (!transactionalComms) return;
+    try {
+      await runAppointmentReminderSweep({
+        appointmentRepo,
+        transactionalComms,
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: appointmentReminderLogger,
+      });
+    } catch (err) {
+      appointmentReminderLogger.error('Appointment-reminder sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     }

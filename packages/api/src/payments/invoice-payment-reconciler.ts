@@ -1,6 +1,7 @@
 import { recordPayment, RecordPaymentInput, PaymentRepository, Payment } from '../invoices/payment';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
 
 export interface ReconciliationResult {
   success: boolean;
@@ -13,7 +14,8 @@ export async function reconcilePayment(
   input: RecordPaymentInput,
   invoiceRepo: InvoiceRepository,
   paymentRepo: PaymentRepository,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  transactionalComms?: TransactionalCommsListener,
 ): Promise<ReconciliationResult> {
   // Validate invoice exists
   const invoice = await invoiceRepo.findById(input.tenantId, input.invoiceId);
@@ -49,6 +51,9 @@ export async function reconcilePayment(
         },
       });
       await auditRepo.create(event);
+      if (transactionalComms) {
+        await transactionalComms.handleAuditEventSafe(event);
+      }
 
       if (updatedInvoice.status !== invoice.status) {
         const statusEvent = createAuditEvent({

@@ -13,6 +13,7 @@ import type { Estimate, EstimateRepository } from '../estimates/estimate';
 import type { Invoice, InvoiceRepository } from '../invoices/invoice';
 import type { Job, JobMoneyState, JobRepository } from './job';
 import type { Logger } from '../logging/logger';
+import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
 import { type AuditRepository, createAuditEvent } from '../audit/audit';
 
 /**
@@ -75,6 +76,8 @@ export interface RefreshJobMoneyStateDeps {
    * the overdue-invoice sweep). Defaults to `() => new Date()`.
    */
   now?: () => Date;
+  /** Layer A comms — fires on `payment.recorded` when auditRepo is also wired. */
+  transactionalComms?: TransactionalCommsListener;
 }
 
 export interface RefreshJobMoneyStateResult {

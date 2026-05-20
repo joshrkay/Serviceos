@@ -9,6 +9,7 @@ import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import type { TransactionalCommsListener } from '../notifications/transactional-comms-listener';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -24,6 +25,7 @@ export function createPaymentRouter(
   jobRepo?: JobRepository,
   estimateRepo?: EstimateRepository,
   auditRepo?: AuditRepository,
+  transactionalComms?: TransactionalCommsListener,
 ): Router {
   const router = Router();
 
@@ -35,7 +37,7 @@ export function createPaymentRouter(
   // is logged (not silently swallowed) at this call site.
   const refreshDeps: RefreshJobMoneyStateDeps | undefined =
     jobRepo && estimateRepo
-      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger }
+      ? { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger, transactionalComms }
       : undefined;
 
   router.post(

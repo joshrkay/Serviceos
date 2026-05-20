@@ -7,7 +7,12 @@ import {
 } from 'lucide-react';
 import { leads } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
-import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
+import {
+  normalizeJobStatus,
+  normalizeJobMoneyState,
+  normalizeEstimateStatus,
+  centsToDisplay,
+} from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { ErrorState } from '../ErrorState';
@@ -18,6 +23,7 @@ interface ApiJob {
   jobNumber: string;
   summary: string;
   status: string;
+  moneyState?: string;
   priority?: string;
   serviceType?: string;
   scheduledStart?: string;
@@ -139,6 +145,7 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
   const svc = SVC[job.serviceType ?? ''] ?? SVC.HVAC;
   const name = customerName(job.customer);
   const uiStatus = normalizeJobStatus(job.status);
+  const moneyLabel = normalizeJobMoneyState(job.moneyState);
   const techName = job.technician
     ? [job.technician.firstName, job.technician.lastName].filter(Boolean).join(' ')
     : null;
@@ -156,7 +163,12 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm text-slate-900 truncate">{name}</p>
-          <StatusBadge status={uiStatus} size="sm" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            {moneyLabel && (
+              <StatusBadge status={moneyLabel as 'Estimate sent'} size="sm" />
+            )}
+            <StatusBadge status={uiStatus} size="sm" />
+          </div>
         </div>
         <div className="flex items-center gap-2 mt-0.5">
           {scheduledTime && (

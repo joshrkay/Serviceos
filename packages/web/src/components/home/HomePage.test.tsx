@@ -277,4 +277,21 @@ describe('HomePage', () => {
     expect(container.querySelectorAll('.animate-spin')).toHaveLength(0);
     expect(screen.getAllByText('Session expired — please reload').length).toBeGreaterThan(0);
   });
+
+  it('shows money-state badge on today job rows', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs') {
+        return makeListResult([
+          { ...mockJobs[0], moneyState: 'estimate_sent' },
+          { ...mockJobs[1], moneyState: 'overdue' },
+        ]) as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices') return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    expect(screen.getByText('Estimate sent')).toBeInTheDocument();
+    expect(screen.getAllByText('Overdue').length).toBeGreaterThanOrEqual(1);
+  });
 });

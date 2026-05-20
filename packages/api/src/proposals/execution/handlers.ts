@@ -35,6 +35,8 @@ import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
+import type { TransactionalCommsListener } from '../../notifications/transactional-comms-listener';
+import { createAuditEvent } from '../../audit/audit';
 import { CreateCustomerVoiceExecutionHandler } from './create-customer-handler';
 import { CustomerRepository } from '../../customers/customer';
 
@@ -100,6 +102,8 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly confirmationNotifier: SchedulingConfirmationNotifier = new NoopSchedulingConfirmationNotifier(),
+    private readonly auditRepo?: AuditRepository,
+    private readonly transactionalComms?: TransactionalCommsListener,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -177,12 +181,26 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
       : ['sms', 'email'];
     const shouldSendConfirmation = payload.sendConfirmation !== false;
     if (shouldSendConfirmation && channels.length > 0) {
-      await this.confirmationNotifier.enqueue({
-        tenantId: context.tenantId,
-        appointmentId: appointment.id,
-        jobId: appointment.jobId,
-        channels,
-      });
+      if (this.transactionalComms && this.auditRepo) {
+        const bookedEvent = createAuditEvent({
+          tenantId: context.tenantId,
+          actorId: context.executedBy,
+          actorRole: 'system',
+          eventType: 'appointment.booked',
+          entityType: 'appointment',
+          entityId: appointment.id,
+          metadata: { proposalId: proposal.id, jobId: appointment.jobId },
+        });
+        await this.auditRepo.create(bookedEvent);
+        await this.transactionalComms.handleAuditEventSafe(bookedEvent);
+      } else {
+        await this.confirmationNotifier.enqueue({
+          tenantId: context.tenantId,
+          appointmentId: appointment.id,
+          jobId: appointment.jobId,
+          channels,
+        });
+      }
     }
 
     return { success: true, resultEntityId: appointment.id };
@@ -226,6 +244,7 @@ export function createExecutionHandlerRegistry(deps?: {
   serviceCreditRepo?: ServiceCreditRepository;
   googleReplyResolver?: GoogleBusinessReplyResolver;
   reviewPrivateMessageSender?: ReviewPrivateMessageSender;
+  transactionalComms?: TransactionalCommsListener;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -250,13 +269,35 @@ export function createExecutionHandlerRegistry(deps?: {
       : new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(),
     new CreateJobExecutionHandler(),
-    new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),
-    new CreateBookingExecutionHandler(deps?.appointmentRepo, deps?.auditRepo),
+    new CreateAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
+      deps?.schedulingNotifier,
+      deps?.auditRepo,
+      deps?.transactionalComms,
+    ),
+    new CreateBookingExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.auditRepo,
+      deps?.transactionalComms,
+    ),
     new DraftEstimateExecutionHandler(),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
-    new RescheduleAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.auditRepo, deps?.feasibilityDeps),
-    new CancelAppointmentExecutionHandler(deps?.appointmentRepo, deps?.analyticsRepo, deps?.auditRepo),
+    new RescheduleAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.assignmentRepo,
+      deps?.analyticsRepo,
+      deps?.auditRepo,
+      deps?.feasibilityDeps,
+      deps?.transactionalComms,
+    ),
+    new CancelAppointmentExecutionHandler(
+      deps?.appointmentRepo,
+      deps?.analyticsRepo,
+      deps?.auditRepo,
+      deps?.transactionalComms,
+    ),
     // Stage-2 voice handlers wired against real repositories. Each
     // handler degrades to a synthetic-id passthrough when its dep is
     // absent (used by in-memory tests that don't exercise the
