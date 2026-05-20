@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
 import { Proposal, ProposalRepository, ProposalStatus } from './proposal';
@@ -73,7 +74,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
           $25, $26, $27
         ) ${conflictClause} RETURNING *`,
         [
-          proposal.id,
+          proposal.id ?? uuidv4(),
           proposal.tenantId,
           proposal.proposalType,
           proposal.status,
