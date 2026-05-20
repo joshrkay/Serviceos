@@ -18,7 +18,10 @@ export interface OnboardingStatusResult {
  *   - App-shell guard (30s on every authed page so completing onboarding
  *     elsewhere correctly unblocks the rest of the app)
  */
-export function useOnboardingStatus(pollIntervalMs = 3000): OnboardingStatusResult {
+export function useOnboardingStatus(
+  pollIntervalMs = 3000,
+  enabled = true,
+): OnboardingStatusResult {
   const apiFetch = useApiClient();
   const [data, setData] = useState<OnboardingStatusResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -45,13 +48,17 @@ export function useOnboardingStatus(pollIntervalMs = 3000): OnboardingStatusResu
   }, [apiFetch]);
 
   useEffect(() => {
+    if (!enabled) {
+      setIsLoading(false);
+      return;
+    }
     void refetch();
     if (pollIntervalMs <= 0) return;
     const id = setInterval(() => {
       void refetch();
     }, pollIntervalMs);
     return () => clearInterval(id);
-  }, [refetch, pollIntervalMs]);
+  }, [refetch, pollIntervalMs, enabled]);
 
   return { data, isLoading, error, refetch };
 }
