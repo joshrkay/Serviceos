@@ -19,10 +19,14 @@ Ship a **full public, self-serve launch** for a **solo HVAC or plumbing owner-op
 |-------|----------|-----------|
 | **Signup** | **A — Fully open** | Matches launch-readiness spec: "full public launch, fully self-serve." |
 | **App access** | **C — Soft product gate** | `ProtectedRoute` redirects to `/onboarding` until `GET /api/onboarding/status` reports `isComplete` (when `VITE_ONBOARDING_V2_ENABLED=true`). |
-| **Inbound voice** | **Trial + subscription gates at webhook** | Per §10 spec: agent stops answering when subscription is not `trialing`/`active` or trial AI caps exceeded — independent of UI onboarding progress. |
+| **Inbound voice** | **Trial + subscription gates at webhook** | `createVoiceGate` (`voice-gate.ts`) allows inbound AI only when `subscription_status` is `trialing` or `active`. **No trial at signup** — billing (step 5) must complete before the agent answers, even though the Twilio number may exist at step 4. |
 | **Quality gate** | **Human + automated** | Layer 1 `launchGate.pass` plus runbook sign-off before marketing "AI answers your phone." |
 
-**Open product question:** Should inbound calls be answered **before** onboarding step 6 (test call)? Today, Twilio may be provisioned at step 4 while the app shell still forces `/onboarding`. Default for this design: **yes** (number is live for forwarding instructions), but **trial caps** and **voice quality bar** limit blast radius. Alternative **B (waitlist)** is out of scope unless product overrides §1 signup row.
+**Phone vs agent (clarified):** Step 4 provisions the number for copy/forward instructions; the **AI does not answer** until step 5 establishes `trialing`/`active`. This matches `evaluateTrialCap` / Gate A.
+
+**Onboarding UX gap (visibility):** While `isComplete === false`, the shell redirects to `/onboarding`, so the owner cannot reach `/inbox` or customers during steps 4–5 even though the API is not blocked (§10). Between step 5 and a **finished** step-6 test call, live calls can produce proposals the owner cannot see in the main nav.
+
+**Launch mitigation (product — post-spec):** Either (a) add a read-only **“Activity during setup”** panel on the Test Call step (polls `/api/proposals/inbox`), or (b) allow `/inbox` (and `/customers`) while onboarding is incomplete **after** billing is `done`. Option (a) is smaller scope for v1.
 
 ### Non-goals (launch surface)
 
@@ -78,7 +82,7 @@ Underlying multi-tech data model may remain; **product surface** is owner-only.
 | Persist `create_customer` | Wire handler to `customerRepo`; register real handler in registry | `production-readiness-blockers.md` Phase 1 |
 | Classifier `create_customer` | Fix inbound intent for new signup utterances | **P18-001** |
 | Idempotency | Pass `IdempotencyGuard` into `ProposalExecutor` | Production-readiness Phase 3 |
-| Postgres repos in prod | `PgAssignmentRepository`, `PgDispatchAnalyticsRepository` when pool present | Production-readiness Phase 2 |
+| Postgres repos in prod | `PgAssignmentRepository`, `PgDispatchAnalyticsRepository` when pool present | Production-readiness Phase 2 — **already shipped**; all queries include explicit `tenant_id` (defense-in-depth per repo headers) |
 | Invoice delivery fail-fast | No silent `NoopInvoiceDeliveryProvider` in staging/prod | Production-readiness Phase 4 |
 
 **Defer past launch (solo path still viable via UI):** `draft_estimate`, `create_job`, `update_customer` voice stubs — if web flows cover estimate/invoice loop.
@@ -127,7 +131,7 @@ Env prerequisites: `TWILIO_MEDIA_STREAMS_ENABLED`, production STT/TTS provider k
 | E2E | Extend `e2e/journeys/onboarding-v2.spec.ts` for identity PUT + pack POST against migrated DB |
 | Docs | Update deployment.md / `.env.example` |
 
-**Derived status (no `onboarding_progress` table):** Six mandatory steps per §10 spec; step 6 = inbound `voice_sessions` ended **or** skip timestamp.
+**Derived status (no `onboarding_progress` table):** Six mandatory steps per §10 spec. Step 6 = inbound `voice_sessions` with `ended_at IS NOT NULL` **or** skip timestamp — implemented in `load-facts.ts` (`COUNT` where `ended_at IS NOT NULL`); `derive-status.ts` uses `inboundCallCount > 0` on that count, so completion does **not** fire mid-call.
 
 **Trial gates (already specced):** Subscription status + AI minute caps at inbound webhook; early-upgrade nudge after 30 minutes.
 
