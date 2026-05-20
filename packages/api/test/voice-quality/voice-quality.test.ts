@@ -33,6 +33,7 @@ const scripts = (() => {
 const myScripts = scripts;
 
 function writeVerdictShard(verdict: Awaited<ReturnType<typeof gradeLayer1Script>>): void {
+  fs.mkdirSync(VOICE_QUALITY_VERDICTS_DIR, { recursive: true });
   const file = path.join(VOICE_QUALITY_VERDICTS_DIR, `${verdict.scriptId}.json`);
   fs.writeFileSync(file, JSON.stringify(verdict, null, 2));
 }

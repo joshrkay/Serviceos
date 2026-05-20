@@ -6,17 +6,11 @@
  * default vitest config so the unit tests in
  * `test/voice-quality/*.test.ts` (schema, observation, runner, etc.)
  * keep running on vitest's default pool while the corpus run uses
- * deterministic 4-way fork parallelism.
+ * a single fork so all verdict shards merge in one pass.
  *
- * Why forks (not threads): each worker creates its own InMemory repo
- * bundle and `VITEST_POOL_ID`-derived tenant id namespace. Forks give
- * us hard process-level isolation, which is the simplest way to
- * guarantee no module-level cache (e.g., a shared logger or singleton)
- * leaks state between scripts running in parallel. `minForks ===
- * maxForks === 4` pins the worker count so the per-worker assignment
- * formula in the entry (`i % 4`) is stable; without that pin vitest
- * could elastically scale the pool down on small machines and shift
- * worker IDs.
+ * Why forks (not threads): each run gets its own InMemory repo bundle.
+ * `minForks === maxForks === 1` keeps the corpus sequential in one
+ * process so `merge-voice-quality-report.ts` sees every script shard.
  *
  * `reporters: ['default', 'json']` + `outputFile.json` emit a machine-
  * readable report that VQ-023's aggregator (Phase 3) consumes to
