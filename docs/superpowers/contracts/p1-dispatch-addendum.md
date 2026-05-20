@@ -132,7 +132,7 @@ cd /home/user/Serviceos && \
 ## P1-022 — Add `mobile_number` to users for inbound identity binding
 
 **Wave:** Wave-C blocker B4 (see `docs/superpowers/plans/2026-05-17-wave-c-bad-day-recovery.md`)
-**Migration number reserved:** `101_users_mobile_number`
+**Migration number reserved:** `109_users_mobile_number` (was `101`; bumped — main advanced to migration 108, and `101` is now `101_google_reviews`)
 **Forbidden files:**
 - `packages/api/src/sms/tech-status/**` (P6-028 consumes — does not modify users)
 - `packages/api/src/voice/triage/**` (P8-016 consumes for owner-cell paging)
@@ -140,7 +140,7 @@ cd /home/user/Serviceos && \
 - `packages/shared/**`
 
 **Allowed files (concrete list):**
-- `packages/api/src/db/schema.ts` (modify — add key `101_users_mobile_number`)
+- `packages/api/src/db/schema.ts` (modify — add key `109_users_mobile_number`)
 - `packages/api/src/users/user.ts` (modify — add `mobileNumber?: string`)
 - `packages/api/src/users/pg-user.ts` (modify — read/write column + `findByMobileNumber()`)
 - `packages/api/src/users/pg-user.test.ts` (modify — add coverage)
