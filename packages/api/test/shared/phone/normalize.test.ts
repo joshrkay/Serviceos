@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeMobileE164, InvalidPhoneNumberError } from './normalize';
+import { normalizeMobileE164, InvalidPhoneNumberError } from '../../../src/shared/phone/normalize';
 
 describe('P1-022 normalizeMobileE164', () => {
   it('normalizes (555) 123-4567 to E.164', () => {

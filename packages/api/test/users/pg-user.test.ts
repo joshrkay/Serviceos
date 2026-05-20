@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { InMemoryUserRepository, User } from './user';
-import { normalizeMobileE164 } from '../shared/phone/normalize';
-import { MIGRATIONS } from '../db/schema';
+import { InMemoryUserRepository, User } from '../../src/users/user';
+import { normalizeMobileE164 } from '../../src/shared/phone/normalize';
+import { MIGRATIONS } from '../../src/db/schema';
 
 /**
  * P1-022 — mobile_number identity binding.
