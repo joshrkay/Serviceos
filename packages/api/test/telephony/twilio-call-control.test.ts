@@ -145,3 +145,35 @@ describe('P8-013 DefaultTwilioCallControl rotation cursor', () => {
     expect(cc.getCursor('s-x').index).toBe(0);
   });
 });
+
+describe('dialDispatcher with whisper', () => {
+  const ctrl = new DefaultTwilioCallControl();
+
+  it('omits url attribute when no whisperUrl is supplied (no regression)', () => {
+    const twiml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://example.com/action',
+      timeoutSeconds: 20,
+    });
+    expect(twiml).toContain('<Number>+15551234567</Number>');
+    expect(twiml).not.toContain('url="');
+  });
+
+  it('adds url attribute on <Number> when whisperUrl is supplied', () => {
+    const twiml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://example.com/action',
+      whisperUrl: 'https://example.com/api/telephony/whisper/esc_abc',
+      timeoutSeconds: 20,
+    });
+    expect(twiml).toContain(
+      '<Number url="https://example.com/api/telephony/whisper/esc_abc">+15551234567</Number>',
+    );
+  });
+
+  it('XML-escapes the whisperUrl', () => {
+    const twiml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://example.com/action',
+      whisperUrl: 'https://example.com/whisper?id=a&b=c',
+    });
+    expect(twiml).toContain('url="https://example.com/whisper?id=a&amp;b=c"');
+  });
+});

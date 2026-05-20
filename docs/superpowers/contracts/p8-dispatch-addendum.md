@@ -173,6 +173,147 @@ cd /home/user/Serviceos && \
 
 ---
 
+## P8-015 — Dropped-call SMS recovery
+
+**Wave:** 8-Wave-C1 (depends on Wave-C blockers B1 = P4-015, B5 = P0-036, B6 = P0-037)
+**Migration number reserved:** `108_dropped_call_recoveries`
+**Forbidden files:**
+- `packages/api/src/conversations/linkage.ts` (P0-037 owns the entity-type expansion)
+- `packages/api/src/shared/rate-limit/**` (P0-036 owns — this story consumes only)
+- `packages/api/src/ai/prompt-registry.ts` (P4-015 owns the brand-voice registration)
+- `packages/api/src/voice/voice-session.ts` (the model + `CallOutcome` are already correct)
+- `packages/api/src/voice/pg-voice-session.ts` (the repo's `markEnded` is already correct)
+- `packages/api/src/notifications/**` (outbound SMS is reused, not modified)
+- `packages/api/src/ai/agents/customer-calling/state-machine.ts` (FSM is unchanged — the trigger is at the adapter's terminal hook)
+- `packages/shared/**` (except `packages/shared/src/contracts/dropped-call-event.ts`)
+
+**Allowed files (concrete list):**
+- `packages/api/src/voice/recovery/detect-dropped.ts` (new — pure function)
+- `packages/api/src/voice/recovery/extract-context-cue.ts` (new — partial-transcript cue with PII strip + 80-char cap)
+- `packages/api/src/voice/recovery/**.test.ts` (new)
+- `packages/api/src/sms/recovery/dropped-call-handler.ts` (new — orchestrator)
+- `packages/api/src/sms/recovery/scheduler.ts` (new — enqueues with `runAfter = now + 60s`)
+- `packages/api/src/sms/recovery/**.test.ts` (new)
+- `packages/api/src/workers/dropped-call-worker.ts` (new — drains queue items)
+- `packages/api/src/workers/dropped-call-worker.test.ts` (new)
+- `packages/api/src/ai/agents/customer-calling/inapp-adapter.ts` (modify — DI of `droppedCallScheduler` + fire at `finalizeTerminalOutcome` post-`session.terminalOutcome`)
+- `packages/api/src/voice/voice-service.ts` (modify — mirror the same hook for the Twilio adapter terminal path)
+- `packages/api/src/db/schema.ts` (modify — add key `108_dropped_call_recoveries`)
+- `packages/shared/src/contracts/dropped-call-event.ts` (new)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P8-015|dropped-call|recovery"
+```
+
+**Pre-flight:** P4-015, P0-036, P0-037 have merged on `main`.
+
+**Risk note:**
+- **Trigger site is the choke point.** `finalizeTerminalOutcome` at `inapp-adapter.ts:564` is the ONLY place every terminal outcome is computed. Wire there + the Twilio-adapter mirror in `voice-service.ts`. Do NOT instrument individual transition handlers — they're not exhaustive.
+- **60s deferred-send uses the queue, not `setTimeout`.** Server restarts must not lose pending recoveries. Use the existing `packages/api/src/queues/queue.ts` with `runAfter = now + 60s`.
+- **Suppression check re-runs at execution.** Between scheduling (T=0) and sending (T=60s) the caller might call back and complete a booking — the worker re-checks `proposals` for any successful booking proposal correlated to `voice_session_id` since the drop. Found → `suppressed_reason='booking_completed'` and skip.
+- **Rate-limit on E.164.** Use P0-036's `tryConsume('sms_recovery', callerE164, 1, 5*60_000)`. Deny → audit + skip.
+- **PII in context cue.** The partial transcript can contain names, addresses, etc. The cue extractor uses a fixed template ("Sounds like you were calling about your AC...") seeded by the top intent from the FSM context — NOT free-form transcript text.
+- **Threading.** After Twilio acceptance, link both directions: `entityType='voice_session'` AND `entityType='sms_conversation'`.
+
+**Implementation hints:**
+1. Read `inapp-adapter.ts:550-610` first to confirm the trigger site.
+2. The DI shape: add `droppedCallScheduler?: DroppedCallScheduler` to `InapAdapterDeps`. In the constructor, the scheduler is optional (tests can omit). The fire call is `void this.deps.droppedCallScheduler?.schedule(event)`.
+3. The scheduler upserts on `(tenant_id, voice_session_id)` (UNIQUE), so a duplicate fire is idempotent.
+4. The worker polls every 5s for due rows (`scheduled_for <= NOW() AND sent_at IS NULL AND suppressed_reason IS NULL`).
+5. **Migration 108 body** (final form):
+   ```sql
+   CREATE TABLE dropped_call_recoveries (
+     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+     tenant_id UUID NOT NULL REFERENCES tenants(id),
+     voice_session_id UUID NOT NULL,
+     caller_e164 TEXT NOT NULL,
+     scheduled_for TIMESTAMPTZ NOT NULL,
+     sent_at TIMESTAMPTZ,
+     suppressed_reason TEXT,
+     sms_message_sid TEXT,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+     UNIQUE (tenant_id, voice_session_id)
+   );
+   CREATE INDEX dropped_call_recoveries_due ON dropped_call_recoveries (scheduled_for) WHERE sent_at IS NULL AND suppressed_reason IS NULL;
+   ALTER TABLE dropped_call_recoveries ENABLE ROW LEVEL SECURITY;
+   -- standard tenant policy
+   ```
+
+---
+
+## P8-016 — Vulnerability-aware emergency triage
+
+**Wave:** 8-Wave-C1 (depends on Wave-C blocker B4 = P1-022)
+**Migration numbers reserved:**
+- `109_customer_vulnerability_fields` — additive `date_of_birth` + `account_type`
+- `110_weather_cache` — public weather cache (no tenant scope; PK on rounded lat/lng)
+- `111_vulnerability_signals` — analytics + post-incident review
+
+**Forbidden files:**
+- `packages/api/src/users/**` (P1-022 owns the owner-mobile column)
+- `packages/api/src/ai/skills/classify-urgency-tier.ts` (vulnerability is a pre-filter to escalation, not a rewrite of urgency classification)
+- `packages/api/src/ai/skills/triage-rules.schema.ts` (the rules schema is unchanged — vulnerability is a separate weighted score)
+- `packages/api/src/oncall/rotation.ts` (dispatcher rotation is unaffected; owner-cell is a separate path)
+- `packages/shared/**` (except `packages/shared/src/contracts/vulnerability-signal.ts`)
+
+**Allowed files (concrete list):**
+- `packages/api/src/ai/vulnerability/signal-extractor.ts` (new)
+- `packages/api/src/ai/vulnerability/detectors/age-detector.ts` (new)
+- `packages/api/src/ai/vulnerability/detectors/weather-detector.ts` (new)
+- `packages/api/src/ai/vulnerability/detectors/medical-detector.ts` (new)
+- `packages/api/src/ai/vulnerability/detectors/property-type-detector.ts` (new)
+- `packages/api/src/ai/vulnerability/triage-decision.ts` (new — pure)
+- `packages/api/src/ai/vulnerability/**.test.ts` (new)
+- `packages/api/src/voice/triage/owner-cell-patch.ts` (new — extends escalate-to-human)
+- `packages/api/src/voice/triage/context-preface.ts` (new — deterministic template, NOT LLM)
+- `packages/api/src/voice/triage/**.test.ts` (new)
+- `packages/api/src/integrations/weather/weather-client.ts` (new — thin OpenWeather/NOAA wrapper)
+- `packages/api/src/integrations/weather/pg-weather-cache.ts` (new)
+- `packages/api/src/integrations/weather/**.test.ts` (new)
+- `packages/api/src/customers/customer.ts` (modify — add `dateOfBirth?: Date`, `accountType?: 'residential'|'b2b'`)
+- `packages/api/src/customers/pg-customer.ts` (modify — read/write the new columns)
+- `packages/api/src/customers/pg-customer.test.ts` (modify — round-trip the new fields)
+- `packages/api/src/ai/skills/escalate-to-human.ts` (modify — add `EscalationReason='vulnerability_patch'`, owner-mobile resolver, 60s no-answer fallback)
+- `packages/api/src/ai/agents/customer-calling/state-machine.ts` (modify — call `triage-decision()` at the escalation site BEFORE falling through to existing escalate)
+- `packages/api/src/db/schema.ts` (modify — add keys 109 + 110 + 111)
+- `packages/shared/src/contracts/vulnerability-signal.ts` (new)
+
+**Verification gate (single command):**
+```bash
+cd /home/user/Serviceos && \
+  npx tsc --project packages/api/tsconfig.build.json --noEmit && \
+  npm test --workspace=packages/api -- --run -t "P8-016|vulnerability|triage-decision|owner-cell-patch"
+```
+
+**Pre-flight:** P1-022 has merged on `main`.
+
+**Risk note:**
+- **No medical authority.** The medical detector OUTPUTS evidence verbatim ("caller mentioned oxygen") — the brand voice elsewhere must never say "you have a medical emergency". The preface template uses the evidence string only; do not paraphrase it into a clinical claim.
+- **5s budget = deterministic template.** A model round-trip + TTS would blow past 5s. The preface composer is a string template: `"Vulnerability: ${vulnLabel}. Reason: ${reason}. Customer ${customerLabel}. Putting them through."` — assert at test time the synthesized audio stays under 5s.
+- **High specificity over recall.** False positives (patching the owner for non-emergencies) burn out the owner faster than false negatives. The triage decision requires BOTH vulnerability AND urgency to patch the cell.
+- **Weather-API failure is degraded, not blocking.** A 5xx from the weather provider must not block the call. Fall back to age + medical + property-type signals; mark the weather detector's signal as `null` (not absent) so post-incident analysis sees the gap.
+- **Owner-unreachable fallback.** If `<Dial>` rings owner's mobile for 60s with no answer (or busy / voicemail-pickup), the existing Twilio dial-result handler cascades — extend it to fall through to (a) create a `high_priority_booking` proposal with vulnerability-signal metadata in `sourceContext`, and (b) SMS the owner what happened.
+- **Property-type signal is conservative.** Only fires when `customer.accountType === 'b2b' AND currentlyOccupied`. `currentlyOccupied` requires explicit intent extraction ("there are people in the unit right now") — do NOT default to true for B2B customers.
+- **Preface PII.** Never includes full address. Includes customer's first name + "customer since YYYY" only.
+
+**Implementation hints:**
+1. Read `escalate-to-human.ts` first to understand the existing `<Dial>` + `dispatcherPhoneResolver` pattern. Add `ownerPhoneResolver?` as a sibling and a new `EscalationReason='vulnerability_patch'` that uses it.
+2. Each detector is a PURE function: `(input: TriageInput) => VulnerabilitySignal | null`. The extractor calls them in parallel (`Promise.allSettled` so one failure doesn't block the others) and filters out nulls.
+3. The `triage-decision()` matrix is small (4 vulnerability counts × 4 urgency tiers = 16 outcomes); express it as an exhaustive switch.
+4. Weather cache key: round lat/lng to 0.5° (~30 mi) so adjacent service areas share. Fetch on miss, store with `fetched_at`; consider stale if `>1h`.
+5. **Migration 109 body** (final form):
+   ```sql
+   ALTER TABLE customers ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+   ALTER TABLE customers ADD COLUMN IF NOT EXISTS account_type TEXT
+     CHECK (account_type IS NULL OR account_type IN ('residential','b2b'));
+   ```
+6. The state-machine edit at the escalation site is minimal: BEFORE the existing escalate call, run `const decision = triageDecision(signals, urgencyTier)`. Branch on `decision.kind`. Falling through to existing behavior is the `'normal'` branch.
+
+---
+
 ## Universal pre-flight checks (run by `/dispatch-story` before launching any agent)
 
 1. `git fetch origin && git rev-parse origin/main` — confirms fresh main.

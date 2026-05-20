@@ -21,7 +21,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'log_expense' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'log_expense' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -48,6 +48,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'onboarding_estimate_template',
   'onboarding_team_member',
   'onboarding_schedule',
+  'review_response_proposal',
 ];
 
 export interface Proposal {
@@ -224,6 +225,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // explicit approval. A mis-sent invoice is a real reputation
     // cost.
     case 'send_invoice':
+      return 'comms';
+    // Review responses: public + private + service-credit are always
+    // owner-approved (per-component). The auto-approve path is
+    // hard-blocked because the 'comms' class never auto-approves
+    // regardless of trust tier — see decideInitialStatus().
+    case 'review_response_proposal':
       return 'comms';
     // Money: per D3, money-class proposals never auto-approve
     // regardless of confidence / trust tier. The MCP money_server

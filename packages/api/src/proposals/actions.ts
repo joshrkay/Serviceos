@@ -7,6 +7,63 @@ import { AppointmentRepository, updateAppointment } from '../appointments/appoin
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
 
+export interface BatchApproveResult {
+  approved: string[];
+  failed: { id: string; reason: string }[];
+}
+
+/**
+ * P2-035 — Batch proposal approval (APPROVE ALL).
+ *
+ * Iterates the IDs and delegates to `approveProposal` per ID. There is NO
+ * cross-proposal transaction: partial success is the desired outcome (the
+ * P6-028 "tech goes out, four customers need rescheduling" scenario should
+ * approve everything the owner can approve and surface the rest as
+ * `failed` rather than rolling everything back).
+ *
+ * Each successful approval emits its own `proposal.approved` audit event
+ * through the existing `approveProposal` helper — there is no separate
+ * "batch" audit row by design. Downstream consumers (timeline, notifier)
+ * index on the singular events, and collapsing here would silently break
+ * them.
+ *
+ * RBAC is enforced per-proposal inside `approveProposal`. The route also
+ * gates with `requirePermission('proposals:approve')` so unauthorized
+ * callers 403 at the boundary; the per-proposal check is the second
+ * layer that survives a future route refactor.
+ */
+export async function approveProposalsBatch(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  proposalIds: string[],
+  actorId: string,
+  actorRole: Role,
+  auditRepo?: AuditRepository,
+): Promise<BatchApproveResult> {
+  const approved: string[] = [];
+  const failed: { id: string; reason: string }[] = [];
+
+  for (const id of proposalIds) {
+    try {
+      await approveProposal(proposalRepo, tenantId, id, actorId, actorRole, auditRepo);
+      approved.push(id);
+    } catch (err) {
+      // Surface the error code when available (e.g. NOT_FOUND, FORBIDDEN,
+      // VALIDATION_ERROR). Callers — both the HTTP layer and the inbox UI —
+      // pivot on these. Falls back to message for non-AppError throwables.
+      const reason =
+        err instanceof AppError
+          ? err.code
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      failed.push({ id, reason });
+    }
+  }
+
+  return { approved, failed };
+}
+
 export async function approveProposal(
   proposalRepo: ProposalRepository,
   tenantId: string,

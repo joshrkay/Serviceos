@@ -521,6 +521,24 @@ describe('intent-classifier — classifyIntent', () => {
       expect(result.intentType).toBe('create_customer');
     });
 
+    it('P18-001 AC-1 — bumps weak create_customer on signup phrasing to ≥ 0.75 (FSM TAU_INT)', async () => {
+      const gateway = mockGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.65,
+          extractedEntities: { displayName: 'Jane Smith' },
+        })
+      );
+      const result = await classifyIntent(
+        "I'd like to sign up as a new customer",
+        { tenantId },
+        gateway
+      );
+      expect(result.intentType).toBe('create_customer');
+      expect(result.confidence).toBeGreaterThanOrEqual(0.75);
+      expect(result.extractedEntities?.displayName).toBe('Jane Smith');
+    });
+
     it('routes genuinely ambiguous input to unknown so clarification can ask for the intent', async () => {
       // "Add Jordan" could mean customer, line item, or team member.
       // When the LLM is not confident, the threshold guardrail must

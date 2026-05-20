@@ -89,6 +89,15 @@ function renderShell() {
 describe('P12-002 — Shell mode-aware nav + toggle visibility', () => {
   beforeEach(() => {
     vi.mocked(useMe).mockReset();
+    // P2-033 — Shell mounts usePendingProposals on render. Stub fetch
+    // so it resolves to an empty list and any setState happens inside
+    // an act-flushed promise tick, avoiding noisy "update not wrapped
+    // in act" warnings in this file's tests (which don't exercise the
+    // proposal-notification UI).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [], total: 0 }),
+    } as Response);
   });
 
   it('shows the mode toggle for an owner', () => {

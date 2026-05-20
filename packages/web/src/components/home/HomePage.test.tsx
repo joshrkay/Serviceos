@@ -199,4 +199,82 @@ describe('HomePage', () => {
     renderPage();
     expect(screen.getByText('No jobs scheduled today')).toBeInTheDocument();
   });
+
+  // ── P20-004: Error states for authenticated data panels ──────────────────
+
+  it('[P20-004] shows session-expired message when jobs query returns 401', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs') {
+        return { ...makeListResult([]), error: 'HTTP 401' } as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    expect(screen.getAllByText('Session expired — please reload').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('img', { name: /spinner/ })).not.toBeInTheDocument();
+  });
+
+  it('[P20-004] shows session-expired message when estimates query returns 401', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') {
+        return { ...makeListResult([]), error: 'HTTP 401' } as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    expect(screen.getAllByText('Session expired — please reload').length).toBeGreaterThan(0);
+  });
+
+  it('[P20-004] shows session-expired message when invoices query returns 401', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
+      if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices') {
+        return { ...makeListResult([]), error: 'HTTP 401' } as ReturnType<typeof useListQuery>;
+      }
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    expect(screen.getAllByText('Session expired — please reload').length).toBeGreaterThan(0);
+  });
+
+  it('[P20-004] shows generic error message for non-401 jobs failure', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs') {
+        return { ...makeListResult([]), error: 'HTTP 500' } as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    expect(screen.getByText("Couldn't load jobs — please try again")).toBeInTheDocument();
+  });
+
+  it('[P20-004] happy path: no error shown when all queries succeed', () => {
+    renderPage();
+    expect(screen.queryByText('Session expired — please reload')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load/)).not.toBeInTheDocument();
+    expect(screen.getByText("Today's jobs")).toBeInTheDocument();
+    expect(screen.getAllByText('Alice Smith').length).toBeGreaterThan(0);
+  });
+
+  it('[P20-004] no infinite spinner when jobs query errors (loading exits)', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs') {
+        return { ...makeListResult([]), isLoading: false, error: 'HTTP 401' } as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    const { container } = renderPage();
+    // Spinner inside the jobs section should not be present
+    expect(container.querySelectorAll('.animate-spin')).toHaveLength(0);
+    expect(screen.getAllByText('Session expired — please reload').length).toBeGreaterThan(0);
+  });
 });

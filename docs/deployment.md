@@ -42,6 +42,16 @@ Do not reintroduce migration-gated startup.
 
 Now safe to scale beyond single dyno.
 
+## Dispatch feasibility env vars
+
+The dispatch board's feasibility composer (overlap + travel-time + skill checks) reads the following optional env vars. All are safe to omit — the API degrades to a haversine-only travel estimator and stub skill matcher.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GOOGLE_MAPS_API_KEY` | unset | Enables the Google Distance Matrix provider for traffic-aware drive-time estimates. When unset, the API falls back to a haversine great-circle estimator (~30 mph). |
+| `TRAVEL_TIME_CACHE_TTL_SECONDS` | `300` | TTL for Google Distance Matrix responses cached in-process. |
+| `TRAVEL_TIME_CACHE_MAX_ENTRIES` | `1000` | Hard cap on the in-process LRU cache; prevents unbounded memory growth on multi-tenant deploys. |
+
 ## Observability sink validation (post-deploy)
 
 After each deploy in `dev`, `staging`, and `production`, validate that redaction processors are active on every sink.

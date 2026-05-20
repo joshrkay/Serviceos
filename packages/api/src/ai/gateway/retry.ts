@@ -112,6 +112,8 @@ export interface RunWithRetryOptions {
   deadline?: DeadlineContext;
   /** Provider name for metrics; falls back to "unknown". */
   provider?: string;
+  /** Task type for metrics; falls back to "unknown". */
+  taskType?: string;
   /** Hook called before each backoff sleep — useful for tests. */
   onAttempt?: (info: RetryAttemptInfo) => void;
   /** Optional rng override for deterministic testing. */
@@ -132,6 +134,7 @@ export async function runWithRetry<T>(
   const policy = opts.policy ?? DEFAULT_RETRY;
   const sleep = opts.sleep ?? defaultSleep;
   const provider = opts.provider ?? 'unknown';
+  const taskType = opts.taskType ?? 'unknown';
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < policy.maxAttempts; attempt++) {
@@ -152,7 +155,7 @@ export async function runWithRetry<T>(
         backoffDelayMs(attempt, policy, opts.rng),
         Math.max(0, remaining - 50),
       );
-      gatewayRetryAttemptsTotal.inc({ provider, reason: errClass });
+      gatewayRetryAttemptsTotal.inc({ provider, taskType, outcome: errClass });
       opts.onAttempt?.({ attempt: next, errClass, delayMs: delay });
       if (delay > 0) await sleep(delay);
     }

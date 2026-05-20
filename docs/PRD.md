@@ -944,6 +944,154 @@ aware triage (N-008). Dropped-call recovery (N-007) is a sibling
 story, not an extension.
 
 #### AMEND P10-001 (customer portal) — **DEFER**
+### Story Details — LLM Gateway (P2-027–P2-031)
+
+The gateway and its surrounding modules were scaffolded out-of-band before these stories were written. These specs reflect the actual remaining work: composing, integrating, and persisting — not greenfield construction. See `packages/api/src/ai/gateway/` for the existing scaffolding.
+
+#### P2-027 — Provider-agnostic LLM gateway `[S]`
+
+| Attribute | Value |
+|-----------|-------|
+| Layer | AI/Platform |
+| AI Buildability | High |
+| Human Review | Heavy |
+| Dependencies | P0-015, P0-016, P2-007 |
+| Allowed Files | `packages/api/src/ai/gateway/**`, `packages/api/src/ai/providers/**`, `packages/api/src/ai/ai-run.ts`, `packages/api/src/ai/pg-ai-run.ts`, `packages/api/src/app.ts` |
+
+**Build prompt:** Gateway, factory, and provider abstraction already exist (`packages/api/src/ai/gateway/{gateway,factory}.ts`, `packages/api/src/ai/providers/openai-compatible.ts`) and the single instance is wired in `packages/api/src/app.ts`. Close the three gaps that prevent it from being the true canonical chokepoint:
+1. **Wire AI-run logging into `LLMGateway.complete()`** — every call writes an `ai_runs` row (`pending` → `running` → `completed`/`failed`) with `taskType`, resolved `model`, `promptVersionId` (when supplied), `tokenUsage`, `durationMs`, `correlationId`. Inject `AiRunRepository` via constructor; tests default to `InMemoryAiRunRepository`, prod uses `PgAiRunRepository`.
+2. **Delete `gateway/types.ts`.** Canonical types (`LLMRequest`/`LLMResponse`/`LLMMessage`, `complete()`-based `LLMProvider`) live in `gateway.ts`. Move `GatewayConfig`/`TaskRouteConfig` only if still referenced; drop the `chat()`-based duplicate; fix imports in `routing-config.ts`, `complexity-classifier.ts`, and `index.ts`.
+3. **Add a CI guard.** Grep for `new OpenAI(` and `client.chat.completions.create` outside `ai/gateway/` and `ai/providers/`; fail the build if any match.
+
+**Automated checks:** `gateway.complete() writes a pending then a completed AiRun on success; writes a failed AiRun with errorMessage on provider error; correlationId propagates from request to AiRun row; resolved model (not request override placeholder) recorded on AiRun; type-duplication test confirms no ChatRequest/ChatResponse symbol is exported; CI grep guard fails on a planted direct provider call; all existing task handler tests pass unchanged`
+
+**Acceptance criteria:**
+- Every `gateway.complete()` call produces exactly one `ai_runs` row via `AiRunRepository`.
+- AiRun lifecycle and fields populated as above.
+- `gateway/types.ts` removed; no symbol it exported is imported anywhere.
+- `gateway/index.ts` re-exports only the `LLMRequest`/`LLMResponse` family.
+- CI guard: zero direct provider calls outside the gateway/providers tree.
+
+**Non-goals:** No new providers. No routing/retry/cache/failover changes (covered by P2-028/029/031). No AI-run viewing UI.
+
+---
+
+#### P2-028 — Task-complexity-based model routing `[S]`
+
+| Attribute | Value |
+|-----------|-------|
+| Layer | AI/Orchestration |
+| AI Buildability | Medium |
+| Human Review | Heavy |
+| Dependencies | P2-027, P2-008 |
+| Allowed Files | `packages/api/src/ai/gateway/{gateway,router,routing-config,complexity-classifier}.ts`, `packages/api/src/config/ai-routing.ts` |
+
+**Build prompt:** Tier table (`packages/api/src/config/ai-routing.ts`), `enrichRequestWithRouting()` (`packages/api/src/ai/gateway/router.ts`), and complexity classifier already exist but are not composed into `LLMGateway.complete()`. Make routing automatic:
+1. Replace the inline `LLMGateway.resolveModel()` with a call into `enrichRequestWithRouting()` so `taskType → tier → model + temperature + maxTokens` happens before provider dispatch. Explicit `request.model` still wins (caller override).
+2. Add `LLMGatewayConfig.tenantOverrides?: Record<tenantId, Partial<AIRoutingConfig>>` for per-tenant tier maps.
+3. Emit a structured `model_routing_decision` log line: `{taskType, resolvedTier, resolvedModel, overrideSource: 'request'|'tenant'|'default'}`.
+4. Unmapped `taskType` resolves to `standard` tier with one warning log per process per taskType.
+
+**Automated checks:** `routing test per tier (lightweight/standard/complex); request.model override beats tier mapping; tenant override beats default config; unmapped taskType resolves to standard with single warning; AiRun.model equals resolved model on every call`
+
+**Acceptance criteria:**
+- `gateway.complete({ taskType: 'intent_classification' })` resolves to the lightweight-tier model with no caller-supplied `model`.
+- `gateway.complete({ taskType: 'draft_estimate' })` resolves to the complex-tier model.
+- Tenant override applied when `tenantOverrides[tenantId]` is present.
+- AiRun.model always equals the *resolved* model.
+
+**Non-goals:** No automatic complexity inference from message content (classifier stays opt-in). No cost-based routing.
+
+---
+
+#### P2-029 — Provider health monitoring + failover `[S]`
+
+| Attribute | Value |
+|-----------|-------|
+| Layer | AI/Operations |
+| AI Buildability | High |
+| Human Review | Moderate |
+| Dependencies | P2-027, P0-008 |
+| Allowed Files | `packages/api/src/ai/gateway/{factory,gateway,breaker,retry,deadline,failover,health,tenant-quota}.ts`, `packages/api/src/routes/health.ts` |
+
+**Build prompt:** Resilience modules (breaker, retry, deadline, failover, tenant-quota, health) already exist but `createLLMGateway()` doesn't compose them. Wire them in and surface health:
+1. Compose order, innermost to outermost: `provider → retry → deadline → breaker → failover → tenant-quota → LLMGateway`. Each wrapper preserves the `LLMProvider` interface so wrapping order can be changed without touching call sites.
+2. Add `GET /api/health/ai` returning `{providers: [{name, available, breakerState, lastError, lastSuccessAt}]}`.
+3. Emit Prometheus metrics: `gateway_breaker_state{provider, state}`, `gateway_retry_attempts_total{provider, taskType, outcome}`, `gateway_failover_total{from_provider, to_provider}`.
+4. Distinguish error envelopes: single-provider failure → `LLM_PROVIDER_ERROR` (existing); full failover exhausted → new `LLM_PROVIDER_UNAVAILABLE`.
+5. Populate `LLMResponse.providerPath` on success; mirror into AiRun output snapshot for postmortems.
+
+**Automated checks:** `breaker opens after N consecutive failures, short-circuits subsequent calls, half-opens after cooldown; retry honors exponential backoff and aborts on AbortSignal; deadline cancels in-flight provider call via signal; failover advances on 5xx/network but not on 4xx; tenant-quota blocks over-tier calls with 429 envelope; /api/health/ai reflects current breaker state; AiRun.outputSnapshot.providerPath populated when failover engages`
+
+**Acceptance criteria:**
+- Default `createLLMGateway()` returns a gateway with the full resilience stack composed.
+- Breaker behavior: opens, short-circuits, half-opens, recovers — all driven by configurable thresholds.
+- `/api/health/ai` returns per-provider state.
+- Failover never engages on validation errors.
+- `providerPath` surfaces in logs and AiRun rows.
+
+**Non-goals:** No active health probing (passive observation only). No latency-based provider re-ordering. No tenant-quota admin UI.
+
+---
+
+#### P2-030 — Model shadow comparison framework `[S]`
+
+| Attribute | Value |
+|-----------|-------|
+| Layer | AI/Analytics |
+| AI Buildability | Medium |
+| Human Review | Moderate |
+| Dependencies | P2-027, P2-020, P0-015 |
+| Allowed Files | `packages/api/src/ai/evaluation/shadow-comparison.ts`, `packages/api/src/ai/evaluation/pg-shadow-comparison.ts`, `packages/api/src/ai/gateway/factory.ts`, `packages/api/src/routes/evaluation.ts`, `packages/api/migrations/*shadow*` |
+
+**Build prompt:** `ShadowComparisonGateway` and the in-memory store already exist; opt-in via `SHADOW_LLM_ENABLED` and wrapped in `packages/api/src/ai/gateway/factory.ts`. Make it durable and queryable:
+1. Add `shadow_comparisons` table: `id, tenant_id, ai_run_id (FK), shadow_model, primary_response_text, shadow_response_text, primary_latency_ms, shadow_latency_ms, primary_token_usage JSONB, shadow_token_usage JSONB, divergence_score NUMERIC (nullable, written by P2-020 eval), created_at`. RLS on `tenant_id`. Index on `(tenant_id, ai_run_id)` and `(tenant_id, created_at DESC)`.
+2. Implement `PgShadowComparisonStore` mirroring the in-memory interface.
+3. Factory swaps to PG store when `DATABASE_URL` set and `SHADOW_LLM_ENABLED=true`; otherwise falls back to in-memory.
+4. Add `GET /api/evaluation/shadow-comparisons?taskType=&limit=&cursor=` (owner/admin only, paginated). Apply existing PII redaction (`voice-audit` module) before persistence.
+
+**Automated checks:** `PgShadowComparisonStore round-trip; sampling rate respected (statistical test over 1000 calls — within ±2σ of target rate); shadow-provider failure never blocks primary response; comparison row links to ai_run_id; tenant isolation test on read API; PII redacted before insert`
+
+**Acceptance criteria:**
+- With `SHADOW_LLM_ENABLED=true` and `SHADOW_LLM_SAMPLING_RATE=0.1`, ~10% of `gateway.complete()` calls produce a `shadow_comparisons` row.
+- Each row links to its `ai_run_id`; both responses persisted in full.
+- Shadow-provider error logs at `warn`; primary response always returned.
+- Read API enforces RLS; cross-tenant returns empty.
+- PII redaction applied pre-insert.
+
+**Non-goals:** No automated divergence scoring (P2-020's job, consuming this table). No shadow-comparison dashboard UI.
+
+---
+
+#### P2-031 — Response caching for deterministic tasks `[S]`
+
+| Attribute | Value |
+|-----------|-------|
+| Layer | AI/Platform |
+| AI Buildability | High |
+| Human Review | Moderate |
+| Dependencies | P2-027 |
+| Allowed Files | `packages/api/src/ai/gateway/{cache,redis-cache-store,factory}.ts`, `packages/api/src/config/cache.ts` |
+
+**Build prompt:** `CachingGatewayWrapper` exists (`packages/api/src/ai/gateway/cache.ts`) but is not wired into the default factory and only has an in-memory store. Make the cache real:
+1. Add `RedisCacheStore` implementing `CacheStore`. Connection from `REDIS_URL`; fall back to `InMemoryCacheStore` when unset.
+2. `createLLMGateway()` wraps the assembled gateway (post-resilience, so cache sits *outside* breaker/retry — a cache hit is free and shouldn't burn breaker budget) with `CachingGatewayWrapper` when `AI_CACHE_ENABLED=true`. Default deterministic set: `intent_classification`, `entity_extraction`, `transcript_normalization`, `extract_categories`.
+3. Propagate `LLMResponse.cached: true` through resilience wrappers so callers and AiRun rows see it.
+4. Prometheus metrics: `gateway_cache_hits_total{taskType}`, `gateway_cache_misses_total{taskType}`.
+5. Verify `createCacheKey()` still includes `tenantId` after factory composition changes (currently true — guard with test).
+
+**Automated checks:** `cache hit returns cached=true; cache hit still writes an AiRun row marked cached: true (auditability preserved); cache miss falls through; TTL expiry forces re-fetch; non-deterministic taskTypes bypass cache entirely; cross-tenant cache key isolation; RedisCacheStore JSON round-trip; hit/miss counters increment correctly`
+
+**Acceptance criteria:**
+- Identical `(tenantId, taskType, model, messages)` requests hit cache on second call within TTL.
+- Cache hit writes a *separate* AiRun row with `cached: true` so audit is never blind.
+- Non-deterministic taskTypes never touch cache.
+- Cross-tenant requests with identical messages do not share entries.
+- `AI_CACHE_ENABLED=false` (default in dev) skips cache wrapping entirely — zero overhead.
+
+**Non-goals:** No semantic-similarity caching (exact-match only). No cache invalidation API. No pre-warming.
+
+---
 
 **Amendment**: Defer indefinitely. The strategy commits to SMS, not
 portal. Re-evaluate only if Wave 3 customer signal demands it.

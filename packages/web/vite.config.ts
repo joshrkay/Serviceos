@@ -23,6 +23,7 @@ export default defineConfig({
           ) {
             return 'react-vendor';
           }
+          if (id.includes('@radix-ui')) return 'radix';
           if (id.includes('lucide-react')) return 'icons';
           return 'vendor';
         },

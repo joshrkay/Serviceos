@@ -14,6 +14,7 @@ export interface BoardAppointment {
   technicianName?: string;
   scheduledStart: string;
   scheduledEnd: string;
+  updatedAt: string;
   arrivalWindowStart?: string;
   arrivalWindowEnd?: string;
   status: string;
@@ -96,6 +97,7 @@ function toBoardAppointment(
     technicianName,
     scheduledStart: toISOString(appointment.scheduledStart),
     scheduledEnd: toISOString(appointment.scheduledEnd),
+    updatedAt: toISOString(appointment.updatedAt),
     arrivalWindowStart: appointment.arrivalWindowStart ? toISOString(appointment.arrivalWindowStart) : undefined,
     arrivalWindowEnd: appointment.arrivalWindowEnd ? toISOString(appointment.arrivalWindowEnd) : undefined,
     status: appointment.status,

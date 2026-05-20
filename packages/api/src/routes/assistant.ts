@@ -103,6 +103,16 @@ Set "proposal" to null when no proposal is needed.
 export interface AssistantRouterDeps {
   gateway: LLMGateway;
   proposalRepo: ProposalRepository;
+  /**
+   * §3B/3D/3E — vertical-aware prompt resolver. When wired, the
+   * assistant chat classifier sees the tenant's HVAC/plumbing pack
+   * terminology + intake-disambiguation questions + objection scripts
+   * as a separate system message, matching the voice pipeline. Without
+   * it, an operator chatting "draft an estimate for the Johnson water
+   * heater" can miss vertical-specific entity terms. Optional so tests
+   * can omit it.
+   */
+  verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
 }
 
 type AssistantProposal = z.infer<typeof assistantProposalSchema>;
@@ -163,7 +173,24 @@ async function generateAssistantReply(
   // through to the LLM — separate stories wire them into the chat.
   if (lastUserText.trim().length > 0) {
     try {
-      const classification = await classifyIntent(lastUserText, { tenantId }, deps.gateway);
+      // §3B/3D/3E — resolve the tenant's vertical context (terminology +
+      // intake questions + objection scripts) once per request. The
+      // resolver memoizes internally; a failure falls back to the bare
+      // classifier rather than breaking the chat.
+      let verticalPromptSection: string | undefined;
+      if (deps.verticalPromptResolver) {
+        try {
+          verticalPromptSection = await deps.verticalPromptResolver(tenantId);
+        } catch {
+          verticalPromptSection = undefined;
+        }
+      }
+
+      const classification = await classifyIntent(
+        lastUserText,
+        { tenantId, ...(verticalPromptSection ? { verticalPromptSection } : {}) },
+        deps.gateway,
+      );
 
       if (classification.intentType === 'create_customer') {
         const handler = new CreateCustomerTaskHandler();

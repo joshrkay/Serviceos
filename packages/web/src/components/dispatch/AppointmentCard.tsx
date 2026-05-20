@@ -13,6 +13,8 @@ export interface AppointmentCardData {
   arrivalWindowEnd?: string;
   status: string;
   paymentIndicator?: string;
+  /** Optimistic-concurrency token — server's appointment.updatedAt ISO string. */
+  updatedAt?: string;
 }
 
 export interface AppointmentCardProps {

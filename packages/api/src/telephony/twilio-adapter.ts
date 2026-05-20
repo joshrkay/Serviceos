@@ -77,6 +77,9 @@ import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
 } from '../ai/voice-turn';
+import type { RepairTemplate } from '../verticals/registry';
+import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
+import type { SettingsRepository } from '../settings/settings';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -213,33 +216,60 @@ export interface TwilioAdapterDeps {
    * the nudge check.
    */
   onSessionEnded?: (event: { tenantId: string; callSid?: string }) => Promise<void>;
+  /**
+   * §P2-3 — Resolves the vertical-specific repair templates for a tenant.
+   * When present, the templates are threaded into the FSM context at
+   * session creation so low-confidence reprompts use vertical-aware copy.
+   * When absent, the FSM falls back to the generic "say that again" prompt.
+   */
+  repairTemplatesResolver?: (tenantId: string) => Promise<ReadonlyArray<RepairTemplate>>;
+  /**
+   * F8 — per-tenant escalation settings repository. When wired, the
+   * processor loads channel preferences before each `escalateToHuman`
+   * call. Optional so existing test fixtures continue to work.
+   */
+  settingsRepo?: SettingsRepository;
 }
 
 /**
  * Build the full telephony greeting.
  *
- * When `persona.greeting` is set the tenant owns the entire opening
- * line — no extra CTA is appended. `disclosureText` (recording notice)
- * is always appended afterward regardless of which branch is taken,
- * since disclosure is a compliance requirement that cannot be opted out.
+ * `disclosureText` (recording notice) is always appended after the
+ * greeting when present — it is a compliance requirement that cannot
+ * be opted out.
  *
  * Branch priority:
- *   1. Custom greeting → `${greeting} ${disclosureText}`
- *   2. Agent name only → `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
- *   3. Neither         → `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *   1. Custom greeting (`persona.greeting` set):
+ *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
+ *        The tenant owns the entire opening line — NO CTA is appended.
+ *        The result is returned as-is so the tenant's chosen wording
+ *        is preserved verbatim.
+ *   2. Agent name only (`persona.agentName` set, no custom greeting):
+ *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
+ *   3. Neither:
+ *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        A CTA is appended if the assembled string does not already end with `?`.
  */
 export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
   persona?: VoicePersona | null
 ): string {
+  const disclosure = disclosureText.trim();
+
+  // Branch 1 — tenant owns the entire opening line. Return without CTA append.
   if (persona?.greeting) {
-    return `${persona.greeting} ${disclosureText}`;
+    const greeting = persona.greeting.trim();
+    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
   }
+
+  // Branch 2 / 3 — assemble a default greeting, then ensure it ends with a CTA.
   const opener = persona?.agentName
     ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
     : `Thank you for calling ${businessName}.`;
-  return `${opener} ${disclosureText} How can I help you today?`;
+  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  return assembled.endsWith('?') ? assembled : `${assembled} How can I help you today?`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -381,7 +411,9 @@ export function buildTwiML(
         payload: fx.payload,
       });
     }
-    // audit_log / create_proposal / start_transcription → no TwiML
+    // audit_log / create_proposal / start_transcription / emit_quality_event
+    // → no TwiML (Gather path has no event bus; telemetry only fires when
+    // Media Streams is active).
   }
 
   if (!ended) {
@@ -485,8 +517,12 @@ export class TwilioGatherAdapter {
     if (existing && existing.tenantId === opts.tenantId) {
       return this.buildStreamTwiML({ sessionId: existing.id, callSid: opts.callSid });
     }
+    const repairTemplates = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplates.length > 0 ? { repairTemplates } : {}),
     });
     // initializeStreamSession reads callerIdBySession to drive
     // identifyCaller/lead creation; without this, every media-stream
@@ -695,6 +731,30 @@ export class TwilioGatherAdapter {
         { type: 'end_session', payload: { reason: 'session_not_found' } },
       ];
     }
+
+    // Always append utterance to transcript first so it is captured
+    // regardless of the path below (frustration escalation or normal turn).
+    this.deps.store.appendTranscript(opts.sessionId, {
+      speaker: 'caller',
+      text: opts.speechResult,
+      ts: Date.now(),
+    });
+
+    // B3.2 — keyword frustration check BEFORE intent classification.
+    // Route through the processor so notify_oncall (and any escalation
+    // side effects added by the FSM) actually fire — the mediastream
+    // adapter's emitSideEffects only handles tts_play/quality events.
+    const frustration = detectFrustration(opts.speechResult);
+    if (frustration.matched) {
+      const sideEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: frustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, sideEffects, opts.tenantId);
+      return sideEffects;
+    }
+
     return this.processor.speechTurn({
       session,
       speechResult: opts.speechResult,
@@ -730,8 +790,12 @@ export class TwilioGatherAdapter {
       );
     }
 
+    const repairTemplatesForInbound = this.deps.repairTemplatesResolver
+      ? await this.deps.repairTemplatesResolver(opts.tenantId).catch(() => [])
+      : [];
     const session = this.deps.store.create(opts.tenantId, 'telephony', {
       callSid: opts.callSid,
+      ...(repairTemplatesForInbound.length > 0 ? { repairTemplates: repairTemplatesForInbound } : {}),
     });
     this.persistVoiceSessionRow(session, opts.callSid);
 
@@ -928,12 +992,27 @@ export class TwilioGatherAdapter {
       );
     }
 
-    // 1. Append caller utterance to transcript.
+    // 1. Append caller utterance to transcript first — must happen before
+    //    any early-exit path so the utterance is never lost.
     this.deps.store.appendTranscript(opts.sessionId, {
       speaker: 'caller',
       text: opts.speechResult,
       ts: Date.now(),
     });
+
+    // B3.2 — keyword frustration check on the PSTN/Gather path, mirroring
+    // the same guard in processCallerUtterance (WS path). Runs after the
+    // transcript append so the triggering utterance is always captured.
+    const gatherFrustration = detectFrustration(opts.speechResult);
+    if (gatherFrustration.matched) {
+      const frustrationEffects = session.machine.dispatch({
+        type: 'frustration_detected',
+        source: 'keyword',
+        detail: gatherFrustration.keyword,
+      });
+      await this.processor.executeSideEffects(session, frustrationEffects, opts.tenantId);
+      return this.finalizeTwiml(session, frustrationEffects, opts.sessionId);
+    }
 
     const sideEffectsAll: SideEffect[] = [];
     const currentState = session.machine.currentState;
@@ -1659,6 +1738,19 @@ export class TwilioGatherAdapter {
     const twiml = this.pendingTransferTwiml.get(sessionId);
     if (twiml) this.pendingTransferTwiml.delete(sessionId);
     return twiml;
+  }
+
+  /**
+   * Store a pending <Dial> TwiML string for the given session. Called by
+   * `TwilioMediaStreamAdapter` via a deps callback so both the gather
+   * adapter (which reads via `takePendingTransferTwiml`) and the media-stream
+   * adapter (which writes during `handleEscalateWithContext`) share the same
+   * in-memory Map. Without this, the Dial TwiML would be written to
+   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
+   * ever reads it — the call would hang on hold forever.
+   */
+  setPendingTransferTwiml(sessionId: string, twiml: string): void {
+    this.pendingTransferTwiml.set(sessionId, twiml);
   }
 
   /**

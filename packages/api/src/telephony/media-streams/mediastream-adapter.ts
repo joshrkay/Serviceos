@@ -24,6 +24,7 @@
  * inflating unbounded.
  */
 
+import { z } from 'zod';
 import { createLogger } from '../../logging/logger';
 import type {
   StreamingSession,
@@ -32,6 +33,7 @@ import type {
 import type { TtsProvider } from '../../ai/tts/tts-provider';
 import type { VoiceSession, VoiceSessionStore } from '../../ai/agents/customer-calling/voice-session-store';
 import type { SideEffect } from '../../ai/agents/customer-calling/types';
+import { escalateWithContextPayloadSchema } from '../../ai/agents/customer-calling/types';
 import {
   decodeTwilioInboundFrame,
   encodeTwilioOutboundFrame,
@@ -46,8 +48,18 @@ import {
 import {
   transcriptReceivedEvent,
   audioFrameEmittedEvent,
+  repairTemplateFiredEvent,
+  fillerFiredEvent,
+  fillerCancelledEvent,
+  escalationStartedEvent,
+  escalationSummaryBuiltEvent,
 } from '../../ai/voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
+import type { WhisperCache } from '../whisper-cache';
+import type { TwilioCallControl } from '../twilio-call-control';
+import type { EscalationSettings } from '../../settings/settings';
+import type { SentimentInput, SentimentResult } from '../../ai/agents/customer-calling/sentiment-classifier';
+import type { PanelData } from '../../ai/agents/customer-calling/escalation-summary-builder';
 
 const logger = createLogger({
   service: 'telephony.media-streams',
@@ -156,6 +168,93 @@ export interface MediaStreamAdapterDeps {
     reason: string,
     sideEffects: ReadonlyArray<SideEffect>,
   ) => void;
+  /**
+   * Resolves Deepgram keyword-boost tokens for the tenant. Optional —
+   * when omitted, Deepgram opens without keyword boost.
+   */
+  terminologyProvider?: {
+    getKeywords(tenantId: string): Promise<ReadonlyArray<string>>;
+  };
+  /**
+   * Optional filler engine + cache. When both are present, the adapter
+   * wraps each `tts_play` turn with a 250ms timer: if the real TTS has
+   * not started streaming by then, it plays one filler clip from the
+   * cache. Omitting either turns the feature off entirely.
+   */
+  fillerEngine?: {
+    selectNext(ctx?: { skipFillers?: boolean }): { id: string; text: string; approxDurationMs: number } | undefined;
+  };
+  fillerCache?: {
+    get(id: string): Buffer | undefined;
+  };
+  /** Override for the 250ms filler threshold (ms). Default 250. */
+  fillerDelayMs?: number;
+  /**
+   * Section 7 — escalate_with_context fan-out deps.
+   * When present, handleEscalateWithContext stores whisper TwiML so the
+   * /whisper/:escalationId webhook can serve it to the dispatcher's leg.
+   */
+  whisperCache?: WhisperCache;
+  /**
+   * Section 7 — delivery provider for dispatcher SMS. Optional so
+   * existing test fixtures continue to work without DI'ing a stub.
+   */
+  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * Section 7 — used to build the whisper webhook URL and the dial-action
+   * URL injected into the <Dial> TwiML.
+   * Falls back to relative paths when absent.
+   */
+  publicBaseUrl?: string;
+  /**
+   * Section 7 — Twilio call-control surface used to emit the <Dial>
+   * TwiML that bridges the caller to the dispatcher with whisper.
+   * When absent, the Dial step is skipped gracefully.
+   *
+   * Whisper-route mounting note: mount the whisper router inside
+   * createTelephonyRouter so it inherits requireTwilioSignature.
+   * Full wiring in app.ts is deferred to Section 12.
+   */
+  callControl?: TwilioCallControl;
+  /**
+   * Section 7 (CRITICAL) — Callback that writes the <Dial> TwiML into the
+   * TwilioGatherAdapter's shared `pendingTransferTwiml` Map so the next
+   * gather-callback route invocation returns it to Twilio and bridges the
+   * call to the dispatcher. Without this wired, the TwiML is written to
+   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
+   * ever reads it — the caller stays on hold forever.
+   *
+   * Wire via: `gatherAdapter.setPendingTransferTwiml.bind(gatherAdapter)`
+   */
+  setPendingTransferTwiml?: (sessionId: string, twiml: string) => void;
+  /**
+   * F6c — async LLM sentiment classifier. When present and per-tenant
+   * `escalationSettings.trigger_llm_sentiment` is true, the adapter
+   * calls this after each `speechTurn` in a fire-and-forget manner.
+   * If the returned frustrationScore >= threshold, a `frustration_detected`
+   * FSM event is dispatched out-of-band and the resulting side effects executed.
+   */
+  sentimentClassifier?: (input: SentimentInput) => Promise<SentimentResult>;
+  /**
+   * Per-tenant escalation settings, resolved once at adapter construction
+   * (i.e. per WebSocket connection lifetime). Changes made to the tenant's
+   * escalationSettings during an active call are NOT reflected in the
+   * current connection — they apply only to subsequent connections.
+   * Optional — when absent, LLM sentiment is disabled.
+   *
+   * @deprecated Use `resolveEscalationSettings` for per-tenant resolution at
+   * session start. This static field is kept as a fallback for tests.
+   */
+  escalationSettings?: EscalationSettings;
+  /**
+   * F6c (per-tenant) — async resolver for escalation settings. Called once
+   * per WS session after the tenantId is known (in handleStart). The resolved
+   * settings are stored on RuntimeState and used to gate the LLM sentiment
+   * classifier. Preferred over the static `escalationSettings` field.
+   * Optional — when absent and `escalationSettings` is also absent, LLM
+   * sentiment is disabled.
+   */
+  resolveEscalationSettings?: (tenantId: string) => Promise<EscalationSettings>;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -180,6 +279,8 @@ interface RuntimeState {
    * of overlapping the next caller turn.
    */
   outboundTurnId: number;
+  /** Active TTS turn's AbortController so barge-in can immediately cancel a pending WS read. */
+  ttsController: AbortController | null;
   closed: boolean;
   /** Last time we received an inbound `media` frame. */
   lastMediaAt: number;
@@ -212,6 +313,26 @@ interface RuntimeState {
    * because the lifecycle is strictly bound to this WS connection.
    */
   awaitingFirstAudioFrame: boolean;
+  /**
+   * True while a filler clip is actively streaming. Cleared when real
+   * TTS preempts it or when barge-in kills it. Used to gate
+   * TTFA emission and to coordinate filler/real-TTS cancellation.
+   */
+  fillerActive: boolean;
+  /**
+   * @deprecated DO NOT USE — use `deps.setPendingTransferTwiml` to write
+   * into the TwilioGatherAdapter's shared pendingTransferTwiml Map. This
+   * field is never read by any route handler; it exists only as a fallback
+   * log target when `deps.setPendingTransferTwiml` is not wired.
+   */
+  pendingTransferTwiml: string | null;
+  /**
+   * F6c (per-tenant) — escalation settings resolved at session start
+   * (after tenantId is known in handleStart). Null when resolution
+   * failed or `deps.resolveEscalationSettings` is absent. Falls back
+   * to `deps.escalationSettings` when null.
+   */
+  resolvedEscalationSettings: EscalationSettings | null;
 }
 
 const TWILIO_QUEUE_MAX_MSGS = 200;
@@ -278,6 +399,7 @@ export class TwilioMediaStreamAdapter {
       deepgram: null,
       agentSpeaking: false,
       outboundTurnId: 0,
+      ttsController: null,
       closed: false,
       lastMediaAt: Date.now(),
       audioIdleTimer: null,
@@ -294,6 +416,9 @@ export class TwilioMediaStreamAdapter {
       wsCloseInitiated: false,
       pendingFinalizeEffects: [],
       awaitingFirstAudioFrame: false,
+      fillerActive: false,
+      pendingTransferTwiml: null,
+      resolvedEscalationSettings: null,
     };
   }
 
@@ -394,6 +519,25 @@ export class TwilioMediaStreamAdapter {
     this.state.session = session;
     this.state.tenantId = session.tenantId;
 
+    // F6c (per-tenant) — resolve escalation settings now that tenantId is known.
+    // Stored on RuntimeState so the sentiment gating check reads a live value
+    // rather than the static dep (which was always undefined in production).
+    if (this.deps.resolveEscalationSettings) {
+      try {
+        this.state.resolvedEscalationSettings = await this.deps.resolveEscalationSettings(session.tenantId);
+      } catch (err) {
+        logger.warn('mediastream: failed to resolve escalation settings, using defaults', {
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.state.resolvedEscalationSettings = null;
+      }
+    }
+
+    const keywords = this.deps.terminologyProvider
+      ? await this.deps.terminologyProvider.getKeywords(session.tenantId).catch(() => [])
+      : [];
+
     try {
       this.state.deepgram = await this.deps.streamingProvider.openSession(
         (event) => {
@@ -410,6 +554,8 @@ export class TwilioMediaStreamAdapter {
           // Deepgram closed independently — we can still drain Twilio
           // until it sends `stop`. No-op.
         },
+        undefined, // language defaults
+        keywords.length > 0 ? { keywords } : undefined
       );
     } catch (err) {
       logger.error('mediastream: failed to open Deepgram session', {
@@ -519,6 +665,26 @@ export class TwilioMediaStreamAdapter {
 
     await this.emitSideEffects(sideEffects);
 
+    // B3.3 — async LLM sentiment classifier. Gated by per-tenant settings.
+    // Fire-and-forget so it never blocks the audio response path.
+    // Skip when the current turn already emits end_session — the WS will be
+    // torn down below, and dispatching into a closing session produces noise.
+    const alreadyEnding = sideEffects.some((fx) => fx.type === 'end_session');
+    // Use per-session resolved settings (preferred) falling back to the static dep.
+    const activeEscalationSettings = this.state.resolvedEscalationSettings ?? this.deps.escalationSettings;
+    if (
+      !alreadyEnding &&
+      this.deps.sentimentClassifier &&
+      activeEscalationSettings?.trigger_llm_sentiment
+    ) {
+      void this.runSentimentCheckAndMaybeEscalate(session, event.transcript, sideEffects).catch(
+        (err) =>
+          logger.warn('sentiment check failed', {
+            error: err instanceof Error ? err.message : String(err),
+          }),
+      );
+    }
+
     // FSM may have terminated this turn — close the call.
     if (sideEffects.some((fx) => fx.type === 'end_session')) {
       // B2: stash the dispatch's effects so the finalize hook can read
@@ -529,30 +695,116 @@ export class TwilioMediaStreamAdapter {
     }
   }
 
+  /**
+   * B3.3 — Run the async LLM sentiment classifier and, if the score
+   * meets or exceeds the per-tenant threshold, dispatch
+   * `frustration_detected` out-of-band into the FSM and execute the
+   * resulting side effects. The FSM's idempotency guard handles
+   * double-fires correctly (keyword detector may have already fired).
+   */
+  private async runSentimentCheckAndMaybeEscalate(
+    session: VoiceSession,
+    transcript: string,
+    priorTurnEffects: SideEffect[],
+  ): Promise<void> {
+    const priorTurns = this.extractPriorTurns(session, 4);
+    const intent =
+      (priorTurnEffects.find((fx) => fx.type === 'audit_log')?.payload as { intent?: string } | undefined)
+        ?.intent ?? 'unknown';
+
+    const result = await this.deps.sentimentClassifier!({
+      transcript,
+      priorTurns,
+      intent,
+    });
+
+    const threshold = this.deps.escalationSettings!.llm_sentiment_threshold;
+    if (result.frustrationScore >= threshold) {
+      // Serialize dispatch+emit against any concurrent turn handler.
+      // The LLM call above may take 200–2000 ms; without the lock the FSM
+      // could advance (e.g. to `confirming`) between the LLM returning and
+      // our dispatch. withSessionLock queues us behind the current turn so
+      // the FSM idempotency guard at transitions.ts:212 is the only arbiter
+      // of whether frustration_detected is still actionable.
+      const newEffects = await this.deps.store.withSessionLock(session.id, () =>
+        Promise.resolve(
+          session.machine.dispatch({
+            type: 'frustration_detected',
+            source: 'llm_sentiment',
+            detail: result.frustrationScore.toFixed(2),
+          }),
+        ),
+      );
+      await this.emitSideEffects(newEffects);
+    }
+  }
+
+  /**
+   * Extract the last `n` caller + AI turns from the session transcript
+   * in the format `{ role, text }` the sentiment classifier expects.
+   * The session transcript stores strings like `"caller: text"` and
+   * `"agent: text"`.
+   */
+  private extractPriorTurns(
+    session: VoiceSession,
+    n: number,
+  ): ReadonlyArray<{ role: 'caller' | 'ai'; text: string }> {
+    const snapshot = [...session.transcript].slice(-n);
+    return snapshot
+      .map((line) => {
+        const colonIdx = line.indexOf(': ');
+        if (colonIdx === -1) return null;
+        const speaker = line.slice(0, colonIdx);
+        const text = line.slice(colonIdx + 2);
+        const role: 'caller' | 'ai' = speaker === 'caller' ? 'caller' : 'ai';
+        return { role, text };
+      })
+      .filter((t): t is { role: 'caller' | 'ai'; text: string } => t !== null);
+  }
+
   // ─── Outbound: TTS → μ-law → media frame ───────────────────────────────────
 
   private async emitSideEffects(sideEffects: SideEffect[]): Promise<void> {
     const ttsProvider = this.deps.ttsProvider;
     if (!ttsProvider) return;
     for (const fx of sideEffects) {
+      if (fx.type === 'emit_quality_event' && this.state.session) {
+        const eventType = String((fx.payload as { eventType?: string }).eventType ?? '');
+        if (eventType === 'repair_template_fired') {
+          this.state.session.events.emit(VOICE_EVENT_CHANNEL, repairTemplateFiredEvent({
+            trigger: String((fx.payload as { trigger?: string }).trigger ?? ''),
+            text: String((fx.payload as { text?: string }).text ?? ''),
+          }));
+        }
+        continue;
+      }
+      if (fx.type === 'escalate_with_context') {
+        const parsed = escalateWithContextPayloadSchema.safeParse(fx.payload);
+        if (!parsed.success) {
+          logger.error('escalate_with_context: invalid payload, dropping', {
+            issues: parsed.error.issues,
+          });
+          continue;
+        }
+        this.handleEscalateWithContext(parsed.data).catch((err) => {
+          logger.error('escalate_with_context handler threw', {
+            error: err instanceof Error ? err.message : String(err),
+            escalationId: parsed.data.escalationId,
+          });
+        });
+        continue;
+      }
       if (fx.type !== 'tts_play') continue;
       const text = typeof fx.payload.text === 'string' ? fx.payload.text : '';
       if (!text) continue;
-      const turnId = ++this.state.outboundTurnId;
+      let turnId = ++this.state.outboundTurnId;
       this.state.agentSpeaking = true;
       try {
-        const result = await ttsProvider.synthesize({
-          text,
-          tenantId: this.state.tenantId ?? undefined,
-        });
-        // If the caller barged in while we were synthesizing, drop this
-        // chunk so we don't speak over them.
-        if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
-          continue;
-        }
-        await this.streamPcmAsMedia(result.audio, turnId);
+        // runTurnWithFiller returns the final turnId — it may have been
+        // bumped if a filler was preempted by the real TTS arrival.
+        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId);
       } catch (err) {
-        logger.warn('mediastream: TTS synthesize failed', {
+        logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       } finally {
@@ -561,6 +813,242 @@ export class TwilioMediaStreamAdapter {
         }
       }
     }
+  }
+
+  /**
+   * Section 7 — Fan out the escalate_with_context side effect to three
+   * parallel channels: whisper TwiML cache, dispatcher SMS, and in-app
+   * SSE event. Builds and stashes the <Dial> TwiML with whisperUrl so
+   * the next gather-webhook response bridges the call to the dispatcher.
+   *
+   * All channels are independently opt-in via channelPreferences and
+   * fail gracefully — a failed SMS send is logged and swallowed, never
+   * blocking the Dial TwiML or in-app notification.
+   *
+   * Whisper-route mounting: mount inside createTelephonyRouter so it
+   * inherits requireTwilioSignature. Full wiring deferred to Section 12.
+   */
+  private async handleEscalateWithContext(
+    payload: z.infer<typeof escalateWithContextPayloadSchema>,
+  ): Promise<void> {
+    const startMs = Date.now();
+    const { escalationId, summary, dispatcher, callSid, channelPreferences } = payload;
+
+    // 1) Store whisper text in cache for Twilio's webhook fetch (no-op if disabled).
+    if (channelPreferences.whisper && this.deps.whisperCache) {
+      this.deps.whisperCache.set(escalationId, summary.whisper);
+    }
+
+    // 2) Send dispatcher SMS in parallel (no-op if disabled).
+    let smsPromise: Promise<unknown> = Promise.resolve();
+    if (channelPreferences.sms && this.deps.deliveryProvider) {
+      const smsBody = summary.sms.replace('<escalationId>', escalationId);
+      smsPromise = this.deps.deliveryProvider
+        .sendSms({ to: dispatcher.phone, body: smsBody })
+        .catch((err) => {
+          logger.warn('escalate_with_context: SMS dispatch failed', {
+            escalationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    }
+
+    // 3) Emit in-app SSE event (no-op if disabled or no active session).
+    if (channelPreferences.in_app && this.state.session) {
+      this.state.session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        escalationStartedEvent({
+          escalationId,
+          reason: summary.panel.reason.code,
+          dispatcherUserId: dispatcher.userId,
+          tenantId: payload.tenantId,
+          // summary.panel is structurally compatible with PanelData at runtime;
+          // the Zod schema uses z.string() for reason.code vs the TS union type.
+          panel: summary.panel as unknown as PanelData,
+        }),
+      );
+    }
+
+    // 4) Build <Dial> with whisper URL and hand off to the gather adapter's
+    // pendingTransferTwiml Map via deps.setPendingTransferTwiml. This is the
+    // CRITICAL fix: without this callback, the TwiML would be written to the
+    // media-stream adapter's state where no route handler ever reads it, and
+    // the caller would stay on hold forever while the dispatcher gets an SMS
+    // but no incoming call.
+    if (this.deps.callControl) {
+      // Issue 6: strip trailing slash from publicBaseUrl before building URLs.
+      const baseUrl = this.deps.publicBaseUrl?.replace(/\/$/, '');
+      const whisperUrl =
+        channelPreferences.whisper && baseUrl
+          ? `${baseUrl}/api/telephony/whisper/${escalationId}`
+          : undefined;
+      const dialActionUrl = baseUrl
+        ? `${baseUrl}/api/telephony/dial-action`
+        : '/api/telephony/dial-action';
+      const dialTwiml = this.deps.callControl.dialDispatcher(
+        callSid,
+        dispatcher.phone,
+        {
+          actionUrl: dialActionUrl,
+          whisperUrl,
+          timeoutSeconds: 20,
+        },
+      );
+
+      if (this.deps.setPendingTransferTwiml && this.state.session) {
+        // Route the TwiML through the gather adapter's shared Map so the
+        // next gather-callback route response bridges the call.
+        this.deps.setPendingTransferTwiml(this.state.session.id, dialTwiml);
+      } else {
+        // Legacy fallback — kept for parity but unread by any route handler.
+        // Log a warning so operators know the transfer will NOT happen.
+        this.state.pendingTransferTwiml = dialTwiml;
+        logger.warn(
+          'escalate_with_context: setPendingTransferTwiml not wired — call will not transfer',
+          { escalationId, callSid },
+        );
+      }
+    } else {
+      logger.warn(
+        'escalate_with_context: callControl not wired — Dial TwiML not built, call will not transfer',
+        { escalationId, callSid },
+      );
+    }
+
+    // 5) Telemetry — capture durationMs BEFORE awaiting SMS so the metric
+    // reflects summary-build/dispatch time, not carrier round-trip latency.
+    const builtMs = Date.now();
+    if (this.state.session) {
+      this.state.session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        escalationSummaryBuiltEvent({
+          escalationId,
+          durationMs: builtMs - startMs,
+        }),
+      );
+    }
+
+    // Block on SMS only to surface failures via logger.warn (already in .catch).
+    await smsPromise;
+  }
+
+  /**
+   * Run a single TTS turn, optionally preceded by a filler clip if the
+   * real TTS has not started streaming within `fillerDelayMs` (default 250ms).
+   *
+   * The filler is fired in a best-effort setTimeout. If real audio starts
+   * before the timer fires, it is cancelled. If it fires while real audio is
+   * already in-flight (e.g. buffered provider), the timer is a no-op because
+   * `realStarted` will be true. The existing barge-in machinery (bargeIn())
+   * cancels both filler and real audio together when the caller speaks.
+   */
+  private async runTurnWithFiller(
+    ttsProvider: TtsProvider,
+    text: string,
+    turnIdIn: number,
+  ): Promise<number> {
+    const delayMs = this.deps.fillerDelayMs ?? 250;
+    const engine = this.deps.fillerEngine;
+    const cache = this.deps.fillerCache;
+
+    // Mutable local copy so we can rebind after filler-cancellation bump.
+    let turnId = turnIdIn;
+    let realStarted = false;
+    const controller = new AbortController();
+    this.state.ttsController = controller;
+
+    // Helper: cancel an in-flight filler by bumping the turn id so its
+    // streamPcmAsMedia loop exits on the next iteration, then rebind our
+    // local turnId so subsequent real-TTS writes land under the new turn.
+    const cancelActiveFiller = () => {
+      if (this.state.fillerActive) {
+        this.state.outboundTurnId++;
+        turnId = this.state.outboundTurnId;
+        this.state.fillerActive = false;
+        if (this.state.session) {
+          this.state.session.events.emit(
+            VOICE_EVENT_CHANNEL,
+            fillerCancelledEvent({ fillerText: '' }),
+          );
+        }
+      }
+    };
+
+    // Schedule a filler if both engine and cache are wired.
+    const fillerTimer = engine && cache
+      ? setTimeout(() => {
+          if (realStarted || turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            return;
+          }
+          const filler = engine.selectNext();
+          if (!filler) return;
+          const pcm = cache.get(filler.id);
+          if (!pcm) return;
+          // Mark filler as active BEFORE starting the stream so that the
+          // real-TTS first-chunk handler can see the flag synchronously.
+          this.state.fillerActive = true;
+          // Best-effort emission — do not await; cancellation is handled
+          // by cancelActiveFiller() when real audio arrives.
+          void this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true).catch(() => undefined);
+          if (this.state.session) {
+            this.state.session.events.emit(
+              VOICE_EVENT_CHANNEL,
+              fillerFiredEvent({ fillerText: filler.text }),
+            );
+          }
+        }, delayMs)
+      : null;
+    if (fillerTimer && typeof fillerTimer.unref === 'function') fillerTimer.unref();
+
+    try {
+      if (typeof ttsProvider.synthesizeStream === 'function') {
+        const stream = ttsProvider.synthesizeStream({
+          text,
+          tenantId: this.state.tenantId ?? undefined,
+          signal: controller.signal,
+        });
+        let first = true;
+        for await (const chunk of stream) {
+          if (turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
+            controller.abort();
+            break;
+          }
+          if (first && chunk.pcm.length > 0) {
+            realStarted = true;
+            if (fillerTimer) clearTimeout(fillerTimer);
+            // If a filler clip is mid-stream, terminate it cleanly by
+            // bumping outboundTurnId (exits its streamPcmAsMedia loop)
+            // and rebinding our local turnId to the new value.
+            cancelActiveFiller();
+            first = false;
+          }
+          if (chunk.pcm.length > 0) {
+            await this.streamPcmAsMedia(chunk.pcm, turnId);
+          }
+          if (chunk.isFinal) break;
+        }
+      } else {
+        const result = await ttsProvider.synthesize({
+          text,
+          tenantId: this.state.tenantId ?? undefined,
+        });
+        realStarted = true;
+        if (fillerTimer) clearTimeout(fillerTimer);
+        // Same cancellation logic for buffered (non-streaming) TTS.
+        cancelActiveFiller();
+        if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+          await this.streamPcmAsMedia(result.audio, turnId);
+        }
+      }
+    } finally {
+      if (fillerTimer) clearTimeout(fillerTimer);
+      if (this.state.ttsController === controller) {
+        this.state.ttsController = null;
+      }
+    }
+    // Return the (possibly rebounded) turnId so emitSideEffects can
+    // compare it against outboundTurnId for the agentSpeaking reset.
+    return turnId;
   }
 
   /**
@@ -573,7 +1061,7 @@ export class TwilioMediaStreamAdapter {
    * Pacing: when ≥ TWILIO_MAX_UNACKED_MARKS marks are unacked, we yield
    * to give Twilio a chance to ack before pushing more audio.
    */
-  private async streamPcmAsMedia(pcm: Buffer, turnId: number): Promise<void> {
+  private async streamPcmAsMedia(pcm: Buffer, turnId: number, isFiller = false): Promise<void> {
     if (!this.state.streamSid) return;
     const FRAME_BYTES_16K = 640; // 20 ms @ 16 kHz, 16-bit mono
     const MARK_EVERY_N_FRAMES = 25; // ~500ms at 20ms/frame
@@ -602,7 +1090,9 @@ export class TwilioMediaStreamAdapter {
       // on the first chunk that lands on the queue. The flag is armed
       // by `onTranscriptEvent` and disarmed here so subsequent chunks
       // in the same turn (and barge-in `clear` events) don't re-emit.
-      if (this.state.awaitingFirstAudioFrame && this.state.session) {
+      // Skip when this chunk is a filler — filler audio fills the LLM
+      // thinking gap and would otherwise poison the TTFA metric.
+      if (!isFiller && this.state.awaitingFirstAudioFrame && this.state.session) {
         this.state.awaitingFirstAudioFrame = false;
         this.state.session.events.emit(
           VOICE_EVENT_CHANNEL,
@@ -657,6 +1147,18 @@ export class TwilioMediaStreamAdapter {
    * Called when an interim transcript arrives during agent TTS.
    */
   private bargeIn(): void {
+    this.state.ttsController?.abort();
+    // If a filler clip was mid-stream when barge-in fires, emit the
+    // cancellation event and clear the flag before bumping the turn.
+    if (this.state.fillerActive) {
+      this.state.fillerActive = false;
+      if (this.state.session) {
+        this.state.session.events.emit(
+          VOICE_EVENT_CHANNEL,
+          fillerCancelledEvent({ fillerText: '' }),
+        );
+      }
+    }
     if (!this.state.streamSid) return;
     this.state.outboundTurnId++;
     this.state.agentSpeaking = false;

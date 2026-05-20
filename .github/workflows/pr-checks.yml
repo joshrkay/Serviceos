@@ -33,6 +33,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: AI gateway guard
+        run: npm run check:ai-gateway-guard --workspace=packages/api
+
       - name: Unit tests
         run: npm test -- --reporter=verbose
 

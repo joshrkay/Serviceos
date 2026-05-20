@@ -974,3 +974,92 @@ describe('B2 — voiceSessionRepo outcome stamping (Twilio adapter)', () => {
     ).resolves.toBeDefined();
   });
 });
+
+// ─── buildTelephonyGreeting ───────────────────────────────────────────────────
+
+describe('buildTelephonyGreeting', () => {
+  it('respects custom persona greetings — does not append CTA', () => {
+    // Tenant's persona ends with a question; disclosure follows.
+    // Old code would append "What can I help you with today?" because the
+    // assembled string ends with "." not "?". New code must leave persona alone.
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      'This call may be recorded for quality.',
+      { greeting: 'Hi, this is Sarah. What can I help you with today?', agentName: 'Sarah' },
+    );
+    // Exactly one '?' — the tenant's own.
+    expect((result.match(/\?/g) ?? []).length).toBe(1);
+    // Tenant's CTA is preserved verbatim
+    expect(result).toContain('What can I help you with today?');
+    // Default CTA "How can I help you today?" is NOT appended
+    expect(result).not.toContain('How can I help you today?');
+  });
+
+  it('appends default CTA only when no persona is set', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      'This call may be recorded for quality.',
+      // No persona
+    );
+    expect(result.trim().endsWith('?')).toBe(true);
+    expect(result).toContain('How can I help you today?');
+  });
+
+  it('on default branch does not double up when disclosure already ends with ?', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      'This call may be recorded for quality, ok?',
+    );
+    // Disclosure ends with '?' so no CTA append
+    expect((result.match(/\?/g) ?? []).length).toBe(1);
+  });
+
+  it('persona greeting without disclosure is returned unchanged', () => {
+    const result = buildTelephonyGreeting(
+      'Joes HVAC',
+      '',
+      { greeting: 'Hi, this is Sarah. What can I help you with today?', agentName: 'Sarah' },
+    );
+    expect(result).toBe('Hi, this is Sarah. What can I help you with today?');
+    expect((result.match(/\?/g) ?? []).length).toBe(1);
+  });
+});
+
+// ─── B3.2 — frustration detector wiring ──────────────────────────────────────
+
+describe('TwilioGatherAdapter.processCallerUtterance — frustration detector', () => {
+  it('escalates on frustration keyword without invoking intent classifier', async () => {
+    const store = new VoiceSessionStore();
+    const speechTurn = vi.fn();
+    const machineDispatch = vi.fn(() => [
+      { type: 'tts_play', payload: { text: 'connecting you' } } as const,
+      { type: 'notify_oncall', payload: { escalationId: 'e1', reason: 'keyword_frustration' } } as const,
+    ]);
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme',
+      publicBaseUrl: 'https://example.com',
+      processor: { speechTurn } as never,
+    } as never);
+
+    // Inject a fake session with a mock machine into the store so
+    // processCallerUtterance finds it without going through handleInbound.
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-frust-1' });
+    // Replace the machine's dispatch with our spy.
+    (session.machine as unknown as { dispatch: typeof machineDispatch }).dispatch = machineDispatch;
+
+    const sideEffects = await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-frust-1',
+      speechResult: 'this is ridiculous',
+      tenantId: 'tenant-t1',
+    });
+
+    expect(speechTurn).not.toHaveBeenCalled();
+    expect(machineDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'frustration_detected', source: 'keyword' }),
+    );
+    expect(sideEffects.length).toBeGreaterThan(0);
+  });
+});

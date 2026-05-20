@@ -70,6 +70,7 @@ export class BusinessProfileExtractor implements OnboardingExtractor<BusinessPro
           { role: 'user', content: userMessage },
         ],
         responseFormat: 'json',
+        tenantId: context.tenantId,
       });
       parsed = tryParseJson(response.content);
     } catch {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ProposalType } from './proposal';
+import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
@@ -14,6 +15,10 @@ import {
   onboardingTeamMemberPayloadSchema,
   onboardingSchedulePayloadSchema,
 } from './contracts/onboarding';
+// P7-026 PR c — review_response_proposal schema lives in the shared
+// package (per the spec — single source of truth, re-exported via the
+// shared barrel). Do NOT redefine it locally.
+import { reviewResponseProposalPayloadSchema } from '@ai-service-os/shared';
 
 export const createCustomerPayloadSchema = z.object({
   name: z.string().min(1),
@@ -197,6 +202,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,
   onboarding_team_member: onboardingTeamMemberPayloadSchema,
   onboarding_schedule: onboardingSchedulePayloadSchema,
+  review_response_proposal: reviewResponseProposalPayloadSchema,
 };
 
 export function validateProposalPayload(
@@ -217,4 +223,31 @@ export function validateProposalPayload(
   }
 
   return { valid: true };
+}
+
+/**
+ * P2-002 AI-safety gate. Production AI task handlers (and any other
+ * code path that translates a model's structured output into a
+ * proposal) MUST call this before `createProposal`. Throws a typed
+ * `ValidationError` with the offending Zod paths in `details.errors`,
+ * which the HTTP layer surfaces as a 400 rather than letting the
+ * payload reach storage or execution.
+ *
+ * Plain `createProposal` is intentionally left as a pure builder so
+ * test fixtures can construct proposals with synthetic payloads
+ * without dragging in the full schema for unrelated concerns
+ * (lifecycle, audit, prioritization). The gate is enforced where AI
+ * emits, not where any caller builds.
+ */
+export function assertValidProposalPayload(
+  proposalType: string,
+  payload: unknown
+): void {
+  const validation = validateProposalPayload(proposalType, payload);
+  if (!validation.valid) {
+    throw new ValidationError(
+      `Invalid payload for proposal type '${proposalType}'`,
+      { errors: validation.errors }
+    );
+  }
 }

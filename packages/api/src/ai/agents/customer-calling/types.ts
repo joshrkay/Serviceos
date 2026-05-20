@@ -5,6 +5,10 @@
  * all side effects are returned as data and executed by callers/adapters.
  */
 
+import { z } from 'zod';
+import type { RepairTemplate } from '../../../verticals/registry';
+import type { EscalationSummary } from './escalation-summary-builder';
+
 // ─── States ──────────────────────────────────────────────────────────────────
 
 export type CallingAgentState =
@@ -60,7 +64,8 @@ export type CallingAgentEvent =
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }
   | { type: 'closed' }
-  | { type: 'second_intent' };
+  | { type: 'second_intent' }
+  | { type: 'frustration_detected'; source: 'keyword' | 'llm_sentiment'; detail?: string };
 
 // ─── Context ─────────────────────────────────────────────────────────────────
 
@@ -85,6 +90,12 @@ export interface CallingAgentContext {
   repromptCount: number;
   escalationReason?: string;
   startedAt: number; // Date.now()
+  /**
+   * §P2-3 — Vertical-specific repair templates, sourced from the rich
+   * pack at FSM construction time. Optional: when absent, the FSM falls
+   * back to the generic "say that again" reprompt.
+   */
+  repairTemplates?: ReadonlyArray<RepairTemplate>;
 }
 
 // ─── Side effects ─────────────────────────────────────────────────────────────
@@ -95,12 +106,76 @@ export type SideEffectType =
   | 'create_proposal'
   | 'notify_oncall'
   | 'start_transcription'
-  | 'end_session';
+  | 'end_session'
+  | 'emit_quality_event'
+  | 'escalate_with_context';
 
 export interface SideEffect {
   type: SideEffectType;
   payload: Record<string, unknown>;
 }
+
+export interface EscalateWithContextPayload {
+  escalationId: string;
+  summary: EscalationSummary;
+  dispatcher: { userId: string; phone: string };
+  callSid: string;
+  tenantId: string;
+  channelPreferences: { sms: boolean; in_app: boolean; whisper: boolean };
+}
+
+// ─── Payload schema (runtime validation) ─────────────────────────────────────
+
+/**
+ * Zod schema for `escalate_with_context` side-effect payloads.
+ * Used by `TwilioMediaStreamAdapter.emitSideEffects` to validate the raw
+ * `fx.payload` before dispatching to `handleEscalateWithContext`. Invalid
+ * payloads are logged and dropped — they never reach the handler.
+ */
+export const escalateWithContextPayloadSchema = z.object({
+  escalationId: z.string().min(1),
+  summary: z.object({
+    whisper: z.string(),
+    sms: z.string(),
+    panel: z.object({
+      header: z.object({
+        title: z.string(),
+        callerName: z.string(),
+        callerPhone: z.string(),
+      }),
+      customer: z.object({
+        name: z.string(),
+        phone: z.string(),
+        tags: z.array(z.string()),
+      }),
+      lastInteraction: z.union([z.string(), z.null()]),
+      intent: z.object({
+        summary: z.string(),
+        entities: z.array(z.object({ key: z.string(), value: z.string() })),
+      }),
+      reason: z.object({
+        code: z.string(),
+        humanReadable: z.string(),
+      }),
+      transcriptSnapshot: z.array(z.object({
+        role: z.union([z.literal('caller'), z.literal('ai')]),
+        text: z.string(),
+        ts: z.number(),
+      })),
+    }),
+  }),
+  dispatcher: z.object({
+    userId: z.string().min(1),
+    phone: z.string().min(1),
+  }),
+  callSid: z.string().min(1),
+  tenantId: z.string().min(1),
+  channelPreferences: z.object({
+    sms: z.boolean(),
+    in_app: z.boolean(),
+    whisper: z.boolean(),
+  }),
+});
 
 // ─── Transition result ────────────────────────────────────────────────────────
 
