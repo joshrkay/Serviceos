@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
-  Home, MessageSquare, Briefcase, Calendar,
+  Home, MessageSquare, Briefcase, Calendar, LayoutGrid,
   Users, FileText, Receipt, Settings, Zap, Bell, Layers, TrendingUp, LogOut,
   Wrench,
 } from 'lucide-react';
@@ -22,6 +22,7 @@ import {
   useActiveSessions,
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
+import { isOnboardingV2Enabled } from '../../lib/runtimeConfig';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -42,10 +43,6 @@ interface NavItem {
  * underlying routes remain the existing ones (e.g. `/assistant` is
  * "Sessions" in supervisor mode, `/technician/day` is "Today" in tech).
  *
- * Routes that don't yet exist (e.g. `/dispatch`) are deliberately
- * omitted — the supervisor wall + DispatchBoard wiring lands in a
- * separate story. Adding them here would 404 and we'd rather hide
- * them until they're real.
  */
 function getNav(mode: Mode): NavItem[] {
   switch (mode) {
@@ -64,6 +61,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/technician/day', label: 'Today',        icon: Wrench        },
         { to: '/jobs',           label: 'My jobs',      icon: Briefcase     },
         { to: '/schedule',       label: 'Schedule',     icon: Calendar      },
+        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',      label: 'Customers',    icon: Users         },
         { to: '/estimates',      label: 'Estimates',    icon: FileText      },
         { to: '/invoices',       label: 'Invoices',     icon: Receipt       },
@@ -76,6 +74,7 @@ function getNav(mode: Mode): NavItem[] {
         { to: '/assistant',     label: 'Sessions',     icon: MessageSquare },
         { to: '/jobs',          label: 'Jobs',         icon: Briefcase     },
         { to: '/schedule',      label: 'Schedule',     icon: Calendar      },
+        { to: '/dispatch',      label: 'Dispatch',     icon: LayoutGrid    },
         { to: '/customers',     label: 'Customers',    icon: Users         },
         { to: '/leads',         label: 'Leads',        icon: TrendingUp    },
         { to: '/estimates',     label: 'Estimates',    icon: FileText      },
@@ -264,11 +263,27 @@ function ShellInner() {
     [navigate],
   );
 
+  const handleCriticalProposal = useCallback(
+    (proposal: PendingProposalSummary) => {
+      const expiry = proposal.expiresAt
+        ? new Date(proposal.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        : 'soon';
+      toast.warning(`Hold expiring ${expiry}: ${proposal.summary}`, {
+        action: {
+          label: 'Review',
+          onClick: () => navigate('/inbox'),
+        },
+      });
+    },
+    [navigate],
+  );
+
   const {
     count: pendingProposalCount,
   } = usePendingProposals({
     enabled: isLoaded && Boolean(user),
     onNewProposal: handleNewProposal,
+    onCriticalProposal: handleCriticalProposal,
   });
 
   // Prefer the live session feed when it's reporting (the supervisor
@@ -341,7 +356,7 @@ function ShellInner() {
       {/* §10 onboarding — early-upgrade nudge. Renders only when the
           30-minute trial threshold has fired (and onboarding is otherwise
           complete). Gated by VITE_ONBOARDING_V2_ENABLED via the hook. */}
-      {import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true' && <UpgradeNudgeBanner />}
+      {isOnboardingV2Enabled() && <UpgradeNudgeBanner />}
 
       <div className="flex flex-1 overflow-hidden">
 

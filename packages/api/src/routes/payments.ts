@@ -9,6 +9,7 @@ import { JobRepository } from '../jobs/job';
 import { EstimateRepository } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
+import { PaymentReceiptNotifier } from '../invoices/payment';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -24,6 +25,7 @@ export function createPaymentRouter(
   jobRepo?: JobRepository,
   estimateRepo?: EstimateRepository,
   auditRepo?: AuditRepository,
+  paymentReceiptNotifier?: PaymentReceiptNotifier,
 ): Router {
   const router = Router();
 
@@ -54,6 +56,7 @@ export function createPaymentRouter(
         invoiceRepo,
         paymentRepo,
         refreshDeps,
+        paymentReceiptNotifier,
       );
       res.status(201).json(result);
     })

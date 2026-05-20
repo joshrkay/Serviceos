@@ -15,6 +15,8 @@ describe('public-intake api client', () => {
         businessName: 'Ortega HVAC & Services',
         businessPhone: '(512) 555-0100',
         serviceTypes: [{ verticalType: 'hvac', displayName: 'HVAC Services' }],
+        businessHoursSummary: 'Mon–Fri 8 AM – 5 PM',
+        intakeTagline: null,
       };
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,

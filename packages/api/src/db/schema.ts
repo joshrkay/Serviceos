@@ -2750,6 +2750,48 @@ export const MIGRATIONS = {
       ADD CONSTRAINT service_credits_review_id_fkey
       FOREIGN KEY (review_id) REFERENCES google_reviews(id) ON DELETE SET NULL;
   `,
+  '105_create_dispatch_analytics': `
+    CREATE TABLE IF NOT EXISTS dispatch_analytics (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      event_type TEXT NOT NULL CHECK (event_type IN (
+        'assigned', 'reassigned', 'rescheduled', 'canceled',
+        'conflict_detected', 'delay_notice_sent', 'delay_notice_failed'
+      )),
+      appointment_id UUID,
+      technician_id UUID,
+      metadata JSONB,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_recorded ON dispatch_analytics(tenant_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_type ON dispatch_analytics(tenant_id, event_type);
+    CREATE INDEX IF NOT EXISTS idx_dispatch_analytics_tenant_tech ON dispatch_analytics(tenant_id, technician_id) WHERE technician_id IS NOT NULL;
+    ALTER TABLE dispatch_analytics ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dispatch_analytics ON dispatch_analytics;
+    CREATE POLICY tenant_isolation_dispatch_analytics ON dispatch_analytics
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  '106_tenant_settings_escalation_settings': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS escalation_settings JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `,
+
+  // Production-readiness — replace permissive NULL-tenant portal_sessions reads
+  // with an explicit system lookup GUC (mirrors 074 tenant_integrations).
+  // Bumped to 107 because main landed 106_tenant_settings_escalation_settings first.
+  '107_portal_sessions_system_lookup_rls': `
+    DROP POLICY IF EXISTS tenant_isolation_portal_sessions ON portal_sessions;
+    CREATE POLICY tenant_isolation_portal_sessions ON portal_sessions
+      USING (
+        current_setting('app.portal_token_lookup', true) = 'true'
+        OR (
+          current_setting('app.current_tenant_id', true) IS NOT NULL
+          AND current_setting('app.current_tenant_id', true) <> ''
+          AND tenant_id::text = current_setting('app.current_tenant_id', true)
+        )
+      );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -309,6 +309,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         // create_appointment proposal rather than failing the call.
         return { proposal: createProposal(input), taskType: this.taskType };
       }
+      const holdExpiryAt = new Date(Date.now() + HOLD_WINDOW_MS);
       const bookingInput: CreateProposalInput = {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
@@ -319,6 +320,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         sourceContext: context.conversationId ? { conversationId: context.conversationId } : undefined,
         createdBy: context.userId,
         sourceTrustTier: 'autonomous',
+        expiresAt: holdExpiryAt,
         ...(context.tenantThresholdOverride
           ? { tenantThresholdOverride: context.tenantThresholdOverride }
           : {}),

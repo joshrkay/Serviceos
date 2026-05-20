@@ -47,4 +47,14 @@ describe('useOnboardingStatus', () => {
     const { result } = renderHook(() => useOnboardingStatus(0));
     await waitFor(() => expect(result.current.error).toBe('boom'));
   });
+
+  it('skips fetch when enabled is false', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const { result } = renderHook(() => useOnboardingStatus(30_000, false));
+
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.data).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });

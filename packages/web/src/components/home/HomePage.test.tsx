@@ -5,12 +5,6 @@ import { MemoryRouter } from 'react-router';
 import { HomePage } from './HomePage';
 
 vi.mock('../../hooks/useListQuery', () => ({ useListQuery: vi.fn() }));
-vi.mock('../../data/mock-data', () => ({
-  leads: [
-    { id: 'l1', name: 'Dave Brown', status: 'New', description: 'Needs AC repair this summer', estimatedValue: 1200 },
-    { id: 'l2', name: 'Eve Clark',  status: 'Contacted', description: 'Bathroom remodel', estimatedValue: 4500 },
-  ],
-}));
 
 import { useListQuery } from '../../hooks/useListQuery';
 
@@ -23,6 +17,7 @@ const mockJobs = [
     jobNumber: 'JOB-001',
     summary: 'Fix AC unit',
     status: 'scheduled',
+    moneyState: 'estimate_sent',
     serviceType: 'HVAC',
     scheduledStart: `${today}T09:00:00Z`,
     customer: { id: 'c1', displayName: 'Alice Smith' },
@@ -47,6 +42,27 @@ const mockEstimates = [
     totalCents: 150000,
     customer: { id: 'c1', displayName: 'Alice Smith' },
     sentAt: '2026-03-10T10:00:00Z',
+  },
+];
+
+const mockLeads = [
+  {
+    id: 'l1',
+    firstName: 'Dave',
+    lastName: 'Brown',
+    stage: 'new',
+    sourceDetail: 'Needs AC repair this summer',
+    estimatedValueCents: 120_000,
+    source: 'web_form',
+  },
+  {
+    id: 'l2',
+    firstName: 'Eve',
+    lastName: 'Clark',
+    stage: 'contacted',
+    sourceDetail: 'Bathroom remodel',
+    estimatedValueCents: 450_000,
+    source: 'phone_call',
   },
 ];
 
@@ -87,6 +103,7 @@ beforeEach(() => {
     if (path === '/api/jobs')      return makeListResult(mockJobs) as ReturnType<typeof useListQuery>;
     if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
     if (path === '/api/invoices')  return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+    if (path === '/api/leads')     return makeListResult(mockLeads) as ReturnType<typeof useListQuery>;
     return makeListResult([]) as ReturnType<typeof useListQuery>;
   });
 });
@@ -107,10 +124,23 @@ describe('HomePage', () => {
     expect(screen.getAllByText('Bob Jones').length).toBeGreaterThan(0);
   });
 
-  it('renders leads from mock data', () => {
+  it('shows job money-state badge when moneyState is set', () => {
+    renderPage();
+    expect(screen.getByText('Estimate sent')).toBeInTheDocument();
+  });
+
+  it('renders leads from /api/leads', () => {
     renderPage();
     expect(screen.getByText('Lead pipeline')).toBeInTheDocument();
     expect(screen.getByText('Dave Brown')).toBeInTheDocument();
+  });
+
+  it('queries /api/leads with limit filter', () => {
+    renderPage();
+    expect(vi.mocked(useListQuery)).toHaveBeenCalledWith(
+      '/api/leads',
+      expect.objectContaining({ filters: expect.objectContaining({ limit: '50' }) }),
+    );
   });
 
   it('renders pending estimates section', () => {
@@ -276,5 +306,22 @@ describe('HomePage', () => {
     // Spinner inside the jobs section should not be present
     expect(container.querySelectorAll('.animate-spin')).toHaveLength(0);
     expect(screen.getAllByText('Session expired — please reload').length).toBeGreaterThan(0);
+  });
+
+  it('shows money-state badge on today job rows', () => {
+    vi.mocked(useListQuery).mockImplementation((path: string) => {
+      if (path === '/api/jobs') {
+        return makeListResult([
+          { ...mockJobs[0], moneyState: 'estimate_sent' },
+          { ...mockJobs[1], moneyState: 'overdue' },
+        ]) as ReturnType<typeof useListQuery>;
+      }
+      if (path === '/api/estimates') return makeListResult(mockEstimates) as ReturnType<typeof useListQuery>;
+      if (path === '/api/invoices') return makeListResult(mockInvoices) as ReturnType<typeof useListQuery>;
+      return makeListResult([]) as ReturnType<typeof useListQuery>;
+    });
+    renderPage();
+    expect(screen.getByText('Estimate sent')).toBeInTheDocument();
+    expect(screen.getAllByText('Overdue').length).toBeGreaterThanOrEqual(1);
   });
 });

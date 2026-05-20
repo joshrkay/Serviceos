@@ -5,9 +5,14 @@ import {
   DollarSign, FileText, Zap, Send, Eye, Calendar, Plus,
   CheckCircle2, Mic, TrendingUp,
 } from 'lucide-react';
-import { leads } from '../../data/mock-data';
 import { useListQuery } from '../../hooks/useListQuery';
-import { normalizeJobStatus, normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
+import {
+  normalizeJobStatus,
+  normalizeEstimateStatus,
+  centsToDisplay,
+  normalizeJobMoneyState,
+  JOB_MONEY_STATE_LABEL,
+} from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
 import { ErrorState } from '../ErrorState';
@@ -18,6 +23,7 @@ interface ApiJob {
   jobNumber: string;
   summary: string;
   status: string;
+  moneyState?: string;
   priority?: string;
   serviceType?: string;
   scheduledStart?: string;
@@ -33,6 +39,16 @@ interface ApiEstimate {
   customer?: { id: string; displayName?: string; firstName?: string; lastName?: string };
   sentAt?: string;
   viewedAt?: string;
+}
+
+interface ApiLead {
+  id: string;
+  firstName?: string;
+  lastName?: string;
+  companyName?: string;
+  stage: string;
+  estimatedValueCents?: number;
+  sourceDetail?: string;
 }
 
 interface ApiInvoice {
@@ -144,6 +160,16 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
     : null;
   const techColor = job.technician?.color ?? '#94a3b8';
   const scheduledTime = formatTime(job.scheduledStart);
+  const moneyState = normalizeJobMoneyState(job.moneyState);
+  const moneyLabel = moneyState ? JOB_MONEY_STATE_LABEL[moneyState] : null;
+  const moneyBadgeClasses: Record<string, string> = {
+    overdue: 'bg-red-100 text-red-700',
+    paid: 'bg-green-100 text-green-700',
+    invoiced: 'bg-amber-100 text-amber-800',
+    estimate_sent: 'bg-amber-100 text-amber-800',
+  };
+  const moneyBadgeClass =
+    (moneyState && moneyBadgeClasses[moneyState]) ?? 'bg-violet-100 text-violet-700';
 
   return (
     <button
@@ -156,7 +182,14 @@ function JobRow({ job, onClick }: { job: ApiJob; onClick: () => void }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm text-slate-900 truncate">{name}</p>
-          <StatusBadge status={uiStatus} size="sm" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            {moneyLabel && (
+              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${moneyBadgeClass}`}>
+                {moneyLabel}
+              </span>
+            )}
+            <StatusBadge status={uiStatus} size="sm" />
+          </div>
         </div>
         <div className="flex items-center gap-2 mt-0.5">
           {scheduledTime && (
@@ -230,6 +263,8 @@ export function HomePage() {
   const jobsQuery = useListQuery<ApiJob>('/api/jobs', { filters: { scheduledDate: today } });
   const estimatesQuery = useListQuery<ApiEstimate>('/api/estimates', { filters: { status: 'sent' } });
   const invoicesQuery = useListQuery<ApiInvoice>('/api/invoices', { filters: { status: 'open' } });
+  const leadsQuery = useListQuery<ApiLead>('/api/leads', { filters: { limit: '50' } });
+  const leads = leadsQuery.data ?? [];
 
   const todayJobs    = jobsQuery.data.filter(j => normalizeJobStatus(j.status) !== 'Canceled');
   const pendingEsts  = estimatesQuery.data.filter(e => {
@@ -356,16 +391,23 @@ export function HomePage() {
                 </button>
               </div>
               {(() => {
-                const pipeline = leads.filter(l => l.status !== 'Won' && l.status !== 'Lost');
-                const newLeads = leads.filter(l => l.status === 'New');
-                const pipelineValue = pipeline.reduce((s, l) => s + (l.estimatedValue ?? 0), 0);
+                const pipeline = leads.filter((l) => l.stage !== 'won' && l.stage !== 'lost');
+                const newLeads = leads.filter((l) => l.stage === 'new');
+                const pipelineValueCents = pipeline.reduce(
+                  (s, l) => s + (l.estimatedValueCents ?? 0),
+                  0,
+                );
+                const leadDisplayName = (l: ApiLead) =>
+                  [l.firstName, l.lastName].filter(Boolean).join(' ')
+                  || l.companyName
+                  || 'Lead';
                 return (
                   <div className="rounded-xl bg-white border border-slate-200 overflow-hidden">
                     <div className="flex divide-x divide-slate-100">
                       {[
-                        { label: 'New',       count: leads.filter(l => l.status === 'New').length,           color: 'text-blue-600',   dot: 'bg-blue-500'   },
-                        { label: 'Contacted', count: leads.filter(l => l.status === 'Contacted').length,     color: 'text-amber-600',  dot: 'bg-amber-500'  },
-                        { label: 'Est. Sent', count: leads.filter(l => l.status === 'Estimate Sent').length, color: 'text-violet-600', dot: 'bg-violet-500' },
+                        { label: 'New', count: leads.filter((l) => l.stage === 'new').length, color: 'text-blue-600', dot: 'bg-blue-500' },
+                        { label: 'Contacted', count: leads.filter((l) => l.stage === 'contacted').length, color: 'text-amber-600', dot: 'bg-amber-500' },
+                        { label: 'Quoted', count: leads.filter((l) => l.stage === 'quoted').length, color: 'text-violet-600', dot: 'bg-violet-500' },
                       ].map(({ label, count, color, dot }) => (
                         <button key={label} onClick={() => navigate('/leads')} className="flex-1 flex flex-col items-center py-3.5 hover:bg-slate-50 transition-colors">
                           <span className={`flex size-1.5 rounded-full mb-1.5 ${dot}`} />
@@ -379,8 +421,13 @@ export function HomePage() {
                         <button onClick={() => navigate('/leads')} className="flex items-center gap-2.5 w-full text-left hover:opacity-80 transition-opacity">
                           <span className="size-1.5 rounded-full bg-blue-500 shrink-0 animate-pulse" />
                           <p className="text-xs text-slate-600 flex-1">
-                            <span className="text-slate-900">{newLeads[0].name}</span>
-                            {' '}— {newLeads[0].description.slice(0, 45)}…
+                            <span className="text-slate-900">{leadDisplayName(newLeads[0]!)}</span>
+                            {newLeads[0]!.sourceDetail && (
+                              <>
+                                {' '}— {newLeads[0]!.sourceDetail!.slice(0, 45)}
+                                {newLeads[0]!.sourceDetail!.length > 45 ? '…' : ''}
+                              </>
+                            )}
                           </p>
                           <ChevronRight size={12} className="text-slate-300 shrink-0" />
                         </button>
@@ -388,7 +435,7 @@ export function HomePage() {
                     )}
                     <div className="border-t border-slate-100 px-4 py-2.5 bg-slate-50">
                       <p className="text-xs text-slate-400">
-                        ${pipelineValue.toLocaleString()} est. pipeline value · {pipeline.length} active
+                        ${(pipelineValueCents / 100).toLocaleString()} est. pipeline value · {pipeline.length} active
                       </p>
                     </div>
                   </div>

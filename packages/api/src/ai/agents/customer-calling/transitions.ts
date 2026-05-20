@@ -212,6 +212,17 @@ function checkGlobalGuards(
     if (state === 'escalating' || state === 'terminated') {
       return { nextState: state, sideEffects: [], updatedContext: context };
     }
+    if (context.escalationTriggers && !context.escalationTriggers.trigger_explicit_request) {
+      return {
+        nextState: state,
+        sideEffects: [
+          ttsPlay(
+            "I can help with scheduling and service questions. What do you need help with today?",
+          ),
+        ],
+        updatedContext: context,
+      };
+    }
     const updatedContext: CallingAgentContext = {
       ...context,
       currentIntent: event.intentType,
@@ -234,6 +245,13 @@ function checkGlobalGuards(
   // Idempotent: skip if already in a terminal/escalating state.
   if (event.type === 'frustration_detected') {
     if (state === 'escalating' || state === 'terminated') {
+      return { nextState: state, sideEffects: [], updatedContext: context };
+    }
+    if (
+      event.source === 'keyword' &&
+      context.escalationTriggers &&
+      !context.escalationTriggers.trigger_keyword_frustration
+    ) {
       return { nextState: state, sideEffects: [], updatedContext: context };
     }
     const escalationReason: CallingAgentContext['escalationReason'] =
@@ -466,6 +484,24 @@ function transitionIntentCapture(
     // Confidence below threshold → reprompt or escalate
     const newRetryCount = context.retryCount + 1;
     if (newRetryCount > MAX_INTENT_CAPTURE_RETRIES) {
+      if (
+        context.escalationTriggers &&
+        !context.escalationTriggers.trigger_low_confidence
+      ) {
+        return {
+          nextState: 'intent_capture',
+          sideEffects: [
+            auditLog(context, 'intent_capture', 'intent_capture', 'low_confidence_cap', {
+              confidence: event.confidence,
+              retryCount: newRetryCount,
+            }),
+            ttsPlay(
+              "I'm still having trouble understanding. Could you describe what you need in a few words?",
+            ),
+          ],
+          updatedContext: { ...context, retryCount: newRetryCount },
+        };
+      }
       return {
         nextState: 'escalating',
         sideEffects: [

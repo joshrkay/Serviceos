@@ -63,3 +63,13 @@ After each deploy in `dev`, `staging`, and `production`, validate that redaction
 5. If any sink receives raw values, rollback and treat as Sev-1 data leak risk.
 
 Validation should include at least one request path that logs through transport adapters and one path that throws to Sentry.
+
+## Solo owner launch (voice)
+
+| Variable | Purpose |
+|----------|---------|
+| `TWILIO_MEDIA_STREAMS_ENABLED=true` | Media Streams |
+| `TTS_PROVIDER=elevenlabs` | Streaming TTS after soak |
+| `ELEVENLABS_API_KEY` | TTS |
+| `DEEPGRAM_API_KEY` | STT + keyword boost |
+| `DATABASE_URL` | Required in prod |

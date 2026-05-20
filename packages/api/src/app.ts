@@ -11,6 +11,8 @@ import { loadConfig } from './shared/config';
 import { createWebhookRouter } from './webhooks/routes';
 import { createTelephonyRouter } from './routes/telephony';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
+import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
+import { createBusinessPhoneDispatcherResolver } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
@@ -238,7 +240,6 @@ import {
   InMemoryDispatchRepository,
   PgDispatchRepository,
 } from './notifications/dispatch-repository';
-import { SendServiceInvoiceDeliveryProvider } from './notifications/invoice-delivery-adapter';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -326,8 +327,12 @@ import { InMemoryProposalRepository } from './proposals/proposal';
 import { PgProposalRepository } from './proposals/pg-proposal';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
+import {
+  NoOpIdempotencyLockProvider,
+  PgIdempotencyLockProvider,
+} from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
-import { NoopInvoiceDeliveryProvider } from './proposals/execution/voice-extended-handlers';
+import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -349,7 +354,8 @@ import {
   NoopDelayNotificationService,
 } from './notifications/delay-notifications';
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
-import { AppointmentConfirmationNotifier } from './notifications/appointment-confirmation-notifier';
+import { TransactionalCommsService } from './notifications/transactional-comms-service';
+import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -829,35 +835,33 @@ export function createApp(): express.Express {
       }
     : undefined;
 
-  app.use(
-    '/webhooks',
-    createWebhookRouter(config, {
-      tenantRepo,
-      settingsRepo: webhookSettingsRepo,
-      invoiceRepo: webhookInvoiceRepo,
-      estimateRepo: webhookEstimateRepo,
-      paymentRepo: webhookPaymentRepo,
-      jobRepo,
-      // Tier 4 (Team members — PR 3). Invitee join-tenant path on
-      // user.created. The same shared pending invitation repo + pool
-      // backs the /api/users invite routes so an invite written by
-      // the route is found by the webhook on accept.
-      pendingInvitationRepo,
-      pool: pool ?? undefined,
-      // Tier 4 (Subscription — PR 1). Same instance the route uses,
-      // so a customer.subscription.* webhook updates the cached
-      // status the GET /api/billing/subscription endpoint reads.
-      // Wired only when both pool and STRIPE_SECRET_KEY exist.
-      billingService,
-      connectService,
-      stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
-      queue,
-      appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-      auditRepo: webhookAuditRepo,
-      webhookEventRepo,
-      integrationResolver,
-    })
-  );
+  const webhookRouterDeps: import('./webhooks/routes').WebhookRouterDeps = {
+    tenantRepo,
+    settingsRepo: webhookSettingsRepo,
+    invoiceRepo: webhookInvoiceRepo,
+    estimateRepo: webhookEstimateRepo,
+    paymentRepo: webhookPaymentRepo,
+    jobRepo,
+    // Tier 4 (Team members — PR 3). Invitee join-tenant path on
+    // user.created. The same shared pending invitation repo + pool
+    // backs the /api/users invite routes so an invite written by
+    // the route is found by the webhook on accept.
+    pendingInvitationRepo,
+    pool: pool ?? undefined,
+    // Tier 4 (Subscription — PR 1). Same instance the route uses,
+    // so a customer.subscription.* webhook updates the cached
+    // status the GET /api/billing/subscription endpoint reads.
+    // Wired only when both pool and STRIPE_SECRET_KEY exist.
+    billingService,
+    connectService,
+    stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    queue,
+    appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
+    auditRepo: webhookAuditRepo,
+    webhookEventRepo,
+    integrationResolver,
+  };
+  app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
 
   // Dev-only storage PUT receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so unauthenticated presigned-style PUTs
@@ -1092,7 +1096,7 @@ export function createApp(): express.Express {
             replyToEmail: process.env.SENDGRID_REPLY_TO_EMAIL,
           },
         })
-      : process.env.NODE_ENV === 'production'
+      : config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
         ? null
         : new InMemoryDeliveryProvider();
   const publicBaseUrl = process.env.APP_PUBLIC_URL ?? 'http://localhost:5173';
@@ -1220,28 +1224,31 @@ export function createApp(): express.Express {
     }
   }
   // Voice intents (add_note, send_invoice, record_payment) execute
-  // against real domain repositories. Note + payment use the same
-  // in-memory or Pg repos already wired above. Invoice delivery
-  // routes through the unified SendService when delivery credentials
-  // are configured; otherwise falls back to the Noop so the proposal
-  // executor stays exercised in dev/test without sending bytes.
-  const invoiceDeliveryProvider = sendService
-    ? new SendServiceInvoiceDeliveryProvider(sendService)
-    : new NoopInvoiceDeliveryProvider();
+  // against real domain repositories. Invoice delivery routes through
+  // SendService when configured; resolveInvoiceDeliveryProvider throws at
+  // boot in prod/staging without credentials; dev/test uses Noop.
+  const invoiceDeliveryProvider = resolveInvoiceDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
-  const schedulingConfirmationNotifier = messageDelivery
-    ? new AppointmentConfirmationNotifier({
+  const transactionalComms = messageDelivery
+    ? new TransactionalCommsService({
         delivery: messageDelivery,
         appointmentRepo,
         jobRepo,
         customerRepo,
         settingsRepo,
+        invoiceRepo,
         dispatchRepo,
         dncRepo,
       })
     : undefined;
+  if (transactionalComms) {
+    webhookRouterDeps.paymentReceiptNotifier = transactionalComms;
+  }
   const feasibilityDeps: FeasibilityDependencies = {
     assignmentRepo,
     appointmentRepo,
@@ -1281,6 +1288,8 @@ export function createApp(): express.Express {
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
+    jobRepo,
+    locationRepo,
     appointmentRepo,
     assignmentRepo,
     invoiceRepo,
@@ -1290,22 +1299,24 @@ export function createApp(): express.Express {
     paymentRepo,
     invoiceDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
-    schedulingNotifier: schedulingConfirmationNotifier,
+    schedulingNotifier: transactionalComms,
+    transactionalComms,
     expenseRepo,
     auditRepo,
-    jobRepo,
     feasibilityDeps,
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
   });
-  // §11 H1: every executor wiring threads an IdempotencyGuard so
-  // queue redelivery cannot double-execute side effects. The guard
-  // looks up prior `proposal_executions` rows by (tenant_id,
-  // idempotency_key) — passthrough when the proposal has no key.
+  // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
+  // default to `proposal-run:{tenant}:{id}` when callers omit one.
+  const proposalIdempotencyLock = pool
+    ? new PgIdempotencyLockProvider(pool)
+    : new NoOpIdempotencyLockProvider();
   const proposalIdempotencyGuard = new IdempotencyGuard(
     proposalExecutionRepo,
     proposalRepo,
+    proposalIdempotencyLock,
   );
   // Phase 4a-1: persist a proposal_executions row on success + fire the
   // proposal-correction-worker. The onExecuted callback is failure-soft
@@ -1553,7 +1564,7 @@ export function createApp(): express.Express {
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry)
+    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
@@ -1770,6 +1781,7 @@ export function createApp(): express.Express {
     if (!isValidVerticalType(base)) return [];
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
+  const telephonyCallControl = new DefaultTwilioCallControl();
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1777,6 +1789,18 @@ export function createApp(): express.Express {
     proposalRepo,
     auditRepo,
     onCallRepo: sharedOnCallRepo,
+    callControl: telephonyCallControl,
+    dispatcherPhoneResolver: createBusinessPhoneDispatcherResolver(settingsRepo),
+    settingsRepo,
+    whisperCache: sharedWhisperCache,
+    ...(messageDelivery
+      ? {
+          deliveryProvider: {
+            sendSms: (args: { to: string; body: string }) =>
+              messageDelivery.sendSms({ to: args.to, body: args.body }),
+          },
+        }
+      : {}),
     leadRepo,
     // P11-001: lookup-skill family wiring. Without these the adapter
     // falls back to a "let me get a person to help" line on lookup_*
@@ -2016,6 +2040,11 @@ export function createApp(): express.Express {
       ...(pool && auditRepo
         ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
         : {}),
+      ...(pool ? { pool } : {}),
+      settingsRepo,
+      leadRepo,
+      auditRepo,
+      businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
     }),
   );
 
@@ -2349,7 +2378,22 @@ export function createApp(): express.Express {
       delayNotificationCoordinator,
     }, auditRepo)
   );
-  app.use('/api/dispatch', createDispatchRoutes({ appointmentRepo, assignmentRepo, jobRepo, customerRepo, locationRepo }));
+  app.use(
+    '/api/dispatch',
+    createDispatchRoutes({
+      appointmentRepo,
+      assignmentRepo,
+      jobRepo,
+      customerRepo,
+      locationRepo,
+      boardEventsDeps: {
+        authUserIdFromRequest: async (req) =>
+          (req as { auth?: { userId?: string } }).auth?.userId ?? null,
+        authTenantIdFromRequest: async (req) =>
+          (req as { auth?: { tenantId?: string } }).auth?.tenantId ?? null,
+      },
+    }),
+  );
   app.use(
     '/api/estimates',
     createEstimateRouter(
@@ -2362,7 +2406,20 @@ export function createApp(): express.Express {
       { jobRepo, invoiceRepo },
     ),
   );
-  app.use('/api/invoices', createInvoiceRouter(invoiceRepo, settingsRepo, auditRepo, ownership, paymentRepo, sendService, jobRepo, estimateRepo));
+  app.use(
+    '/api/invoices',
+    createInvoiceRouter(
+      invoiceRepo,
+      settingsRepo,
+      auditRepo,
+      ownership,
+      paymentRepo,
+      sendService,
+      jobRepo,
+      estimateRepo,
+      paymentLinkProvider,
+    ),
+  );
 
   // Tier 4 (Team members — PR 1+2+3). User roster, role editing, and
   // invitation flow. Tenant scoping is enforced by the route's
@@ -2425,7 +2482,17 @@ export function createApp(): express.Express {
       timeGivenBackReporter,
     }),
   );
-  app.use('/api/payments', createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo));
+  app.use(
+    '/api/payments',
+    createPaymentRouter(
+      paymentRepo,
+      invoiceRepo,
+      jobRepo,
+      estimateRepo,
+      auditRepo,
+      transactionalComms,
+    ),
+  );
   app.use('/api/notes', createNoteRouter(noteRepo, ownership, auditRepo));
 
   // ── P12-001: /api/me — current user + mode ──────────────────────────────
@@ -2568,7 +2635,7 @@ export function createApp(): express.Express {
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
   app.use('/api/voice', createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger));
-  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService }));
+  app.use('/api/onboarding', createOnboardingRouter({ settingsRepo, packActivationRepo, auditRepo, pool, billingService, queue }));
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({
@@ -2724,6 +2791,7 @@ export function createApp(): express.Express {
         estimateRepo,
         invoiceRepo,
         auditRepo,
+        transactionalComms,
         listTenantIds: async () => {
           if (!pool) return [];
           const r = await pool.query('SELECT id FROM tenants');
@@ -2737,6 +2805,31 @@ export function createApp(): express.Express {
       });
     }
   }, 60 * 60_000);
+
+  const appointmentReminderLogger = createLogger({
+    service: 'appointment-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (transactionalComms) {
+    setInterval(async () => {
+      try {
+        await runAppointmentReminderSweep({
+          appointmentRepo,
+          transactionalComms,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: appointmentReminderLogger,
+        });
+      } catch (err) {
+        appointmentReminderLogger.error('Appointment-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 60 * 60_000);
+  }
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`

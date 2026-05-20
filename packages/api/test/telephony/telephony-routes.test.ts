@@ -340,7 +340,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(calledUsers).toContain('u2');
   });
 
-  it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays "we will call you back"', async () => {
+  it('on full rotation exhaustion, queues customer_callback_required proposal + audit and plays voicemail', async () => {
     const { app, store, auditRepo, proposalRepo, callControl } = buildDialHarness({
       rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
       phones: { u1: '+15125550101' },
@@ -365,7 +365,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
 
     expect(res.status).toBe(200);
     expect(res.text).toMatch(/Acme Plumbing/);
-    expect(res.text).toMatch(/call you back/i);
+    expect(res.text).toMatch(/<Record/);
+    expect(res.text).toMatch(/voicemail-status/);
     expect(res.text).toContain('<Hangup');
 
     const proposals = await proposalRepo.findByTenant(TENANT_ID);
@@ -404,14 +405,14 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Hangup');
-    expect(res.text).not.toMatch(/call you back/i);
+    expect(res.text).not.toMatch(/<Record/);
     expect(res.text).not.toContain('<Dial');
 
     const proposals = await proposalRepo.findByTenant(TENANT_ID);
     expect(proposals).toHaveLength(0);
   });
 
-  it('cascade: dispatcher 1 no-answer → dispatcher 2 dialed → dispatcher 2 no-answer → callback', async () => {
+  it('cascade: dispatcher 1 no-answer → dispatcher 2 dialed → dispatcher 2 no-answer → voicemail', async () => {
     const { app, store, proposalRepo, auditRepo, callControl } = buildDialHarness({
       rotation: [
         { id: 'r1', userId: 'u1', orderIndex: 0 },
@@ -445,7 +446,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       From: '+15125550100',
       To: '+15125550999',
     });
-    expect(res2.text).toMatch(/call you back/i);
+    expect(res2.text).toMatch(/<Record/);
+    expect(res2.text).toMatch(/voicemail-status/);
     expect(res2.text).toContain('Acme Plumbing');
     expect(res2.text).toContain('<Hangup');
 
@@ -526,7 +528,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       From: '+15125550100',
       To: '+15125550999',
     });
-    expect(res.text).toMatch(/call you back/i);
+    expect(res.text).toMatch(/<Record/);
+    expect(res.text).toMatch(/voicemail-status/);
     await new Promise((resolve) => setImmediate(resolve));
 
     const row = await voiceSessionRepo.findById(TENANT_ID, session.id);

@@ -11,10 +11,11 @@
  *      `entries` (real LLM exchanges are recorded later via
  *      `npm run voice-quality:record`).
  *
- * P18-001 closed the `create-customer-new-signup` classifier leak;
- * the script is Layer-2 eligible and must classify `create_customer` on
- * the signup phrasing. The caller turn includes a name; hard-slot
- * grading only pins caller-id `phone` (name is a soft slot for VQ-022).
+ * P18-001 closed the `create-customer-new-signup` classifier leak; the script
+ * is Layer-2 eligible and must classify `create_customer` on the signup
+ * phrasing. The caller turn includes a name; hard-slot grading only pins
+ * caller-id `phone` (name is a soft slot for VQ-022). Cassettes must still
+ * be recorded (Phase 2) before expecting Layer 1 `launchGate.pass`.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -77,6 +78,8 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
   );
 
   it('VQ-012 — create-customer-new-signup is P18-001-ready (layer2 + create_customer intent)', () => {
+    // P18-001: classifier + voice handler shipped. Cassettes must still be
+    // recorded (Phase 2) before Layer 1 launch gate can pass in replay mode.
     const file = path.join(
       CORPUS_ROOT,
       'scripts',

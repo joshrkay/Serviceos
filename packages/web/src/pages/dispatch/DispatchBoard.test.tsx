@@ -7,11 +7,30 @@ vi.mock('../../hooks/useDispatchBoard', () => ({
   useDispatchBoard: vi.fn(),
 }));
 
+vi.mock('@clerk/clerk-react', () => ({
+  useAuth: () => ({ userId: 'test-user', getToken: vi.fn().mockResolvedValue(null) }),
+  useUser: () => ({ user: { id: 'test-user' } }),
+}));
+
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
     error: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
   },
+}));
+
+vi.mock('../../hooks/useDispatchBoardStream', () => ({
+  useDispatchBoardStream: vi.fn(),
+}));
+
+vi.mock('../../hooks/useDispatchPresence', () => ({
+  useDispatchPresence: vi.fn(),
+}));
+
+vi.mock('../../components/dispatch/useFeasibilityPreview', () => ({
+  useFeasibilityPreview: () => ({ preview: null, isLoading: false }),
 }));
 
 import { useDispatchBoard } from '../../hooks/useDispatchBoard';
@@ -165,18 +184,23 @@ function createDataTransfer(): MockDataTransferStore & {
   };
 }
 
+function resolveDropElement(dropTarget: HTMLElement, dropIndex = '0'): HTMLElement {
+  const gap = dropTarget.querySelector(`[data-drop-index="${dropIndex}"]`);
+  return (gap as HTMLElement) ?? dropTarget;
+}
+
 function fireDragSequence(
   card: HTMLElement,
   dropTarget: HTMLElement,
   appointmentId: string,
+  dropIndex = '0',
 ) {
   const dt = createDataTransfer();
-  // dragstart on the source card seeds the dataTransfer
+  const target = resolveDropElement(dropTarget, dropIndex);
   fireEvent.dragStart(card, { dataTransfer: dt });
-  // simulate the source card's onDragStart having stored the id
   dt.setData('text/plain', appointmentId);
-  fireEvent.dragOver(dropTarget, { dataTransfer: dt });
-  fireEvent.drop(dropTarget, { dataTransfer: dt });
+  fireEvent.dragOver(target, { dataTransfer: dt });
+  fireEvent.drop(target, { dataTransfer: dt });
 }
 
 describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () => {
@@ -244,7 +268,7 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     const sourceLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
     const card = sourceLane.querySelector('[data-appointment-id="assigned-1"]') as HTMLElement;
 
-    fireDragSequence(card, sourceLane, 'assigned-1');
+    fireDragSequence(card, sourceLane, 'assigned-1', '1');
 
     expect(screen.getByTestId('confirm-proposal-title')).toHaveTextContent(/reschedule/i);
     fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
@@ -284,7 +308,8 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     const dt = createDataTransfer();
 
     fireEvent.dragStart(card, { dataTransfer: dt });
-    fireEvent.dragOver(targetLane, { dataTransfer: dt });
+    const gap = resolveDropElement(targetLane);
+    fireEvent.dragOver(gap, { dataTransfer: dt });
 
     expect(targetLane.className).toContain('technician-lane--drag-over');
   });

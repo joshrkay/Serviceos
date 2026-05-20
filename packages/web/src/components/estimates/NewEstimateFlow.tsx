@@ -5,9 +5,67 @@ import {
   Mic, Camera, Image, Sparkles, RotateCcw, StopCircle,
   Pencil, Minus, ListChecks,
 } from 'lucide-react';
-import { customers } from '../../data/mock-data';
-import type { ServiceType } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
+import { useListQuery } from '../../hooks/useListQuery';
+
+type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
+
+interface EstimateCustomer {
+  id: string;
+  name: string;
+  phone: string;
+  email: string;
+  address: string;
+  serviceType: ServiceType;
+  locations: Array<{
+    id: string;
+    nickname: string;
+    address: string;
+    serviceTypes: ServiceType[];
+    isPrimary: boolean;
+  }>;
+}
+
+interface ApiCustomer {
+  id: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
+  primaryPhone?: string;
+  email?: string;
+  locations?: Array<{
+    id: string;
+    label?: string;
+    street1?: string;
+    city?: string;
+    state?: string;
+    postalCode?: string;
+    serviceTypes?: ServiceType[];
+    isPrimary?: boolean;
+  }>;
+}
+
+function mapApiCustomers(apiCustomers: ApiCustomer[]): EstimateCustomer[] {
+  return apiCustomers.map((c) => {
+    const locations = (c.locations ?? []).map((loc) => ({
+      id: loc.id,
+      nickname: loc.label || 'Location',
+      address: [loc.street1, loc.city, loc.state, loc.postalCode].filter(Boolean).join(', '),
+      serviceTypes: loc.serviceTypes?.length ? loc.serviceTypes : (['HVAC'] as ServiceType[]),
+      isPrimary: !!loc.isPrimary,
+    }));
+    const primary = locations.find((l) => l.isPrimary) ?? locations[0];
+    return {
+      id: c.id,
+      name: c.displayName || [c.firstName, c.lastName].filter(Boolean).join(' ') || 'Customer',
+      phone: c.primaryPhone || '',
+      email: c.email || '',
+      address: primary?.address || '',
+      serviceType: (primary?.serviceTypes[0] ?? 'HVAC') as ServiceType,
+      locations,
+    };
+  });
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type LineItem   = { description: string; qty: number; rate: number };
@@ -858,9 +916,10 @@ function PhotoInput({ svcType, onResult }: { svcType?: ServiceType; onResult: (r
 }
 
 // ─── Inline customer picker ───────────────────────────────────────────────────
-function InlineCustomerPicker({ selectedId, onSelect }: {
+function InlineCustomerPicker({ selectedId, onSelect, customers }: {
   selectedId: string | null;
   onSelect: (id: string) => void;
+  customers: EstimateCustomer[];
 }) {
   const [search, setSearch] = useState('');
   const filtered = search
@@ -905,13 +964,13 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   onCreated: () => void;
   preSelectedCustomerId?: string;
 }) {
-  const preCustomer  = customers.find(c => c.id === preSelectedCustomerId);
-  const initialLocId = preCustomer?.locations.length === 1 ? preCustomer.locations[0].id : null;
+  const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
+  const customers = mapApiCustomers(apiCustomers);
 
   const [step,       setStep]      = useState<FlowStep>('start');
   const [startMode,  setStartMode] = useState<StartMode>(null);
   const [customerId, setCustId]    = useState<string | null>(preSelectedCustomerId ?? null);
-  const [locationId, setLocId]     = useState<string | null>(initialLocId);
+  const [locationId, setLocId]     = useState<string | null>(null);
   const [inputMode,  setInputMode] = useState<InputMode>('voice');
   const [aiResult,   setAiResult]  = useState<AIResult | null>(null);
   const [editMode,   setEditMode]  = useState(false);
@@ -1089,7 +1148,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                 /* Show picker for manual path upfront; voice shows it after result */
                 startMode === 'manual' && (
                   <div className="mx-5 mt-4">
-                    <InlineCustomerPicker selectedId={customerId} onSelect={selectCustomer} />
+                    <InlineCustomerPicker selectedId={customerId} onSelect={selectCustomer} customers={customers} />
                   </div>
                 )
               )}
@@ -1138,7 +1197,7 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
                   <div className="flex flex-col gap-3 pb-4">
                     {/* Inline customer picker for voice-first when no customer yet */}
                     {startMode === 'voice' && !customerId && (
-                      <InlineCustomerPicker selectedId={customerId} onSelect={selectCustomer} />
+                      <InlineCustomerPicker selectedId={customerId} onSelect={selectCustomer} customers={customers} />
                     )}
                     <AIResultCard
                       result={aiResult}

@@ -5,7 +5,7 @@ import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
-import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { PaymentRepository, recordPayment, PaymentReceiptNotifier } from '../invoices/payment';
 import { recordRefund } from '../payments/payment-service';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
@@ -21,6 +21,7 @@ import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
+import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -94,6 +95,8 @@ export interface WebhookRouterDeps {
   provisioningQueue?: {
     send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   };
+  /** §7 Layer A — payment receipt SMS/email after Stripe checkout completes. */
+  paymentReceiptNotifier?: PaymentReceiptNotifier;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -776,6 +779,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.invoiceRepo,
             deps.paymentRepo,
             moneyStateDeps,
+            deps.paymentReceiptNotifier,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
@@ -798,6 +802,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.invoiceRepo,
                   deps.paymentRepo,
                   moneyStateDeps,
+                  deps.paymentReceiptNotifier,
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
@@ -1265,6 +1270,34 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         });
         dispatchResult = { handled: false, reason: 'handler_error' };
       }
+      if (!dispatchResult.handled) {
+        const voiceSessionId = lookupDroppedCallSession(tenantId, fromE164);
+        if (voiceSessionId) {
+          dispatchResult = {
+            handled: true,
+            handler: 'dropped_call_resume',
+            reason: 'voice_session_linked',
+          };
+          if (deps.auditRepo) {
+            await deps.auditRepo.create(
+              createAuditEvent({
+                tenantId,
+                actorId: 'system:twilio_inbound_sms',
+                actorRole: 'system',
+                eventType: 'sms.dropped_call_resume',
+                entityType: 'voice_session',
+                entityId: voiceSessionId,
+                metadata: {
+                  messageSid: eventId,
+                  fromE164,
+                  bodyLength: body.length,
+                },
+              }),
+            );
+          }
+        }
+      }
+
       if (deps.auditRepo) {
         await deps.auditRepo.create(
           createAuditEvent({

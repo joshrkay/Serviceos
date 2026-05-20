@@ -45,6 +45,12 @@ import {
   type PhoneNumberRepository,
 } from '../integrations/twilio/phone-number-repository';
 import { getSentryClient, type SentryClient } from '../monitoring/sentry';
+import { buildVoicemailTwiml } from '../telephony/voicemail-fallback';
+import { isTenantAfterHours } from '../telephony/business-hours-loader';
+import { createVoicemailStatusRouter } from '../telephony/voicemail-status-route';
+import type { SettingsRepository } from '../settings/settings';
+import { resolveEscalationSettings } from '../settings/settings';
+import type { LeadRepository } from '../leads/lead';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -158,6 +164,10 @@ export interface TelephonyRouterDeps {
    * Useful for verifying a Railway deploy without grepping logs.
    */
   getHealth?: () => TelephonyHealthReport;
+  pool?: Pool;
+  settingsRepo?: SettingsRepository;
+  leadRepo?: LeadRepository;
+  auditRepo?: import('../audit/audit').AuditRepository;
 }
 
 export interface TelephonyHealthReport {
@@ -205,6 +215,17 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   // middleware operates on a body parsed independently of the
   // /voice + /gather body parser. Mount it BEFORE the parser/middleware
   // below so its router-scoped middleware fully owns the /recording path.
+  if (deps.recording?.store) {
+    router.use(
+      createVoicemailStatusRouter({
+        store: deps.recording.store,
+        pool: deps.pool,
+        leadRepo: deps.leadRepo,
+        auditRepo: deps.auditRepo,
+      }),
+    );
+  }
+
   if (deps.recording) {
     router.use(
       createRecordingRouter(
@@ -316,6 +337,32 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       } catch (err) {
         // Gate failures must not block real calls — log and fall through.
         logger.error('telephony/voice: voiceGate failed open', {
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const shopName = deps.businessName ?? 'our team';
+    if (deps.pool && deps.settingsRepo) {
+      try {
+        const afterHours = await isTenantAfterHours(deps.pool, tenantId);
+        if (afterHours) {
+          const settings = await deps.settingsRepo.findByTenant(tenantId);
+          const esc = resolveEscalationSettings(settings);
+          if (esc.after_hours_voice_mode !== 'ai_answering') {
+            const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+            const callback = base
+              ? `${base}/api/telephony/voicemail-status`
+              : '/api/telephony/voicemail-status';
+            res.status(200).type('text/xml').send(
+              buildVoicemailTwiml({ shopName, recordingStatusCallback: callback }),
+            );
+            return;
+          }
+        }
+      } catch (err) {
+        logger.warn('telephony/voice: after-hours check failed open', {
           callSid,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -553,28 +600,17 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     const businessName = deps.businessName ?? 'our team';
-    const safeName = xmlEscape(businessName);
-    const message =
-      `I'm sorry, no one is available right now. ` +
-      `${safeName} will call you back as soon as possible. ` +
-      `Thank you for calling.`;
-
     session.ended = true;
-    // B2 — stamp voice_sessions.outcome on rotation-exhausted hangup.
-    // queueCallbackProposal pushed a callback proposal onto session.proposalIds
-    // and FSM stays at `escalating`, so deriveCallOutcome maps
-    // escalating + hasProposal → 'callback_required'.
     adapter.finalizeTerminatedSession(session, [], 'normal_close');
+
+    const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+    const callback = base
+      ? `${base}/api/telephony/voicemail-status`
+      : '/api/telephony/voicemail-status';
     res
       .status(200)
       .type('text/xml')
-      .send(
-        `<?xml version="1.0" encoding="UTF-8"?>` +
-          `<Response>` +
-          `<Say voice="Polly.Joanna">${message}</Say>` +
-          `<Hangup/>` +
-          `</Response>`,
-      );
+      .send(buildVoicemailTwiml({ shopName: businessName, recordingStatusCallback: callback }));
   });
 
   return router;

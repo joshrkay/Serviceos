@@ -159,9 +159,10 @@ check('D1', 'decisions.test green', () =>
   runVitest('test/decisions/decisions.test.ts'),
 );
 
-check('D2', 'smoke + synthetic voice tests present', () =>
+check('D2', 'smoke + owner-loop critical path tests present', () =>
   existsSync(join(API, 'scripts/smoke-test.ts')) &&
-  existsSync(join(API, 'test/voice/voice-smoke.synthetic.test.ts')),
+  existsSync(join(API, 'test/voice/voice-smoke.synthetic.test.ts')) &&
+  existsSync(join(API, 'test/owner-loop-critical-path.test.ts')),
 );
 
 check('D3', 'migration-immutability green', () =>
@@ -185,5 +186,35 @@ const verdict =
     ? 'PASS — bar is met. Safe to open self-serve.'
     : 'FAIL — bar is NOT met.';
 console.log(`\n${passed}/${checks.length} ${verdict}\n`);
+
+// Operator advisories — do not fail the bar; surface incomplete human steps.
+const acksPath = join(API, '.launch-quality-acks.json');
+if (existsSync(acksPath)) {
+  const acks = JSON.parse(readFileSync(acksPath, 'utf8')) as {
+    alerting_runbook_verified?: string | null;
+    voice_capacity_provenance?: string;
+  };
+  const advisories: string[] = [];
+  if (!acks.alerting_runbook_verified) {
+    advisories.push(
+      'H3 operator: Sentry→Slack E2E not acked — complete docs/runbooks/alerting.md verification and set alerting_runbook_verified in .launch-quality-acks.json',
+    );
+  }
+  if (
+    typeof acks.voice_capacity_provenance === 'string' &&
+    acks.voice_capacity_provenance.includes('harness-self-check')
+  ) {
+    advisories.push(
+      'H5 operator: only harness self-check recorded — run voice-load:staging before high-traffic launch (docs/runbooks/voice-capacity.md)',
+    );
+  }
+  if (advisories.length > 0) {
+    console.log('Operator advisories (bar still passes):');
+    for (const a of advisories) {
+      console.log(`  [WARN] ${a}`);
+    }
+    console.log('');
+  }
+}
 
 process.exit(passed === checks.length ? 0 : 1);

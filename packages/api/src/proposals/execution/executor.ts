@@ -1,7 +1,7 @@
 import { Proposal, ProposalRepository } from '../proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
-import { IdempotencyGuard } from './idempotency';
+import { IdempotencyGuard, withResolvedIdempotencyKey } from './idempotency';
 import { ProposalType } from '../proposal';
 import { AppError } from '../../shared/errors';
 import { ProposalExecutionRepository } from '../proposal-execution';
@@ -104,13 +104,33 @@ export class ProposalExecutor {
       );
     }
 
-    // Idempotency gate: every execution routes through the guard
-    // (§11 H1 — guard is now a required constructor dep). When
-    // `idempotencyKey` is absent the guard is a passthrough and runs
-    // the handler directly.
-    const outcome = await this.idempotency.checkAndExecute(proposal, () =>
-      handler.execute(proposal, context)
-    );
+    // Idempotency gate (§11 H1). Keys default to `proposal-run:{tenant}:{id}`
+    // when callers omit `idempotencyKey`, so every execution is lockable.
+    const keyedProposal = withResolvedIdempotencyKey(proposal);
+    let executionId: string | undefined;
+    let executionRecordedInGuard = false;
+    const outcome = await this.idempotency.checkAndExecute(keyedProposal, async () => {
+      const handlerResult = await handler.execute(keyedProposal, context);
+
+      // Critical race fix (§11 H1): write the idempotency marker while we still
+      // hold the advisory lock. If this insert happened later (after
+      // checkAndExecute returns), a second concurrent caller could acquire the
+      // lock, fail to find a prior execution, and run the handler a second time.
+      if (this.executionRepo && handlerResult.success) {
+        const row = await this.executionRepo.recordExecution({
+          tenantId: keyedProposal.tenantId,
+          proposalId: keyedProposal.id,
+          executedPayload: keyedProposal.payload,
+          executedBy: context.executedBy,
+          status: 'succeeded',
+          idempotencyKey: keyedProposal.idempotencyKey,
+        });
+        executionId = row.id;
+        executionRecordedInGuard = true;
+      }
+
+      return handlerResult;
+    });
     const result: ExecutionResult = outcome.result;
     const alreadyExecuted = outcome.alreadyExecuted;
 
@@ -183,8 +203,7 @@ export class ProposalExecutor {
     // blocks: failures are logged via console (no logger threaded yet)
     // but never rethrown — the proposal is already in 'executed' state
     // and the user-visible side effect succeeded.
-    let executionId: string | undefined;
-    if (this.executionRepo && !alreadyExecuted) {
+    if (this.executionRepo && !alreadyExecuted && !executionRecordedInGuard) {
       try {
         const row = await this.executionRepo.recordExecution({
           tenantId: updatedProposal.tenantId,
@@ -198,7 +217,7 @@ export class ProposalExecutor {
           executedBy: context.executedBy,
           status: result.success ? 'succeeded' : 'failed',
           errorMessage: result.success ? undefined : result.error ?? 'execution_failed',
-          idempotencyKey: updatedProposal.idempotencyKey ?? undefined,
+          idempotencyKey: withResolvedIdempotencyKey(updatedProposal).idempotencyKey,
         });
         executionId = row.id;
       } catch (err) {

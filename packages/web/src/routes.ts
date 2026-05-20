@@ -21,6 +21,7 @@ import { IntakeFormPage } from './components/customer/IntakeFormPage';
 import { FeedbackPage } from './components/customer/FeedbackPage';
 import { InteractionsPage } from './components/interactions/InteractionsPage';
 import { DispatchLogPage } from './components/interactions/DispatchLogPage';
+import { DispatchBoard } from './pages/dispatch/DispatchBoard';
 import { LeadList } from './pages/leads/LeadList';
 import { LeadDetail } from './pages/leads/LeadDetail';
 import { LeadCreate } from './pages/leads/LeadCreate';
@@ -41,6 +42,7 @@ import { CustomerEdit } from './pages/customers/CustomerEdit';
 import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
 import { useParams, useNavigate } from 'react-router';
 import React from 'react';
+import { isOnboardingV2Enabled } from './lib/runtimeConfig';
 
 // P11-007 — wrappers that pull `:id` from the route and forward it to
 // the typed edit components.
@@ -127,7 +129,7 @@ export const router = createBrowserRouter([
   // §10 onboarding v2 — flag-gated. Off → legacy 9-step wizard.
   {
     path: '/onboarding',
-    Component: import.meta.env.VITE_ONBOARDING_V2_ENABLED === 'true' ? OnboardingShell : OnboardingPage,
+    Component: isOnboardingV2Enabled() ? OnboardingShell : OnboardingPage,
   },
   { path: '/e/:id',      Component: EstimateApprovalPage },
   { path: '/pay/:id',    Component: InvoicePaymentPage },
@@ -149,6 +151,7 @@ export const router = createBrowserRouter([
       { path: 'jobs/new',       Component: JobCreate       },
       { path: 'jobs/:id',       Component: JobsPage        },
       { path: 'schedule',       Component: SchedulePage    },
+      { path: 'dispatch',       Component: DispatchBoard   },
       { path: 'customers',      Component: CustomersPage   },
       { path: 'customers/:id',  Component: CustomerDetailRoute },
       { path: 'customers/:id/edit', Component: CustomerEditRoute },

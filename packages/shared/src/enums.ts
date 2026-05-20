@@ -215,6 +215,10 @@ export enum MessageType {
   TRANSCRIPT = 'transcript',
   SYSTEM_EVENT = 'system_event',
   NOTE = 'note',
+  /** Matches `createMessageSchema` in packages/api — F-2 contract freeze. */
+  CLARIFICATION = 'clarification',
+  /** Matches `createMessageSchema` in packages/api — F-2 contract freeze. */
+  PROPOSAL = 'proposal',
   PROPOSAL_SUMMARY = 'proposal_summary',
 }
 

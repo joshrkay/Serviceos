@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useApiClient } from '../../lib/apiClient';
+import { emitProposalsChanged } from '../../lib/proposal-events';
 
 type Urgency = 'critical' | 'high' | 'normal' | 'low';
 
@@ -10,9 +11,19 @@ interface InboxProposalRow {
     summary: string;
     status: string;
     createdAt: string;
+    expiresAt?: string;
   };
   urgency: Urgency;
   reason?: string;
+}
+
+function holdExpiryLine(row: InboxProposalRow): string | null {
+  if (row.proposal.proposalType !== 'create_booking' || !row.proposal.expiresAt) {
+    return null;
+  }
+  const at = new Date(row.proposal.expiresAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return `Hold expires ${at.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
 }
 
 interface InboxSummary {
@@ -73,6 +84,7 @@ export function InboxPage() {
     try {
       const res = await apiFetch(`/api/proposals/${id}/${action}`, { method: 'POST' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      emitProposalsChanged();
     } catch (err) {
       if (removed) setRows((prev) => [removed, ...prev]);
       setError(err instanceof Error ? err.message : `${action} failed`);
@@ -126,6 +138,9 @@ export function InboxPage() {
                       <span className="text-xs text-slate-500">{row.proposal.proposalType}</span>
                     </div>
                     <p className="text-sm text-slate-900 font-medium truncate">{row.proposal.summary}</p>
+                    {holdExpiryLine(row) && (
+                      <p className="text-xs text-amber-700 mt-0.5">{holdExpiryLine(row)}</p>
+                    )}
                     {row.reason && <p className="text-xs text-slate-500 mt-0.5">{row.reason}</p>}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

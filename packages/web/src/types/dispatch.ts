@@ -1,5 +1,11 @@
 import { AppointmentCardData } from '../components/dispatch/AppointmentCard';
 
+export interface BoardAppointmentEditing {
+  userId: string;
+  displayName: string;
+  mode: 'viewing' | 'dragging';
+}
+
 export interface TechnicianLaneData {
   technicianId: string;
   technicianName: string;
@@ -20,6 +26,7 @@ export interface BoardSummary {
 
 export interface DispatchBoardData {
   date: string;
+  boardRevision?: string;
   unassignedAppointments: AppointmentCardData[];
   technicianLanes: TechnicianLaneData[];
   summary: BoardSummary;

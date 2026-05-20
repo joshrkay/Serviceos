@@ -12,7 +12,6 @@ import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { normalizeInvoiceStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
-import { customers } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
@@ -335,14 +334,13 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
   /** When set, the sheet calls the real /api/invoices/:id/send endpoint. */
   apiId?: string;
 }) {
-  const customer = customers.find(c => c.id === inv.customerId);
   const [channel, setChannel] = useState<'sms' | 'email'>('sms');
-  const [recipient, setRecipient] = useState<string>(customer?.phone ?? '');
+  const [recipient, setRecipient] = useState<string>('');
   const [sending, setSending] = useState(false);
   const [sent,    setSent]    = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
 
-  const firstName = customer?.name.split(' ')[0] ?? 'there';
+  const firstName = inv.customer.split(' ')[0] ?? 'there';
 
   const [msg, setMsg] = useState('');
 
@@ -429,7 +427,7 @@ function SendPaymentSheet({ inv, total, paymentLink, onClose, onSent, apiId }: {
                   key={c}
                   onClick={() => {
                     setChannel(c);
-                    setRecipient(c === 'sms' ? customer?.phone ?? '' : customer?.email ?? '');
+                    if (c !== channel) setRecipient('');
                   }}
                   className={`flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm transition-colors ${
                     channel === c ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
