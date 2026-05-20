@@ -36,6 +36,8 @@ import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { CreateBookingExecutionHandler } from './create-booking-handler';
+import { CreateCustomerVoiceExecutionHandler } from './create-customer-handler';
+import { CustomerRepository } from '../../customers/customer';
 
 export interface ExecutionContext {
   tenantId: string;
@@ -204,6 +206,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 }
 
 export function createExecutionHandlerRegistry(deps?: {
+  customerRepo?: CustomerRepository;
   appointmentRepo?: AppointmentRepository;
   assignmentRepo?: AssignmentRepository;
   invoiceRepo?: InvoiceRepository;
@@ -244,7 +247,9 @@ export function createExecutionHandlerRegistry(deps?: {
       : undefined;
 
   const handlers: ExecutionHandler[] = [
-    new CreateCustomerExecutionHandler(),
+    deps?.customerRepo
+      ? new CreateCustomerVoiceExecutionHandler(deps.customerRepo, deps.auditRepo)
+      : new CreateCustomerExecutionHandler(),
     new UpdateCustomerExecutionHandler(),
     new CreateJobExecutionHandler(),
     new CreateAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.schedulingNotifier),

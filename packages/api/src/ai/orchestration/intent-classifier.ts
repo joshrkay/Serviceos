@@ -210,6 +210,14 @@ export interface ClassifyContext {
  */
 export const CLASSIFIER_CONFIDENCE_THRESHOLD = 0.6;
 
+/**
+ * Sign-up phrasings must clear the FSM intent gate (TAU_INT = 0.75 in
+ * customer-calling transitions). When the LLM returns create_customer in
+ * the [0.6, 0.75) band we still bump confidence so voice does not reprompt
+ * on an unambiguous new-customer request.
+ */
+export const SIGNUP_INTENT_ACT_THRESHOLD = 0.75;
+
 const SYSTEM_PROMPT = `You are an intent classifier for a field service operating system.
 Given a voice transcript from a field service operator, decide which action they intend to take.
 
@@ -741,7 +749,9 @@ export async function classifyIntent(
     signupOverride &&
     (parsed.intentType === 'unknown' ||
       parsed.confidence < CLASSIFIER_CONFIDENCE_THRESHOLD ||
-      parsed.intentType !== 'create_customer')
+      parsed.intentType !== 'create_customer' ||
+      (parsed.intentType === 'create_customer' &&
+        parsed.confidence < SIGNUP_INTENT_ACT_THRESHOLD))
   ) {
     const overridden: IntentClassification = {
       intentType: 'create_customer',
