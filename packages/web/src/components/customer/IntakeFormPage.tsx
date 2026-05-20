@@ -82,12 +82,6 @@ const DEFAULT_SERVICE_PRESENTATION: ServicePresentation = {
 
 const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
 
-function presentationForVertical(verticalType: string): ServicePresentation {
-  return SERVICE_PRESENTATION[verticalType] ?? DEFAULT_SERVICE_PRESENTATION;
-}
-
-const FALLBACK_PLACEHOLDER = DEFAULT_SERVICE_PRESENTATION.placeholder;
-
 function presentationForVertical(
   verticalType: string,
   displayName?: string,
