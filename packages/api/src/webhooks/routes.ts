@@ -5,7 +5,7 @@ import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
 import { InvoiceRepository } from '../invoices/invoice';
-import { PaymentRepository, recordPayment } from '../invoices/payment';
+import { PaymentRepository, recordPayment, PaymentReceiptNotifier } from '../invoices/payment';
 import { recordRefund } from '../payments/payment-service';
 import { JobRepository } from '../jobs/job';
 import { deriveDepositStatus } from '../jobs/deposit-rule';
@@ -94,6 +94,8 @@ export interface WebhookRouterDeps {
   provisioningQueue?: {
     send<T>(type: string, payload: T, idempotencyKey?: string): Promise<string>;
   };
+  /** §7 Layer A — payment receipt SMS/email after Stripe checkout completes. */
+  paymentReceiptNotifier?: PaymentReceiptNotifier;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -776,6 +778,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.invoiceRepo,
             deps.paymentRepo,
             moneyStateDeps,
+            deps.paymentReceiptNotifier,
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
@@ -798,6 +801,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.invoiceRepo,
                   deps.paymentRepo,
                   moneyStateDeps,
+                  deps.paymentReceiptNotifier,
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,

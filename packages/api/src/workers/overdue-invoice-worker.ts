@@ -20,6 +20,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository } from '../invoices/invoice';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { TransactionalCommsService } from '../notifications/transactional-comms-service';
 
 export interface OverdueInvoiceWorkerDeps {
   jobRepo: JobRepository;
@@ -31,6 +32,8 @@ export interface OverdueInvoiceWorkerDeps {
   logger: Logger;
   /** Injectable clock — defaults to `() => new Date()`. */
   now?: () => Date;
+  /** §7 Layer A — overdue dunning SMS/email when a job first crosses overdue. */
+  transactionalComms?: TransactionalCommsService;
 }
 
 export async function runOverdueInvoiceSweep(
@@ -103,6 +106,9 @@ export async function runOverdueInvoiceSweep(
               },
             }),
           );
+          if (deps.transactionalComms) {
+            await deps.transactionalComms.notifyInvoiceOverdue(tenantId, invoice.id);
+          }
         }
       }
     } catch (err) {
