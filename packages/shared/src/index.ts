@@ -8,3 +8,4 @@ export * from './contracts/review-response-proposal.js';
 export * from './contracts/proposal.js';
 export * from './contracts/messages.js';
 export * from './contracts/vulnerability-signal.js';
+export * from './contracts/tech-status-event.js';

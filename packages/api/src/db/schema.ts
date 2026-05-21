@@ -2937,6 +2937,56 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_vulnerability_signals ON vulnerability_signals
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P6-028 — PG-backed unavailable_blocks mirroring the in-memory
+  // UnavailableBlock model (packages/api/src/availability/unavailable-block.ts).
+  // A tech "I'm out today" SMS writes one row spanning the tenant-local day
+  // (start_time = tenant-local midnight, end_time = +24h, reason = the
+  // normalized keyword). Columns match the in-memory interface so both impls
+  // satisfy `UnavailableBlockRepository`. Tenant-scoped + RLS. Idempotent
+  // (IF NOT EXISTS + DROP/CREATE POLICY) so the whole-string runner replays it
+  // on every boot.
+  '116_tech_unavailable_blocks': `
+    CREATE TABLE IF NOT EXISTS tech_unavailable_blocks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      start_time TIMESTAMPTZ NOT NULL,
+      end_time TIMESTAMPTZ NOT NULL,
+      reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tech_unavailable_blocks_tech_range
+      ON tech_unavailable_blocks (tenant_id, technician_id, start_time, end_time);
+    ALTER TABLE tech_unavailable_blocks ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tech_unavailable_blocks ON tech_unavailable_blocks;
+    CREATE POLICY tenant_isolation_tech_unavailable_blocks ON tech_unavailable_blocks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P6-028 — daily idempotency key for the tech "I'm out today" SMS. The PK
+  // includes local_date (the tech's TENANT-LOCAL calendar date), so a second
+  // OUT reply on the same day is a no-op (the INSERT conflicts) and a new day
+  // simply has no row — "midnight clear" emerges from the PK with NO cron.
+  // status mirrors the three accepted keywords; source_message_sid records the
+  // inbound SMS provenance. Tenant-scoped + RLS. Idempotent (IF NOT EXISTS +
+  // DROP/CREATE POLICY) so the whole-string runner replays it on every boot.
+  '117_tech_status_today': `
+    CREATE TABLE IF NOT EXISTS tech_status_today (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      local_date DATE NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('out','sick','unavailable')),
+      source_message_sid TEXT NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, technician_id, local_date)
+    );
+    ALTER TABLE tech_status_today ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tech_status_today ON tech_status_today;
+    CREATE POLICY tenant_isolation_tech_status_today ON tech_status_today
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
