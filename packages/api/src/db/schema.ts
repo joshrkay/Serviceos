@@ -2819,6 +2819,29 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS brand_voice JSONB NOT NULL DEFAULT '{}'::jsonb;
   `,
+
+  // P0-036 — generic per-key sliding-window rate limiter backing domain-scoped
+  // throttles (P8-015 dropped-call recovery is the first consumer). `scope`
+  // namespaces unrelated limiters (e.g. 'sms_recovery' vs 'verify_code') so they
+  // share one table without colliding. Each tryConsume() writes a row keyed by
+  // NOW(); callers SUM counts over the trailing windowMs, so old windows age out
+  // (a sliding window, not a fixed bucket). The PRIMARY KEY's btree on
+  // (tenant_id, scope, key, window_start) is exactly the lookup index, so no
+  // separate index is created. RLS-isolated by tenant.
+  '111_phone_rate_limits': `
+    CREATE TABLE IF NOT EXISTS phone_rate_limits (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      scope TEXT NOT NULL,
+      key TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      count INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, scope, key, window_start)
+    );
+    ALTER TABLE phone_rate_limits ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_phone_rate_limits ON phone_rate_limits;
+    CREATE POLICY tenant_isolation_phone_rate_limits ON phone_rate_limits
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
