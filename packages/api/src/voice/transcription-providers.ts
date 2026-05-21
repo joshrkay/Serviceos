@@ -351,18 +351,27 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
 
 /**
  * P0-027 factory — returns the hardened Whisper provider when an OpenAI-
- * compatible key is configured, otherwise returns the dev no-op (NOT a
- * fake-data mock) and logs a warning so missing-key in production is loud.
+ * compatible key is configured.
+ *
+ * In production/staging a missing key is a hard error: we refuse to start
+ * with DevNoopTranscriptionProvider (which returns placeholder transcripts),
+ * matching the fail-fast contract of the TTS (`NoopTtsProvider`) and
+ * invoice-delivery (`resolveInvoiceDeliveryProvider`) factories. Silently
+ * degrading STT in prod means the voice agent "answers" but transcribes
+ * garbage. In dev/test a missing key falls back to the no-op with a loud warning.
  *
  * Falls back to AI_PROVIDER_API_KEY (the documented production secret in
  * shared/config.ts) when OPENAI_API_KEY is unset, so deployments that only
  * set the canonical key still get real transcription instead of placeholder
  * text.
- *
- * Wiring into `app.ts` is owed to P0-023 (Wave 1C).
  */
 export function createWhisperTranscriptionProvider(
-  env: { OPENAI_API_KEY?: string; AI_PROVIDER_API_KEY?: string; WHISPER_MODEL?: string },
+  env: {
+    OPENAI_API_KEY?: string;
+    AI_PROVIDER_API_KEY?: string;
+    WHISPER_MODEL?: string;
+    NODE_ENV?: string;
+  },
   deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
@@ -372,6 +381,17 @@ export function createWhisperTranscriptionProvider(
       apiKey,
       env.WHISPER_MODEL ?? 'whisper-1',
       deps.fetchImpl
+    );
+  }
+  if (
+    env.NODE_ENV === 'prod' ||
+    env.NODE_ENV === 'production' ||
+    env.NODE_ENV === 'staging'
+  ) {
+    throw new Error(
+      'Transcription requires OPENAI_API_KEY or AI_PROVIDER_API_KEY in ' +
+        'production/staging. Refusing to start with DevNoopTranscriptionProvider, ' +
+        'which returns placeholder text. Configure the key in the deploy environment.'
     );
   }
   logger.warn(

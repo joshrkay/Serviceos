@@ -156,6 +156,25 @@ describe('createWhisperTranscriptionProvider', () => {
     expect(provider).not.toBeInstanceOf(DevNoopTranscriptionProvider);
     expect(warnMock).not.toHaveBeenCalled();
   });
+
+  it.each(['production', 'staging', 'prod'])(
+    'throws in %s when neither key is set instead of degrading to the no-op',
+    (nodeEnv) => {
+      const warnMock = vi.fn();
+      expect(() =>
+        createWhisperTranscriptionProvider({ NODE_ENV: nodeEnv }, { logger: { warn: warnMock } }),
+      ).toThrow(/production\/staging/);
+      expect(warnMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still returns a real provider in production when a key is set', () => {
+    const provider = createWhisperTranscriptionProvider({
+      NODE_ENV: 'production',
+      AI_PROVIDER_API_KEY: 'sk_live',
+    });
+    expect(provider).toBeInstanceOf(WhisperTranscriptionProvider);
+  });
 });
 
 describe('DeepgramStreamingProvider URL builder', () => {
