@@ -1,0 +1,199 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { createLogger } from '../../../src/logging/logger';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import {
+  DroppedCallScheduler,
+  InMemoryDroppedCallRecoveryRepository,
+  RECOVERY_DELAY_MS,
+  type DroppedCallRecoveryRow,
+} from '../../../src/sms/recovery/scheduler';
+import {
+  handleDroppedCallRecovery,
+  type DroppedCallHandlerDeps,
+} from '../../../src/sms/recovery/dropped-call-handler';
+
+const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+const TENANT = '00000000-0000-0000-0000-000000000001';
+const SESSION = '00000000-0000-0000-0000-0000000000aa';
+const E164 = '+15551234567';
+const T0 = new Date('2026-05-21T12:00:00Z');
+
+function freshHandlerDeps(
+  repo: InMemoryDroppedCallRecoveryRepository,
+  audit: InMemoryAuditRepository,
+  overrides: Partial<DroppedCallHandlerDeps> = {},
+): DroppedCallHandlerDeps {
+  return {
+    repo,
+    audit,
+    logger,
+    rateLimit: vi.fn(async () => true),
+    resolvedSince: vi.fn(async () => null),
+    compose: vi.fn(async ({ contextCue }) =>
+      contextCue ? `${contextCue} — want to text or call back? We're here.` : 'Sorry we got cut off — text us back anytime.',
+    ),
+    sendSms: vi.fn(async () => 'SM_fake_sid'),
+    now: () => T0,
+    ...overrides,
+  };
+}
+
+async function seedDueRow(
+  repo: InMemoryDroppedCallRecoveryRepository,
+): Promise<DroppedCallRecoveryRow> {
+  return repo.schedule({
+    tenantId: TENANT,
+    voiceSessionId: SESSION,
+    callerE164: E164,
+    scheduledFor: new Date(T0.getTime() - 1),
+  });
+}
+
+describe('P8-015 dropped-call recovery scheduler', () => {
+  it('schedules a durable row 60s out for a dropped inbound call (queue, not setTimeout)', async () => {
+    const repo = new InMemoryDroppedCallRecoveryRepository();
+    const scheduler = new DroppedCallScheduler(repo, logger, () => T0);
+    const row = await scheduler.schedule({
+      tenantId: TENANT,
+      voiceSessionId: SESSION,
+      callerE164: E164,
+      outcome: 'dropped',
+      channel: 'voice_inbound',
+    });
+    expect(row).not.toBeNull();
+    expect(row!.scheduledFor.getTime()).toBe(T0.getTime() + RECOVERY_DELAY_MS);
+    expect(repo.rows).toHaveLength(1);
+  });
+
+  it('does NOT schedule for a successful booking (completed)', async () => {
+    const repo = new InMemoryDroppedCallRecoveryRepository();
+    const scheduler = new DroppedCallScheduler(repo, logger, () => T0);
+    const row = await scheduler.schedule({
+      tenantId: TENANT,
+      voiceSessionId: SESSION,
+      callerE164: E164,
+      outcome: 'completed',
+      channel: 'voice_inbound',
+    });
+    expect(row).toBeNull();
+    expect(repo.rows).toHaveLength(0);
+  });
+
+  it('is idempotent per (tenant, voice_session) — a duplicate finalize schedules once', async () => {
+    const repo = new InMemoryDroppedCallRecoveryRepository();
+    const scheduler = new DroppedCallScheduler(repo, logger, () => T0);
+    await scheduler.schedule({ tenantId: TENANT, voiceSessionId: SESSION, callerE164: E164, outcome: 'dropped', channel: 'voice_inbound' });
+    await scheduler.schedule({ tenantId: TENANT, voiceSessionId: SESSION, callerE164: E164, outcome: 'dropped', channel: 'voice_inbound' });
+    expect(repo.rows).toHaveLength(1);
+  });
+});
+
+describe('P8-015 dropped-call recovery orchestrator', () => {
+  let repo: InMemoryDroppedCallRecoveryRepository;
+  let audit: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryDroppedCallRecoveryRepository();
+    audit = new InMemoryAuditRepository();
+  });
+
+  it('hangup before booking → SMS sent within the deferred window', async () => {
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit);
+    const result = await handleDroppedCallRecovery(row, deps);
+    expect(result).toEqual({ action: 'sent', smsMessageSid: 'SM_fake_sid' });
+    expect(deps.sendSms).toHaveBeenCalledTimes(1);
+    expect(repo.rows[0].sentAt).toBeTruthy();
+  });
+
+  it('successful booking since the drop → no SMS (suppressed booking_completed)', async () => {
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit, {
+      resolvedSince: vi.fn(async () => 'booking_completed' as const),
+    });
+    const result = await handleDroppedCallRecovery(row, deps);
+    expect(result).toEqual({ action: 'suppressed', reason: 'booking_completed' });
+    expect(deps.sendSms).not.toHaveBeenCalled();
+    expect(repo.rows[0].suppressedReason).toBe('booking_completed');
+  });
+
+  it('audio failure mid-call → SMS sent', async () => {
+    // A "failed" outcome row reaches the worker the same way; the handler
+    // re-checks suppression + rate limit and sends.
+    const row = await repo.schedule({
+      tenantId: TENANT,
+      voiceSessionId: SESSION,
+      callerE164: E164,
+      scheduledFor: new Date(T0.getTime() - 1),
+    });
+    const deps = freshHandlerDeps(repo, audit);
+    const result = await handleDroppedCallRecovery(row, deps);
+    expect(result.action).toBe('sent');
+    expect(deps.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('partial transcript context cue is included when a top intent is available', async () => {
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit, {
+      topIntentFor: vi.fn(async () => 'ac_repair'),
+    });
+    await handleDroppedCallRecovery(row, deps);
+    const composeArg = (deps.compose as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(composeArg.contextCue).toBe('Sounds like you were calling about your AC');
+    const sentBody = (deps.sendSms as ReturnType<typeof vi.fn>).mock.calls[0][0].body;
+    expect(sentBody).toContain('Sounds like you were calling about your AC');
+  });
+
+  it('no transcript / intent → generic SMS (empty context cue)', async () => {
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit, {
+      topIntentFor: vi.fn(async () => undefined),
+    });
+    await handleDroppedCallRecovery(row, deps);
+    const composeArg = (deps.compose as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(composeArg.contextCue).toBe('');
+  });
+
+  it('threads the recovery — links voice_session and sms_conversation to one conversation', async () => {
+    const row = await seedDueRow(repo);
+    const thread = vi.fn(async () => undefined);
+    const deps = freshHandlerDeps(repo, audit, { thread });
+    await handleDroppedCallRecovery(row, deps);
+    expect(thread).toHaveBeenCalledWith({
+      tenantId: TENANT,
+      voiceSessionId: SESSION,
+      smsMessageSid: 'SM_fake_sid',
+    });
+  });
+
+  it('rate-limited — a caller who keeps dropping gets ONE SMS, not multiple', async () => {
+    // First recovery: allowed.
+    const first = await seedDueRow(repo);
+    const allow = vi
+      .fn<[string, string], Promise<boolean>>()
+      .mockResolvedValueOnce(true) // first within window
+      .mockResolvedValue(false); // subsequent within window
+    const deps = freshHandlerDeps(repo, audit, { rateLimit: allow });
+    const r1 = await handleDroppedCallRecovery(first, deps);
+    expect(r1.action).toBe('sent');
+
+    // Second drop from same caller within 5 min → different session row.
+    const second = await repo.schedule({
+      tenantId: TENANT,
+      voiceSessionId: '00000000-0000-0000-0000-0000000000bb',
+      callerE164: E164,
+      scheduledFor: new Date(T0.getTime() - 1),
+    });
+    const r2 = await handleDroppedCallRecovery(second, deps);
+    expect(r2).toEqual({ action: 'suppressed', reason: 'rate_limited' });
+    expect((deps.sendSms as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it('uses an idempotency key derived from the recovery row id (no double-send on retry)', async () => {
+    const row = await seedDueRow(repo);
+    const deps = freshHandlerDeps(repo, audit);
+    await handleDroppedCallRecovery(row, deps);
+    const sendArg = (deps.sendSms as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(sendArg.idempotencyKey).toBe(`dropped_call_recovery:${row.id}`);
+  });
+});

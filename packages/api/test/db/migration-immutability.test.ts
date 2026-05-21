@@ -169,6 +169,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['109_users_mobile_number', '84773bb91c016828430bdb2f5a8504edef06193ad201ce41051a4b15134d9f22'],
   ['110_tenant_settings_brand_voice', '4d5499d20742415bb4852704a2fe3972446a3acc6efbfb050d4b57b573a6dc34'],
   ['111_phone_rate_limits', '07b4989a51fea21cf60c8f5245da2bab2ec01b8ebc4fae5afc8378545397594d'],
+  ['112_dropped_call_recoveries', '40e7b282467a7da006b5b6ba0d9403eb6ab24ed7009332741c350517969e256f'],
 ];
 
 function hashMigration(value: string): string {

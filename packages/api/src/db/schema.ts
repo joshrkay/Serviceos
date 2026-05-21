@@ -2842,6 +2842,37 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_phone_rate_limits ON phone_rate_limits
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P8-015 — durable queue for the 60s deferred dropped-call recovery SMS.
+  // Inserting a row (scheduled_for = drop time + 60s) IS the enqueue; the
+  // dropped-call-worker polls due rows via the partial index below, so a
+  // restart between schedule (T=0) and send (T=60s) never loses a recovery
+  // (vs. the superseded setTimeout MVP). UNIQUE (tenant_id, voice_session_id)
+  // makes scheduling idempotent — a duplicate finalize is a no-op. sent_at /
+  // suppressed_reason / sms_message_sid are stamped by the worker at send
+  // time. RLS-isolated by tenant. Idempotent (IF NOT EXISTS + DROP/CREATE
+  // POLICY) so the whole-string migration runner can replay it on every boot.
+  '112_dropped_call_recoveries': `
+    CREATE TABLE IF NOT EXISTS dropped_call_recoveries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id UUID NOT NULL,
+      caller_e164 TEXT NOT NULL,
+      scheduled_for TIMESTAMPTZ NOT NULL,
+      sent_at TIMESTAMPTZ,
+      suppressed_reason TEXT,
+      sms_message_sid TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (tenant_id, voice_session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dropped_call_recoveries_due
+      ON dropped_call_recoveries (scheduled_for)
+      WHERE sent_at IS NULL AND suppressed_reason IS NULL;
+    ALTER TABLE dropped_call_recoveries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dropped_call_recoveries ON dropped_call_recoveries;
+    CREATE POLICY tenant_isolation_dropped_call_recoveries ON dropped_call_recoveries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
