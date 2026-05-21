@@ -2873,6 +2873,70 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_dropped_call_recoveries ON dropped_call_recoveries
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // P8-016 — additive vulnerability fields on the tenant-scoped customers
+  // table. `date_of_birth` lets the age detector derive age >65 from the
+  // matched customer record (in addition to a self-reported age in the
+  // utterance). `account_type` distinguishes residential callers from B2B
+  // accounts (e.g. property managers) so the property-type detector can fire
+  // conservatively. Both are nullable — existing rows have neither on file.
+  // Idempotent (ADD COLUMN IF NOT EXISTS) so the whole-string runner replays
+  // it on every boot. customers already has RLS (migration 014); no policy
+  // change here.
+  '113_customer_vulnerability_fields': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS account_type TEXT
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b'));
+  `,
+
+  // P8-016 — PUBLIC weather cache. INTENTIONALLY NOT tenant-scoped: it caches
+  // an external weather provider's reading keyed by ROUNDED lat/lng (~0.5°,
+  // roughly 30 mi). Two tenants in the same locale share the same cached row,
+  // so there is NO `tenant_id` column and NO RLS policy — the data is public
+  // (ambient temperature) and not customer/tenant PII. Repos read/write it via
+  // `withClient()` (the cross-tenant escape hatch on PgBaseRepository), NOT
+  // `withTenant()`. `fetched_at` drives staleness (>1h = refetch). Idempotent
+  // (IF NOT EXISTS) so the whole-string runner replays it on every boot.
+  '114_weather_cache': `
+    CREATE TABLE IF NOT EXISTS weather_cache (
+      lat_rounded NUMERIC(4,1) NOT NULL,
+      lng_rounded NUMERIC(4,1) NOT NULL,
+      max_temp_f NUMERIC(5,1),
+      min_temp_f NUMERIC(5,1),
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (lat_rounded, lng_rounded)
+    );
+    CREATE INDEX IF NOT EXISTS idx_weather_cache_fetched_at
+      ON weather_cache (fetched_at);
+  `,
+
+  // P8-016 — analytics / post-incident-review log of every vulnerability
+  // triage decision. Tenant-scoped + RLS. Carries the decision kind, urgency
+  // tier, score total, the weather-unavailable gap flag, and the fired signals
+  // (kind + NON-PII evidence + weight) as JSONB so a reviewer can audit "did
+  // the matrix make the right call?" without replaying the call. NO transcript,
+  // NO full address. Idempotent (IF NOT EXISTS + DROP/CREATE POLICY) so the
+  // whole-string runner replays it on every boot.
+  '115_vulnerability_signals': `
+    CREATE TABLE IF NOT EXISTS vulnerability_signals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id UUID NOT NULL,
+      customer_id UUID,
+      decision_kind TEXT NOT NULL,
+      urgency TEXT NOT NULL,
+      score_total INT NOT NULL DEFAULT 0,
+      weather_unavailable BOOLEAN NOT NULL DEFAULT false,
+      signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_vulnerability_signals_tenant_created
+      ON vulnerability_signals (tenant_id, created_at);
+    ALTER TABLE vulnerability_signals ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_vulnerability_signals ON vulnerability_signals;
+    CREATE POLICY tenant_isolation_vulnerability_signals ON vulnerability_signals
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
