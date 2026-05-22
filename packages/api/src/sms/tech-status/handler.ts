@@ -131,33 +131,55 @@ export async function handleTechStatusSms(
     return { handled: true, handler: 'tech-status', reason: 'already_recorded' };
   }
 
-  // 4. Same-day unavailable block: tenant-local midnight → +24h.
-  const dayStart = tzMidnight(localDate, tz);
-  const dayEnd = addCalendarDays(dayStart, 1, tz);
-  const block = createUnavailableBlock({
-    tenantId: ctx.tenantId,
-    technicianId: user.id,
-    startTime: dayStart,
-    endTime: dayEnd,
-    reason: status,
-    createdBy: user.id,
-  });
-  await deps.unavailableBlockRepo.create(block);
-
-  // 5. Walk remaining appointments today → create reschedule proposals with a
-  //    brand-voice customer SMS draft attached to each.
-  const windowStart = now;
-  const { proposals } = await createRescheduleProposalsFromTechOut(
-    {
+  // Steps 4-5 run AFTER the idempotency claim, so a mid-flow failure would
+  // leave the day claimed ("handled") while the block / reschedules never
+  // landed — and the next sweep would short-circuit on the existing claim,
+  // permanently stranding the customer reschedules. Wrap them: on failure we
+  // release the claim so a retry re-attempts from a clean slate. (The block
+  // INSERT may re-run on retry; a duplicate same-day block is benign — the day
+  // is unavailable either way — whereas duplicate proposals or stranded
+  // reschedules are not.)
+  let block: ReturnType<typeof createUnavailableBlock>;
+  let proposals: Awaited<
+    ReturnType<typeof createRescheduleProposalsFromTechOut>
+  >['proposals'];
+  try {
+    // 4. Same-day unavailable block: tenant-local midnight → +24h.
+    const dayStart = tzMidnight(localDate, tz);
+    const dayEnd = addCalendarDays(dayStart, 1, tz);
+    block = createUnavailableBlock({
       tenantId: ctx.tenantId,
       technicianId: user.id,
-      windowStart,
-      windowEnd: dayEnd,
-      createdBy: user.id,
+      startTime: dayStart,
+      endTime: dayEnd,
       reason: status,
-    },
-    deps.rescheduleDeps,
-  );
+      createdBy: user.id,
+    });
+    await deps.unavailableBlockRepo.create(block);
+
+    // 5. Walk remaining appointments today → create reschedule proposals with a
+    //    brand-voice customer SMS draft attached to each.
+    const windowStart = now;
+    ({ proposals } = await createRescheduleProposalsFromTechOut(
+      {
+        tenantId: ctx.tenantId,
+        technicianId: user.id,
+        windowStart,
+        windowEnd: dayEnd,
+        createdBy: user.id,
+        reason: status,
+      },
+      deps.rescheduleDeps,
+    ));
+  } catch (err) {
+    await deps.techStatusTodayRepo.releaseToday(ctx.tenantId, user.id, localDate);
+    await audit(deps, ctx, 'tech_status.processing_failed', user.id, {
+      localDate,
+      status,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { handled: false, handler: 'tech-status', reason: 'processing_failed' };
+  }
 
   await audit(deps, ctx, 'tech_status.recorded', user.id, {
     localDate,

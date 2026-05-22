@@ -192,6 +192,11 @@ export async function createRescheduleProposalsFromTechOut(
         draftSms: draft.text,
         techStatus: input.reason,
         technicianId: input.technicianId,
+        // The payload is seeded with the appointment's CURRENT times (the owner
+        // hasn't picked a new slot yet). This flag makes the reschedule
+        // execution handler reject an approval that never changed the time, so
+        // APPROVE ALL can't fire a no-op "we've rescheduled you" customer SMS.
+        requiresSlotSelection: true,
       },
       createdBy: input.createdBy,
     });

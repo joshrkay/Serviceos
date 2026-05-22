@@ -46,6 +46,20 @@ export interface TechStatusTodayRepository {
    * NOTHING, so concurrent inbound messages for the same day cannot both win.
    */
   claimToday(input: ClaimTodayInput): Promise<boolean>;
+  /**
+   * Release a claim. The handler claims the day FIRST (to dedupe concurrent
+   * OUT texts) and only then writes the unavailable block + reschedule
+   * proposals. If those side-effects fail, the claim must be released so the
+   * day is not falsely marked "handled" — otherwise a retry would short-circuit
+   * on `claimToday() === false` and the appointments would never be
+   * rescheduled. Releasing restores the invariant "a claimed day is fully
+   * processed." A no-op when no row exists.
+   */
+  releaseToday(
+    tenantId: string,
+    technicianId: string,
+    localDate: string,
+  ): Promise<void>;
   /** Read the current claim, if any. Used by tests + diagnostics. */
   findToday(
     tenantId: string,
@@ -75,6 +89,14 @@ export class InMemoryTechStatusTodayRepository
       recordedAt: new Date(),
     });
     return true;
+  }
+
+  async releaseToday(
+    tenantId: string,
+    technicianId: string,
+    localDate: string,
+  ): Promise<void> {
+    this.rows.delete(this.key(tenantId, technicianId, localDate));
   }
 
   async findToday(
@@ -126,6 +148,20 @@ export class PgTechStatusTodayRepository
         ],
       );
       return (result.rowCount ?? 0) > 0;
+    });
+  }
+
+  async releaseToday(
+    tenantId: string,
+    technicianId: string,
+    localDate: string,
+  ): Promise<void> {
+    await this.withTenantTransaction(tenantId, async (client) => {
+      await client.query(
+        `DELETE FROM tech_status_today
+          WHERE tenant_id = $1 AND technician_id = $2 AND local_date = $3`,
+        [tenantId, technicianId, localDate],
+      );
     });
   }
 

@@ -228,6 +228,32 @@ describe('P6-028 tech_out — tech-status SMS handler', () => {
     expect(await h.proposalRepo.findByStatus(TENANT, 'ready_for_review')).toHaveLength(3);
   });
 
+  it('processing failure releases the claim so a retry re-attempts (no permanent strand)', async () => {
+    // First block write fails after the day is already claimed.
+    const realCreate = h.unavailableRepo.create.bind(h.unavailableRepo);
+    let calls = 0;
+    h.unavailableRepo.create = async (block) => {
+      calls += 1;
+      if (calls === 1) throw new Error('db write failed');
+      return realCreate(block);
+    };
+
+    const failed = await handleTechStatusSms(ctx({ body: 'OUT' }), h.deps);
+    expect(failed).toMatchObject({ handled: false, reason: 'processing_failed' });
+
+    // The claim was released — the day is NOT falsely marked handled.
+    const local = tenantLocalDate(NOW, 'America/New_York');
+    expect(await h.todayRepo.findToday(TENANT, TECH_ID, local)).toBeNull();
+    const audits = await h.auditRepo.findByEntity(TENANT, 'tech_status', TECH_ID);
+    expect(audits.some((a) => a.eventType === 'tech_status.processing_failed')).toBe(true);
+
+    // Retry now succeeds end-to-end (claim available again, block + proposals land).
+    const ok = await handleTechStatusSms(ctx({ body: 'OUT' }), h.deps);
+    expect(ok).toMatchObject({ handled: true, reason: 'recorded' });
+    expect(await h.unavailableRepo.findByTechnician(TENANT, TECH_ID)).toHaveLength(1);
+    expect(await h.proposalRepo.findByStatus(TENANT, 'ready_for_review')).toHaveLength(3);
+  });
+
   it('status auto-clears at midnight tenant-local (new day → not a no-op)', async () => {
     await handleTechStatusSms(ctx({ body: 'OUT' }), h.deps);
 

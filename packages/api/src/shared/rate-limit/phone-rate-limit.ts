@@ -37,6 +37,39 @@ export class PhoneRateLimiter extends PgBaseRepository {
    * same counter allow exactly `limit` of them — never more. The lock is
    * released automatically on COMMIT/ROLLBACK.
    */
+  /**
+   * Non-consuming check: report whether one more event for `(scope, key)` would
+   * be within `limit` over the trailing `windowMs`, WITHOUT recording it.
+   *
+   * Use this when the recorded action can fail AFTER the limit decision (e.g. an
+   * outbound SMS send): gate on `check()` before the action and only
+   * `tryConsume()` once it has succeeded, so a transient failure cannot burn a
+   * scarce token and strand the caller. The check↔consume gap is a benign race
+   * under concurrency (two callers may both pass `check` then both `consume`);
+   * `tryConsume` remains the authoritative atomic gate where exactness matters.
+   */
+  async check(
+    tenantId: string,
+    scope: string,
+    key: string,
+    limit: number,
+    windowMs: number,
+  ): Promise<boolean> {
+    if (limit <= 0) {
+      return false;
+    }
+    return this.withTenant(tenantId, async (client) => {
+      const cutoff = new Date(Date.now() - windowMs);
+      const { rows } = await client.query<{ total: number }>(
+        `SELECT COALESCE(SUM(count), 0)::int AS total
+           FROM phone_rate_limits
+          WHERE scope = $1 AND key = $2 AND window_start > $3`,
+        [scope, key, cutoff],
+      );
+      return rows[0].total < limit;
+    });
+  }
+
   async tryConsume(
     tenantId: string,
     scope: string,

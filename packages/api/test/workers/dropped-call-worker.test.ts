@@ -19,7 +19,7 @@ function handlerDeps(
   return {
     audit: new InMemoryAuditRepository(),
     logger,
-    rateLimit: vi.fn(async () => true),
+    rateLimit: { check: vi.fn(async () => true), record: vi.fn(async () => undefined) },
     resolvedSince: vi.fn(async () => null),
     compose: vi.fn(async () => 'Sorry we got cut off — text us back anytime.'),
     sendSms: vi.fn(async () => 'SM_sid'),

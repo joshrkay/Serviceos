@@ -47,14 +47,20 @@ export type RecoveryDisposition =
   | { action: 'suppressed'; reason: string };
 
 /**
- * Per-caller throttle (P0-036). Returns true when the send is allowed (and was
- * recorded), false when the limit is already reached. Wraps
- * `PhoneRateLimiter.tryConsume(tenantId, scope, key, limit, windowMs)`.
+ * Per-caller throttle (P0-036), split into a non-consuming pre-send check and a
+ * post-send record so a transient send failure cannot burn the caller's single
+ * recovery token and strand the row (a re-drain would otherwise suppress it as
+ * `rate_limited` and the recovery would never go out).
+ *
+ *   - `check`  → would a send be allowed right now? Records NOTHING. Wraps
+ *                `PhoneRateLimiter.check(tenantId, scope, key, limit, windowMs)`.
+ *   - `record` → register one send AFTER it actually went out. Wraps
+ *                `PhoneRateLimiter.tryConsume(...)`.
  */
-export type RateLimitConsumer = (
-  tenantId: string,
-  callerE164: string,
-) => Promise<boolean>;
+export interface RecoveryRateLimiter {
+  check(tenantId: string, callerE164: string): Promise<boolean>;
+  record(tenantId: string, callerE164: string): Promise<void>;
+}
 
 /**
  * Re-check at execution time: did this voice session ultimately resolve with a
@@ -97,7 +103,7 @@ export interface DroppedCallHandlerDeps {
   repo: DroppedCallRecoveryRepository;
   audit: AuditRepository;
   logger: Logger;
-  rateLimit: RateLimitConsumer;
+  rateLimit: RecoveryRateLimiter;
   resolvedSince: ResolvedSinceChecker;
   compose: RecoveryMessageComposer;
   sendSms: RecoverySmsSender;
@@ -131,8 +137,10 @@ export async function handleDroppedCallRecovery(
     return { action: 'suppressed', reason: resolved };
   }
 
-  // 2. Per-caller rate limit (P0-036). Deny → audit + skip (no SMS spam).
-  const allowed = await deps.rateLimit(row.tenantId, row.callerE164);
+  // 2. Per-caller rate limit (P0-036) — CHECK only (non-consuming) so a
+  //    transient compose/send failure below can't burn the caller's single
+  //    token and strand the row. The token is recorded after the send succeeds.
+  const allowed = await deps.rateLimit.check(row.tenantId, row.callerE164);
   if (!allowed) {
     await suppress(row, 'rate_limited', deps, actorId);
     return { action: 'suppressed', reason: 'rate_limited' };
@@ -157,6 +165,19 @@ export async function handleDroppedCallRecovery(
     // Idempotent on the recovery row id so a retry never double-sends.
     idempotencyKey: `dropped_call_recovery:${row.id}`,
   });
+
+  // Record the rate-limit consumption now that the SMS has actually gone out.
+  // Best-effort: the message is already sent, so a record failure must not roll
+  // it back (we'd re-send on retry); the only cost is a slightly looser limit.
+  try {
+    await deps.rateLimit.record(row.tenantId, row.callerE164);
+  } catch (err) {
+    deps.logger.warn('dropped-call recovery rate-limit record failed', {
+      tenantId: row.tenantId,
+      voiceSessionId: row.voiceSessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   if (deps.thread) {
     try {

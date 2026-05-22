@@ -27,7 +27,7 @@ function freshHandlerDeps(
     repo,
     audit,
     logger,
-    rateLimit: vi.fn(async () => true),
+    rateLimit: { check: vi.fn(async () => true), record: vi.fn(async () => undefined) },
     resolvedSince: vi.fn(async () => null),
     compose: vi.fn(async ({ contextCue }) =>
       contextCue ? `${contextCue} — want to text or call back? We're here.` : 'Sorry we got cut off — text us back anytime.',
@@ -169,11 +169,13 @@ describe('P8-015 dropped-call recovery orchestrator', () => {
   it('rate-limited — a caller who keeps dropping gets ONE SMS, not multiple', async () => {
     // First recovery: allowed.
     const first = await seedDueRow(repo);
-    const allow = vi
+    const check = vi
       .fn<[string, string], Promise<boolean>>()
       .mockResolvedValueOnce(true) // first within window
       .mockResolvedValue(false); // subsequent within window
-    const deps = freshHandlerDeps(repo, audit, { rateLimit: allow });
+    const deps = freshHandlerDeps(repo, audit, {
+      rateLimit: { check, record: vi.fn(async () => undefined) },
+    });
     const r1 = await handleDroppedCallRecovery(first, deps);
     expect(r1.action).toBe('sent');
 
@@ -187,6 +189,31 @@ describe('P8-015 dropped-call recovery orchestrator', () => {
     const r2 = await handleDroppedCallRecovery(second, deps);
     expect(r2).toEqual({ action: 'suppressed', reason: 'rate_limited' });
     expect((deps.sendSms as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it('a failed send does NOT burn the rate-limit token (check before send, record after)', async () => {
+    const row = await seedDueRow(repo);
+    const check = vi.fn(async () => true);
+    const record = vi.fn(async () => undefined);
+    const sendSms = vi
+      .fn<[unknown], Promise<string>>()
+      .mockRejectedValueOnce(new Error('twilio 503')) // transient failure
+      .mockResolvedValue('SM_after_retry');
+    const deps = freshHandlerDeps(repo, audit, {
+      rateLimit: { check, record },
+      sendSms,
+    });
+
+    // First drain: send throws and propagates so the worker leaves the row
+    // pending. Crucially the token was NOT recorded (record only runs on a
+    // successful send), so the retry below is not suppressed as rate_limited.
+    await expect(handleDroppedCallRecovery(row, deps)).rejects.toThrow('twilio 503');
+    expect(record).not.toHaveBeenCalled();
+
+    // Retry: check still allows, send succeeds, token recorded once.
+    const r2 = await handleDroppedCallRecovery(row, deps);
+    expect(r2).toEqual({ action: 'sent', smsMessageSid: 'SM_after_retry' });
+    expect(record).toHaveBeenCalledTimes(1);
   });
 
   it('uses an idempotency key derived from the recovery row id (no double-send on retry)', async () => {
