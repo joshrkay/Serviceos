@@ -63,7 +63,8 @@ export class PhoneRateLimiter extends PgBaseRepository {
       const { rows } = await client.query<{ total: number }>(
         `SELECT COALESCE(SUM(count), 0)::int AS total
            FROM phone_rate_limits
-          WHERE scope = $1 AND key = $2 AND window_start > $3`,
+          WHERE tenant_id = current_setting('app.current_tenant_id')::uuid
+            AND scope = $1 AND key = $2 AND window_start > $3`,
         [scope, key, cutoff],
       );
       return rows[0].total < limit;
@@ -91,7 +92,8 @@ export class PhoneRateLimiter extends PgBaseRepository {
       const { rows } = await client.query<{ total: number }>(
         `SELECT COALESCE(SUM(count), 0)::int AS total
            FROM phone_rate_limits
-          WHERE scope = $1 AND key = $2 AND window_start > $3`,
+          WHERE tenant_id = current_setting('app.current_tenant_id')::uuid
+            AND scope = $1 AND key = $2 AND window_start > $3`,
         [scope, key, cutoff],
       );
       if (rows[0].total >= limit) {
@@ -114,7 +116,8 @@ export class PhoneRateLimiter extends PgBaseRepository {
       // sustained traffic. Scoped to this (scope, key) to avoid a table scan.
       await client.query(
         `DELETE FROM phone_rate_limits
-          WHERE scope = $1 AND key = $2 AND window_start <= $3`,
+          WHERE tenant_id = current_setting('app.current_tenant_id')::uuid
+            AND scope = $1 AND key = $2 AND window_start <= $3`,
         [scope, key, cutoff],
       );
 
