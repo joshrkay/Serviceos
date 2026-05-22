@@ -1,7 +1,17 @@
+import { z } from 'zod';
 import { verifyWebhookSignature, handleWebhookEvent, WebhookRepository } from '../webhooks/webhook-handler';
 import { instrument } from '../monitoring/instrumentation';
 
-export type StripeEventType = 'checkout.session.completed' | 'payment_intent.succeeded' | 'payment_intent.payment_failed';
+// Single source of truth for the event types we process. The `StripeEventType`
+// union and the runtime `VALID_EVENT_TYPES` guard both derive from this array
+// so they cannot drift apart.
+const SUPPORTED_EVENT_TYPES = [
+  'checkout.session.completed',
+  'payment_intent.succeeded',
+  'payment_intent.payment_failed',
+] as const;
+
+export type StripeEventType = (typeof SUPPORTED_EVENT_TYPES)[number];
 
 export interface StripeWebhookResult {
   eventId: string;
@@ -18,11 +28,23 @@ export interface StripeWebhookConfig {
   toleranceSeconds?: number;
 }
 
-const VALID_EVENT_TYPES: StripeEventType[] = [
-  'checkout.session.completed',
-  'payment_intent.succeeded',
-  'payment_intent.payment_failed',
-];
+const VALID_EVENT_TYPES: readonly StripeEventType[] = SUPPORTED_EVENT_TYPES;
+
+// Runtime shape of the fields we read off `data.object`. Every field is
+// optional (shapes differ per event type) but, when present, must be the
+// expected primitive — so a drifted/forged-shape payload fails loudly here
+// instead of silently coercing via an `as` cast. Unknown keys pass through.
+const stripeEventObjectSchema = z
+  .object({
+    id: z.string().optional(),
+    amount: z.number().optional(),
+    amount_total: z.number().optional(),
+    currency: z.string().optional(),
+    payment_intent: z.string().optional(),
+    client_reference_id: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
 
 export function parseStripeEvent(payload: Record<string, unknown>): {
   eventType: string;
@@ -31,13 +53,25 @@ export function parseStripeEvent(payload: Record<string, unknown>): {
   currency?: string;
   paymentIntentId?: string;
 } {
-  const eventType = payload.type as string;
-  if (!eventType) throw new Error('Missing event type in payload');
+  const eventType = payload.type;
+  if (typeof eventType !== 'string' || !eventType) {
+    throw new Error('Missing event type in payload');
+  }
 
   const data = payload.data as Record<string, unknown> | undefined;
-  const object = data?.object as Record<string, unknown> | undefined;
+  const rawObject = data?.object;
+  if (!rawObject || typeof rawObject !== 'object') {
+    throw new Error('Missing data.object in payload');
+  }
 
-  if (!object) throw new Error('Missing data.object in payload');
+  const result = stripeEventObjectSchema.safeParse(rawObject);
+  if (!result.success) {
+    const fields = result.error.issues.map((i) => i.path.join('.')).join(', ');
+    throw new Error(`Invalid Stripe event object shape: ${fields}`);
+  }
+  const object = result.data;
+  const metadataInvoiceId =
+    typeof object.metadata?.invoiceId === 'string' ? object.metadata.invoiceId : undefined;
 
   let invoiceId: string | undefined;
   let amountCents: number | undefined;
@@ -45,17 +79,15 @@ export function parseStripeEvent(payload: Record<string, unknown>): {
   let paymentIntentId: string | undefined;
 
   if (eventType === 'checkout.session.completed') {
-    const metadata = object.metadata as Record<string, unknown> | undefined;
-    invoiceId = (metadata?.invoiceId as string) || (object.client_reference_id as string) || undefined;
-    amountCents = object.amount_total as number | undefined;
-    currency = object.currency as string | undefined;
-    paymentIntentId = object.payment_intent as string | undefined;
+    invoiceId = metadataInvoiceId || object.client_reference_id || undefined;
+    amountCents = object.amount_total;
+    currency = object.currency;
+    paymentIntentId = object.payment_intent;
   } else if (eventType === 'payment_intent.succeeded' || eventType === 'payment_intent.payment_failed') {
-    const metadata = object.metadata as Record<string, unknown> | undefined;
-    invoiceId = metadata?.invoiceId as string | undefined;
-    amountCents = object.amount as number | undefined;
-    currency = object.currency as string | undefined;
-    paymentIntentId = object.id as string | undefined;
+    invoiceId = metadataInvoiceId;
+    amountCents = object.amount;
+    currency = object.currency;
+    paymentIntentId = object.id;
   }
 
   return { eventType, invoiceId, amountCents, currency, paymentIntentId };

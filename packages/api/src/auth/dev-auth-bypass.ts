@@ -87,12 +87,13 @@ export interface DevAuthBypassDeps {
 }
 
 export function isDevAuthBypassEnabled(): boolean {
-  // NODE_ENV may be undefined when .env is not explicitly loaded before this
-  // check runs (e.g., dotenv loaded later in createApp). Treat undefined as
-  // 'dev' to mirror the Zod default in config.ts.
-  const isDevEnv = process.env.NODE_ENV === 'dev'
-    || process.env.NODE_ENV === 'development'
-    || process.env.NODE_ENV === undefined;
+  // Security-sensitive toggle — fail CLOSED. The bypass activates only for an
+  // EXPLICIT dev NODE_ENV, never when NODE_ENV is unset/empty. This way a prod
+  // box that somehow loses NODE_ENV cannot silently accept unsigned tokens even
+  // if DEV_AUTH_BYPASS leaked into its environment. Local dev must set
+  // NODE_ENV=dev|development (the same values config.ts validates as dev).
+  const isDevEnv =
+    process.env.NODE_ENV === 'dev' || process.env.NODE_ENV === 'development';
   return isDevEnv && process.env.DEV_AUTH_BYPASS === 'true';
 }
 
