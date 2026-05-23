@@ -58,7 +58,7 @@ import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
 import type { EscalationSettings } from '../../settings/settings';
-import type { SentimentInput, SentimentResult } from '../../ai/agents/customer-calling/sentiment-classifier';
+import type { SentimentInput, SentimentResult, SentimentBudget } from '../../ai/agents/customer-calling/sentiment-classifier';
 import type { PanelData } from '../../ai/agents/customer-calling/escalation-summary-builder';
 
 const logger = createLogger({
@@ -234,7 +234,22 @@ export interface MediaStreamAdapterDeps {
    * If the returned frustrationScore >= threshold, a `frustration_detected`
    * FSM event is dispatched out-of-band and the resulting side effects executed.
    */
-  sentimentClassifier?: (input: SentimentInput) => Promise<SentimentResult>;
+  sentimentClassifier?: (
+    input: SentimentInput,
+    budget?: SentimentBudget,
+  ) => Promise<SentimentResult>;
+  /**
+   * Delivers side effects from the out-of-band `frustration_detected` dispatch
+   * (notify_oncall, audit_log) through the host's voice-turn processor — the
+   * adapter's own `emitSideEffects` only renders `tts_play`. When absent, those
+   * effects are skipped (test/dev path). Wired in production via
+   * `TwilioGatherAdapter.deliverOutOfBandEffects`.
+   */
+  deliverEscalationEffects?: (
+    session: VoiceSession,
+    effects: SideEffect[],
+    tenantId: string,
+  ) => Promise<void>;
   /**
    * Per-tenant escalation settings, resolved once at adapter construction
    * (i.e. per WebSocket connection lifetime). Changes made to the tenant's
@@ -258,6 +273,10 @@ export interface MediaStreamAdapterDeps {
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
+
+// Skip the LLM sentiment call once the session has consumed this fraction of
+// its cost cap, so frustration classification can't blow a tenant's budget.
+const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 
 interface RuntimeState {
   ws: WsLike;
@@ -672,12 +691,22 @@ export class TwilioMediaStreamAdapter {
     const alreadyEnding = sideEffects.some((fx) => fx.type === 'end_session');
     // Use per-session resolved settings (preferred) falling back to the static dep.
     const activeEscalationSettings = this.state.resolvedEscalationSettings ?? this.deps.escalationSettings;
+    // Once the call has already escalated (or ended), further sentiment checks
+    // are wasted LLM spend — the FSM no-ops the dispatch anyway. Skip them.
+    const callState = session.machine.currentState;
     if (
       !alreadyEnding &&
+      callState !== 'escalating' &&
+      callState !== 'terminated' &&
       this.deps.sentimentClassifier &&
       activeEscalationSettings?.trigger_llm_sentiment
     ) {
-      void this.runSentimentCheckAndMaybeEscalate(session, event.transcript, sideEffects).catch(
+      void this.runSentimentCheckAndMaybeEscalate(
+        session,
+        event.transcript,
+        sideEffects,
+        activeEscalationSettings,
+      ).catch(
         (err) =>
           logger.warn('sentiment check failed', {
             error: err instanceof Error ? err.message : String(err),
@@ -706,19 +735,27 @@ export class TwilioMediaStreamAdapter {
     session: VoiceSession,
     transcript: string,
     priorTurnEffects: SideEffect[],
+    escalationSettings: EscalationSettings,
   ): Promise<void> {
     const priorTurns = this.extractPriorTurns(session, 4);
     const intent =
-      (priorTurnEffects.find((fx) => fx.type === 'audit_log')?.payload as { intent?: string } | undefined)
-        ?.intent ?? 'unknown';
+      (priorTurnEffects.find((fx) => fx.type === 'audit_log')?.payload as { intentType?: string } | undefined)
+        ?.intentType ?? 'unknown';
 
-    const result = await this.deps.sentimentClassifier!({
-      transcript,
-      priorTurns,
-      intent,
-    });
+    const result = await this.deps.sentimentClassifier!(
+      {
+        transcript,
+        priorTurns,
+        intent,
+      },
+      {
+        costTracker: session.costTracker,
+        sessionCostCapCents: session.costTracker.costCapCents,
+        maxSentimentBudgetRatio: SENTIMENT_MAX_BUDGET_RATIO,
+      },
+    );
 
-    const threshold = this.deps.escalationSettings!.llm_sentiment_threshold;
+    const threshold = escalationSettings.llm_sentiment_threshold;
     if (result.frustrationScore >= threshold) {
       // Serialize dispatch+emit against any concurrent turn handler.
       // The LLM call above may take 200–2000 ms; without the lock the FSM
@@ -732,10 +769,24 @@ export class TwilioMediaStreamAdapter {
             type: 'frustration_detected',
             source: 'llm_sentiment',
             detail: result.frustrationScore.toFixed(2),
+            ...(result.reasonHint ? { reasonHint: result.reasonHint } : {}),
           }),
         ),
       );
+      // Deliver notify_oncall + audit through the host processor (the adapter's
+      // emitSideEffects only renders tts_play), then render the reassurance TTS.
+      await this.deps.deliverEscalationEffects?.(session, newEffects, session.tenantId);
       await this.emitSideEffects(newEffects);
+      // Record the agent's reassurance line so summarizeSession + later turns
+      // see it — mirrors the speechTurn path (create-voice-turn-processor.ts).
+      const spokenTts = [...newEffects].reverse().find((fx) => fx.type === 'tts_play');
+      if (spokenTts && typeof spokenTts.payload.text === 'string') {
+        this.deps.store.appendTranscript(session.id, {
+          speaker: 'agent',
+          text: spokenTts.payload.text,
+          ts: Date.now(),
+        });
+      }
     }
   }
 

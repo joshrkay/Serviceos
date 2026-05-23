@@ -112,6 +112,11 @@ export class SessionCostTracker {
     return this._exceededDimensions.size > 0;
   }
 
+  /** Per-session total cost cap (cents) this tracker was configured with. */
+  get costCapCents(): number {
+    return this._config.maxCostCents;
+  }
+
   reset(): void {
     this._inputTokens = 0;
     this._outputTokens = 0;

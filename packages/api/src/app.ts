@@ -2152,17 +2152,15 @@ export function createApp(): express.Express {
       // that interface here using the `call_sentiment` task type so routing
       // config can target it separately from main call-flow completions.
       //
-      // NOTE: escalationSettings is per-tenant and must be resolved per-session.
-      // For now we pass undefined here — the feature is enabled only when
-      // the adapter dep is non-undefined, so wiring escalationSettings requires
-      // threading settingsRepo into a per-session init hook (deferred to
-      // Section 12 per-tenant resolution work, tracked in TODO below).
-      //
-      // TODO(S12): resolve escalationSettings per-tenant at session start by
-      // passing a factory/resolver into attachMediaStreamServer so each session
-      // can call `settingsRepo.findByTenantId(tenantId)` and surface the result.
+      // escalationSettings is per-tenant and resolved per-session: the
+      // `resolveEscalationSettings` resolver (passed into attachMediaStreamServer
+      // below) reads the tenant's current settings at session start, so the
+      // static `escalationSettings` dep is intentionally left unset.
       const sentimentClassifierDep = llmGateway
-        ? (input: Parameters<typeof classifyTurnSentiment>[0]) =>
+        ? (
+            input: Parameters<typeof classifyTurnSentiment>[0],
+            budget?: Partial<Parameters<typeof classifyTurnSentiment>[1]>,
+          ) =>
             classifyTurnSentiment(input, {
               llm: {
                 complete: async ({ prompt }: { prompt: string }) => {
@@ -2173,6 +2171,10 @@ export function createApp(): express.Express {
                   return { text: res.content };
                 },
               },
+              // Per-session cost-cap inputs threaded in by the adapter so the
+              // classifier's budget guard can skip the LLM call when the session
+              // is near its cost cap.
+              ...budget,
             })
         : undefined;
 
@@ -2231,6 +2233,10 @@ export function createApp(): express.Express {
               const settings = await settingsRepo.findByTenant(tenantId);
               return resolveEscalationSettings(settings);
             },
+            // F6c: deliver out-of-band frustration_detected effects (notify_oncall,
+            // audit) through the host processor — emitSideEffects only renders TTS.
+            deliverEscalationEffects: (session, effects, tenantId) =>
+              twilioAdapter.deliverOutOfBandEffects(session, effects, tenantId),
           },
         );
         return server;
