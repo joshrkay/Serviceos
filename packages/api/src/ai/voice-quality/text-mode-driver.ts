@@ -102,6 +102,22 @@ import {
 import type { QueueMessage } from '../../queues/queue';
 import type { Logger } from '../../logging/logger';
 
+// Compliance + escalation (production skills reused so the harness exercises
+// the real DNC / after-hours / escalation logic, not a re-implementation).
+import { enforceCompliance } from '../skills/enforce-compliance';
+import { escalateToHuman } from '../skills/escalate-to-human';
+import { createProposal } from '../../proposals/proposal';
+import type { SettingsRepository } from '../../settings/settings';
+import type { DncRepository } from '../../compliance/dnc';
+import type { OnCallRepository } from '../../oncall/rotation';
+
+/** Intents that book/queue work — gated to a callback when after-hours. */
+const BOOKING_INTENTS = new Set<string>([
+  'create_appointment',
+  'book_appointment',
+  'create_booking',
+]);
+
 /**
  * Silent logger used by the synthesized voice-action-router worker
  * dispatch. The router logs at info/warn for ops visibility — those
@@ -169,6 +185,18 @@ export interface TextModeDriverDeps {
   lookupEvents?: LookupEventService;
   /** Used as `userId` on synthesized voice-action-router messages. */
   systemActorId?: string;
+  /**
+   * Compliance gate deps. When `settingsRepo` + `dncRepo` are supplied, the
+   * driver runs `enforceCompliance` once per session before the first turn:
+   *   - DNC caller → escalate (needs `onCallRepo`) + terminate the session.
+   *   - after-hours booker → callback proposal instead of `create_appointment`.
+   * Omitted in tests that don't exercise compliance — the gate no-ops.
+   */
+  settingsRepo?: SettingsRepository;
+  dncRepo?: DncRepository;
+  onCallRepo?: OnCallRepository;
+  /** Wall-clock for the business-hours check (corpus `callMomentLocal`). */
+  currentTime?: Date;
 }
 
 // ─── Implementation ──────────────────────────────────────────────────────────
@@ -206,6 +234,15 @@ export class TextModeDriver implements AgentDriver {
    * `AudioModeDriver`. Cleared in `endSession`.
    */
   private readonly turnIndexBySession = new Map<string, number>();
+  /** Sessions whose once-per-session compliance gate has already run. */
+  private readonly complianceCheckedBySession = new Set<string>();
+  /** Sessions flagged after-hours by the compliance gate. */
+  private readonly afterHoursSessions = new Set<string>();
+  /** Caller identity captured at startSession, keyed by sessionId. */
+  private readonly callerInfoBySession = new Map<
+    string,
+    { callerId: string | null; blocked: boolean }
+  >();
 
   constructor(deps: TextModeDriverDeps) {
     this.deps = deps;
@@ -226,6 +263,10 @@ export class TextModeDriver implements AgentDriver {
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
     }
+    this.callerInfoBySession.set(session.id, {
+      callerId: opts.callerId,
+      blocked: opts.callerIdBlocked,
+    });
     return { sessionId: session.id };
   }
 
@@ -253,6 +294,13 @@ export class TextModeDriver implements AgentDriver {
     // strict `latencyMs > 0` assertions in the test suite (see VQ-007).
     const startedAt = performance.now();
 
+    // Compliance gate (once per session, detection-only). Reuses the
+    // production `enforceCompliance` skill so the harness exercises real DNC /
+    // after-hours logic. We still classify the utterance below (so the
+    // disposition grader sees the recognized intent) before acting: DNC →
+    // escalate + terminate; after-hours booker → callback.
+    const compliance = await this.runComplianceGate(session);
+
     // 2. Classify intent. Errors → low-confidence-style "couldn't catch
     //    that" line; mirrors the Twilio adapter's failure-mode for
     //    classifier exceptions (we don't want a 5xx to hang the call).
@@ -275,7 +323,13 @@ export class TextModeDriver implements AgentDriver {
         }),
       );
 
-      if (classification.intentType === 'unknown') {
+      if (compliance === 'dnc') {
+        // DNC caller: the intent was classified (above) so the grader sees
+        // it, but we refuse to act — escalate to a human + terminate.
+        await this.handleDncBlock(session);
+        agentResponse =
+          "I'm sorry, I'm not able to continue this call. Goodbye.";
+      } else if (classification.intentType === 'unknown') {
         // Mirror the action-router's clarification path. We still want
         // a proposal to land for graders that assert "every utterance
         // produced a visible outcome".
@@ -287,6 +341,16 @@ export class TextModeDriver implements AgentDriver {
           session,
           classification.intentType as IntentType,
         );
+      } else if (
+        compliance === 'after_hours' &&
+        BOOKING_INTENTS.has(classification.intentType)
+      ) {
+        // After-hours booker: do NOT create a booking proposal. Queue a
+        // callback and escalate (reuses production escalateToHuman) so the
+        // owner follows up during business hours.
+        await this.emitAfterHoursCallback(session);
+        agentResponse =
+          "We're closed right now, so I've arranged for our team to call you back. Is there anything else?";
       } else {
         // Mutation: route through voice-action-router so the same
         // handler set + clarification semantics + entity translation
@@ -370,6 +434,9 @@ export class TextModeDriver implements AgentDriver {
   async endSession(sessionId: string): Promise<void> {
     const session = this.deps.voiceSessionStore.peek(sessionId);
     this.turnIndexBySession.delete(sessionId);
+    this.complianceCheckedBySession.delete(sessionId);
+    this.afterHoursSessions.delete(sessionId);
+    this.callerInfoBySession.delete(sessionId);
     if (!session) return;
     if (this.deps.bus) {
       this.deps.bus.unsubscribe(session);
@@ -378,6 +445,108 @@ export class TextModeDriver implements AgentDriver {
   }
 
   // ─── Internals ─────────────────────────────────────────────────────────────
+
+  /**
+   * Run the inbound compliance gate once per session, reusing the
+   * production `enforceCompliance` skill. Returns the disposition the
+   * caller (`speak`) acts on. No-ops to `'open'` when the compliance
+   * repos aren't wired (non-compliance tests).
+   */
+  private async runComplianceGate(
+    session: VoiceSession,
+  ): Promise<'dnc' | 'after_hours' | 'open'> {
+    if (this.complianceCheckedBySession.has(session.id)) {
+      return this.afterHoursSessions.has(session.id) ? 'after_hours' : 'open';
+    }
+    this.complianceCheckedBySession.add(session.id);
+
+    const { settingsRepo, dncRepo } = this.deps;
+    if (!settingsRepo || !dncRepo) return 'open';
+
+    const callerInfo = this.callerInfoBySession.get(session.id);
+    const callerPhone = callerInfo?.callerId ?? undefined;
+
+    const result = await enforceCompliance({
+      tenantId: session.tenantId,
+      callerPhone,
+      channel: 'telephony',
+      currentTime: this.deps.currentTime ?? new Date(),
+      settingsRepo,
+      dncRepo,
+    });
+
+    if (!result.allowed) return 'dnc';
+    if (result.isAfterHours) {
+      this.afterHoursSessions.add(session.id);
+      return 'after_hours';
+    }
+    return 'open';
+  }
+
+  /**
+   * DNC hard block: escalate to a human (emits `escalation_triggered` when a
+   * rotation is seeded) and terminate the session. Called after the turn's
+   * intent has been classified so the disposition grader still sees it.
+   */
+  private async handleDncBlock(session: VoiceSession): Promise<void> {
+    const callerPhone = this.callerInfoBySession.get(session.id)?.callerId ?? undefined;
+    if (this.deps.onCallRepo) {
+      await escalateToHuman({
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        reason: 'abuse_detected',
+        channel: 'telephony',
+        callerPhone,
+        onCallRepo: this.deps.onCallRepo,
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+        session,
+      });
+    }
+    session.events.emit('voice-event', sessionTerminatedEvent('dnc_blocked'));
+    session.ended = true;
+  }
+
+  /**
+   * After-hours booking: persist a callback proposal (the existing
+   * `voice_clarification`/`customer_callback_required` mechanism) instead
+   * of a booking proposal, and escalate so the owner is notified.
+   */
+  private async emitAfterHoursCallback(session: VoiceSession): Promise<void> {
+    const proposal = createProposal({
+      tenantId: session.tenantId,
+      proposalType: 'voice_clarification',
+      payload: {
+        intent: 'customer_callback_required',
+        reason: 'after_hours',
+        sessionId: session.id,
+      },
+      summary: 'After-hours booking — customer callback required',
+      sourceContext: {
+        source: 'calling-agent',
+        channel: 'telephony',
+        sessionId: session.id,
+        escalationReason: 'after_hours',
+      },
+      createdBy: this.deps.systemActorId ?? 'system:text-mode',
+    });
+    const stored = await this.deps.proposalRepo.create(proposal);
+    session.proposalIds.push(stored.id);
+    session.events.emit('voice-event', {
+      type: 'proposal_created',
+      proposalId: stored.id,
+    });
+    if (this.deps.onCallRepo) {
+      await escalateToHuman({
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        reason: 'low_confidence',
+        channel: 'telephony',
+        onCallRepo: this.deps.onCallRepo,
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+        session,
+      });
+    }
+  }
 
   /**
    * Drive the voice-action-router worker with a synthetic queue

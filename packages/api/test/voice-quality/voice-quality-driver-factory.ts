@@ -18,6 +18,9 @@ import {
 import { TextModeDriver, type AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
+import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
+import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
+import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 
 const JUDGE_PASS_JSON = JSON.stringify({
   answerMeaningMatches: true,
@@ -115,6 +118,42 @@ export function makeVoiceQualityDriverFactory(
     const gateway =
       fctx.gateway ?? buildCassetteGatewayForScript(script, cassetteMode);
 
+    // Compliance gate deps — only wired for scripts that declare DNC or
+    // business-hours fixtures, so non-compliance scripts are unaffected.
+    const tenant = script.fixtures.tenant as
+      | {
+          id?: string;
+          dnc?: { list?: string[] };
+          businessHours?: {
+            schedule?: Array<{ dayOfWeek: number; openTime: string; closeTime: string }>;
+            callMomentLocal?: string;
+            timezone?: string;
+          };
+        }
+      | undefined;
+    const tenantId = tenant?.id;
+    const hasCompliance = Boolean(tenantId && (tenant?.dnc || tenant?.businessHours));
+
+    let settingsRepo: InMemorySettingsRepository | undefined;
+    let dncRepo: InMemoryDncRepository | undefined;
+    let onCallRepo: InMemoryOnCallRepository | undefined;
+    let currentTime: Date | undefined;
+    let settingsSeeded = false;
+
+    if (hasCompliance && tenantId) {
+      dncRepo = new InMemoryDncRepository();
+      for (const phone of tenant?.dnc?.list ?? []) {
+        dncRepo.add(tenantId, normalizePhone(phone));
+      }
+      settingsRepo = new InMemorySettingsRepository();
+      onCallRepo = new InMemoryOnCallRepository(
+        new Map([[tenantId, [{ id: 'oncall-1', userId: 'oncall-user-1', orderIndex: 0 }]]]),
+      );
+      if (tenant?.businessHours?.callMomentLocal) {
+        currentTime = new Date(tenant.businessHours.callMomentLocal);
+      }
+    }
+
     const driver = new TextModeDriver({
       voiceSessionStore: store,
       bus: fctx.bus,
@@ -128,6 +167,10 @@ export function makeVoiceQualityDriverFactory(
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
       systemActorId: 'system:vq-corpus',
+      ...(settingsRepo ? { settingsRepo } : {}),
+      ...(dncRepo ? { dncRepo } : {}),
+      ...(onCallRepo ? { onCallRepo } : {}),
+      ...(currentTime ? { currentTime } : {}),
     });
 
     const firstCustomer = script.fixtures.customers?.[0] as { id?: string } | undefined;
@@ -135,6 +178,27 @@ export function makeVoiceQualityDriverFactory(
 
     return {
       startSession: async (opts) => {
+        // Seed the tenant settings row (with business-hours schedule) once,
+        // before the first turn runs the compliance gate.
+        if (settingsRepo && tenantId && !settingsSeeded) {
+          settingsSeeded = true;
+          const now = new Date();
+          await settingsRepo.create({
+            id: `vq-settings-${tenantId}`,
+            tenantId,
+            businessName: 'VQ Tenant',
+            timezone: tenant?.businessHours?.timezone ?? 'America/Los_Angeles',
+            estimatePrefix: 'EST-',
+            invoicePrefix: 'INV-',
+            nextEstimateNumber: 1,
+            nextInvoiceNumber: 1,
+            defaultPaymentTermDays: 30,
+            createdAt: now,
+            updatedAt: now,
+            // enforceCompliance reads this via a cast; not on the public type.
+            businessHoursSchedule: tenant?.businessHours?.schedule ?? [],
+          } as unknown as TenantSettings);
+        }
         const r = await driver.startSession(opts);
         if (customerId) {
           const session = store.get(r.sessionId);
