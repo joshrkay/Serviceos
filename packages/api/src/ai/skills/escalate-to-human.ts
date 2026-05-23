@@ -77,7 +77,11 @@ export type EscalationReason =
   | 'emergency_dispatch'
   | 'abuse_detected'
   | 'provider_failure'
-  | 'max_retries_exceeded';
+  | 'max_retries_exceeded'
+  // P8-016 — vulnerability-aware emergency patch to the OWNER's cell (a
+  // separate path from the dispatcher rotation). Additive; existing reasons
+  // are unchanged.
+  | 'vulnerability_patch';
 
 /**
  * Maps the skill-layer EscalationReason (internal system categorisation)
@@ -93,6 +97,9 @@ export function mapSkillReasonToBuilderReason(
 ): EscalationContext['reason'] {
   switch (reason) {
     case 'emergency_dispatch':
+    // P8-016 — a vulnerability patch IS an emergency from the human's POV;
+    // surface it with the emergency vocabulary.
+    case 'vulnerability_patch':
       return 'emergency_dispatch';
     case 'caller_requested':
       return 'operator_request';
@@ -124,6 +131,15 @@ export type DispatcherPhoneResolver = (
   userId: string,
 ) => Promise<string | null>;
 
+/**
+ * P8-016 — resolve the TENANT OWNER's cell phone (E.164) for a vulnerability
+ * patch. Sibling to `DispatcherPhoneResolver` but a SEPARATE path: it pages the
+ * owner directly (tenants.owner_id → that user's `mobileNumber`), bypassing the
+ * dispatcher rotation. Returns null when no owner mobile is on file — the
+ * caller (`owner-cell-patch`) then falls back to a high-priority booking + SMS.
+ */
+export type OwnerPhoneResolver = (tenantId: string) => Promise<string | null>;
+
 export interface EscalateToHumanInput {
   tenantId: string;
   conversationId?: string;
@@ -148,6 +164,13 @@ export interface EscalateToHumanInput {
    * the skill falls back to the v1 in-app behavior even on telephony.
    */
   dispatcherPhoneResolver?: DispatcherPhoneResolver;
+  /**
+   * P8-016 — telephony only. Resolves the tenant OWNER's cell for a
+   * `vulnerability_patch`. Optional; consumed by `owner-cell-patch`, not by
+   * the default escalation branches. Present here so the input shape stays the
+   * single carrier for telephony resolvers.
+   */
+  ownerPhoneResolver?: OwnerPhoneResolver;
   /**
    * Telephony only. Twilio CallSid of the active call leg. Required
    * for `callControl.dialDispatcher` to bind the `<Dial>` to the

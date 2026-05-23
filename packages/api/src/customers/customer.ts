@@ -48,6 +48,20 @@ export interface Customer {
    * the call-site to 'en' | 'es' for runtime catalog lookups.
    */
   preferredLanguage?: string;
+  /**
+   * P8-016 — date of birth (additive, migration 113). When present, the
+   * vulnerability age detector derives age >65 from this in addition to a
+   * self-reported age in the caller's utterance. Optional — most rows have
+   * no DOB on file.
+   */
+  dateOfBirth?: Date;
+  /**
+   * P8-016 — account classification (additive, migration 113). 'b2b' marks a
+   * business account (e.g. a property manager reporting on residents); the
+   * property-type vulnerability detector only fires for 'b2b' accounts AND
+   * explicit currently-occupied intent. Optional — unset means unclassified.
+   */
+  accountType?: 'residential' | 'b2b';
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;

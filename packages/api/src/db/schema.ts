@@ -2797,6 +2797,196 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS voice_agent_live_at TIMESTAMPTZ;
   `,
+
+  // P1-022 — bind inbound communications (P6-028 tech "OUT" SMS reply,
+  // P8-016 emergency owner-cell paging) to a user by mobile number.
+  // Stored normalized to E.164 (`+15551234567`) by normalizeMobileE164().
+  // Partial unique index: tenant-scoped uniqueness while permitting many
+  // rows with NULL mobile (existing users have none on file). Idempotent
+  // (IF NOT EXISTS) so the migration is safely replayable on Postgres 14+.
+  '109_users_mobile_number': `
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_number TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_mobile_unique
+      ON users (tenant_id, mobile_number)
+      WHERE mobile_number IS NOT NULL;
+  `,
+
+  // P4-015 — per-tenant brand voice tone consumed by composeBrandVoiceMessage.
+  // JSONB so the shape (formality / pronoun / vibe_words / business_name) can
+  // evolve additively. Defaults to '{}' which mapRow surfaces as undefined,
+  // so the composer falls back to its neutral default tone for existing rows.
+  '110_tenant_settings_brand_voice': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS brand_voice JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `,
+
+  // P0-036 — generic per-key sliding-window rate limiter backing domain-scoped
+  // throttles (P8-015 dropped-call recovery is the first consumer). `scope`
+  // namespaces unrelated limiters (e.g. 'sms_recovery' vs 'verify_code') so they
+  // share one table without colliding. Each tryConsume() writes a row keyed by
+  // NOW(); callers SUM counts over the trailing windowMs, so old windows age out
+  // (a sliding window, not a fixed bucket). The PRIMARY KEY's btree on
+  // (tenant_id, scope, key, window_start) is exactly the lookup index, so no
+  // separate index is created. RLS-isolated by tenant.
+  '111_phone_rate_limits': `
+    CREATE TABLE IF NOT EXISTS phone_rate_limits (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      scope TEXT NOT NULL,
+      key TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      count INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, scope, key, window_start)
+    );
+    ALTER TABLE phone_rate_limits ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_phone_rate_limits ON phone_rate_limits;
+    CREATE POLICY tenant_isolation_phone_rate_limits ON phone_rate_limits
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P8-015 — durable queue for the 60s deferred dropped-call recovery SMS.
+  // Inserting a row (scheduled_for = drop time + 60s) IS the enqueue; the
+  // dropped-call-worker polls due rows via the partial index below, so a
+  // restart between schedule (T=0) and send (T=60s) never loses a recovery
+  // (vs. the superseded setTimeout MVP). UNIQUE (tenant_id, voice_session_id)
+  // makes scheduling idempotent — a duplicate finalize is a no-op. sent_at /
+  // suppressed_reason / sms_message_sid are stamped by the worker at send
+  // time. RLS-isolated by tenant. Idempotent (IF NOT EXISTS + DROP/CREATE
+  // POLICY) so the whole-string migration runner can replay it on every boot.
+  '112_dropped_call_recoveries': `
+    CREATE TABLE IF NOT EXISTS dropped_call_recoveries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id UUID NOT NULL,
+      caller_e164 TEXT NOT NULL,
+      scheduled_for TIMESTAMPTZ NOT NULL,
+      sent_at TIMESTAMPTZ,
+      suppressed_reason TEXT,
+      sms_message_sid TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (tenant_id, voice_session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dropped_call_recoveries_due
+      ON dropped_call_recoveries (scheduled_for)
+      WHERE sent_at IS NULL AND suppressed_reason IS NULL;
+    ALTER TABLE dropped_call_recoveries ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_dropped_call_recoveries ON dropped_call_recoveries;
+    CREATE POLICY tenant_isolation_dropped_call_recoveries ON dropped_call_recoveries
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P8-016 — additive vulnerability fields on the tenant-scoped customers
+  // table. `date_of_birth` lets the age detector derive age >65 from the
+  // matched customer record (in addition to a self-reported age in the
+  // utterance). `account_type` distinguishes residential callers from B2B
+  // accounts (e.g. property managers) so the property-type detector can fire
+  // conservatively. Both are nullable — existing rows have neither on file.
+  // Idempotent (ADD COLUMN IF NOT EXISTS) so the whole-string runner replays
+  // it on every boot. customers already has RLS (migration 014); no policy
+  // change here.
+  '113_customer_vulnerability_fields': `
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+    ALTER TABLE customers ADD COLUMN IF NOT EXISTS account_type TEXT
+      CHECK (account_type IS NULL OR account_type IN ('residential', 'b2b'));
+  `,
+
+  // P8-016 — PUBLIC weather cache. INTENTIONALLY NOT tenant-scoped: it caches
+  // an external weather provider's reading keyed by ROUNDED lat/lng (~0.5°,
+  // roughly 30 mi). Two tenants in the same locale share the same cached row,
+  // so there is NO `tenant_id` column and NO RLS policy — the data is public
+  // (ambient temperature) and not customer/tenant PII. Repos read/write it via
+  // `withClient()` (the cross-tenant escape hatch on PgBaseRepository), NOT
+  // `withTenant()`. `fetched_at` drives staleness (>1h = refetch). Idempotent
+  // (IF NOT EXISTS) so the whole-string runner replays it on every boot.
+  '114_weather_cache': `
+    CREATE TABLE IF NOT EXISTS weather_cache (
+      lat_rounded NUMERIC(4,1) NOT NULL,
+      lng_rounded NUMERIC(4,1) NOT NULL,
+      max_temp_f NUMERIC(5,1),
+      min_temp_f NUMERIC(5,1),
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (lat_rounded, lng_rounded)
+    );
+    CREATE INDEX IF NOT EXISTS idx_weather_cache_fetched_at
+      ON weather_cache (fetched_at);
+  `,
+
+  // P8-016 — analytics / post-incident-review log of every vulnerability
+  // triage decision. Tenant-scoped + RLS. Carries the decision kind, urgency
+  // tier, score total, the weather-unavailable gap flag, and the fired signals
+  // (kind + NON-PII evidence + weight) as JSONB so a reviewer can audit "did
+  // the matrix make the right call?" without replaying the call. NO transcript,
+  // NO full address. Idempotent (IF NOT EXISTS + DROP/CREATE POLICY) so the
+  // whole-string runner replays it on every boot.
+  '115_vulnerability_signals': `
+    CREATE TABLE IF NOT EXISTS vulnerability_signals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      voice_session_id UUID NOT NULL,
+      customer_id UUID,
+      decision_kind TEXT NOT NULL,
+      urgency TEXT NOT NULL,
+      score_total INT NOT NULL DEFAULT 0,
+      weather_unavailable BOOLEAN NOT NULL DEFAULT false,
+      signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_vulnerability_signals_tenant_created
+      ON vulnerability_signals (tenant_id, created_at);
+    ALTER TABLE vulnerability_signals ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_vulnerability_signals ON vulnerability_signals;
+    CREATE POLICY tenant_isolation_vulnerability_signals ON vulnerability_signals
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P6-028 — PG-backed unavailable_blocks mirroring the in-memory
+  // UnavailableBlock model (packages/api/src/availability/unavailable-block.ts).
+  // A tech "I'm out today" SMS writes one row spanning the tenant-local day
+  // (start_time = tenant-local midnight, end_time = +24h, reason = the
+  // normalized keyword). Columns match the in-memory interface so both impls
+  // satisfy `UnavailableBlockRepository`. Tenant-scoped + RLS. Idempotent
+  // (IF NOT EXISTS + DROP/CREATE POLICY) so the whole-string runner replays it
+  // on every boot.
+  '116_tech_unavailable_blocks': `
+    CREATE TABLE IF NOT EXISTS tech_unavailable_blocks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      start_time TIMESTAMPTZ NOT NULL,
+      end_time TIMESTAMPTZ NOT NULL,
+      reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tech_unavailable_blocks_tech_range
+      ON tech_unavailable_blocks (tenant_id, technician_id, start_time, end_time);
+    ALTER TABLE tech_unavailable_blocks ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tech_unavailable_blocks ON tech_unavailable_blocks;
+    CREATE POLICY tenant_isolation_tech_unavailable_blocks ON tech_unavailable_blocks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // P6-028 — daily idempotency key for the tech "I'm out today" SMS. The PK
+  // includes local_date (the tech's TENANT-LOCAL calendar date), so a second
+  // OUT reply on the same day is a no-op (the INSERT conflicts) and a new day
+  // simply has no row — "midnight clear" emerges from the PK with NO cron.
+  // status mirrors the three accepted keywords; source_message_sid records the
+  // inbound SMS provenance. Tenant-scoped + RLS. Idempotent (IF NOT EXISTS +
+  // DROP/CREATE POLICY) so the whole-string runner replays it on every boot.
+  '117_tech_status_today': `
+    CREATE TABLE IF NOT EXISTS tech_status_today (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      technician_id UUID NOT NULL REFERENCES users(id),
+      local_date DATE NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('out','sick','unavailable')),
+      source_message_sid TEXT NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (tenant_id, technician_id, local_date)
+    );
+    ALTER TABLE tech_status_today ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tech_status_today ON tech_status_today;
+    CREATE POLICY tenant_isolation_tech_status_today ON tech_status_today
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

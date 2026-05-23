@@ -76,6 +76,32 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         return { success: false, error: `Stale proposal: ${freshness.reasons.join('; ')}` };
       }
 
+      // "No slot selected" guard. Tech-out proposals (P6-028) are created with
+      // `sourceContext.requiresSlotSelection` and the payload seeded with the
+      // appointment's CURRENT times, for the owner to edit to a real new slot.
+      // Approving one (e.g. via APPROVE ALL) WITHOUT editing would update
+      // nothing yet still fire a customer "we've rescheduled you" notification
+      // (notifyRescheduled below). Reject that so the owner must pick a time
+      // first. Scoped to flagged proposals so an ordinary reschedule
+      // re-executed with its already-applied times stays idempotent.
+      const requiresSlotSelection =
+        proposal.sourceContext?.requiresSlotSelection === true;
+      const hasArrivalWindowChange =
+        payload.newArrivalWindowStart != null ||
+        payload.newArrivalWindowEnd != null;
+      if (
+        requiresSlotSelection &&
+        !hasArrivalWindowChange &&
+        startDate.getTime() === appointment.scheduledStart.getTime() &&
+        endDate.getTime() === appointment.scheduledEnd.getTime()
+      ) {
+        return {
+          success: false,
+          error:
+            'Reschedule has no new time selected — pick a new slot before approving.',
+        };
+      }
+
       // Conflict / feasibility check — delegate to the checkFeasibility composer
       let trailingWarnings: FeasibilityIssue[] = [];
       if (this.feasibilityDeps) {

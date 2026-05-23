@@ -88,6 +88,14 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       }
       return { ...DEFAULT_ESCALATION_SETTINGS, ...raw };
     })(),
+    // P4-015 — migration 110. JSONB column; pg returns the parsed object
+    // directly. Empty object means "not configured" — surface as undefined
+    // so the brand-voice composer falls back to its neutral default tone.
+    brandVoice: (() => {
+      const raw = row.brand_voice as Record<string, unknown> | null | undefined;
+      if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
+      return raw as TenantSettings['brandVoice'];
+    })(),
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -246,6 +254,20 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         if (key === 'escalationSettings') {
           setClauses.push(`escalation_settings = $${paramIndex}::jsonb`);
           const v = value as Partial<EscalationSettings> | undefined | null;
+          params.push(
+            v && typeof v === 'object' && Object.keys(v).length > 0
+              ? JSON.stringify(v)
+              : '{}',
+          );
+          paramIndex++;
+          continue;
+        }
+        // P4-015 — brand_voice is JSONB; mirror the threshold/escalation
+        // pattern. Cleared (undefined / empty / null) writes '{}' so the
+        // column matches its DEFAULT and reads back as undefined.
+        if (key === 'brandVoice') {
+          setClauses.push(`brand_voice = $${paramIndex}::jsonb`);
+          const v = value as Record<string, unknown> | undefined | null;
           params.push(
             v && typeof v === 'object' && Object.keys(v).length > 0
               ? JSON.stringify(v)

@@ -138,6 +138,41 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     expect(result.success).toBe(true);
   });
 
+  it('rejects an unedited tech-out proposal (requiresSlotSelection + same times) so APPROVE ALL cannot fire a no-op customer SMS', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-15T10:00:00Z'),
+      scheduledEnd: new Date('2026-03-15T12:00:00Z'),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    // Seeded with the appointment's CURRENT times (P6-028 tech-out shape).
+    const proposal: Proposal = {
+      ...makeProposal({
+        appointmentId: appt.id,
+        newScheduledStart: '2026-03-15T10:00:00Z',
+        newScheduledEnd: '2026-03-15T12:00:00Z',
+      }),
+      sourceContext: { requiresSlotSelection: true },
+    };
+
+    const result = await handler.execute(proposal, context);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('no new time selected');
+
+    // Once the owner picks a real slot, the same flagged proposal executes.
+    const edited: Proposal = {
+      ...proposal,
+      payload: {
+        appointmentId: appt.id,
+        newScheduledStart: '2026-03-16T10:00:00Z',
+        newScheduledEnd: '2026-03-16T12:00:00Z',
+      },
+    };
+    const ok = await handler.execute(edited, context);
+    expect(ok.success).toBe(true);
+  });
+
   it('rejects when feasibility reports a blocking overlap', async () => {
     const assignmentRepo = new InMemoryAssignmentRepository();
     const appt = await createAppointment({

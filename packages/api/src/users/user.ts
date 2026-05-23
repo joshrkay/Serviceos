@@ -31,6 +31,14 @@ export interface User {
   lastName?: string;
   /** Phase 12 — owners + dispatchers who can switch to tech mode. */
   canFieldServe: boolean;
+  /**
+   * P1-022 — normalized E.164 mobile number (`+15551234567`) used to bind
+   * an inbound communication (tech SMS reply, emergency owner-cell paging)
+   * to this user. Stored normalized; always pass raw input through
+   * `normalizeMobileE164()` before writing or looking up. Optional —
+   * existing rows have no mobile on file.
+   */
+  mobileNumber?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -50,6 +58,15 @@ export interface UpdateUserInput {
 export interface UserRepository {
   findByTenant(tenantId: string, options?: UserListOptions): Promise<User[]>;
   findById(tenantId: string, id: string): Promise<User | null>;
+  /**
+   * P1-022 — bind an inbound communication to a user by mobile number.
+   * `e164` MUST already be normalized via `normalizeMobileE164()`. Always
+   * tenant-scoped (the tenantId is enforced in the WHERE clause as defense
+   * in depth alongside RLS) so a number registered in one tenant can never
+   * resolve a user in another. Returns null when no user in this tenant has
+   * that mobile on file.
+   */
+  findByMobileNumber(tenantId: string, e164: string): Promise<User | null>;
   update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null>;
   /**
    * Tier 4 (Team members — PR 2 follow-up). Atomic role demotion that
@@ -172,6 +189,13 @@ export class InMemoryUserRepository implements UserRepository {
     const u = this.users.get(id);
     if (!u || u.tenantId !== tenantId) return null;
     return { ...u };
+  }
+
+  async findByMobileNumber(tenantId: string, e164: string): Promise<User | null> {
+    const match = Array.from(this.users.values()).find(
+      (u) => u.tenantId === tenantId && u.mobileNumber === e164,
+    );
+    return match ? { ...match } : null;
   }
 
   async update(tenantId: string, id: string, updates: UpdateUserInput): Promise<User | null> {
