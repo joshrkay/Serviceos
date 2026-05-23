@@ -23,19 +23,6 @@ export type MatrixModule =
   | 'ISO'
   | 'PORTAL'
   | 'LEGACY';
-
-  | 'EST'
-  | 'INV'
-  | 'AST'
-  | 'PROV'
-  | 'CUST'
-  | 'JRN'
-  | 'SCH'
-  | 'SMS'
-  | 'PAY'
-  | 'VOX'
-  | 'ISO'
-  | 'PORT';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
 export interface MatrixRow {
