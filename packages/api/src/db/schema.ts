@@ -2987,6 +2987,18 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_tech_status_today ON tech_status_today
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '118_jobs_money_state': `
+    -- Denormalized money-state rollup read/written by refreshJobMoneyState
+    -- (packages/api/src/jobs/pg-job.ts). The estimate/invoice transition
+    -- handlers UPDATE jobs.money_state in the SAME transaction as the status
+    -- change, so a missing column aborts the txn and silently rolls the
+    -- transition back (the HTTP response still shows the new status). This
+    -- column was required by code but created by no migration. IF NOT EXISTS
+    -- keeps it safe on databases where it already exists out-of-band.
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS money_state TEXT NOT NULL DEFAULT 'no_estimate';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
