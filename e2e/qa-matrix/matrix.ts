@@ -306,6 +306,93 @@ export const MATRIX: MatrixRow[] = [
       "Tenant B token reading Tenant A's customer/job/estimate/invoice returns 403/404; cross-tenant note write blocked; DB without tenant GUC returns 0 rows",
     expected: 'pass',
   },
+
+  // ----- Payments edge cases -----
+  {
+    id: 'PAY-01',
+    module: 'PAY',
+    feature: 'Partial → full payment + over-payment guard',
+    passCriteria:
+      'Partial payment → partially_paid; over-payment (> amount_due) rejected; remainder payment → paid with amount_due=0',
+    expected: 'pass',
+  },
+  {
+    id: 'PAY-02',
+    module: 'PAY',
+    feature: 'Deposit credit auto-applied on first invoice',
+    passCriteria:
+      "A job with deposit_paid_cents set yields a 'deposit_credit' payment on its first invoice and a reduced amount_due",
+    expected: 'partial',
+    expectedReason: 'Requires a read-write DB conn to seed the deposit; auto-credit path verified live.',
+  },
+  {
+    id: 'PAY-03',
+    module: 'PAY',
+    feature: 'Money dashboard reflects paid revenue',
+    passCriteria: 'GET /api/reports/money-dashboard shows non-zero revenue after invoices are paid',
+    expected: 'pass',
+  },
+  {
+    id: 'PAY-04',
+    module: 'PAY',
+    feature: 'Overdue invoice money-state',
+    passCriteria: "A past-due open invoice drives job money_state to 'overdue' (worker-computed)",
+    expected: 'partial',
+    expectedReason: 'Worker-driven, no HTTP trigger; needs RW conn to backdate due_date + the overdue sweep running.',
+  },
+
+  // ----- Public portal (token-gated, no auth) -----
+  {
+    id: 'PORT-01',
+    module: 'PORT',
+    feature: 'Public estimate approval via view token',
+    passCriteria:
+      'Send estimate → obtain view token → GET /public/estimates/:token (200) → approve → status accepted; malformed token → 400/404',
+    expected: 'pass',
+  },
+  {
+    id: 'PORT-02',
+    module: 'PORT',
+    feature: 'Public invoice view + checkout via view token',
+    passCriteria:
+      'Send invoice → obtain view token → GET /public/invoices/:token (200) → checkout returns a URL (or 400 if Stripe unconfigured); malformed token → 400/404',
+    expected: 'pass',
+  },
+
+  // ----- Voice / AI edge cases -----
+  {
+    id: 'VOX-01',
+    module: 'VOX',
+    feature: 'Emergency triage fast-path (voice)',
+    passCriteria: 'An emergency utterance (no-heat + gas smell) routes the session to escalation rather than a normal booking',
+    expected: 'partial',
+    expectedReason: 'Real-LLM observation; escalation surfaced via session state/side-effects.',
+  },
+  {
+    id: 'VOX-02',
+    module: 'VOX',
+    feature: 'Spanish / i18n voice response',
+    passCriteria: 'A Spanish utterance yields a Spanish-language response (language detection / switch)',
+    expected: 'partial',
+    expectedReason: 'Real-LLM, soft language assertion; evidence captured for review.',
+  },
+  {
+    id: 'VOX-03',
+    module: 'VOX',
+    feature: 'DNC suppression of outbound SMS',
+    passCriteria: 'A phone on the tenant DNC list receives no SMS dispatch when an estimate is sent to it',
+    expected: 'partial',
+    expectedReason: 'Needs RW conn to seed DNC + a wired send path; degrades to na if send is unavailable.',
+  },
+  {
+    id: 'VOX-04',
+    module: 'VOX',
+    feature: 'Telephony-only edge cases (documented coverage gap)',
+    passCriteria:
+      'Records the cases not exercisable in simulated/in-app mode: business-hours enforcement, plan caller-context, phone rate-limiting, tech "out today" SMS, dropped-call recovery, session cost caps',
+    expected: 'na',
+    expectedReason: 'Require live Twilio (signed webhooks / real call) or non-API config; documented, not driven.',
+  },
 ];
 
 export function findRow(id: string): MatrixRow | undefined {
