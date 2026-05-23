@@ -22,6 +22,8 @@ export class FillerAudioCache {
   ) {}
 
   load(): void {
+    const missing: Array<{ id: string; candidates: string[] }> = [];
+
     for (const filler of FILLER_LIBRARY) {
       // Prefer pcm (current renderer output). Allow mp3 or .bin overrides
       // for legacy render runs or alternate provider output.
@@ -30,10 +32,18 @@ export class FillerAudioCache {
       );
       const path = candidates.find((p) => existsSync(p));
       if (!path) {
-        this.logger.warn('filler audio missing', { id: filler.id, candidates });
+        missing.push({ id: filler.id, candidates });
         continue;
       }
       this.cache.set(filler.id, readFileSync(path));
+    }
+
+    if (missing.length > 0) {
+      this.logger.warn('filler audio missing', {
+        missingCount: missing.length,
+        loadedCount: this.cache.size,
+        missing,
+      });
     }
   }
 
