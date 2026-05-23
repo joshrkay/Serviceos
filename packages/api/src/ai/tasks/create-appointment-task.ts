@@ -217,6 +217,12 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
     const parsed = tryParseJson(llmResponse.content);
     const payload = buildPayload(parsed);
 
+    // The LLM is instructed never to invent a customerId; the caller's
+    // identity is resolved upstream (caller-ID match) and threaded on
+    // the context. Prefer it over anything the model produced so the
+    // booking is attributed to the verified caller.
+    if (context.customerId) payload.customerId = context.customerId;
+
     const confidenceInput = parsed ?? {};
     const confidence = assessConfidence(confidenceInput);
 

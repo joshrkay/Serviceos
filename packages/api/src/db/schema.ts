@@ -2987,6 +2987,44 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_tech_status_today ON tech_status_today
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  '118_jobs_money_state': `
+    -- Denormalized money-state rollup read/written by refreshJobMoneyState
+    -- (packages/api/src/jobs/pg-job.ts). The estimate/invoice transition
+    -- handlers UPDATE jobs.money_state in the SAME transaction as the status
+    -- change, so a missing column aborts the txn and silently rolls the
+    -- transition back (the HTTP response still shows the new status). This
+    -- column was required by code but created by no migration. IF NOT EXISTS
+    -- keeps it safe on databases where it already exists out-of-band.
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS money_state TEXT NOT NULL DEFAULT 'no_estimate';
+  `,
+
+  '119_view_token_lookup_functions': `
+    -- Token-lookup helpers used by pg-estimate.ts / pg-invoice.ts for the
+    -- public approval/payment pages. The token IS the auth (no tenant GUC yet),
+    -- so the lookup must bypass RLS: SECURITY DEFINER runs as the function
+    -- owner, which on Railway/Supabase is a privileged role (superuser /
+    -- BYPASSRLS). Required by code but created by no prior migration, so a DB
+    -- built from these migrations 500s on every public estimate/invoice page.
+    -- Conditional create (not CREATE OR REPLACE) so we NEVER overwrite a
+    -- definition that already exists out-of-band in an environment.
+    -- PROD-PARITY: confirm the deploy/migrate role can bypass RLS.
+    DO $do$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_estimate_by_view_token') THEN
+        CREATE FUNCTION find_estimate_by_view_token(p_token TEXT)
+        RETURNS TABLE (id UUID, tenant_id UUID)
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+        AS 'SELECT e.id, e.tenant_id FROM estimates e WHERE e.view_token = p_token';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'find_invoice_by_view_token') THEN
+        CREATE FUNCTION find_invoice_by_view_token(p_token TEXT)
+        RETURNS TABLE (id UUID, tenant_id UUID)
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+        AS 'SELECT i.id, i.tenant_id FROM invoices i WHERE i.view_token = p_token';
+      END IF;
+    END $do$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

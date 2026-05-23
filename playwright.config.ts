@@ -84,8 +84,37 @@ export default defineConfig({
             name: 'qa-matrix',
             testDir: './e2e/qa-matrix',
             testIgnore: [],
-            testMatch: ['precheck.spec.ts', 'estimates.spec.ts', 'invoices.spec.ts', 'assistant.spec.ts'],
-            use: { ...devices['Desktop Chrome'] },
+            // testMatch order is for readability, NOT a guaranteed run order
+            // (under workers:1 Playwright may order files alphabetically). Specs
+            // are written to be self-contained — each seeds its own
+            // customer/location/job and provisions its own vertical — so no row
+            // depends on another having run first; precheck is a fail-fast gate
+            // but each row also validates its own prerequisites.
+            testMatch: [
+              'precheck.spec.ts',
+              'provisioning.spec.ts',
+              'customers.spec.ts',
+              'estimates.spec.ts',
+              'billing-journey.spec.ts',
+              'payments-edge.spec.ts',
+              'invoices.spec.ts',
+              'public-portal.spec.ts',
+              'scheduling.spec.ts',
+              'sms.spec.ts',
+              'voice-extras.spec.ts',
+              'isolation.spec.ts',
+              'assistant.spec.ts',
+            ],
+            // Browsers in the image (build 1194) can differ from the installed
+            // Playwright's expected build. QA_CHROMIUM_PATH lets a run point at
+            // an existing full-chromium binary (headless works without the
+            // separate headless-shell). No-op when unset.
+            use: {
+              ...devices['Desktop Chrome'],
+              ...(process.env.QA_CHROMIUM_PATH
+                ? { launchOptions: { executablePath: process.env.QA_CHROMIUM_PATH } }
+                : {}),
+            },
           },
         ]
       : []),

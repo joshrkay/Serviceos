@@ -21,7 +21,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'log_expense' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'record_payment' | 'log_expense' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal';
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -29,6 +29,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_job',
   'create_appointment',
   'create_booking',
+  'callback',
   'draft_estimate',
   'update_estimate',
   'draft_invoice',
@@ -187,6 +188,10 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'create_job':
     case 'create_appointment':
     case 'create_booking':
+    // A callback request is a low-risk capture: it asks an operator to
+    // call the caller back (e.g. an after-hours booking). It carries no
+    // money and mutates nothing until the operator acts.
+    case 'callback':
     case 'draft_estimate':
     case 'update_estimate':
     case 'draft_invoice':

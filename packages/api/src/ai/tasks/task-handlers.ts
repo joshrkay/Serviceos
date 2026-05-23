@@ -7,6 +7,13 @@ export interface TaskContext {
   existingEntities?: Record<string, unknown>;
   userId: string;
   /**
+   * Resolved caller identity. Set by the entry-point once the inbound
+   * caller has been matched to a customer (e.g. by caller-ID). Handlers
+   * that need the caller's customer (create_appointment, cancel,
+   * reschedule) read this instead of asking the LLM to invent one.
+   */
+  customerId?: string;
+  /**
    * Tier 4 / PR B — per-tenant auto-approve threshold override
    * resolved by the entry-point (voice-action-router) and threaded
    * onto each task's CreateProposalInput. Optional: when undefined,
