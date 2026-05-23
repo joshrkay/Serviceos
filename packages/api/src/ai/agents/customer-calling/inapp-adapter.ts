@@ -168,7 +168,7 @@ export function buildInappGreeting(persona?: VoicePersona | null): string {
  *    will be classified but reprompted by the FSM. Both adapters
  *    rely on this same FSM gate, so behavior is now consistent.
  */
-function classifierToFsmEvent(
+export function classifierToFsmEvent(
   intentType: string,
   confidence: number,
   entities: Record<string, unknown> | undefined
@@ -195,7 +195,7 @@ function summaryFor(intent: string | undefined, entities: Record<string, unknown
   return 'Voice clarification needed';
 }
 
-function intentToProposalType(intent: string | undefined): ProposalType {
+export function intentToProposalType(intent: string | undefined): ProposalType {
   switch (intent) {
     case 'create_invoice': return 'draft_invoice';
     case 'update_invoice': return 'update_invoice';
@@ -220,7 +220,7 @@ function intentToProposalType(intent: string | undefined): ProposalType {
  * Map FSM escalation reasons to the strict EscalationReason union the
  * escalate-to-human skill accepts.
  */
-function toEscalationReason(reason: string | undefined): EscalationReason {
+export function toEscalationReason(reason: string | undefined): EscalationReason {
   switch (reason) {
     case 'caller_requested':
     case 'low_confidence':

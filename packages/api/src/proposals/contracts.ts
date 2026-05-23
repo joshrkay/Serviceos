@@ -179,6 +179,17 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   create_job: createJobPayloadSchema,
   create_appointment: createAppointmentPayloadSchema,
   create_booking: createBookingPayloadSchema,
+  // A callback request captured when the agent cannot complete an action
+  // live (e.g. an after-hours booking) and needs an operator to call back.
+  callback: z
+    .object({
+      reason: z.string().optional(),
+      requestedService: z.string().optional(),
+      callerPhone: z.string().optional(),
+      transcript: z.string().optional(),
+      conversationId: z.string().optional(),
+    })
+    .passthrough(),
   draft_estimate: draftEstimatePayloadSchema,
   update_estimate: updateEstimatePayloadSchema,
   draft_invoice: draftInvoicePayloadSchema,

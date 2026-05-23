@@ -1481,6 +1481,7 @@ export function createApp(): express.Express {
     settingsRepo,
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
+    dncRepo,
     publicBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   });
   workerRegistry.set(
