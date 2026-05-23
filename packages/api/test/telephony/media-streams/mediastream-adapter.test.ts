@@ -30,6 +30,7 @@ import { escalateWithContextPayloadSchema } from '../../../src/ai/agents/custome
 import { decodeTwilioInboundFrame } from '../../../src/telephony/media-streams/mulaw-codec';
 import { VOICE_EVENT_CHANNEL } from '../../../src/ai/voice-quality/event-bus';
 import { WhisperCache } from '../../../src/telephony/whisper-cache';
+import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────────────────
 
@@ -324,6 +325,83 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
     expect(reason).toBe('idle_timeout');
     expect(sideEffects).toEqual([]);
+  });
+
+  it('S12: dispatches frustration_detected using the per-tenant resolved threshold', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-sentiment' });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch').mockReturnValue([]);
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const sentimentClassifier = vi.fn(async () => ({ frustrationScore: 0.9 }));
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        sentimentClassifier,
+        // No static escalationSettings dep — mirrors production wiring,
+        // where only the per-session resolver is supplied.
+        resolveEscalationSettings: async () => ({
+          ...DEFAULT_ESCALATION_SETTINGS,
+          trigger_llm_sentiment: true,
+          llm_sentiment_threshold: 0.5,
+        }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-sentiment',
+      start: { callSid: 'CA-sentiment', accountSid: 'AC', streamSid: 'MZ-sentiment', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'this is ridiculous', confidence: 0.97 });
+    // Flush the speech turn plus the fire-and-forget sentiment promise chain.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(sentimentClassifier).toHaveBeenCalledTimes(1);
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'frustration_detected', source: 'llm_sentiment' }),
+    );
+  });
+
+  it('S12: does not dispatch frustration_detected when score is below the resolved threshold', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-calm' });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch').mockReturnValue([]);
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const sentimentClassifier = vi.fn(async () => ({ frustrationScore: 0.2 }));
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        sentimentClassifier,
+        resolveEscalationSettings: async () => ({
+          ...DEFAULT_ESCALATION_SETTINGS,
+          trigger_llm_sentiment: true,
+          llm_sentiment_threshold: 0.5,
+        }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-calm',
+      start: { callSid: 'CA-calm', accountSid: 'AC', streamSid: 'MZ-calm', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'thanks for the help', confidence: 0.97 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(sentimentClassifier).toHaveBeenCalledTimes(1);
+    expect(dispatchSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'frustration_detected' }),
+    );
   });
 
   it('malformed inbound JSON is silently dropped', async () => {

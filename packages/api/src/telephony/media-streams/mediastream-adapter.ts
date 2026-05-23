@@ -677,7 +677,12 @@ export class TwilioMediaStreamAdapter {
       this.deps.sentimentClassifier &&
       activeEscalationSettings?.trigger_llm_sentiment
     ) {
-      void this.runSentimentCheckAndMaybeEscalate(session, event.transcript, sideEffects).catch(
+      void this.runSentimentCheckAndMaybeEscalate(
+        session,
+        event.transcript,
+        sideEffects,
+        activeEscalationSettings,
+      ).catch(
         (err) =>
           logger.warn('sentiment check failed', {
             error: err instanceof Error ? err.message : String(err),
@@ -706,6 +711,7 @@ export class TwilioMediaStreamAdapter {
     session: VoiceSession,
     transcript: string,
     priorTurnEffects: SideEffect[],
+    escalationSettings: EscalationSettings,
   ): Promise<void> {
     const priorTurns = this.extractPriorTurns(session, 4);
     const intent =
@@ -718,7 +724,7 @@ export class TwilioMediaStreamAdapter {
       intent,
     });
 
-    const threshold = this.deps.escalationSettings!.llm_sentiment_threshold;
+    const threshold = escalationSettings.llm_sentiment_threshold;
     if (result.frustrationScore >= threshold) {
       // Serialize dispatch+emit against any concurrent turn handler.
       // The LLM call above may take 200–2000 ms; without the lock the FSM
