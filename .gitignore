@@ -40,3 +40,6 @@ packages/api/voice-quality-report.json
 packages/api/voice-quality-layer2-report.json
 packages/api/voice-quality-layer2-vitest-report.json
 packages/api/voice-quality-layer2-failures/
+
+# Git worktrees (isolated workspaces)
+.worktrees/
