@@ -202,5 +202,52 @@ describe('P0-002 — Clerk auth and tenant bootstrap', () => {
         })
       ).rejects.toThrow('Region (US state) is required before provisioning can start');
     });
+
+    it('seeds default settings for a newly created tenant when settingsRepository provided', async () => {
+      const created: string[] = [];
+      const settingsRepository = {
+        findByTenant: async () => null,
+        create: async (settings: { tenantId: string }) => {
+          created.push(settings.tenantId);
+          return settings as never;
+        },
+        update: async () => null,
+        incrementEstimateNumber: async () => 1,
+        incrementInvoiceNumber: async () => 1,
+      };
+
+      const result = await bootstrapTenant('user_1', 'jane@example.com', mockRepo, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        settingsRepository: settingsRepository as any,
+      });
+
+      expect(result.created).toBe(true);
+      expect(created).toEqual([result.tenantId]);
+    });
+
+    it('ensures settings idempotently for an already-bootstrapped tenant', async () => {
+      const first = await bootstrapTenant('user_1', 'jane@example.com', mockRepo);
+
+      const lookups: string[] = [];
+      const settingsRepository = {
+        findByTenant: async (tenantId: string) => {
+          lookups.push(tenantId);
+          return null;
+        },
+        create: async (settings: unknown) => settings as never,
+        update: async () => null,
+        incrementEstimateNumber: async () => 1,
+        incrementInvoiceNumber: async () => 1,
+      };
+
+      const second = await bootstrapTenant('user_1', 'jane@example.com', mockRepo, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        settingsRepository: settingsRepository as any,
+      });
+
+      expect(second.created).toBe(false);
+      expect(second.tenantId).toBe(first.tenantId);
+      expect(lookups).toEqual([first.tenantId]);
+    });
   });
 });
