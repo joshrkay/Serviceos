@@ -84,6 +84,12 @@ export default defineConfig({
             name: 'qa-matrix',
             testDir: './e2e/qa-matrix',
             testIgnore: [],
+            // testMatch order is for readability, NOT a guaranteed run order
+            // (under workers:1 Playwright may order files alphabetically). Specs
+            // are written to be self-contained — each seeds its own
+            // customer/location/job and provisions its own vertical — so no row
+            // depends on another having run first; precheck is a fail-fast gate
+            // but each row also validates its own prerequisites.
             testMatch: [
               'precheck.spec.ts',
               'provisioning.spec.ts',

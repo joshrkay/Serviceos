@@ -90,15 +90,16 @@ matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
     return void h.evidence.partial(`Scheduling proposal did not execute (status=${outcome.status}); worker/entity-resolution may be incomplete.`);
   }
 
-  if (outcome.resultEntityId) {
-    const db = await h.db.query({
-      label: '02-appt-row',
-      tenantId,
-      sql: `SELECT id, status FROM appointments WHERE id = $1`,
-      params: [outcome.resultEntityId],
-    });
-    expect(db.rowCount, 'voice-scheduled appointment row must exist').toBe(1);
+  if (!outcome.resultEntityId) {
+    return void h.evidence.fail('Scheduling proposal executed but returned no resultEntityId; cannot confirm an appointment was created.');
   }
+  const db = await h.db.query({
+    label: '02-appt-row',
+    tenantId,
+    sql: `SELECT id, status FROM appointments WHERE id = $1`,
+    params: [outcome.resultEntityId],
+  });
+  expect(db.rowCount, 'voice-scheduled appointment row must exist').toBe(1);
   await gotoUi(h, '/dispatch', '02-board-ui');
   h.evidence.pass();
 });

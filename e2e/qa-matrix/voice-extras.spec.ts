@@ -60,8 +60,11 @@ matrixTest('VOX-02', 'Spanish / i18n voice response', async (h) => {
     return void h.evidence.partial(`Voice input returned ${res.response.status}; cannot assess language handling.`);
   }
   const tts = ((res.response.body as { ttsText?: string }).ttsText ?? '').toLowerCase();
-  const spanishMarkers = [' su ', ' para ', 'gracias', 'hola', 'puedo', 'ayuda', 'cita', 'podemos', 'usted', 'está'];
-  const looksSpanish = spanishMarkers.some((m) => tts.includes(m.trim()));
+  // Whole-word match on distinctive Spanish tokens (avoid short substrings
+  // like "su"/"para" matching inside English words).
+  const words = new Set(tts.split(/[^a-záéíóúñ]+/).filter(Boolean));
+  const spanishMarkers = ['gracias', 'hola', 'puedo', 'ayuda', 'cita', 'podemos', 'usted', 'necesita', 'agendar', 'disculpe'];
+  const looksSpanish = spanishMarkers.some((m) => words.has(m));
   if (tts && looksSpanish) {
     h.evidence.pass('Voice responded in Spanish to a Spanish utterance.');
   } else {
@@ -123,12 +126,12 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
     label: '03-no-dispatch',
     tenantId: h.tenantA.tenantId,
     sql: `SELECT count(*)::int AS c FROM message_dispatches
-          WHERE entity_id = $1 AND channel = 'sms' AND status IN ('sent','delivered')`,
+          WHERE entity_id = $1 AND channel = 'sms'`,
     params: [estimateId],
   });
   const c = (sent.rows[0] as { c: number }).c;
-  if (c === 0) h.evidence.pass('No SMS delivered to the DNC number (suppressed correctly).');
-  else h.evidence.fail(`${c} SMS dispatch row(s) to a DNC-listed number — suppression not honored.`);
+  if (c === 0) h.evidence.pass('No SMS dispatch attempt for the DNC number on this estimate (suppressed correctly).');
+  else h.evidence.fail(`${c} SMS dispatch row(s) for a DNC-listed number — suppression not honored (any attempt counts).`);
 });
 
 matrixTest('VOX-04', 'Telephony-only edge cases (documented coverage gap)', async (h) => {

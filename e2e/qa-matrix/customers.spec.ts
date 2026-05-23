@@ -55,7 +55,6 @@ matrixTest('CUST-01', 'Create customers in-app (both tenants)', async (h) => {
 
 matrixTest('CUST-02', 'Create customer via AI voice session', async (h) => {
   const { token, tenantId } = h.tenantA;
-  const t0 = new Date(Date.now() - 5000).toISOString();
 
   const sessionId = await startVoiceSession(h, token, '02');
   if (!sessionId) {
@@ -87,26 +86,20 @@ matrixTest('CUST-02', 'Create customer via AI voice session', async (h) => {
     return;
   }
 
-  // The executed proposal should have produced a customer row.
-  if (outcome.resultEntityId) {
-    const db = await h.db.query({
-      label: '02-created-row',
-      tenantId,
-      sql: `SELECT id, first_name, last_name FROM customers WHERE id = $1`,
-      params: [outcome.resultEntityId],
-    });
-    expect(db.rowCount, 'voice-created customer row must exist').toBe(1);
-  } else {
-    // Scope to rows created during this test so a stale 'Dana Rivera' from a
-    // prior run can't mask a regression in the voice execution path.
-    const db = await h.db.query({
-      label: '02-created-by-name',
-      tenantId,
-      sql: `SELECT id FROM customers WHERE tenant_id = $1 AND first_name = 'Dana' AND last_name = 'Rivera' AND created_at >= $2`,
-      params: [tenantId, t0],
-    });
-    expect(db.rowCount, 'voice-created customer (by name, this run) must exist').toBeGreaterThanOrEqual(1);
+  // Matrix pass criteria requires creation with result_entity_id — fail if the
+  // executed proposal didn't surface one (no name-match fallback, which a stale
+  // row from a prior run could satisfy).
+  if (!outcome.resultEntityId) {
+    h.evidence.fail('create_customer executed but returned no resultEntityId; cannot confirm a customer was created.');
+    return;
   }
+  const db = await h.db.query({
+    label: '02-created-row',
+    tenantId,
+    sql: `SELECT id, first_name, last_name FROM customers WHERE id = $1`,
+    params: [outcome.resultEntityId],
+  });
+  expect(db.rowCount, 'voice-created customer row must exist').toBe(1);
 
   await gotoUi(h, '/customers', '02-list-ui');
   h.evidence.pass();

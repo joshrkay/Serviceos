@@ -86,6 +86,10 @@ async function verifyVertical(
   });
   const packs = db.rows.map((r) => (r as { pack_id: string }).pack_id);
   expect(packs, `pack_activations must contain ${pack} for this tenant`).toContain(pack);
+  // Vertical separation, enforced regardless of whether the categories
+  // endpoint responded: this tenant must NOT carry the other vertical's pack.
+  const foreignPack = pack === 'hvac' ? 'plumbing' : 'hvac';
+  expect(packs, `tenant must NOT have the ${foreignPack} pack`).not.toContain(foreignPack);
 
   // Agent B — settings/onboarding screen renders.
   await gotoUi(h, '/settings', `${labelPrefix}-settings-ui`);
