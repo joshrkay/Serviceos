@@ -1,8 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { Client } from 'pg';
-import { mintToken } from './fixtures/tokens';
-
-const apiBase = (): string => process.env.E2E_API_URL!.replace(/\/$/, '');
+import { apiBase, tenantA } from './fixtures/tokens';
 
 /**
  * Fails fast if prerequisites are missing so matrix rows don't produce
@@ -65,94 +63,129 @@ test('precheck — DB is reachable and has tenants/estimates/invoices tables', a
   }
 });
 
-// --- Hard gate: minted HMAC tokens must actually authenticate ---
-test('precheck — HMAC dev tokens accepted by /api/me', async ({ request }) => {
-  const tenantId = process.env.E2E_TENANT_A_ID;
-  expect(tenantId, 'E2E_TENANT_A_ID required').toBeTruthy();
-  const token = mintToken(tenantId!, 'A');
-  const res = await request.get(`${apiBase()}/api/me`, {
-    headers: { authorization: `Bearer ${token}` },
+test('precheck — minted tenant token can call /api/me (CLERK_DEV_HMAC_TOKENS path active)', async ({ request }) => {
+  const t = tenantA();
+  const me = await request.get(`${apiBase().replace(/\/$/, '')}/api/me`, {
+    headers: { Authorization: `Bearer ${t.token}` },
   });
-  expect(
-    res.status(),
-    'GET /api/me must return 200. A 401 almost always means CLERK_DEV_HMAC_TOKENS=true is NOT set on ' +
-      'the dev API (it then verifies real Clerk RS256 tokens and rejects our HMAC tokens).'
-  ).toBe(200);
-  const body = (await res.json()) as { tenant_id?: string; tenantId?: string };
-  expect(body.tenant_id ?? body.tenantId, 'token tenant must echo back from /api/me').toBe(tenantId);
+
+  expect(me.status(), `Expected 200 from /api/me using minted HMAC tenant token; got ${me.status()}.`).toBe(200);
 });
 
-// --- Informational: capture the live message_dispatches entity_type CHECK ---
-test('precheck — message_dispatches entity_type CHECK (informational)', async () => {
+test('precheck — voice utterance generates proposal IDs (non-mock LLM path)', async ({ request }) => {
+  const t = tenantA();
+  const base = apiBase().replace(/\/$/, '');
+
+  const create = await request.post(`${base}/api/voice/sessions`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: { channel: 'qa-precheck' },
+  });
+  expect([200, 201], `Unexpected create session status: ${create.status()}`).toContain(create.status());
+
+  const created = (await create.json()) as { id?: string; sessionId?: string };
+  const sessionId = created.id ?? created.sessionId;
+  expect(sessionId, `Voice session create response did not include id/sessionId: ${JSON.stringify(created)}`).toBeTruthy();
+
+  const utter = await request.post(`${base}/api/voice/sessions/${sessionId}/utterances`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: {
+      text: `Create an estimate proposal for job ${t.jobId} with diagnostic labor line item for $125 total.`,
+      source: 'qa-precheck',
+    },
+  });
+  expect([200, 201], `Unexpected utterance status: ${utter.status()}`).toContain(utter.status());
+
+  const utterBody = (await utter.json()) as {
+    proposalIds?: string[];
+    proposals?: Array<{ id: string }>;
+  };
+  const proposalIds = utterBody.proposalIds ?? utterBody.proposals?.map((p) => p.id) ?? [];
+  expect(
+    proposalIds.length,
+    `Expected utterance to return at least one proposal id (non-mock LLM signal). Body=${JSON.stringify(utterBody)}`
+  ).toBeGreaterThanOrEqual(1);
+});
+
+test('precheck — approved proposal transitions to executed after undo window', async ({ request }) => {
+  const t = tenantA();
+  const base = apiBase().replace(/\/$/, '');
+
+  const draft = await request.post(`${base}/api/assistant/chat`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: {
+      messages: [
+        {
+          role: 'user',
+          content: `Draft an estimate for job ${t.jobId} with one labor item for $99 and return the proposal.`,
+        },
+      ],
+    },
+  });
+  expect(draft.status(), `Expected assistant chat 200, got ${draft.status()}.`).toBe(200);
+
+  const draftBody = (await draft.json()) as {
+    message?: { proposal?: { id?: string } };
+    proposal?: { id?: string };
+  };
+  const proposalId = draftBody.message?.proposal?.id ?? draftBody.proposal?.id;
+  expect(proposalId, `No proposal id found in assistant response: ${JSON.stringify(draftBody)}`).toBeTruthy();
+
+  const approve = await request.post(`${base}/api/proposals/${proposalId}/approve`, {
+    headers: { Authorization: `Bearer ${t.token}` },
+    data: {},
+  });
+  expect([200, 202], `Unexpected proposal approve status: ${approve.status()}`).toContain(approve.status());
+
+  await new Promise((resolve) => setTimeout(resolve, 6_500));
+
+  const timeoutMs = 45_000;
+  const start = Date.now();
+  let latestStatus = 'unknown';
+  while (Date.now() - start < timeoutMs) {
+    const statusRes = await request.get(`${base}/api/proposals/${proposalId}`, {
+      headers: { Authorization: `Bearer ${t.token}` },
+    });
+    expect(statusRes.status(), `Failed fetching proposal status for ${proposalId}.`).toBe(200);
+    const body = (await statusRes.json()) as { status?: string };
+    latestStatus = body.status ?? 'missing';
+    if (latestStatus === 'executed') break;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+
+  expect(
+    latestStatus,
+    `Proposal ${proposalId} did not reach executed within ${timeoutMs}ms after undo window elapsed.`
+  ).toBe('executed');
+});
+
+test('precheck — capture message_dispatches entity_type check constraint definition', async () => {
   const client = new Client({ connectionString: process.env.E2E_DB_URL_READONLY });
   await client.connect();
   try {
     const res = await client.query(
-      `SELECT pg_get_constraintdef(oid) AS def
-         FROM pg_constraint WHERE conname = 'message_dispatches_entity_type_check'`
+      `SELECT c.conname, pg_get_constraintdef(c.oid) AS definition
+       FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+       WHERE n.nspname = 'public'
+         AND t.relname = 'message_dispatches'
+         AND c.contype = 'c'
+         AND pg_get_constraintdef(c.oid) ILIKE '%entity_type%'
+       ORDER BY c.conname`
     );
-    const def = (res.rows[0]?.def as string) ?? '(constraint not found)';
-    console.log('[qa-matrix:precheck] message_dispatches entity_type CHECK =>', def);
-    for (const t of ['appointment_reschedule', 'appointment_cancel', 'payment_receipt']) {
-      if (!def.includes(t)) {
-        console.warn(
-          `[qa-matrix:precheck] WARNING entity_type '${t}' is NOT permitted by the live CHECK — ` +
-            'its SMS dispatch insert will be rejected (known defect candidate; see SMS-01).'
-        );
-      }
-    }
-    expect(res.rowCount ?? 0, 'query should execute').toBeGreaterThanOrEqual(0);
+
+    expect(
+      res.rowCount,
+      'No message_dispatches CHECK constraint containing entity_type found in pg_constraint catalog.'
+    ).toBeGreaterThan(0);
+
+    const defs = res.rows.map((r) => `${r.conname}: ${r.definition}`);
+    test.info().annotations.push({
+      type: 'evidence',
+      description: `message_dispatches entity_type CHECK => ${defs.join(' | ')}`,
+    });
+    console.log(`[precheck evidence] message_dispatches entity_type CHECK => ${defs.join(' | ')}`);
   } finally {
     await client.end();
-  }
-});
-
-// --- Informational: AI voice classification + execution worker readiness ---
-// Voice rows fail loudly on their own; this just surfaces *why* up front.
-test('precheck — AI voice + execution worker readiness (informational)', async ({ request }) => {
-  const tenantId = process.env.E2E_TENANT_A_ID!;
-  const token = mintToken(tenantId, 'A');
-  const headers = { authorization: `Bearer ${token}` };
-
-  const start = await request.post(`${apiBase()}/api/voice/sessions`, { headers, data: {} });
-  if (![200, 201].includes(start.status())) {
-    console.warn(
-      `[qa-matrix:precheck] voice session start returned ${start.status()} — voice rows may not run. Body: ${await start.text()}`
-    );
-    return;
-  }
-  const sessionId = (await start.json()).sessionId as string;
-  const input = await request.post(`${apiBase()}/api/voice/sessions/${sessionId}/input`, {
-    headers,
-    data: { text: 'I want to add a new customer named Precheck Tester, phone 555 555 0123' },
-  });
-  const inBody = input.ok() ? ((await input.json()) as { proposalIds?: string[] }) : {};
-  const proposalIds = inBody.proposalIds ?? [];
-  if (proposalIds.length === 0) {
-    console.warn(
-      '[qa-matrix:precheck] voice input produced NO proposal — AI_PROVIDER_API_KEY likely unset (mock LLM) ' +
-        'or the classifier missed. The voice rows (CUST-02 / SCH-02 / SCH-03) will fail.'
-    );
-    return;
-  }
-  console.log(`[qa-matrix:precheck] AI classified → proposal ${proposalIds[0]}; approving to test the worker…`);
-  await request.post(`${apiBase()}/api/proposals/${proposalIds[0]}/approve`, { headers, data: {} });
-
-  let status = 'unknown';
-  for (let i = 0; i < 12; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const det = await request.get(`${apiBase()}/api/proposals/${proposalIds[0]}`, { headers });
-    if (det.ok()) {
-      status = (await det.json()).status;
-      if (status === 'executed' || status === 'execution_failed') break;
-    }
-  }
-  if (status === 'executed') {
-    console.log('[qa-matrix:precheck] execution worker OK — proposal executed.');
-  } else {
-    console.warn(
-      `[qa-matrix:precheck] proposal did not reach 'executed' (last=${status}). ` +
-        'The runExecutionSweep worker may not be running on the dev API.'
-    );
   }
 });
