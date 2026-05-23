@@ -3,23 +3,26 @@
  * builder uses this as the canonical list when a row never produced a manifest
  * (e.g., test crashed before writing one).
  *
- * `expected` documents the pre-run prediction from the Phase-1 exploration.
+ * NOTE: This catalog now reflects the end-to-end scope (provisioning, customers,
+ * estimates variants, billing journey, scheduling, SMS, payments edge, voice,
+ * isolation, and public portal). Legacy EST/INV/AST-only coverage is deprecated.
+ *
+ * `expected` documents the pre-run prediction from Phase-1 exploration.
  * It is NOT the pass criterion — actual pass/fail comes from runtime checks.
  */
 
 export type MatrixModule =
-  | 'EST'
-  | 'INV'
-  | 'AST'
   | 'PROV'
-  | 'CUST'
-  | 'JRN'
+  | 'CUS'
+  | 'EST'
+  | 'BILL'
   | 'SCH'
   | 'SMS'
   | 'PAY'
-  | 'VOX'
+  | 'VOICE'
   | 'ISO'
-  | 'PORT';
+  | 'PORTAL'
+  | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
 export interface MatrixRow {
@@ -32,171 +35,211 @@ export interface MatrixRow {
 }
 
 export const MATRIX: MatrixRow[] = [
-  // ----- Estimates -----
+  // ----- Provisioning -----
+  {
+    id: 'PROV-01',
+    module: 'PROV',
+    feature: 'Tenant bootstrap',
+    passCriteria:
+      'Provision API returns tenantId/environmentId, setup UI shows active workspace, and DB has tenant + default settings rows for tenant_id',
+    expected: 'pass',
+  },
+  {
+    id: 'PROV-02',
+    module: 'PROV',
+    feature: 'Role/permission seed',
+    passCriteria:
+      'Provision run seeds owner/manager/tech roles, role matrix appears in admin UI, and DB role_permissions rows match seeded policy set',
+    expected: 'pass',
+  },
+
+  // ----- Customers -----
+  {
+    id: 'CUS-01',
+    module: 'CUS',
+    feature: 'Create customer',
+    passCriteria:
+      'POST create returns customer id, customer detail UI resolves same id, and DB customers row persists canonical name/email/phone fields',
+    expected: 'pass',
+  },
+  {
+    id: 'CUS-02',
+    module: 'CUS',
+    feature: 'Update + dedupe customer',
+    passCriteria:
+      'PATCH/PUT update returns updated_at advance, UI reflects merged profile, and DB enforces unique dedupe key without duplicate active records',
+    expected: 'partial',
+  },
+
+  // ----- Estimates variants -----
   {
     id: 'EST-01',
     module: 'EST',
     feature: 'Create draft estimate',
-    passCriteria: 'Same estimate id appears in API response, UI list, and DB row with status=draft',
+    passCriteria:
+      'API create returns estimate id, estimates list UI renders same id/status=draft, and DB estimates row contains identical totals and customer_id',
     expected: 'pass',
   },
   {
     id: 'EST-02',
     module: 'EST',
-    feature: 'Validation errors',
-    passCriteria: 'Invalid payload returns 400, UI blocks submit, no row persisted',
-    expected: 'pass',
+    feature: 'Variant: option package selection',
+    passCriteria:
+      'Variant option ids from API persist to estimate options in DB and selected package state is rendered correctly in UI preview/export views',
+    expected: 'partial',
   },
   {
     id: 'EST-03',
     module: 'EST',
-    feature: 'Edit draft',
-    passCriteria: 'PUT updates fields and updated_at, UI reflects new values after refresh',
-    expected: 'partial',
-    expectedReason: 'PUT only, no PATCH. Matrix accepts either per plan.',
-  },
-  {
-    id: 'EST-04',
-    module: 'EST',
-    feature: 'Estimate total correctness',
-    passCriteria: 'API total, UI total, and DB total_cents all match calculateDocumentTotals()',
-    expected: 'pass',
-  },
-  {
-    id: 'EST-05',
-    module: 'EST',
-    feature: 'Convert estimate to invoice',
-    passCriteria: 'POST /api/invoices with estimateId creates invoice linked via estimate_id FK',
-    expected: 'partial',
-    expectedReason: 'No dedicated /:id/convert endpoint. Uses POST /api/invoices { estimateId }.',
-  },
-  {
-    id: 'EST-06',
-    module: 'EST',
-    feature: 'Tenant isolation',
-    passCriteria: "Tenant B GET on Tenant A's estimate returns 404; DB without tenant GUC returns 0 rows",
+    feature: 'Variant: tax/discount recalculation',
+    passCriteria:
+      'Recompute endpoint returns deterministic subtotal/tax/discount/grand_total, UI totals match response, and DB total_cents equals recomputed amount',
     expected: 'pass',
   },
 
-  // ----- Invoices -----
+  // ----- Billing journey -----
   {
-    id: 'INV-01',
-    module: 'INV',
-    feature: 'Create invoice',
-    passCriteria: 'POST /api/invoices returns 201, row exists in DB, UI detail page loads',
+    id: 'BILL-01',
+    module: 'BILL',
+    feature: 'Estimate to invoice conversion',
+    passCriteria:
+      'Conversion creates invoice linked by estimate_id, billing UI shows lifecycle transition, and DB invoice status starts in expected initial state',
     expected: 'pass',
   },
   {
-    id: 'INV-02',
-    module: 'INV',
-    feature: 'List/filter invoices',
-    passCriteria: 'GET /api/invoices returns filtered subsets matching UI and DB counts',
-    expected: 'fail',
-    expectedReason: 'No GET /api/invoices list endpoint implemented.',
-  },
-  {
-    id: 'INV-03',
-    module: 'INV',
-    feature: 'Send invoice',
-    passCriteria: 'Issue endpoint transitions status draft→open, issued_at set, UI shows issued',
+    id: 'BILL-02',
+    module: 'BILL',
+    feature: 'Issue and deliver invoice',
+    passCriteria:
+      'Issue/send action records issued timestamp in API payload, UI marks invoice as issued/sent, and DB stores delivery metadata + status transition',
     expected: 'partial',
-    expectedReason: "Schema uses 'open' + issued_at (not 'sent'/sent_at). No email delivery.",
   },
   {
-    id: 'INV-04',
-    module: 'INV',
-    feature: 'Payment link generation',
-    passCriteria: 'HTTP endpoint returns Stripe payment link URL, payment_link_url persisted',
-    expected: 'fail',
-    expectedReason: 'StripePaymentLinkProvider exists but is not wired to an HTTP route.',
-  },
-  {
-    id: 'INV-05',
-    module: 'INV',
-    feature: 'Mark paid via webhook',
-    passCriteria: 'Stripe webhook flips invoice to paid with amount_paid_cents set',
-    expected: 'fail',
-    expectedReason: 'Stripe webhook handler exists but is not mounted on a route, no status transition.',
-  },
-  {
-    id: 'INV-06',
-    module: 'INV',
-    feature: 'Idempotent payment handling',
-    passCriteria: 'Second identical webhook is a no-op; only one payment row exists',
+    id: 'BILL-03',
+    module: 'BILL',
+    feature: 'Payment application and closeout',
+    passCriteria:
+      'Payment event marks invoice paid in API/UI, DB amount_paid_cents equals settled amount, and remaining_balance reaches zero with immutable audit row',
     expected: 'partial',
-    expectedReason: 'Idempotency logic exists but relies on in-memory repo and no Stripe route mounted.',
-  },
-  {
-    id: 'INV-07',
-    module: 'INV',
-    feature: 'Overdue lifecycle',
-    passCriteria: "Past-due unpaid invoice transitions to 'overdue' status; UI shows aging badge",
-    expected: 'fail',
-    expectedReason: "No 'overdue' enum value, no cron or on-read computation.",
   },
 
-  // ----- Assistant (FINAL) -----
+  // ----- Scheduling -----
   {
-    id: 'AST-01',
-    module: 'AST',
-    feature: 'Create customer via assistant intent',
-    passCriteria: 'Assistant chat returns create_customer proposal; approval creates row',
-    expected: 'fail',
-    expectedReason: "Intent classifier maps customer-creation utterances to 'unknown'.",
-  },
-  {
-    id: 'AST-02',
-    module: 'AST',
-    feature: 'Create estimate via assistant',
-    passCriteria: 'Assistant returns draft_estimate proposal; approval persists estimate',
+    id: 'SCH-01',
+    module: 'SCH',
+    feature: 'Create job from sold work',
+    passCriteria:
+      'Scheduling API creates job/work order tied to source estimate or invoice, dispatch board UI shows entry, and DB job row stores linkage foreign keys',
     expected: 'pass',
   },
   {
-    id: 'AST-03',
-    module: 'AST',
-    feature: 'Revise estimate via assistant',
-    passCriteria: 'Assistant returns update_estimate proposal; line items revised in DB',
+    id: 'SCH-02',
+    module: 'SCH',
+    feature: 'Reschedule and assignment integrity',
+    passCriteria:
+      'Reschedule API updates window + assignee, UI calendar repositions once, and DB keeps single current assignment with prior change captured in history',
     expected: 'pass',
-  },
-  {
-    id: 'AST-04',
-    module: 'AST',
-    feature: 'Create/send invoice via assistant',
-    passCriteria: 'Assistant drafts invoice and triggers send; DB shows issued invoice',
-    expected: 'partial',
-    expectedReason: 'Draft works; no send_invoice proposal type yet.',
-  },
-  {
-    id: 'AST-05',
-    module: 'AST',
-    feature: 'Payment status query via assistant',
-    passCriteria: 'Assistant returns factually correct paid/unpaid summary for a customer',
-    expected: 'fail',
-    expectedReason: 'No query intents in classifier; read-only proposals not implemented.',
-  },
-  {
-    id: 'AST-06',
-    module: 'AST',
-    feature: 'Failure handling + recovery',
-    passCriteria: 'Invalid assistant input returns clear error, UI shows actionable message, no bad rows',
-    expected: 'partial',
-    expectedReason: 'Error path returns fallback message but no retry/clarification UX.',
-  },
-  {
-    id: 'AST-07',
-    module: 'AST',
-    feature: 'Multi-step orchestration (customer→estimate→invoice)',
-    passCriteria: 'Single conversation chains three creations linked by FK',
-    expected: 'fail',
-    expectedReason: 'No proposal chaining or multi-turn orchestration in codebase.',
   },
 
+  // ----- SMS -----
   {
-    id: 'AST-08',
-    module: 'AST',
-    feature: 'Proposal execution claim lock (multi-instance)',
-    passCriteria: 'Parallel execution sweeps claim each approved proposal once; no duplicate side effects',
+    id: 'SMS-01',
+    module: 'SMS',
+    feature: 'Outbound transactional SMS',
+    passCriteria:
+      'Send endpoint returns provider message id, UI conversation timeline appends outbound event, and DB message log persists status + provider identifiers',
+    expected: 'partial',
+  },
+  {
+    id: 'SMS-02',
+    module: 'SMS',
+    feature: 'Inbound reply threading',
+    passCriteria:
+      'Inbound webhook attaches reply to correct thread/job in API response, UI thread updates in order, and DB links inbound row by conversation foreign key',
+    expected: 'partial',
+  },
+
+  // ----- Payments edge -----
+  {
+    id: 'PAY-01',
+    module: 'PAY',
+    feature: 'Idempotent webhook handling',
+    passCriteria:
+      'Duplicate webhook deliveries produce one financial side effect, UI payment activity shows single entry, and DB unique event key prevents duplicates',
+    expected: 'partial',
+  },
+  {
+    id: 'PAY-02',
+    module: 'PAY',
+    feature: 'Failed/partial payment recovery',
+    passCriteria:
+      'Decline or partial-capture event sets recoverable status via API, UI surfaces retry call-to-action, and DB records failure code with unchanged principal',
+    expected: 'partial',
+  },
+
+  // ----- Voice extras -----
+  {
+    id: 'VOICE-01',
+    module: 'VOICE',
+    feature: 'Call logging sync',
+    passCriteria:
+      'Voice event ingestion maps call to customer/job context, UI activity feed shows call metadata, and DB call log row stores direction/duration/disposition',
+    expected: 'partial',
+  },
+  {
+    id: 'VOICE-02',
+    module: 'VOICE',
+    feature: 'Voicemail/transcript attachment',
+    passCriteria:
+      'Transcript or recording URL from provider webhook is retrievable by API, UI renders playback or transcript, and DB stores artifact reference + timestamps',
+    expected: 'fail',
+  },
+
+  // ----- Isolation -----
+  {
+    id: 'ISO-01',
+    module: 'ISO',
+    feature: 'Cross-tenant API denial',
+    passCriteria:
+      'Tenant B token cannot fetch Tenant A resources (404/403), UI deep-link attempt shows access denied, and DB scoped query returns zero foreign-tenant rows',
     expected: 'pass',
+  },
+  {
+    id: 'ISO-02',
+    module: 'ISO',
+    feature: 'Cross-tenant background job isolation',
+    passCriteria:
+      'Async workers process only jobs with matching tenant context, UI audit pages show no bleed-through, and DB job execution log entries remain tenant-pure',
+    expected: 'pass',
+  },
+
+  // ----- Public portal -----
+  {
+    id: 'PORTAL-01',
+    module: 'PORTAL',
+    feature: 'Public estimate/invoice view token access',
+    passCriteria:
+      'Portal token endpoint resolves document for valid token only, public UI displays sanitized document data, and DB token lookup never exposes internal tenant ids',
+    expected: 'partial',
+  },
+  {
+    id: 'PORTAL-02',
+    module: 'PORTAL',
+    feature: 'Public acceptance/payment intent flow',
+    passCriteria:
+      'Customer accept/pay action from portal updates API state, internal UI reflects accepted/paid status, and DB writes signed acceptance/payment intent audit rows',
+    expected: 'partial',
+  },
+
+  // ----- Legacy assumptions (explicitly deprecated) -----
+  {
+    id: 'LEGACY-ESTINVAST-01',
+    module: 'LEGACY',
+    feature: 'Legacy EST/INV/AST-only matrix completeness',
+    passCriteria:
+      'Deprecated: report builder should not use EST/INV/AST-only catalog as completeness baseline for current E2E scope',
+    expected: 'na',
+    expectedReason: 'Deprecated in favor of multi-domain catalog rows above.',
   },
 
   // ----- Provisioning / verticals -----
