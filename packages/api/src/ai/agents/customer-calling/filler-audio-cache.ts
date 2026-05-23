@@ -32,7 +32,7 @@ export class FillerAudioCache {
       );
       const path = candidates.find((p) => existsSync(p));
       if (!path) {
-        missing.push({ id: filler.id, candidates });
+        missing.push(filler.id);
         continue;
       }
       this.cache.set(filler.id, readFileSync(path));
