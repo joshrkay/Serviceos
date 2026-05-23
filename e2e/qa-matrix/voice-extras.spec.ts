@@ -111,8 +111,10 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
     label: '03-send',
     expectStatus: [200, 202, 400, 403, 503],
   });
-  if (![200, 202].includes(send.response.status)) {
-    h.evidence.na(`Estimate send unavailable (status=${send.response.status}); DNC path not exercised.`);
+  // For an SMS-only send to a DNC number, suppression yields 400 (no channel
+  // actually sent). 200/202/400 all mean "attempted" — proceed to verify no SMS.
+  if (![200, 202, 400].includes(send.response.status)) {
+    h.evidence.na(`Estimate send returned ${send.response.status}; DNC path not exercised.`);
     return;
   }
 
@@ -121,7 +123,8 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
     label: '03-no-dispatch',
     tenantId: h.tenantA.tenantId,
     sql: `SELECT count(*)::int AS c FROM message_dispatches
-          WHERE channel = 'sms' AND recipient LIKE '%0199' AND status IN ('sent','delivered')`,
+          WHERE entity_id = $1 AND channel = 'sms' AND status IN ('sent','delivered')`,
+    params: [estimateId],
   });
   const c = (sent.rows[0] as { c: number }).c;
   if (c === 0) h.evidence.pass('No SMS delivered to the DNC number (suppressed correctly).');

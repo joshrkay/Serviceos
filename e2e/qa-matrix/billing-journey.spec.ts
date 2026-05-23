@@ -51,7 +51,7 @@ async function accept(h: RowHarness, estimateId: string, label: string): Promise
       body: { status },
       token: h.tenantA.token,
       label: `${label}-${status}`,
-      expectStatus: [200, 400],
+      expectStatus: [200],
     });
   }
   const db = await h.db.query({
@@ -139,7 +139,7 @@ matrixTest('JRN-02', 'Three estimates, invoice two → issue → pay → paid', 
       body: { paymentTermDays: 30 },
       token: h.tenantA.token,
       label: `02-issue-${i}`,
-      expectStatus: [200, 400],
+      expectStatus: [200, 201],
     });
 
     await h.api.call({

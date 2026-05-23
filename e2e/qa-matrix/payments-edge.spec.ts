@@ -16,11 +16,11 @@ function line(totalCents: number) {
   ];
 }
 
-async function openInvoice(h: RowHarness, totalCents: number, label: string): Promise<string> {
+async function openInvoice(h: RowHarness, totalCents: number, label: string, jobId = h.tenantA.jobId): Promise<string> {
   const created = await h.api.call({
     method: 'POST',
     path: '/api/invoices',
-    body: { jobId: h.tenantA.jobId, lineItems: line(totalCents), discountCents: 0, taxRateBps: 0 },
+    body: { jobId, lineItems: line(totalCents), discountCents: 0, taxRateBps: 0 },
     token: h.tenantA.token,
     label: `${label}-create`,
     expectStatus: 201,
@@ -32,9 +32,40 @@ async function openInvoice(h: RowHarness, totalCents: number, label: string): Pr
     body: { paymentTermDays: 30 },
     token: h.tenantA.token,
     label: `${label}-issue`,
-    expectStatus: [200, 400],
+    expectStatus: [200, 201],
   });
   return id;
+}
+
+async function freshJob(h: RowHarness, label: string): Promise<string> {
+  const stamp = Date.now();
+  const cust = await h.api.call({
+    method: 'POST',
+    path: '/api/customers',
+    body: { firstName: 'QA', lastName: `${label}-${stamp}`, primaryPhone: `+1555${String(stamp).slice(-7)}` },
+    token: h.tenantA.token,
+    label: `${label}-customer`,
+    expectStatus: 201,
+  });
+  const customerId = (cust.response.body as { id: string }).id;
+  const loc = await h.api.call({
+    method: 'POST',
+    path: '/api/locations',
+    body: { customerId, street1: '1 QA Way', city: 'Testville', state: 'CA', postalCode: '90001' },
+    token: h.tenantA.token,
+    label: `${label}-location`,
+    expectStatus: 201,
+  });
+  const locationId = (loc.response.body as { id: string }).id;
+  const job = await h.api.call({
+    method: 'POST',
+    path: '/api/jobs',
+    body: { customerId, locationId, summary: `QA ${label} job` },
+    token: h.tenantA.token,
+    label: `${label}-job`,
+    expectStatus: 201,
+  });
+  return (job.response.body as { id: string }).id;
 }
 
 matrixTest('PAY-01', 'Partial → full payment + over-payment guard', async (h) => {
@@ -96,38 +127,17 @@ matrixTest('PAY-02', 'Deposit credit auto-applied on first invoice', async (h) =
     return;
   }
 
-  // Fresh customer/location/job so it's the job's first invoice.
-  const stamp = Date.now();
-  const cust = await h.api.call({
-    method: 'POST',
-    path: '/api/customers',
-    body: { firstName: 'QA', lastName: `Deposit-${stamp}`, primaryPhone: `+1555${String(stamp).slice(-7)}` },
-    token: h.tenantA.token,
-    label: '02-customer',
-    expectStatus: 201,
-  });
-  const customerId = (cust.response.body as { id: string }).id;
-  const loc = await h.api.call({
-    method: 'POST',
-    path: '/api/locations',
-    body: { customerId, street1: '1 QA Way', city: 'Testville', state: 'CA', postalCode: '90001' },
-    token: h.tenantA.token,
-    label: '02-location',
-    expectStatus: 201,
-  });
-  const locationId = (loc.response.body as { id: string }).id;
-  const job = await h.api.call({
-    method: 'POST',
-    path: '/api/jobs',
-    body: { customerId, locationId, summary: 'QA deposit job' },
-    token: h.tenantA.token,
-    label: '02-job',
-    expectStatus: 201,
-  });
-  const jobId = (job.response.body as { id: string }).id;
+  // Fresh job so it's the job's first invoice.
+  const jobId = await freshJob(h, '02');
 
   try {
-    await rwExec(h.tenantA.tenantId, `UPDATE jobs SET deposit_paid_cents = 5000 WHERE id = $1`, [jobId]);
+    // The DB enforces deposit_paid_cents <= deposit_required_cents
+    // (jobs_deposit_paid_lte_required) — set both.
+    await rwExec(
+      h.tenantA.tenantId,
+      `UPDATE jobs SET deposit_required_cents = 5000, deposit_paid_cents = 5000 WHERE id = $1`,
+      [jobId]
+    );
   } catch (err) {
     h.evidence.na(`Could not seed deposit (schema differs?): ${(err as Error).message}`);
     return;
@@ -194,7 +204,8 @@ matrixTest('PAY-04', 'Overdue invoice money-state', async (h) => {
     h.evidence.na('E2E_DB_URL_READWRITE not set — cannot backdate due_date.');
     return;
   }
-  const invoiceId = await openInvoice(h, 25000, '04');
+  const jobId = await freshJob(h, '04');
+  const invoiceId = await openInvoice(h, 25000, '04', jobId);
   try {
     await rwExec(
       h.tenantA.tenantId,
@@ -206,7 +217,7 @@ matrixTest('PAY-04', 'Overdue invoice money-state', async (h) => {
     return;
   }
 
-  // The overdue sweep is worker-driven (no HTTP trigger). Poll the job money_state briefly.
+  // The overdue sweep is worker-driven (no HTTP trigger). Poll this job's money_state.
   let moneyState = 'unknown';
   for (let i = 0; i < 6; i++) {
     await new Promise((r) => setTimeout(r, 2500));
@@ -214,7 +225,7 @@ matrixTest('PAY-04', 'Overdue invoice money-state', async (h) => {
       label: `04-money-state-${i}`,
       tenantId: h.tenantA.tenantId,
       sql: `SELECT j.money_state FROM jobs j WHERE j.id = $1`,
-      params: [h.tenantA.jobId],
+      params: [jobId],
     });
     moneyState = (res.rows[0] as { money_state?: string })?.money_state ?? 'unknown';
     if (moneyState === 'overdue') break;

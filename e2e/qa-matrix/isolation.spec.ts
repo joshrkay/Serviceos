@@ -64,11 +64,19 @@ matrixTest('ISO-01', 'Cross-tenant isolation across core entities + RLS', async 
   });
   expect([400, 403, 404]).toContain(noteWrite.response.status);
 
-  const injected = await h.db.query({
-    label: '01-note-not-written',
-    sql: `SELECT count(*)::int AS c FROM notes WHERE content = 'QA cross-tenant injection attempt'`,
-  });
-  expect((injected.rows[0] as { c: number }).c, 'cross-tenant note must not persist').toBe(0);
+  // Query under each tenant's GUC — a no-GUC query is RLS-suppressed to 0 rows
+  // and would mask a leaked note. A leaked note would carry A's or B's tenant_id.
+  let leaked = 0;
+  for (const label of ['A', 'B'] as const) {
+    const r = await h.db.query({
+      label: `01-note-check-${label}`,
+      tenantId: label === 'A' ? a.tenantId : b.tenantId,
+      sql: `SELECT count(*)::int AS c FROM notes WHERE content = $1`,
+      params: ['QA cross-tenant injection attempt'],
+    });
+    leaked += (r.rows[0] as { c: number }).c;
+  }
+  expect(leaked, 'cross-tenant note must not persist under either tenant').toBe(0);
 
   // RLS: estimate is visible only under Tenant A's GUC.
   const noGuc = await h.db.query({

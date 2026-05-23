@@ -55,6 +55,7 @@ matrixTest('CUST-01', 'Create customers in-app (both tenants)', async (h) => {
 
 matrixTest('CUST-02', 'Create customer via AI voice session', async (h) => {
   const { token, tenantId } = h.tenantA;
+  const t0 = new Date(Date.now() - 5000).toISOString();
 
   const sessionId = await startVoiceSession(h, token, '02');
   if (!sessionId) {
@@ -96,13 +97,15 @@ matrixTest('CUST-02', 'Create customer via AI voice session', async (h) => {
     });
     expect(db.rowCount, 'voice-created customer row must exist').toBe(1);
   } else {
+    // Scope to rows created during this test so a stale 'Dana Rivera' from a
+    // prior run can't mask a regression in the voice execution path.
     const db = await h.db.query({
       label: '02-created-by-name',
       tenantId,
-      sql: `SELECT id FROM customers WHERE tenant_id = $1 AND first_name = 'Dana' AND last_name = 'Rivera'`,
-      params: [tenantId],
+      sql: `SELECT id FROM customers WHERE tenant_id = $1 AND first_name = 'Dana' AND last_name = 'Rivera' AND created_at >= $2`,
+      params: [tenantId, t0],
     });
-    expect(db.rowCount, 'voice-created customer (by name) must exist').toBeGreaterThanOrEqual(1);
+    expect(db.rowCount, 'voice-created customer (by name, this run) must exist').toBeGreaterThanOrEqual(1);
   }
 
   await gotoUi(h, '/customers', '02-list-ui');

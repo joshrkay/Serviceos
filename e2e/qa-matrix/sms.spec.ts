@@ -78,7 +78,7 @@ async function pollDispatchCount(h: RowHarness, appointmentId: string, label: st
     const res = await h.db.query({
       label: `${label}-poll-${i}`,
       tenantId: h.tenantA.tenantId,
-      sql: `SELECT count(*)::int AS c FROM message_dispatches WHERE entity_id = $1`,
+      sql: `SELECT count(*)::int AS c FROM message_dispatches WHERE entity_id = $1 AND channel = 'sms'`,
       params: [appointmentId],
     });
     count = (res.rows[0] as { c: number }).c;
