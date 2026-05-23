@@ -739,8 +739,8 @@ export class TwilioMediaStreamAdapter {
   ): Promise<void> {
     const priorTurns = this.extractPriorTurns(session, 4);
     const intent =
-      (priorTurnEffects.find((fx) => fx.type === 'audit_log')?.payload as { intent?: string } | undefined)
-        ?.intent ?? 'unknown';
+      (priorTurnEffects.find((fx) => fx.type === 'audit_log')?.payload as { intentType?: string } | undefined)
+        ?.intentType ?? 'unknown';
 
     const result = await this.deps.sentimentClassifier!(
       {
@@ -777,6 +777,16 @@ export class TwilioMediaStreamAdapter {
       // emitSideEffects only renders tts_play), then render the reassurance TTS.
       await this.deps.deliverEscalationEffects?.(session, newEffects, session.tenantId);
       await this.emitSideEffects(newEffects);
+      // Record the agent's reassurance line so summarizeSession + later turns
+      // see it — mirrors the speechTurn path (create-voice-turn-processor.ts).
+      const spokenTts = [...newEffects].reverse().find((fx) => fx.type === 'tts_play');
+      if (spokenTts && typeof spokenTts.payload.text === 'string') {
+        this.deps.store.appendTranscript(session.id, {
+          speaker: 'agent',
+          text: spokenTts.payload.text,
+          ts: Date.now(),
+        });
+      }
     }
   }
 

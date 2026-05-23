@@ -561,6 +561,8 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     await new Promise((r) => setImmediate(r));
 
     expect(deliverEscalationEffects).toHaveBeenCalledWith(session, escalationEffects, session.tenantId);
+    // The reassurance TTS is recorded in the transcript for summarization/context.
+    expect(session.transcript).toContain('agent: Let me get a person on the line.');
   });
 
   it('malformed inbound JSON is silently dropped', async () => {
