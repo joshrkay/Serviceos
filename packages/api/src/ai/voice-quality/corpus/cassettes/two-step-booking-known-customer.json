@@ -26,7 +26,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.576Z"
+      "recordedAt": "2026-05-23T12:08:49.951Z"
     },
     {
       "requestHash": "sha256:d41f92657acbd0dd691a0f88cf4960d0258a1c3b7003c20421619ccd7a4c3e70",
@@ -36,10 +36,10 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"mock\": true}",
-        "model": "claude-sonnet-4-6",
+        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95}",
+        "model": "mock-model",
         "provider": "mock",
-        "latencyMs": 0,
+        "latencyMs": 1,
         "tokenUsage": {
           "input": 10,
           "output": 10,
@@ -51,7 +51,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.577Z"
+      "recordedAt": "2026-05-23T12:08:49.952Z"
     },
     {
       "requestHash": "sha256:0125493e7f5ffc0fe7897aee0d888b7b03a924fbbb4c493ed8323a5b13a90a6a",
@@ -76,7 +76,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.579Z"
+      "recordedAt": "2026-05-23T12:08:49.955Z"
     },
     {
       "requestHash": "sha256:435d306f2651fdfea0877c58dcd757ed7598bb8b69a51f30faabad9e9155525d",
@@ -86,10 +86,10 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"mock\": true}",
-        "model": "claude-sonnet-4-6",
+        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95,\"scheduledStart\":\"2026-05-12T21:00:00.000Z\",\"scheduledEnd\":\"2026-05-12T23:00:00.000Z\"}",
+        "model": "mock-model",
         "provider": "mock",
-        "latencyMs": 0,
+        "latencyMs": 1,
         "tokenUsage": {
           "input": 10,
           "output": 10,
@@ -101,7 +101,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.579Z"
+      "recordedAt": "2026-05-23T12:08:49.956Z"
     }
   ]
 }

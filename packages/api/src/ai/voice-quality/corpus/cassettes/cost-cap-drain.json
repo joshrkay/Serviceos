@@ -11,22 +11,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.503Z"
+      "recordedAt": "2026-05-23T12:08:49.800Z"
     },
     {
       "requestHash": "sha256:45c12805bd2c7356df4cf89d89167af6e3c784ab29d3621dec0490cb30d79a9d",
@@ -36,22 +36,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.504Z"
+      "recordedAt": "2026-05-23T12:08:49.803Z"
     },
     {
       "requestHash": "sha256:a5bf31ec57cf88917deed9b7c380e7f5e99355b2a473c6a494ff25e6cd097655",
@@ -61,22 +61,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.505Z"
+      "recordedAt": "2026-05-23T12:08:49.809Z"
     },
     {
       "requestHash": "sha256:6cb417b3ddd585b61da39558b17380888026d137287da087f4f9022007253990",
@@ -86,22 +86,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.507Z"
+      "recordedAt": "2026-05-23T12:08:49.811Z"
     },
     {
       "requestHash": "sha256:b671dc6ee1fab4368b236eaa186bf0929bfdca8c1b4f063b36a00e27a78cdfcd",
@@ -111,22 +111,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.509Z"
+      "recordedAt": "2026-05-23T12:08:49.814Z"
     },
     {
       "requestHash": "sha256:996444adda9906b453085b32df6d2c57db3b08931ec40ed45d2d02df516809ce",
@@ -136,22 +136,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.511Z"
+      "recordedAt": "2026-05-23T12:08:49.817Z"
     },
     {
       "requestHash": "sha256:0ed154cf4c5e7228049574d233cc3ceab3050a2d66d07d796e4d868ac2e92157",
@@ -161,22 +161,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.513Z"
+      "recordedAt": "2026-05-23T12:08:49.820Z"
     },
     {
       "requestHash": "sha256:b6f5dfdc27669ade660ad7c0f701c640808b468ef4acb304064d93ef3bf19737",
@@ -186,22 +186,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_account_summary\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
-          "input": 10,
-          "output": 10,
-          "total": 20
+          "input": 0,
+          "output": 260,
+          "total": 260
         }
       },
       "tokenUsage": {
-        "inputTokens": 10,
-        "outputTokens": 10,
+        "inputTokens": 0,
+        "outputTokens": 260,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.516Z"
+      "recordedAt": "2026-05-23T12:08:49.822Z"
     }
   ]
 }

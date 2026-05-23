@@ -11,7 +11,7 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"operator_request\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
@@ -26,7 +26,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.546Z"
+      "recordedAt": "2026-05-23T12:08:49.880Z"
     }
   ]
 }

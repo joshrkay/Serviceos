@@ -24,9 +24,71 @@ import {
   ProposalType,
 } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
+import type { AppointmentRepository } from '../../appointments/appointment';
+import type { LLMGateway } from '../gateway/gateway';
+import { isIsoDatetime } from './create-appointment-task';
 
 function entitiesFrom(context: TaskContext): ExtractedEntities {
   return (context.existingEntities ?? {}) as ExtractedEntities;
+}
+
+/** Tolerate both spellings ('canceled' canonical, 'cancelled' from fixtures). */
+function isCancelled(status: unknown): boolean {
+  return status === 'canceled' || status === 'cancelled';
+}
+
+/**
+ * Resolve the caller's active (non-cancelled) appointment id.
+ *
+ * The classifier only ever returns a natural-language reference
+ * ("my Tuesday appointment"), never a UUID. Production resolves that
+ * against the identified caller's upcoming appointments. We mirror
+ * that here: scan the tenant's scheduled appointments and return the
+ * single active one. Returns undefined when zero or more than one
+ * candidate exists (ambiguous → leave for the review UI / escalation).
+ */
+async function resolveActiveAppointmentId(
+  repo: AppointmentRepository | undefined,
+  tenantId: string,
+): Promise<string | undefined> {
+  if (!repo) return undefined;
+  // Use listWithMeta (tenant-scoped, no date filter) rather than
+  // findByDateRange: corpus fixtures store scheduledStart as ISO
+  // strings, which breaks the repo's Date-based range comparison.
+  let all: Array<{ id: string; status: unknown }> = [];
+  if (repo.listWithMeta) {
+    const r = await repo.listWithMeta(tenantId);
+    all = r.data;
+  } else {
+    all = await repo.findByDateRange(tenantId, new Date(0), new Date('9999-12-31T00:00:00.000Z'));
+  }
+  const active = all.filter((a) => !isCancelled(a.status));
+  return active.length === 1 ? active[0].id : undefined;
+}
+
+const RESCHEDULE_SYSTEM_PROMPT = `You are an appointment scheduling assistant for a field service operating system.
+Given a voice transcript where a caller asks to reschedule an existing appointment, extract the NEW appointment time.
+
+Return valid JSON with this shape (no prose, no markdown fences):
+{
+  "newScheduledStart": "<ISO 8601 UTC datetime, e.g. 2026-04-22T21:00:00.000Z>",
+  "newScheduledEnd": "<ISO 8601 UTC datetime>",
+  "confidence_score": <number between 0 and 1>
+}
+
+Rules:
+- Always return ISO 8601 UTC datetimes.
+- Assume the tenant's local timezone is America/Los_Angeles unless told otherwise, then convert to UTC.
+- Preserve the original appointment's duration unless the caller states a new one.
+- If the new date/time is ambiguous, set confidence_score below 0.7.`;
+
+function tryParseJson(content: string): Record<string, unknown> | null {
+  try {
+    const p = JSON.parse(content);
+    return typeof p === 'object' && p !== null ? (p as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function baseSourceContext(context: TaskContext): Record<string, unknown> | undefined {
@@ -69,25 +131,78 @@ function inputFor(
 export class RescheduleAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'reschedule_appointment' as const;
 
+  constructor(
+    private readonly gateway?: LLMGateway,
+    private readonly appointmentRepo?: AppointmentRepository,
+  ) {}
+
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {};
     const missing: string[] = [];
 
-    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
-    else missing.push('appointmentId');
+    // Resolve the concrete appointment id from the caller's active
+    // appointment (the classifier only gives a natural-language ref).
+    const resolvedId = await resolveActiveAppointmentId(
+      this.appointmentRepo,
+      context.tenantId,
+    );
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
 
     if (ee.newDateTimeDescription) {
       payload.newDateTimeDescription = ee.newDateTimeDescription;
     }
-    // ISO fields are not derived here — flagged as missing so the
-    // review UI fills them from the natural-language description.
-    missing.push('newScheduledStart', 'newScheduledEnd');
+
+    // Parse the natural-language new time into ISO datetimes via the
+    // LLM — mirrors CreateAppointmentAITaskHandler. When no gateway is
+    // wired (or parsing fails) the ISO fields stay missing so the
+    // review UI fills them from the description.
+    let parsedStart: string | undefined;
+    let parsedEnd: string | undefined;
+    if (this.gateway) {
+      try {
+        const res = await this.gateway.complete({
+          taskType: 'reschedule_appointment',
+          messages: [
+            { role: 'system', content: RESCHEDULE_SYSTEM_PROMPT },
+            { role: 'user', content: this.buildUserMessage(context) },
+          ],
+          responseFormat: 'json',
+        });
+        const parsed = tryParseJson(res.content);
+        if (parsed) {
+          if (isIsoDatetime(parsed.newScheduledStart)) parsedStart = parsed.newScheduledStart;
+          if (isIsoDatetime(parsed.newScheduledEnd)) parsedEnd = parsed.newScheduledEnd;
+        }
+      } catch {
+        // Degrade to missing-fields — never fail the call on a parse hiccup.
+      }
+    }
+
+    if (parsedStart) payload.newScheduledStart = parsedStart;
+    else missing.push('newScheduledStart');
+    if (parsedEnd) payload.newScheduledEnd = parsedEnd;
+    else missing.push('newScheduledEnd');
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
       taskType: this.taskType,
     };
+  }
+
+  private buildUserMessage(context: TaskContext): string {
+    const parts: string[] = [`Transcript: ${context.message}`];
+    if (context.existingEntities && Object.keys(context.existingEntities).length > 0) {
+      parts.push(`Known entities: ${JSON.stringify(context.existingEntities)}`);
+    }
+    return parts.join('\n');
   }
 }
 
@@ -99,6 +214,8 @@ export class RescheduleAppointmentTaskHandler implements TaskHandler {
 export class CancelAppointmentTaskHandler implements TaskHandler {
   readonly taskType = 'cancel_appointment' as const;
 
+  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
@@ -106,8 +223,20 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     };
     const missing: string[] = [];
 
-    if (ee.appointmentReference) payload.appointmentReference = ee.appointmentReference;
-    else missing.push('appointmentId');
+    // Resolve the concrete appointment id from the caller's active
+    // appointment; fall back to the natural-language reference.
+    const resolvedId = await resolveActiveAppointmentId(
+      this.appointmentRepo,
+      context.tenantId,
+    );
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
 
     if (ee.cancellationReason && ee.cancellationReason.length > 0) {
       payload.reason = ee.cancellationReason;

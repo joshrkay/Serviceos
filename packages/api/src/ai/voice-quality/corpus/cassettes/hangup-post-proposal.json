@@ -26,7 +26,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.529Z"
+      "recordedAt": "2026-05-23T12:08:49.847Z"
     },
     {
       "requestHash": "sha256:428e6072af579aa11d5d4f7cde03e994484c2f1ee1b6e5064602ca18261a2faa",
@@ -36,10 +36,10 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"mock\": true}",
-        "model": "claude-sonnet-4-6",
+        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95,\"scheduledStart\":\"2026-05-12T21:00:00.000Z\",\"scheduledEnd\":\"2026-05-12T23:00:00.000Z\"}",
+        "model": "mock-model",
         "provider": "mock",
-        "latencyMs": 0,
+        "latencyMs": 1,
         "tokenUsage": {
           "input": 10,
           "output": 10,
@@ -51,7 +51,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.530Z"
+      "recordedAt": "2026-05-23T12:08:49.847Z"
     },
     {
       "requestHash": "sha256:ab5b015ecc96ccc03cd15fd04ac15560509855b147fd386af8ca3eff6aafc033",
@@ -76,7 +76,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.531Z"
+      "recordedAt": "2026-05-23T12:08:49.848Z"
     }
   ]
 }

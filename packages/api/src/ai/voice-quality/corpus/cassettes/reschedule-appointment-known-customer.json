@@ -11,7 +11,7 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"reschedule_appointment\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"reschedule_appointment\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\",\"extractedEntities\":{\"appointmentReference\":\"the appointment\",\"newDateTimeDescription\":\"the requested new time\"}}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
@@ -26,7 +26,32 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-05-20T07:08:13.547Z"
+      "recordedAt": "2026-05-23T12:08:49.883Z"
+    },
+    {
+      "requestHash": "sha256:1aca502c660957fb2fd00f3c0b611938af7293fcf4bde38cb2b6324567f5416b",
+      "request": {
+        "model": "(default)",
+        "prompt": "[{\"content\":\"You are an appointment scheduling assistant for a field service operating system.\\nGiven a voice transcript where a caller asks to reschedule an existing appointment, extract the NEW appointment time.\\n\\nReturn valid JSON with this shape (no prose, no markdown fences):\\n{\\n  \\\"newScheduledStart\\\": \\\"<ISO 8601 UTC datetime, e.g. 2026-04-22T21:00:00.000Z>\\\",\\n  \\\"newScheduledEnd\\\": \\\"<ISO 8601 UTC datetime>\\\",\\n  \\\"confidence_score\\\": <number between 0 and 1>\\n}\\n\\nRules:\\n- Always return ISO 8601 UTC datetimes.\\n- Assume the tenant's local timezone is America/Los_Angeles unless told otherwise, then convert to UTC.\\n- Preserve the original appointment's duration unless the caller states a new one.\\n- If the new date/time is ambiguous, set confidence_score below 0.7.\",\"role\":\"system\"},{\"content\":\"Transcript: Hi, this is Jane Smith. I need to reschedule my appointment from Tuesday to Wednesday at the same time.\\nKnown entities: {\\\"appointmentReference\\\":\\\"the appointment\\\",\\\"newDateTimeDescription\\\":\\\"the requested new time\\\"}\",\"role\":\"user\"}]",
+        "schema": "json"
+      },
+      "response": {
+        "content": "{\"confidence_score\":0.95,\"newScheduledStart\":\"2026-05-13T21:00:00.000Z\",\"newScheduledEnd\":\"2026-05-13T23:00:00.000Z\"}",
+        "model": "mock-model",
+        "provider": "mock",
+        "latencyMs": 1,
+        "tokenUsage": {
+          "input": 10,
+          "output": 10,
+          "total": 20
+        }
+      },
+      "tokenUsage": {
+        "inputTokens": 10,
+        "outputTokens": 10,
+        "costCents": 0
+      },
+      "recordedAt": "2026-05-23T12:08:49.883Z"
     }
   ]
 }

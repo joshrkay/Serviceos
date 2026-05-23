@@ -61,6 +61,13 @@ export interface VoiceActionRouterPayload {
   transcript: string;
   conversationId?: string;
   recordingId?: string;
+  /**
+   * Resolved caller identity (caller-ID match). Threaded onto the task
+   * context so handlers that need the caller's customer — create/cancel/
+   * reschedule appointment — attribute the proposal to the verified
+   * caller instead of asking the LLM to guess.
+   */
+  customerId?: string;
 }
 
 /**
@@ -241,8 +248,14 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('issue_invoice', new IssueInvoiceTaskHandler(deps.proposalRepo, deps.thresholdResolver));
   handlers.set('create_customer', new CreateCustomerTaskHandler());
   handlers.set('create_job', new CreateJobVoiceTaskHandler());
-  handlers.set('reschedule_appointment', new RescheduleAppointmentTaskHandler());
-  handlers.set('cancel_appointment', new CancelAppointmentTaskHandler());
+  handlers.set(
+    'reschedule_appointment',
+    new RescheduleAppointmentTaskHandler(deps.gateway, deps.appointmentRepo),
+  );
+  handlers.set(
+    'cancel_appointment',
+    new CancelAppointmentTaskHandler(deps.appointmentRepo),
+  );
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
@@ -427,7 +440,7 @@ export function createVoiceActionRouterWorker(
       message: QueueMessage<VoiceActionRouterPayload>,
       logger: Logger
     ): Promise<void> => {
-      const { tenantId, userId, transcript, conversationId, recordingId } = message.payload;
+      const { tenantId, userId, transcript, conversationId, recordingId, customerId } = message.payload;
 
       const log = logger.child({ tenantId, recordingId, transcriptLen: transcript.length });
       log.info('voice-action-router: classifying transcript');
@@ -555,6 +568,7 @@ export function createVoiceActionRouterWorker(
           classification.intentType,
           classification.extractedEntities
         ),
+        ...(customerId ? { customerId } : {}),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       };
 
