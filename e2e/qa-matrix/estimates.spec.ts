@@ -122,15 +122,13 @@ matrixTest('EST-04', 'Estimate total correctness', async (h) => {
   });
   const apiBody = created.response.body as {
     id: string;
-    subtotalCents: number;
-    taxCents: number;
-    totalCents: number;
+    totals: { subtotalCents: number; taxCents: number; totalCents: number };
   };
 
   const expected = calculateTotals(payload);
-  expect(apiBody.subtotalCents).toBe(expected.subtotalCents);
-  expect(apiBody.taxCents).toBe(expected.taxCents);
-  expect(apiBody.totalCents).toBe(expected.totalCents);
+  expect(apiBody.totals.subtotalCents).toBe(expected.subtotalCents);
+  expect(apiBody.totals.taxCents).toBe(expected.taxCents);
+  expect(apiBody.totals.totalCents).toBe(expected.totalCents);
 
   const db = await h.db.query({
     label: '04-row',

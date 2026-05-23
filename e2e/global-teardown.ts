@@ -18,6 +18,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import buildReport from './qa-matrix/helpers/report-builder';
 
 export default async function globalTeardown(): Promise<void> {
   // --- BEGIN: ephemeral-DB block ---
@@ -28,20 +29,9 @@ export default async function globalTeardown(): Promise<void> {
 
   // --- BEGIN: QA matrix report builder block ---
   if (process.env.QA_MATRIX === '1') {
-    // Late-import so the bare e2e run doesn't load QA-matrix-only code.
-    const path = await import('node:path');
-    const reportBuilderPath = path.resolve(
-      process.cwd(),
-      'e2e',
-      'qa-matrix',
-      'helpers',
-      'report-builder.ts'
-    );
-    const mod = await import(reportBuilderPath);
-    const fn = (mod as { default?: () => Promise<void> }).default;
-    if (typeof fn === 'function') {
-      await fn();
-    }
+    // Static import (above) so Playwright's TS loader transpiles it; a dynamic
+    // import() of the raw .ts path fails under Node ("import outside a module").
+    await buildReport();
   }
   // --- END: QA matrix report builder block ---
 }

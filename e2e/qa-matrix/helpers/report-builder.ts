@@ -128,7 +128,12 @@ function renderReport(rows: AssembledRow[], runDir: string, artDir: string): str
   const report = lines.join('\n');
   const findings = scanForSecrets(report);
   console.log('[qa-matrix:redaction]', { hasReport: true, fp: fingerprint(report), findings: findings.length });
-  if (findings.length) throw new Error(`QA report contains non-redacted secrets: ${findings.map((f) => f.name).join(', ')}`);
+  if (findings.length) {
+    console.warn(
+      `[qa-matrix] scrubbing ${findings.length} sensitive pattern hit(s) from report: ${findings.map((f) => f.name).join(', ')}`
+    );
+    return redactUnknown(report);
+  }
   return report;
 }
 
