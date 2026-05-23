@@ -14,6 +14,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   update_estimate: 1,
   create_appointment: 2,
   create_booking: 2,
+  // After-hours callback requests surface alongside booking work.
+  callback: 2,
   create_job: 3,
   create_customer: 4,
   update_customer: 5,
