@@ -103,7 +103,7 @@ import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import type { AgreementRepository } from '../../agreements/agreement';
-import type { ProposalRepository } from '../../proposals/proposal';
+import { createProposal, type ProposalRepository } from '../../proposals/proposal';
 
 // Mutation worker (production code path for proposal creation).
 import {
@@ -431,7 +431,10 @@ export class TextModeDriver implements AgentDriver {
     try {
       const classification = await classifyIntent(
         callerTranscript,
-        { tenantId: session.tenantId },
+        {
+          tenantId: session.tenantId,
+          callerIsExistingCustomer: state?.identityState === 'resolved',
+        },
         this.deps.gateway,
       );
 
@@ -519,6 +522,20 @@ export class TextModeDriver implements AgentDriver {
             tts ?? "Let me connect you with a team member who can help.";
           break;
         }
+        case 'after_hours_callback': {
+          await this.createCallbackProposal(session, callerTranscript);
+          await this.fireEscalation(
+            session,
+            { type: 'caller_identification_failed', reason: 'after_hours' },
+            'caller_requested',
+          );
+          agentResponse =
+            "We're closed right now — I've logged a callback request and a team member will reach out to schedule your visit.";
+          break;
+        }
+        case 'noop':
+          agentResponse = 'Got it.';
+          break;
         case 'lookup':
           agentResponse = await this.runLookupSkill(session, intent as IntentType);
           break;
@@ -612,8 +629,10 @@ export class TextModeDriver implements AgentDriver {
   ): Promise<
     | { kind: 'terminate_dnc' }
     | { kind: 'escalate'; event: CallingAgentEvent; reason: string }
+    | { kind: 'after_hours_callback' }
     | { kind: 'lookup' }
     | { kind: 'mutation' }
+    | { kind: 'noop' }
     | { kind: 'reprompt' }
   > {
     const isLookup = isLookupIntent(intent as IntentType);
@@ -672,13 +691,10 @@ export class TextModeDriver implements AgentDriver {
       };
     }
 
-    // After-hours booking → cannot book; escalate for a human callback.
+    // After-hours booking → can't book live; capture a callback request
+    // and escalate for a human to follow up.
     if (state?.afterHours && isBooking) {
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'after_hours' },
-        reason: 'caller_requested',
-      };
+      return { kind: 'after_hours_callback' };
     }
 
     // Ambiguous caller-ID (matches >1 customer) → can't safely act.
@@ -754,6 +770,8 @@ export class TextModeDriver implements AgentDriver {
     }
 
     if (intent === 'unknown') return { kind: 'reprompt' };
+    // Conversational acknowledgments carry no action.
+    if (intent === 'confirm' || intent === 'language_switch') return { kind: 'noop' };
     if (isLookup) return { kind: 'lookup' };
     return { kind: 'mutation' };
   }
@@ -880,6 +898,31 @@ export class TextModeDriver implements AgentDriver {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Capture an after-hours callback request as a `callback` proposal so
+   * an operator follows up — never a live booking. Emits proposal_created.
+   */
+  private async createCallbackProposal(session: VoiceSession, transcript: string): Promise<void> {
+    try {
+      const proposal = createProposal({
+        tenantId: session.tenantId,
+        proposalType: 'callback',
+        payload: {
+          reason: 'after_hours',
+          transcript,
+          ...(session.conversationId ? { conversationId: session.conversationId } : {}),
+        },
+        summary: 'After-hours callback request',
+        createdBy: this.deps.systemActorId ?? 'system:text-mode',
+      });
+      const stored = await this.deps.proposalRepo.create(proposal);
+      session.proposalIds.push(stored.id);
+      session.events.emit('voice-event', { type: 'proposal_created', proposalId: stored.id });
+    } catch {
+      // Never break the call on a proposal-creation hiccup.
+    }
   }
 
   /**

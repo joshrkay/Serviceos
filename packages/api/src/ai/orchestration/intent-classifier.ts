@@ -47,6 +47,9 @@ export type IntentType =
   // The FSM fast-paths directly to escalating without entity_resolution
   // or intent_confirm.
   | 'operator_request'
+  // Caller confirms/agrees to a pending action the agent proposed
+  // ("yes", "that's right", "go ahead"). Conversational, non-proposal.
+  | 'confirm'
   | 'unknown';
 
 const SUPPORTED_INTENTS: readonly IntentType[] = [
@@ -75,6 +78,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_estimates',
   'language_switch',
   'operator_request',
+  'confirm',
   'unknown',
 ] as const;
 
@@ -200,6 +204,15 @@ export interface ClassifyContext {
    * no active plan the section is omitted.
    */
   planPromptSection?: string;
+  /**
+   * True when the inbound caller has already been resolved to an
+   * existing customer (e.g. by caller-ID). Suppresses the deterministic
+   * "sign up" → create_customer override: an established customer who
+   * says "can I sign up?" should be recognized, not enrolled again as a
+   * duplicate. Identity-unaware callers keep the create_customer
+   * short-circuit (P18-001).
+   */
+  callerIsExistingCustomer?: boolean;
 }
 
 /**
@@ -354,6 +367,12 @@ Supported intents (return exactly ONE):
                           NOTE: "I want to schedule with a person" is NOT
                           operator_request — the intent is scheduling, not
                           transferring.
+- "confirm"            — caller confirms or agrees to a pending action the
+                          agent just proposed. Conversational, non-proposal.
+                          Examples: "Yes, that's right"
+                                    "Go ahead"
+                                    "Correct, book it"
+                                    "Yep, that works"
 - "lookup_appointments" — caller is ASKING about their upcoming
                            appointment(s). Read-only — never moves money
                            or creates records. Routed to the
@@ -729,7 +748,11 @@ export async function classifyIntent(
   // We keep any extracted entities the LLM did manage to pull, and
   // pin confidence to 0.85 — comfortably above CLASSIFIER_CONFIDENCE_THRESHOLD
   // and the FSM's TAU_INT (0.75 in the calling-agent transitions).
-  const signupOverride = isCreateCustomerSignupPhrasing(transcript);
+  // An already-identified customer cannot "sign up" again — suppress the
+  // deterministic create_customer override so they're recognized instead
+  // of enrolled as a duplicate.
+  const signupOverride =
+    isCreateCustomerSignupPhrasing(transcript) && !context.callerIsExistingCustomer;
   if (!parsed) {
     if (signupOverride) {
       const result: IntentClassification = {
