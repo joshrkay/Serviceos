@@ -2157,7 +2157,10 @@ export function createApp(): express.Express {
       // below) reads the tenant's current settings at session start, so the
       // static `escalationSettings` dep is intentionally left unset.
       const sentimentClassifierDep = llmGateway
-        ? (input: Parameters<typeof classifyTurnSentiment>[0]) =>
+        ? (
+            input: Parameters<typeof classifyTurnSentiment>[0],
+            budget?: Partial<Parameters<typeof classifyTurnSentiment>[1]>,
+          ) =>
             classifyTurnSentiment(input, {
               llm: {
                 complete: async ({ prompt }: { prompt: string }) => {
@@ -2168,6 +2171,10 @@ export function createApp(): express.Express {
                   return { text: res.content };
                 },
               },
+              // Per-session cost-cap inputs threaded in by the adapter so the
+              // classifier's budget guard can skip the LLM call when the session
+              // is near its cost cap.
+              ...budget,
             })
         : undefined;
 
@@ -2226,6 +2233,10 @@ export function createApp(): express.Express {
               const settings = await settingsRepo.findByTenant(tenantId);
               return resolveEscalationSettings(settings);
             },
+            // F6c: deliver out-of-band frustration_detected effects (notify_oncall,
+            // audit) through the host processor — emitSideEffects only renders TTS.
+            deliverEscalationEffects: (session, effects, tenantId) =>
+              twilioAdapter.deliverOutOfBandEffects(session, effects, tenantId),
           },
         );
         return server;

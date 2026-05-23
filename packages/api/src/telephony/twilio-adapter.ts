@@ -800,6 +800,22 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * Deliver side effects produced by an out-of-band FSM dispatch (e.g. the
+   * mediastream adapter's async LLM-sentiment escalation, which dispatches
+   * `frustration_detected` outside a normal speech turn). Routes them through
+   * the same processor path a normal turn uses so `notify_oncall` and
+   * `audit_log` actually fire — the mediastream adapter's `emitSideEffects`
+   * only renders `tts_play`.
+   */
+  async deliverOutOfBandEffects(
+    session: VoiceSession,
+    effects: SideEffect[],
+    tenantId: string,
+  ): Promise<void> {
+    await this.processor.executeSideEffects(session, effects, tenantId);
+  }
+
+  /**
    * Handle the initial `POST /api/telephony/voice` webhook.
    * Creates a session, runs the disclose_recording + identify_caller
    * skills, drives the FSM through `incoming_call`, and returns TwiML.

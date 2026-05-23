@@ -404,6 +404,165 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     );
   });
 
+  it('S12: forwards the per-session cost budget into the sentiment classifier', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-budget' });
+    vi.spyOn(session.machine, 'dispatch').mockReturnValue([]);
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const sentimentClassifier = vi.fn(async () => ({ frustrationScore: 0.1 }));
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        sentimentClassifier,
+        resolveEscalationSettings: async () => ({
+          ...DEFAULT_ESCALATION_SETTINGS,
+          trigger_llm_sentiment: true,
+          llm_sentiment_threshold: 0.5,
+        }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-budget',
+      start: { callSid: 'CA-budget', accountSid: 'AC', streamSid: 'MZ-budget', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'hello', confidence: 0.97 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(sentimentClassifier).toHaveBeenCalledTimes(1);
+    const budget = sentimentClassifier.mock.calls[0][1] as {
+      costTracker?: unknown;
+      sessionCostCapCents?: number;
+      maxSentimentBudgetRatio?: number;
+    };
+    expect(budget.costTracker).toBe(session.costTracker);
+    expect(budget.sessionCostCapCents).toBe(session.costTracker.costCapCents);
+    expect(budget.maxSentimentBudgetRatio).toBe(0.8);
+  });
+
+  it('S12: skips the sentiment classifier once the call has already escalated', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-already-esc' });
+    vi.spyOn(session.machine, 'currentState', 'get').mockReturnValue('escalating');
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const sentimentClassifier = vi.fn(async () => ({ frustrationScore: 0.9 }));
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        sentimentClassifier,
+        resolveEscalationSettings: async () => ({
+          ...DEFAULT_ESCALATION_SETTINGS,
+          trigger_llm_sentiment: true,
+          llm_sentiment_threshold: 0.5,
+        }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-already-esc',
+      start: { callSid: 'CA-already-esc', accountSid: 'AC', streamSid: 'MZ-already-esc', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'this is ridiculous', confidence: 0.97 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(sentimentClassifier).not.toHaveBeenCalled();
+  });
+
+  it('S12: carries the classifier reasonHint into the frustration_detected dispatch', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-hint' });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch').mockReturnValue([]);
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const sentimentClassifier = vi.fn(async () => ({
+      frustrationScore: 0.9,
+      reasonHint: 'caller_impatience',
+    }));
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        sentimentClassifier,
+        resolveEscalationSettings: async () => ({
+          ...DEFAULT_ESCALATION_SETTINGS,
+          trigger_llm_sentiment: true,
+          llm_sentiment_threshold: 0.5,
+        }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-hint',
+      start: { callSid: 'CA-hint', accountSid: 'AC', streamSid: 'MZ-hint', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'this is ridiculous', confidence: 0.97 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'frustration_detected',
+        source: 'llm_sentiment',
+        reasonHint: 'caller_impatience',
+      }),
+    );
+  });
+
+  it('S12: delivers out-of-band escalation effects (notify_oncall) through the host', async () => {
+    const session = store.create('t', 'telephony', { callSid: 'CA-deliver' });
+    const escalationEffects: SideEffect[] = [
+      { type: 'notify_oncall', payload: { reason: 'llm_sentiment' } },
+      { type: 'tts_play', payload: { text: 'Let me get a person on the line.' } },
+    ];
+    vi.spyOn(session.machine, 'dispatch').mockReturnValue(escalationEffects);
+    const ws = new FakeWs();
+    const { provider, handle } = makeStreamingProvider();
+    const deliverEscalationEffects = vi.fn(async () => {});
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn: async () => [],
+        ttsProvider: makeTtsProvider(),
+        sentimentClassifier: vi.fn(async () => ({ frustrationScore: 0.9 })),
+        deliverEscalationEffects,
+        resolveEscalationSettings: async () => ({
+          ...DEFAULT_ESCALATION_SETTINGS,
+          trigger_llm_sentiment: true,
+          llm_sentiment_threshold: 0.5,
+        }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson({
+      event: 'start',
+      streamSid: 'MZ-deliver',
+      start: { callSid: 'CA-deliver', accountSid: 'AC', streamSid: 'MZ-deliver', tracks: ['inbound'] },
+    });
+    await new Promise((r) => setImmediate(r));
+    handle.emit({ type: 'final', isFinal: true, transcript: 'this is ridiculous', confidence: 0.97 });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(deliverEscalationEffects).toHaveBeenCalledWith(session, escalationEffects, session.tenantId);
+  });
+
   it('malformed inbound JSON is silently dropped', async () => {
     store.create('t', 'telephony', { callSid: 'CA-5' });
     const ws = new FakeWs();

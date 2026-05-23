@@ -28,6 +28,12 @@ export interface SentimentResult {
   reasonHint?: string;
 }
 
+/** Per-session budget inputs the caller threads in to enable the cost-cap guard. */
+export type SentimentBudget = Pick<
+  SentimentDeps,
+  'costTracker' | 'sessionCostCapCents' | 'maxSentimentBudgetRatio'
+>;
+
 const SYSTEM_PROMPT = `You are a sentiment classifier for an AI calling agent.
 Given the caller's latest utterance and a few prior turns, return a JSON object:
 {
