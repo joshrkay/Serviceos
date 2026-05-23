@@ -64,9 +64,13 @@ async function verifyVertical(
     expectStatus: [200, 404],
   });
   if (cats.response.status === 200) {
-    const blob = JSON.stringify(cats.response.body).toLowerCase();
-    expect(blob, `${pack} categories must include the ${pack}-specific term "${ownTerm}"`).toContain(ownTerm);
-    expect(blob, `${pack} categories must NOT include the other vertical's term "${foreignTerm}"`).not.toContain(
+    // Assert on category IDs (not a stringified blob — HVAC's "maintenance"
+    // category legitimately lists "Condensate drain cleaning").
+    const ids = Array.isArray(cats.response.body)
+      ? (cats.response.body as Array<{ id?: string }>).map((c) => String(c.id))
+      : [];
+    expect(ids, `${pack} categories must include the ${pack} category id "${ownTerm}"`).toContain(ownTerm);
+    expect(ids, `${pack} categories must NOT include the other vertical's category id "${foreignTerm}"`).not.toContain(
       foreignTerm
     );
   } else {

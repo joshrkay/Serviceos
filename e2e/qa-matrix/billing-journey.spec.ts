@@ -79,9 +79,9 @@ matrixTest('JRN-01', 'Estimate with mixed line items → send → accept', async
     label: '01-create',
     expectStatus: 201,
   });
-  const body = created.response.body as { id: string; subtotalCents: number; totalCents: number };
+  const body = created.response.body as { id: string; totals: { totalCents: number } };
   const id = body.id;
-  expect(body.totalCents, 'API total must match billing-engine math').toBe(expected.totalCents);
+  expect(body.totals.totalCents, 'API total must match billing-engine math').toBe(expected.totalCents);
 
   const db = await h.db.query({
     label: '01-row',

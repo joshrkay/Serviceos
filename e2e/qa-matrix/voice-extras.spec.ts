@@ -78,7 +78,7 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
   try {
     await rwExec(
       h.tenantA.tenantId,
-      `INSERT INTO tenant_dnc_list (tenant_id, phone, source)
+      `INSERT INTO tenant_dnc_list (tenant_id, phone, added_by)
        VALUES ($1, $2, 'qa') ON CONFLICT DO NOTHING`,
       [h.tenantA.tenantId, dncPhone]
     );
