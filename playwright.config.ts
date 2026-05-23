@@ -99,7 +99,16 @@ export default defineConfig({
               'isolation.spec.ts',
               'assistant.spec.ts',
             ],
-            use: { ...devices['Desktop Chrome'] },
+            // Browsers in the image (build 1194) can differ from the installed
+            // Playwright's expected build. QA_CHROMIUM_PATH lets a run point at
+            // an existing full-chromium binary (headless works without the
+            // separate headless-shell). No-op when unset.
+            use: {
+              ...devices['Desktop Chrome'],
+              ...(process.env.QA_CHROMIUM_PATH
+                ? { launchOptions: { executablePath: process.env.QA_CHROMIUM_PATH } }
+                : {}),
+            },
           },
         ]
       : []),
