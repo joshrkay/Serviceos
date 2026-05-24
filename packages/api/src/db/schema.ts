@@ -3025,6 +3025,19 @@ export const MIGRATIONS = {
       END IF;
     END $do$;
   `,
+  '120_extend_dispatch_analytics_event_type_check': `
+    -- Crew assignment (add_crew_member / remove_crew_member) records
+    -- 'crew_added' / 'crew_removed' dispatch analytics events. The inline
+    -- CHECK from 105_create_dispatch_analytics predates them, so the INSERT
+    -- would violate the constraint and fail the proposal execution. Widen the
+    -- constraint to the full set. Mirrors 069_extend_leads_source_check.
+    ALTER TABLE dispatch_analytics DROP CONSTRAINT IF EXISTS dispatch_analytics_event_type_check;
+    ALTER TABLE dispatch_analytics ADD CONSTRAINT dispatch_analytics_event_type_check
+      CHECK (event_type IN (
+        'assigned', 'reassigned', 'crew_added', 'crew_removed', 'rescheduled',
+        'canceled', 'conflict_detected', 'delay_notice_sent', 'delay_notice_failed'
+      ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

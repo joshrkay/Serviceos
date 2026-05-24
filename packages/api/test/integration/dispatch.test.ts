@@ -7,6 +7,8 @@ import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { getDispatchBoardData } from '../../src/dispatch/board-query';
+import { PgDispatchAnalyticsRepository } from '../../src/dispatch/pg-analytics';
+import { captureDispatchEvent } from '../../src/dispatch/analytics';
 
 describe('Postgres integration — dispatch', () => {
   let pool: Pool;
@@ -104,6 +106,33 @@ describe('Postgres integration — dispatch', () => {
       );
 
       expect(boardData.unassignedAppointments.length).toBe(0);
+    });
+  });
+
+  describe('dispatch analytics event types', () => {
+    // Regression: the crew feature emits 'crew_added'/'crew_removed', which
+    // must be permitted by the dispatch_analytics.event_type CHECK constraint
+    // (migration 120). A real INSERT is the only thing that exercises the
+    // constraint — the in-memory repo accepts any string.
+    it('records crew_added and crew_removed without violating the CHECK constraint', async () => {
+      const analyticsRepo = new PgDispatchAnalyticsRepository(pool);
+
+      const added = await captureDispatchEvent(analyticsRepo, tenant.tenantId, 'crew_added', {
+        appointmentId: crypto.randomUUID(),
+        technicianId: crypto.randomUUID(),
+      });
+      const removed = await captureDispatchEvent(analyticsRepo, tenant.tenantId, 'crew_removed', {
+        appointmentId: crypto.randomUUID(),
+        technicianId: crypto.randomUUID(),
+      });
+
+      expect(added.eventType).toBe('crew_added');
+      expect(removed.eventType).toBe('crew_removed');
+
+      const crewAdded = await analyticsRepo.getMetricsByType(tenant.tenantId, 'crew_added');
+      const crewRemoved = await analyticsRepo.getMetricsByType(tenant.tenantId, 'crew_removed');
+      expect(crewAdded.length).toBeGreaterThanOrEqual(1);
+      expect(crewRemoved.length).toBeGreaterThanOrEqual(1);
     });
   });
 });
