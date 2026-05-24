@@ -30,6 +30,9 @@ export type MatrixModule =
   | 'LEAD'
   | 'INV'
   | 'CUST'
+  | 'FLAG'
+  | 'TIME'
+  | 'SET'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -583,6 +586,36 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Archive customer',
     passCriteria:
       'POST /api/customers/:id/archive sets is_archived=true (archived_at stamped); the customer drops out of the default active list',
+    expected: 'pass',
+  },
+
+  // ----- Feature flags -----
+  {
+    id: 'FLAG-01',
+    module: 'FLAG',
+    feature: 'Feature-flag admin is platform-admin gated',
+    passCriteria:
+      'A tenant owner is refused (401/403/503) on both GET and PUT against /api/admin/feature-flags — the platform-admin gate blocks tenant-level callers from toggling platform flags',
+    expected: 'pass',
+  },
+
+  // ----- Time tracking -----
+  {
+    id: 'TIME-01',
+    module: 'TIME',
+    feature: 'Technician clock-in → clock-out',
+    passCriteria:
+      'POST /api/time-entries/clock-in opens an entry (201); POST /clock-out closes it; the DB time_entries row records both timestamps for the tenant',
+    expected: 'pass',
+  },
+
+  // ----- Tenant settings -----
+  {
+    id: 'SET-01',
+    module: 'SET',
+    feature: 'Read + update tenant settings',
+    passCriteria:
+      'GET /api/settings returns the tenant settings; PUT /api/settings updates a field (e.g. businessName) and a subsequent GET reflects it',
     expected: 'pass',
   },
 
