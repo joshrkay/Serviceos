@@ -3,6 +3,11 @@ import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
 
+/** Supported tenant/customer languages. Structurally identical to the
+ *  voice-stack `Language` in ai/i18n/i18n.ts; defined here to avoid a
+ *  settings→ai module dependency. */
+export type Language = 'en' | 'es';
+
 /**
  * F8 — per-tenant escalation channel + trigger flags.
  *
@@ -201,6 +206,20 @@ export interface TenantSettings {
    */
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
+  /**
+   * P11-002 — tenant language stack (columns on tenant_settings:
+   * default_language, auto_detect_language, tts_voice_en/es,
+   * spanish_dispatcher_user_ids). Resolves EN/ES for the voice agent
+   * and customer-facing comms. Seeded on create and defaulted by the
+   * repo on read ('en' / true), so consumers can rely on `?? 'en'` for
+   * legacy rows. Optional on the type to avoid forcing every
+   * TenantSettings literal to set them.
+   */
+  defaultLanguage?: Language;
+  autoDetectLanguage?: boolean;
+  ttsVoiceEn?: string | null;
+  ttsVoiceEs?: string | null;
+  spanishDispatcherUserIds?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -261,6 +280,12 @@ export interface UpdateSettingsInput {
   /** Public review links (4★+ feedback page); null clears the field. */
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
+  /** P11-002 — tenant language stack. */
+  defaultLanguage?: Language;
+  autoDetectLanguage?: boolean;
+  ttsVoiceEn?: string | null;
+  ttsVoiceEs?: string | null;
+  spanishDispatcherUserIds?: string[];
 }
 
 export interface SettingsRepository {
@@ -434,6 +459,8 @@ export async function createSettings(
       input.activeVerticalPacks,
       options?.normalizePackId ?? normalizePackId
     ),
+    defaultLanguage: 'en',
+    autoDetectLanguage: true,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -514,6 +541,8 @@ export async function ensureTenantSettings(
     nextEstimateNumber: 1,
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: 30,
+    defaultLanguage: 'en',
+    autoDetectLanguage: true,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

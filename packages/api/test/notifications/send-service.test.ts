@@ -198,6 +198,47 @@ describe('SendService.sendEstimate', () => {
     expect(dispatches[0].provider).toBe('in-memory');
   });
 
+  it('P11-002 — localizes the SMS when the customer prefers Spanish', async () => {
+    const c = makeCustomer({ preferredLanguage: 'es' });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).toContain('su presupuesto de Acme HVAC está listo');
+  });
+
+  it('P11-002 — uses the tenant default language when no customer preference', async () => {
+    await h.settings.update(TENANT, { defaultLanguage: 'es' });
+    const c = makeCustomer(); // no preferredLanguage
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).toContain('su presupuesto de Acme HVAC está listo');
+  });
+
+  it('P11-002 — customer preference (en) overrides a Spanish tenant default', async () => {
+    await h.settings.update(TENANT, { defaultLanguage: 'es' });
+    const c = makeCustomer({ preferredLanguage: 'en' });
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).toContain('your estimate from Acme HVAC is ready');
+  });
+
   it('sends both SMS and email when channel=both', async () => {
     const c = makeCustomer();
     await h.customer.create(c);

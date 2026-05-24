@@ -325,6 +325,13 @@ export const updateSettingsSchema = z.object({
     .union([z.string().trim().url(), z.literal(''), z.null()])
     .optional()
     .transform((v) => (v === '' ? null : v)),
+  // P11-002 — tenant language stack. Persisted to tenant_settings and
+  // consumed by the voice agent + customer-facing comms.
+  defaultLanguage: z.enum(['en', 'es']).optional(),
+  autoDetectLanguage: z.boolean().optional(),
+  ttsVoiceEn: z.string().min(1).nullable().optional(),
+  ttsVoiceEs: z.string().min(1).nullable().optional(),
+  spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

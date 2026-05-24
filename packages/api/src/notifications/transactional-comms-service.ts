@@ -20,6 +20,8 @@ import {
   renderPaymentReceiptSms,
   renderInvoiceOverdueSms,
 } from './templates';
+import { resolveCustomerLanguage } from '../i18n/resolve-language';
+import type { Language } from '../ai/i18n/i18n';
 
 export interface TransactionalCommsServiceDeps extends CustomerMessageDeliveryDeps {
   appointmentRepo: AppointmentRepository;
@@ -127,11 +129,16 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
 
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     const businessName = settings?.businessName ?? 'Your service team';
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage: settings?.defaultLanguage,
+    });
     const sms = renderPaymentReceiptSms({
       customerName: customerDisplayName(customer),
       businessName,
       invoiceNumber: invoice.invoiceNumber,
       amountCents,
+      language,
     });
 
     await sendCustomerMessage(this.deps, {
@@ -159,12 +166,17 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
 
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
     const businessName = settings?.businessName ?? 'Your service team';
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage: settings?.defaultLanguage,
+    });
     const sms = renderInvoiceOverdueSms({
       customerName: customerDisplayName(customer),
       businessName,
       invoiceNumber: invoice.invoiceNumber,
       amountDueCents: invoice.amountDueCents,
       dueDateIso: invoice.dueDate?.toISOString(),
+      language,
     });
 
     await sendCustomerMessage(this.deps, {
@@ -193,6 +205,7 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       customerName: string;
       businessName: string;
       dateTimeStr: string;
+      language?: Language;
     }) => { body: string },
   ): Promise<void> {
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
@@ -215,10 +228,15 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
 
     const businessName = settings?.businessName ?? 'Your service team';
     const dateTimeStr = formatAppointmentDate(appointment.scheduledStart, appointment.timezone);
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage: settings?.defaultLanguage,
+    });
     const sms = renderSms({
       customerName: customerDisplayName(customer),
       businessName,
       dateTimeStr,
+      language,
     });
 
     const channels: CustomerMessageChannel[] = ['sms', 'email'];

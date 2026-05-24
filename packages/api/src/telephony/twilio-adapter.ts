@@ -42,6 +42,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 import type { LookupEventService } from '../lookup-events/lookup-event-service';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
+import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import { confirmIntent } from '../ai/skills/confirm-intent';
@@ -266,22 +267,26 @@ export interface TwilioAdapterDeps {
 export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
-  persona?: VoicePersona | null
+  persona?: VoicePersona | null,
+  language: Language = 'en'
 ): string {
   const disclosure = disclosureText.trim();
 
-  // Branch 1 — tenant owns the entire opening line. Return without CTA append.
+  // Branch 1 — tenant owns the entire opening line. Return without CTA
+  // append. The custom greeting is used verbatim (the tenant authored it
+  // in their own language), so we do NOT localize this branch.
   if (persona?.greeting) {
     const greeting = persona.greeting.trim();
     return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
   }
 
-  // Branch 2 / 3 — assemble a default greeting, then ensure it ends with a CTA.
+  // Branch 2 / 3 — assemble a localized default greeting, then ensure it
+  // ends with a CTA (the ES CTA already ends with '?').
   const opener = persona?.agentName
-    ? `Thank you for calling ${businessName}. This is ${persona.agentName}.`
-    : `Thank you for calling ${businessName}.`;
+    ? t('greeting.opener_named', language, { business: businessName, agent: persona.agentName })
+    : t('greeting.opener_default', language, { business: businessName });
   const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
-  return assembled.endsWith('?') ? assembled : `${assembled} How can I help you today?`;
+  return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
 function intentToProposalType(intent: string | undefined): ProposalType {
@@ -522,6 +527,21 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * P11-002 — resolve the spoken language for a new call from the tenant
+   * default (default_language). Customer-level overrides for voice are a
+   * follow-up; the greeting/STT use the tenant default. Falls back to 'en'.
+   */
+  private async resolveTenantLanguage(tenantId: string): Promise<Language> {
+    if (!this.deps.settingsRepo) return 'en';
+    try {
+      const settings = await this.deps.settingsRepo.findByTenant(tenantId);
+      return settings?.defaultLanguage === 'es' ? 'es' : 'en';
+    } catch {
+      return 'en';
+    }
+  }
+
+  /**
    * P8-012 — Initial /voice handler when Media Streams is enabled.
    *
    * Creates (or replays) the session, then returns a
@@ -605,11 +625,16 @@ export class TwilioGatherAdapter {
 
     const from = this.callerIdBySession.get(session.id) ?? '';
 
+    // P11-002: resolve + pin the spoken language (tenant default).
+    const language = await this.resolveTenantLanguage(opts.tenantId);
+    session.language = language;
+
     // 1. Recording disclosure (text only — TTS synthesizes the audio).
     const disclosure = await discloseRecording({
       tenantId: opts.tenantId,
       channel: 'telephony',
       businessName: this.deps.businessName,
+      language,
     });
 
     // 2. Identify caller by phone number.
@@ -659,6 +684,7 @@ export class TwilioGatherAdapter {
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
+      language,
     );
     for (const fx of sideEffects) {
       if (fx.type === 'tts_play' && fx.payload.text === 'greeting') {
@@ -858,11 +884,17 @@ export class TwilioGatherAdapter {
     // primaryPhone without re-prompting.
     this.callerIdBySession.set(session.id, opts.from ?? '');
 
+    // P11-002: resolve spoken language (tenant default) and pin it on the
+    // session so the greeting, disclosure, and every TwiML build speak it.
+    const language = await this.resolveTenantLanguage(opts.tenantId);
+    session.language = language;
+
     // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
     const disclosure = await discloseRecording({
       tenantId: opts.tenantId,
       channel: 'telephony',
       businessName: this.deps.businessName,
+      language,
     });
 
     // 2. Identify caller. Skill requires a Pool; if we don't have one (dev),
@@ -917,6 +949,7 @@ export class TwilioGatherAdapter {
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
+      language,
     );
 
     const expanded = sideEffectsAll.map((fx) => {
@@ -991,6 +1024,7 @@ export class TwilioGatherAdapter {
       transferTwiml ??
       buildTwiML(expanded, {
         gatherActionUrl: this.gatherUrl(session.id),
+        ...(session.language ? { language: session.language } : {}),
         ...(this.deps.recordingCallbackPath
           ? { recordingStatusCallback: this.recordingCallbackUrl() }
           : {}),
@@ -1302,7 +1336,10 @@ export class TwilioGatherAdapter {
       return transferTwiml;
     }
 
-    const twiml = buildTwiML(sideEffects, { gatherActionUrl: this.gatherUrl(sessionId) });
+    const twiml = buildTwiML(sideEffects, {
+      gatherActionUrl: this.gatherUrl(sessionId),
+      ...(session.language ? { language: session.language } : {}),
+    });
     const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
     if (ttsLast && typeof ttsLast.payload.text === 'string') {
       // Capture the agent's reply so summarizeSession sees both sides

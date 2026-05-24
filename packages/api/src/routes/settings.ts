@@ -7,10 +7,13 @@ import { loadActivePackConfigs } from '../shared/pack-config-loader';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { z } from 'zod';
 import {
   getSettings,
   updateSettings,
+  ensureTenantSettings,
   SettingsRepository,
+  TenantSettings,
   validateTerminologyPreferences,
 } from '../settings/settings';
 
@@ -32,17 +35,28 @@ const DEFAULT_LANGUAGE_SETTINGS: LanguageSettings = {
   spanishDispatcherUserIds: [],
 };
 
-// P11-002 — in-process language settings store. Mirrors the columns
-// added by migration 068_create_language_settings on tenant_settings,
-// but kept in memory here so the dev/test boot (no DB) can serve the
-// /api/settings/language endpoint without a 404. Production will swap
-// this for a repository-backed implementation when those columns are
-// surfaced through SettingsRepository.
-const languageSettingsStore = new Map<string, LanguageSettings>();
-
-function isLanguage(value: unknown): value is Language {
-  return value === 'en' || value === 'es';
+// P11-002 — project the persisted tenant_settings language columns into
+// the response shape the web client (web/src/api/settings.ts) expects.
+function projectLanguageSettings(
+  settings: TenantSettings | null,
+): LanguageSettings {
+  if (!settings) return DEFAULT_LANGUAGE_SETTINGS;
+  return {
+    defaultLanguage: settings.defaultLanguage ?? 'en',
+    ttsVoiceEn: settings.ttsVoiceEn ?? null,
+    ttsVoiceEs: settings.ttsVoiceEs ?? null,
+    autoDetectLanguage: settings.autoDetectLanguage ?? true,
+    spanishDispatcherUserIds: settings.spanishDispatcherUserIds ?? [],
+  };
 }
+
+const languagePatchSchema = z.object({
+  defaultLanguage: z.enum(['en', 'es']).optional(),
+  ttsVoiceEn: z.string().min(1).nullable().optional(),
+  ttsVoiceEs: z.string().min(1).nullable().optional(),
+  autoDetectLanguage: z.boolean().optional(),
+  spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+});
 
 interface SettingsRouterDependencies {
   activationRepo: PackActivationRepository;
@@ -80,19 +94,22 @@ export function createSettingsRouter(
   // Frontend (`packages/web/src/api/settings.ts`) calls
   // GET /api/settings/language on Settings-page mount and
   // PATCH /api/settings/language when the Spanish-mode toggle flips.
-  // Without these handlers the SPA logs "fetchLanguageSettings failed: 404".
-  // Backed by `languageSettingsStore` so the dev/test boot (no DB) can
-  // serve the endpoint; production wiring through SettingsRepository is
-  // tracked separately and out of scope for this PR.
+  // Backed by the persisted tenant_settings language columns via
+  // SettingsRepository (P11-002 follow-up — replaces the old in-memory
+  // store). The JSON shape is kept stable for web/src/api/settings.ts.
   router.get(
     '/language',
     requireAuth,
     requireTenant,
     requirePermission('settings:view'),
-    (req: AuthenticatedRequest, res: Response) => {
-      const tenantId = req.auth!.tenantId;
-      const stored = languageSettingsStore.get(tenantId);
-      res.json(stored ?? DEFAULT_LANGUAGE_SETTINGS);
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const settings = await ensureTenantSettings(req.auth!.tenantId, settingsRepo);
+        res.json(projectLanguageSettings(settings));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
     },
   );
 
@@ -104,55 +121,16 @@ export function createSettingsRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
-        const current = languageSettingsStore.get(tenantId) ?? DEFAULT_LANGUAGE_SETTINGS;
-        const patch = (req.body ?? {}) as Partial<LanguageSettings> & Record<string, unknown>;
+        const patch = languagePatchSchema.parse(req.body ?? {});
+        const changedKeys = Object.keys(patch);
 
-        const next: LanguageSettings = { ...current };
-        const changedKeys: string[] = [];
-        if (patch.defaultLanguage !== undefined) {
-          if (!isLanguage(patch.defaultLanguage)) {
-            throw new ValidationError('defaultLanguage must be "en" or "es"', {
-              field: 'defaultLanguage',
-            });
-          }
-          next.defaultLanguage = patch.defaultLanguage;
-          changedKeys.push('defaultLanguage');
-        }
-        if (patch.ttsVoiceEn !== undefined) {
-          next.ttsVoiceEn = patch.ttsVoiceEn === null ? null : String(patch.ttsVoiceEn);
-          changedKeys.push('ttsVoiceEn');
-        }
-        if (patch.ttsVoiceEs !== undefined) {
-          next.ttsVoiceEs = patch.ttsVoiceEs === null ? null : String(patch.ttsVoiceEs);
-          changedKeys.push('ttsVoiceEs');
-        }
-        if (patch.autoDetectLanguage !== undefined) {
-          if (typeof patch.autoDetectLanguage !== 'boolean') {
-            throw new ValidationError('autoDetectLanguage must be boolean', {
-              field: 'autoDetectLanguage',
-            });
-          }
-          next.autoDetectLanguage = patch.autoDetectLanguage;
-          changedKeys.push('autoDetectLanguage');
-        }
-        if (patch.spanishDispatcherUserIds !== undefined) {
-          if (
-            !Array.isArray(patch.spanishDispatcherUserIds) ||
-            !patch.spanishDispatcherUserIds.every((id) => typeof id === 'string')
-          ) {
-            throw new ValidationError('spanishDispatcherUserIds must be string[]', {
-              field: 'spanishDispatcherUserIds',
-            });
-          }
-          next.spanishDispatcherUserIds = patch.spanishDispatcherUserIds;
-          changedKeys.push('spanishDispatcherUserIds');
-        }
+        // Ensure the row exists so a first-time PATCH persists rather
+        // than 404ing (settings are normally bootstrapped on tenant
+        // creation, but tests / legacy tenants may not have a row yet).
+        await ensureTenantSettings(tenantId, settingsRepo);
+        const updated = await updateSettings(tenantId, patch, settingsRepo);
 
-        languageSettingsStore.set(tenantId, next);
-
-        // D2-1c — audit-log the language settings change. Entity is the
-        // tenant_settings row keyed by tenantId (this surface has no
-        // separate id; the languageSettingsStore is keyed by tenant).
+        // D2-1c — audit-log the language settings change.
         if (auditRepo) {
           await auditRepo.create(
             createAuditEvent({
@@ -161,13 +139,13 @@ export function createSettingsRouter(
               actorRole: req.auth!.role,
               eventType: 'settings.language.updated',
               entityType: 'tenant_settings',
-              entityId: tenantId,
+              entityId: updated?.id ?? tenantId,
               metadata: { changedKeys },
             }),
           );
         }
 
-        res.json(next);
+        res.json(projectLanguageSettings(updated));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

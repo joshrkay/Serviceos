@@ -278,7 +278,7 @@ export function SettingsPage() {
       title: 'Business',
       items: [
         { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
-        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + interface language', action: () => navigate('/settings/language') },
+        { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },
         { icon: BookOpen,  label: 'Price book',          description: 'Services, parts & materials with set prices',          action: () => navigate('/settings/price-book') },
         { icon: Zap,       label: 'Vertical packs',      description: 'Activate HVAC, Plumbing, or other service verticals',  action: () => setVerticalPacksOpen(true) },
@@ -522,7 +522,7 @@ export function SettingsPage() {
             },
             {
               label: 'Spanish language mode',
-              description: 'Interface and customer communications in Español',
+              description: 'Customer messages & AI phone calls in Español',
               value: spanishMode, onChange: toggleSpanishMode,
             },
           ].map(({ label, description, value, onChange }) => (

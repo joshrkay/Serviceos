@@ -99,6 +99,15 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // Migration 120. NULL → undefined to match the InMemory repo shape.
     googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
     yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
+    // P11-002 — language stack. default_language / auto_detect_language
+    // are NOT NULL with column defaults, so a pre-migration row still
+    // reads 'en' / true.
+    defaultLanguage: (row.default_language as 'en' | 'es' | null) ?? 'en',
+    autoDetectLanguage: (row.auto_detect_language as boolean | null) ?? true,
+    ttsVoiceEn: (row.tts_voice_en as string | null) ?? undefined,
+    ttsVoiceEs: (row.tts_voice_es as string | null) ?? undefined,
+    spanishDispatcherUserIds:
+      (row.spanish_dispatcher_user_ids as string[] | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -237,6 +246,12 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Migration 120 — public review links.
         googleReviewUrl: 'google_review_url',
         yelpReviewUrl: 'yelp_review_url',
+        // P11-002 — language stack.
+        defaultLanguage: 'default_language',
+        autoDetectLanguage: 'auto_detect_language',
+        ttsVoiceEn: 'tts_voice_en',
+        ttsVoiceEs: 'tts_voice_es',
+        spanishDispatcherUserIds: 'spanish_dispatcher_user_ids',
         updatedAt: 'updated_at',
       };
 
