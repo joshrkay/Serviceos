@@ -14,6 +14,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
 import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { useNavigate } from 'react-router';
+import { toast } from 'sonner';
 
 type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
 
@@ -67,6 +68,8 @@ interface ApiEstimate {
   updatedAt?: string;
   customer?: ApiCustomer;
   customerId?: string;
+  /** Optimistic-concurrency token sent back as If-Match on edits. */
+  version?: number;
 }
 
 /** Convert ApiLineItem to UI LineItem for the editor */
@@ -871,7 +874,21 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                 editable={editable}
                 onChange={async (items) => {
                   setLineItems(items);
-                  await updateEstimate({ lineItems: items.map((item, i) => uiLineToApi(item, i)) });
+                  try {
+                    await updateEstimate(
+                      { lineItems: items.map((item, i) => uiLineToApi(item, i)) },
+                      // Optimistic concurrency: reject (409) a clobber of a
+                      // concurrent edit rather than silently overwriting it.
+                      est.version !== undefined ? { headers: { 'If-Match': String(est.version) } } : undefined,
+                    );
+                  } catch (err) {
+                    if ((err as { status?: number }).status === 409) {
+                      toast.error('This estimate was changed elsewhere — reloading the latest version.');
+                      refetch();
+                    } else {
+                      throw err;
+                    }
+                  }
                 }}
               />
               <AIPricingSuggestions

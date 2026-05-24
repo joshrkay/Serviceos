@@ -45,7 +45,7 @@ describe('GET /api/onboarding/status', () => {
   it('returns identity as current step for a fresh tenant (no settings row)', async () => {
     const res = await request(app).get('/api/onboarding/status');
     expect(res.status).toBe(200);
-    expect(res.body.steps).toHaveLength(6);
+    expect(res.body.steps).toHaveLength(7);
     expect(res.body.currentStep).toBe('identity');
     expect(res.body.isComplete).toBe(false);
   });
@@ -62,11 +62,12 @@ describe('GET /api/onboarding/status', () => {
     expect(res.body.currentStep).toBe('pack');
   });
 
-  it('isComplete=true when all 6 steps satisfied', async () => {
-    // Identity + pack (via terminology_preferences._activeVerticalPacks)
+  it('isComplete=true when all 7 steps satisfied', async () => {
+    // Identity + pack (via terminology_preferences._activeVerticalPacks) +
+    // ai_check passed (ai_model + ai_verification_status).
     await pool.query(
-      `INSERT INTO tenant_settings (id, tenant_id, business_name, business_hours, job_buffer_minutes, hourly_rate_cents, terminology_preferences, timezone, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
-       VALUES (gen_random_uuid(), $1, 'Acme', $2::jsonb, 30, 12500, $3::jsonb, 'America/New_York', 'EST', 'INV', 1, 1, 30)`,
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, business_hours, job_buffer_minutes, hourly_rate_cents, terminology_preferences, ai_model, ai_verification_status, timezone, estimate_prefix, invoice_prefix, next_estimate_number, next_invoice_number, default_payment_term_days)
+       VALUES (gen_random_uuid(), $1, 'Acme', $2::jsonb, 30, 12500, $3::jsonb, 'gpt-4o-mini', 'passed', 'America/New_York', 'EST', 'INV', 1, 1, 30)`,
       [currentTenant.tenantId, JSON.stringify({ mon: null }), JSON.stringify({ _activeVerticalPacks: ['hvac'] })]
     );
     // Phone integration

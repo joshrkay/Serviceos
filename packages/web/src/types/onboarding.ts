@@ -13,6 +13,7 @@ export type OnboardingStepId =
   | 'pack'
   | 'phone'
   | 'billing'
+  | 'ai_check'
   | 'test_call';
 
 export type OnboardingStepStatus =

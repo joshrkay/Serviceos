@@ -201,6 +201,7 @@ export function intentToProposalType(intent: string | undefined): ProposalType {
     case 'update_invoice': return 'update_invoice';
     case 'issue_invoice': return 'issue_invoice';
     case 'send_invoice': return 'send_invoice';
+    case 'send_estimate': return 'send_estimate';
     case 'record_payment': return 'record_payment';
     case 'draft_estimate': return 'draft_estimate';
     case 'update_estimate': return 'update_estimate';

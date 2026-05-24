@@ -33,6 +33,7 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // screen-tap and usually have same-day relevance.
   record_payment: 1,
   send_invoice: 1,
+  send_estimate: 1,
   // Notes are low priority — they never gate other work.
   add_note: 5,
   // Expense logging is informational — captured after the fact, never

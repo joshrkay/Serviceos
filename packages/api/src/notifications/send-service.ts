@@ -209,7 +209,10 @@ export class SendService {
     await this.deps.estimateRepo.update(input.tenantId, estimate.id, {
       viewToken,
       viewTokenExpiresAt,
-      sentAt: now,
+      // Set-once: sentAt records the FIRST send so re-sends (e.g. the
+      // reminder worker) don't overwrite the original send date the UI and
+      // voice readback display. lastDispatchId still tracks the latest send.
+      sentAt: estimate.sentAt ?? now,
       lastDispatchId: sent[sent.length - 1].dispatchId,
       status: estimate.status === 'draft' || estimate.status === 'ready_for_review'
         ? 'sent'
