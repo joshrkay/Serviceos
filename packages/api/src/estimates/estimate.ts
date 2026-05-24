@@ -23,7 +23,7 @@ export interface Estimate {
   viewToken?: string;
   /** Timestamp the view_token becomes invalid (typically sent_at + 90 days). */
   viewTokenExpiresAt?: Date;
-  /** Timestamp of the most recent send. */
+  /** Timestamp of the FIRST send (set-once); re-sends/reminders don't move it. */
   sentAt?: Date;
   /** ID of the most recent message_dispatches row. */
   lastDispatchId?: string;

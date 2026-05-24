@@ -90,6 +90,11 @@ export async function runEstimateReminderSweep(
       // signals.)
       if (estimate.firstViewedAt || estimate.acceptedAt || estimate.rejectedAt) continue;
       if ((estimate.reminderCount ?? 0) >= maxReminders) continue;
+      // Space reminders by reminderAfterDays. Since sentAt is set-once (it no
+      // longer advances on a re-send), gate on the last actual contact —
+      // the most recent reminder, falling back to the original send.
+      const lastContactAt = estimate.lastReminderAt ?? estimate.sentAt;
+      if (lastContactAt && lastContactAt.getTime() >= sentBefore.getTime()) continue;
 
       try {
         await deps.sendService.sendEstimate({

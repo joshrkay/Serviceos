@@ -93,11 +93,27 @@ describe('runEstimateReminderSweep', () => {
     expect(sendEstimate).toHaveBeenCalledTimes(1);
   });
 
-  it('respects a higher maxReminders cap', async () => {
-    await seedSent();
-    await runEstimateReminderSweep(deps({ maxReminders: 2 }));
-    await runEstimateReminderSweep(deps({ maxReminders: 2 }));
-    await runEstimateReminderSweep(deps({ maxReminders: 2 }));
+  it('spaces reminders by reminderAfterDays under a higher cap', async () => {
+    await seedSent(); // sentAt = FIVE_DAYS_AGO
+    const DAY = 24 * 60 * 60 * 1000;
+    let clock = NOW;
+    const d = deps({ maxReminders: 2, now: () => clock });
+
+    await runEstimateReminderSweep(d); // reminder 1
+    expect(sendEstimate).toHaveBeenCalledTimes(1);
+
+    // Same hour: spacing gate blocks a second nudge.
+    await runEstimateReminderSweep(d);
+    expect(sendEstimate).toHaveBeenCalledTimes(1);
+
+    // 4 days later: past the spacing window → reminder 2 fires.
+    clock = new Date(NOW.getTime() + 4 * DAY);
+    await runEstimateReminderSweep(d);
+    expect(sendEstimate).toHaveBeenCalledTimes(2);
+
+    // 8 days later: cap reached → no more.
+    clock = new Date(NOW.getTime() + 8 * DAY);
+    await runEstimateReminderSweep(d);
     expect(sendEstimate).toHaveBeenCalledTimes(2);
   });
 
