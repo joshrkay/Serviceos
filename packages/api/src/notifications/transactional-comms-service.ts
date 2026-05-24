@@ -32,8 +32,11 @@ export interface TransactionalCommsServiceDeps extends CustomerMessageDeliveryDe
   invoiceRepo: InvoiceRepository;
 }
 
-function formatAppointmentDate(date: Date, timezone: string): string {
-  return new Intl.DateTimeFormat('en-US', {
+function formatAppointmentDate(date: Date, timezone: string, language: Language = 'en'): string {
+  // Match the notification copy's language so a Spanish notice doesn't carry
+  // English weekday/month names.
+  const locale = language === 'es' ? 'es-US' : 'en-US';
+  return new Intl.DateTimeFormat(locale, {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -228,11 +231,15 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
     if (!customer) return;
 
     const businessName = settings?.businessName ?? 'Your service team';
-    const dateTimeStr = formatAppointmentDate(appointment.scheduledStart, appointment.timezone);
     const language = resolveCustomerLanguage({
       customerPreferredLanguage: customer.preferredLanguage,
       tenantDefaultLanguage: settings?.defaultLanguage,
     });
+    const dateTimeStr = formatAppointmentDate(
+      appointment.scheduledStart,
+      appointment.timezone,
+      language,
+    );
     const sms = renderSms({
       customerName: customerDisplayName(customer),
       businessName,
