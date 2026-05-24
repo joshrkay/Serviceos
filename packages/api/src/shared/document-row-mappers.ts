@@ -1,0 +1,29 @@
+// Row-to-domain mappers shared by the invoice and estimate Pg repositories.
+// Invoice and estimate line items / totals have identical column shapes, so
+// the mapping lives here rather than being duplicated per repository.
+
+import { LineItem, DocumentTotals } from './billing-engine';
+
+export function mapLineItemRow(row: Record<string, any>): LineItem {
+  return {
+    id: row.id,
+    description: row.description,
+    category: row.category,
+    quantity: Number(row.quantity),
+    unitPriceCents: Number(row.unit_price_cents),
+    totalCents: Number(row.total_cents),
+    sortOrder: Number(row.sort_order),
+    taxable: row.taxable,
+  };
+}
+
+export function mapDocumentTotalsRow(row: Record<string, any>): DocumentTotals {
+  return {
+    subtotalCents: Number(row.subtotal_cents),
+    taxableSubtotalCents: Number(row.taxable_subtotal_cents),
+    discountCents: Number(row.discount_cents),
+    taxRateBps: Number(row.tax_rate_bps),
+    taxCents: Number(row.tax_cents),
+    totalCents: Number(row.total_cents),
+  };
+}
