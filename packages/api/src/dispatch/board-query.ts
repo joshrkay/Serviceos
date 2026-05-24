@@ -12,6 +12,11 @@ export interface BoardAppointmentEditing {
   mode: 'viewing' | 'dragging';
 }
 
+export interface BoardCoAssignee {
+  technicianId: string;
+  technicianName: string;
+}
+
 export interface BoardAppointment {
   id: string;
   jobId: string;
@@ -30,6 +35,8 @@ export interface BoardAppointment {
   holdExpiryAt?: string;
   lateness?: DispatchLatenessResult;
   editing?: BoardAppointmentEditing | null;
+  /** Non-primary (crew) technicians assigned to this appointment, if any. */
+  coAssignees?: BoardCoAssignee[];
 }
 
 export interface TechnicianLane {
@@ -102,6 +109,7 @@ function toBoardAppointment(
   lateness?: DispatchLatenessResult,
   boardDate?: string,
   viewingUserId?: string,
+  coAssignees?: BoardCoAssignee[],
 ): BoardAppointment {
   const editing = boardDate
     ? getEditingOnAppointment(appointment.tenantId, boardDate, appointment.id, viewingUserId)
@@ -128,6 +136,7 @@ function toBoardAppointment(
       : {}),
     lateness,
     editing,
+    ...(coAssignees && coAssignees.length > 0 ? { coAssignees } : {}),
   };
 }
 
@@ -201,6 +210,28 @@ export async function getDispatchBoardData(
     }
   }
 
+  // Fetch technician names in parallel. Includes both lane (primary) techs
+  // and crew (non-primary) techs so co-assignee badges can be labeled.
+  const crewTechIds = [...assignmentMap.values()]
+    .flat()
+    .filter((a) => !a.isPrimary)
+    .map((a) => a.technicianId);
+  const techIds = [...new Set([...technicianAppointments.keys(), ...crewTechIds])];
+  const techNameMap = new Map<string, string>();
+  if (deps.getTechnicianName) {
+    const nameResults = await Promise.all(
+      techIds.map((id) => deps.getTechnicianName!(id).then((name) => ({ id, name })))
+    );
+    for (const { id, name } of nameResults) {
+      techNameMap.set(id, name);
+    }
+  }
+
+  const coAssigneesFor = (appointmentId: string): BoardCoAssignee[] =>
+    (assignmentMap.get(appointmentId) ?? [])
+      .filter((a) => !a.isPrimary)
+      .map((a) => ({ technicianId: a.technicianId, technicianName: techNameMap.get(a.technicianId) ?? a.technicianId }));
+
   // Build unassigned list
   const unassignedLatenessResults = deps.getAppointmentLateness
     ? await Promise.all(
@@ -220,20 +251,9 @@ export async function getDispatchBoardData(
       unassignedLatenessMap.get(appt.id),
       dateStr,
       deps.viewingUserId,
+      coAssigneesFor(appt.id),
     ),
   );
-
-  // Fetch technician names in parallel
-  const techIds = [...technicianAppointments.keys()];
-  const techNameMap = new Map<string, string>();
-  if (deps.getTechnicianName) {
-    const nameResults = await Promise.all(
-      techIds.map((id) => deps.getTechnicianName!(id).then((name) => ({ id, name })))
-    );
-    for (const { id, name } of nameResults) {
-      techNameMap.set(id, name);
-    }
-  }
 
   // Build technician lanes
   const lanes: TechnicianLane[] = [];
@@ -259,6 +279,7 @@ export async function getDispatchBoardData(
         latenessByApptId.get(appointment.id),
         dateStr,
         deps.viewingUserId,
+        coAssigneesFor(appointment.id),
       ),
     );
 

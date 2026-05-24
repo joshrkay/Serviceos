@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 export type DispatchEventType =
   | 'assigned'
   | 'reassigned'
+  | 'crew_added'
+  | 'crew_removed'
   | 'rescheduled'
   | 'canceled'
   | 'conflict_detected'
