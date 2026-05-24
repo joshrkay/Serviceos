@@ -5,6 +5,7 @@ import { ValidationError, ConflictError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { DocumentRevisionRepository, createRevision } from '../ai/document-revision';
 import { EditDeltaRepository, createEditDelta } from './edit-delta';
+import { Logger } from '../logging/logger';
 
 export type EstimateStatus = 'draft' | 'ready_for_review' | 'sent' | 'accepted' | 'rejected' | 'expired';
 
@@ -100,6 +101,8 @@ export interface EstimateMutationDeps {
   editDeltaRepo?: EditDeltaRepository;
   actorId?: string;
   actorRole?: string;
+  /** When set, history/audit recording failures are logged (best-effort). */
+  logger?: Logger;
   /**
    * Deposit already collected on the linked job, in cents. When > 0 the
    * estimate is financially committed and edit/revise is refused. Callers
@@ -396,8 +399,14 @@ async function recordEstimateHistory(
         }),
       );
     }
-  } catch {
-    // History/audit is best-effort and must not fail the mutation.
+  } catch (err) {
+    // History/audit is best-effort and must not fail the mutation — but a
+    // silent drop hides a missing audit trail on a financial change, so log it.
+    deps.logger?.warn('estimate history/audit recording failed', {
+      estimateId: after.id,
+      eventType,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

@@ -5,6 +5,7 @@ import {
   transitionEstimateStatus,
   InMemoryEstimateRepository,
 } from '../../src/estimates/estimate';
+import { vi } from 'vitest';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { ConflictError, ValidationError } from '../../src/shared/errors';
@@ -100,5 +101,23 @@ describe('reviseEstimate (sent estimates)', () => {
 
     const revised = await reviseEstimate('t1', est.id, { discountCents: 1000 }, repo);
     expect(revised?.reminderCount).toBe(0);
+  });
+
+  it('logs but does not fail the edit when audit recording throws', async () => {
+    const est = await seed(repo);
+    const warn = vi.fn();
+    const throwingAudit = {
+      create: vi.fn(async () => { throw new Error('audit DB down'); }),
+      findByEntity: async () => [],
+      findByCorrelation: async () => [],
+    };
+    const updated = await updateEstimate('t1', est.id, { discountCents: 500 }, repo, {
+      auditRepo: throwingAudit as never,
+      logger: { warn } as never,
+      actorId: 'u1',
+    });
+    expect(updated?.totals.discountCents).toBe(500);
+    expect(updated?.version).toBe(2);
+    expect(warn).toHaveBeenCalled();
   });
 });

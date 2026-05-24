@@ -106,6 +106,7 @@ export function createEstimateRouter(
       actorId: req.auth!.userId,
       actorRole: req.auth!.role ?? 'unknown',
       depositPaidCents,
+      logger,
     };
   };
 
