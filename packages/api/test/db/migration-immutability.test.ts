@@ -177,6 +177,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['117_tech_status_today', '5f2224447036245f802ac7aeeb333fb46614670526fdc621285a4200d321a55a'],
   ['118_jobs_money_state', '2f7263cff926f33f21d8b01da9b01feb892c4f61ba09b8a1eafd404f455f8010'],
   ['119_view_token_lookup_functions', '0d4251c8391c2cdf6c1cb8120cf50e92c739e62db3a80cc8eaeb0b48579711a3'],
+  ['120_platform_deprovision_log', 'ab8b3bba1758cf03f7005edacac5ea60f1e1aef4dacdcbedb9dae93a43eff782'],
 ];
 
 function hashMigration(value: string): string {

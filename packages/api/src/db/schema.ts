@@ -3025,6 +3025,27 @@ export const MIGRATIONS = {
       END IF;
     END $do$;
   `,
+
+  // Durable record of tenant hard-deletes. Intentionally NOT tenant-scoped:
+  // no FK to tenants (the tenant row is gone by the time we write this) and
+  // NO row-level security, so it survives the purge and remains readable
+  // cross-tenant by ops. This is the only audit trail of a deprovision, since
+  // the tenant's audit_events rows are themselves purged.
+  '120_platform_deprovision_log': `
+    CREATE TABLE IF NOT EXISTS platform_deprovision_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL,
+      reason TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      twilio_released BOOLEAN NOT NULL DEFAULT FALSE,
+      twilio_subaccount_sid TEXT,
+      twilio_error TEXT,
+      rows_deleted JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_deprovision_log_tenant ON platform_deprovision_log(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_deprovision_log_created ON platform_deprovision_log(created_at);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
