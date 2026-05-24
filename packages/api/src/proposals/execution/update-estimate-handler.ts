@@ -5,7 +5,7 @@ import {
   applyEstimateEdits,
   EstimateEditAction,
 } from '../../estimates/estimate-editor';
-import { ValidationError } from '../../shared/errors';
+import { ValidationError, ConflictError } from '../../shared/errors';
 
 /**
  * Executes `update_estimate` proposals by applying the edit actions in
@@ -61,7 +61,10 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
       });
       return { success: true, resultEntityId: estimate.id };
     } catch (err) {
-      if (err instanceof ValidationError) {
+      // Both are permanent, non-retryable refusals (bad input or a
+      // status/deposit lock) — surface as a soft failure rather than
+      // throwing, which would make the executor retry pointlessly.
+      if (err instanceof ValidationError || err instanceof ConflictError) {
         return { success: false, error: err.message };
       }
       throw err;

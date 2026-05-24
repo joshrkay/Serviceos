@@ -7,6 +7,7 @@ import { PublicEstimateService } from '../estimates/public-estimate-service';
 const approveSchema = z.object({
   acceptedByName: z.string().trim().min(2).max(120),
   signatureData: z.string().max(200_000).optional(),
+  expectedVersion: z.number().int().positive().optional(),
 });
 
 const declineSchema = z.object({
@@ -56,6 +57,7 @@ export function createPublicEstimatesRouter(
         token: req.params.token,
         acceptedByName: parsed.acceptedByName,
         signatureData: parsed.signatureData,
+        expectedVersion: parsed.expectedVersion,
         ip: extractIp(req),
         userAgent: req.get('user-agent') ?? undefined,
       });

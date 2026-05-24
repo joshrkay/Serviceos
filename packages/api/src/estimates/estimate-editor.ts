@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { Estimate, EstimateStatus } from './estimate';
+import { Estimate, assertEstimateEditable } from './estimate';
 import {
   LineItem,
   LineItemCategory,
@@ -44,8 +44,6 @@ export interface ApplyEstimateEditsResult {
   editedFields: string[];
 }
 
-const EDITABLE_STATUSES: readonly EstimateStatus[] = ['draft', 'ready_for_review'];
-
 function toBillingLineItem(
   input: EstimateEditLineItemInput,
   id: string,
@@ -78,12 +76,7 @@ export function applyEstimateEdits(
   estimate: Estimate,
   actions: EstimateEditAction[]
 ): ApplyEstimateEditsResult {
-  if (!EDITABLE_STATUSES.includes(estimate.status)) {
-    throw new ValidationError(
-      `Cannot edit an estimate in status '${estimate.status}'. ` +
-        `Only draft or ready_for_review estimates are editable.`
-    );
-  }
+  assertEstimateEditable(estimate);
   if (actions.length === 0) {
     throw new ValidationError('applyEstimateEdits requires at least one action');
   }

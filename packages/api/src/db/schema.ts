@@ -3025,6 +3025,18 @@ export const MIGRATIONS = {
       END IF;
     END $do$;
   `,
+
+  '120_estimate_revision_versioning': `
+    -- Optimistic-lock + customer re-sync support for the estimate
+    -- edit/revise flow. 'version' increments on every persisted content
+    -- change; the authenticated edit path and the public approve path
+    -- both compare an expected version to reject stale writes. The public
+    -- approval page also reads 'version' to detect that an estimate was
+    -- revised after the customer loaded it. 'last_revised_at' records the
+    -- most recent revise of an already-sent estimate.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_revised_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

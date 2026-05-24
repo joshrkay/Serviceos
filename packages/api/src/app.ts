@@ -334,6 +334,7 @@ import {
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
+import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -1232,6 +1233,10 @@ export function createApp(): express.Express {
     nodeEnv: config.NODE_ENV,
     sendService,
   });
+  const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
@@ -1299,6 +1304,7 @@ export function createApp(): express.Express {
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,
+    estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: transactionalComms,
     transactionalComms,
@@ -2422,6 +2428,7 @@ export function createApp(): express.Express {
       sendService,
       { gateway: llmGateway, proposalRepo },
       { jobRepo, invoiceRepo },
+      { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
     ),
   );
   app.use(

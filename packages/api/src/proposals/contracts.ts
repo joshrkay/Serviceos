@@ -6,6 +6,7 @@ import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
 import { addNotePayloadSchema } from './contracts/notes';
 import { sendInvoicePayloadSchema } from './contracts/send-invoice';
+import { sendEstimatePayloadSchema } from './contracts/send-estimate';
 import { recordPaymentPayloadSchema } from './contracts/record-payment';
 import { logExpensePayloadSchema } from './contracts/log-expense';
 import {
@@ -201,6 +202,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   voice_clarification: voiceClarificationPayloadSchema,
   add_note: addNotePayloadSchema,
   send_invoice: sendInvoicePayloadSchema,
+  send_estimate: sendEstimatePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
   log_expense: logExpensePayloadSchema,
   emergency_dispatch: z.object({

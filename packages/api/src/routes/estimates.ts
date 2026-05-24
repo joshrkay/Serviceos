@@ -11,12 +11,16 @@ import {
   listEstimatesWithMeta,
   getEstimate,
   updateEstimate,
+  reviseEstimate,
   transitionEstimateStatus,
   EstimateRepository,
   EstimateStatus,
+  EstimateMutationDeps,
   DEFAULT_ESTIMATE_LIMIT,
   MAX_ESTIMATE_LIMIT,
 } from '../estimates/estimate';
+import { DocumentRevisionRepository } from '../ai/document-revision';
+import { EditDeltaRepository } from '../estimates/edit-delta';
 import { AuditRepository } from '../audit/audit';
 import { getNextEstimateNumber, SettingsRepository } from '../settings/settings';
 import { SendService } from '../notifications/send-service';
@@ -55,8 +59,39 @@ export function createEstimateRouter(
   // §6 Time-to-Cash. Optional so legacy harnesses still build; the
   // money-state rollup fires only when both repos are wired.
   moneyStateDeps?: { jobRepo: JobRepository; invoiceRepo: InvoiceRepository },
+  // Edit/revision history. When wired, edits and revisions snapshot a
+  // document revision + edit delta. Optional so legacy harnesses build.
+  revisionDeps?: { docRevisionRepo: DocumentRevisionRepository; editDeltaRepo: EditDeltaRepository },
 ): Router {
   const router = Router();
+
+  const jobRepo = moneyStateDeps?.jobRepo;
+
+  // Build the per-request mutation deps (audit + revision history + the
+  // deposit lock). The deposit-paid amount comes from the linked job so
+  // assertEstimateEditable can refuse edits once money has been collected.
+  const buildMutationDeps = async (
+    tenantId: string,
+    estimateId: string,
+    req: AuthenticatedRequest,
+  ): Promise<EstimateMutationDeps> => {
+    let depositPaidCents = 0;
+    if (jobRepo) {
+      const est = await estimateRepo.findById(tenantId, estimateId);
+      if (est) {
+        const job = await jobRepo.findById(tenantId, est.jobId);
+        depositPaidCents = job?.depositPaidCents ?? 0;
+      }
+    }
+    return {
+      auditRepo,
+      docRevisionRepo: revisionDeps?.docRevisionRepo,
+      editDeltaRepo: revisionDeps?.editDeltaRepo,
+      actorId: req.auth!.userId,
+      actorRole: req.auth!.role ?? 'unknown',
+      depositPaidCents,
+    };
+  };
 
   // §6 Time-to-Cash. estimateRepo + auditRepo are already in scope;
   // the caller supplies the job + invoice repos.
@@ -197,7 +232,14 @@ export function createEstimateRouter(
 
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await updateEstimate(req.auth!.tenantId, req.params.id, req.body, estimateRepo);
+      const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+      const result = await updateEstimate(
+        req.auth!.tenantId,
+        req.params.id,
+        req.body,
+        estimateRepo,
+        mutationDeps,
+      );
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
         return;
@@ -223,6 +265,38 @@ export function createEstimateRouter(
     requireTenant,
     requirePermission('estimates:update'),
     updateHandler
+  );
+
+  // POST /:id/revise — edit an already-SENT estimate. Snapshots the
+  // prior version, bumps `version`, stamps `last_revised_at`, and keeps
+  // the estimate in 'sent' (the view link is preserved). The caller is
+  // expected to re-send (POST /:id/send) so the customer is re-notified;
+  // the public approve path compares `version` to block a stale accept.
+  router.post(
+    '/:id/revise',
+    requireAuth,
+    requireTenant,
+    requirePermission('estimates:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const result = await reviseEstimate(
+          req.auth!.tenantId,
+          req.params.id,
+          req.body,
+          estimateRepo,
+          mutationDeps,
+        );
+        if (!result) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
+          return;
+        }
+        res.json(result);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    }
   );
 
   router.post(

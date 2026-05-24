@@ -10,8 +10,10 @@ import { CancelAppointmentExecutionHandler } from './cancellation-handler';
 import {
   AddNoteExecutionHandler,
   SendInvoiceExecutionHandler,
+  SendEstimateExecutionHandler,
   RecordPaymentExecutionHandler,
   InvoiceDeliveryProvider,
+  EstimateDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
 import {
@@ -393,6 +395,7 @@ export function createExecutionHandlerRegistry(deps?: {
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
+  estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
@@ -450,6 +453,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
+    new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,
       deps?.invoiceRepo,

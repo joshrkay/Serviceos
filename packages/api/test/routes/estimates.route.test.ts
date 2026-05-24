@@ -146,7 +146,7 @@ describe('PATCH /api/estimates/:id', () => {
     expect(res.body.totals.totalCents).toBe(10000);
   });
 
-  it('returns 400 when editing an estimate that has been sent', async () => {
+  it('returns 409 when plain-editing a sent estimate (must use revise)', async () => {
     const created = await createEstimate(app);
     await request(app)
       .post(`/api/estimates/${created.body.id}/transition`)
@@ -155,8 +155,17 @@ describe('PATCH /api/estimates/:id', () => {
     const res = await request(app)
       .patch(`/api/estimates/${created.body.id}`)
       .send({ customerMessage: 'too late' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('CONFLICT');
+
+    // ...but the dedicated revise endpoint succeeds and bumps the version.
+    const revised = await request(app)
+      .post(`/api/estimates/${created.body.id}/revise`)
+      .send({ customerMessage: 'updated pricing' });
+    expect(revised.status).toBe(200);
+    expect(revised.body.status).toBe('sent');
+    expect(revised.body.version).toBe(2);
+    expect(revised.body.customerMessage).toBe('updated pricing');
   });
 
   it('returns 404 for unknown id', async () => {
