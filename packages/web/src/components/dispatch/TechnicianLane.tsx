@@ -25,6 +25,8 @@ export interface TechnicianLaneProps {
   conflictIds?: ReadonlySet<string>;
   dragPreview?: DragPreview | null;
   currentUserId?: string;
+  onAddCrew?: (appointmentId: string) => void;
+  onRemoveCoAssignee?: (appointmentId: string, technicianId: string) => void;
 }
 
 function dropZoneStateClass(dragPreview: DragPreview | null | undefined, technicianId: string): string {
@@ -83,6 +85,8 @@ export function TechnicianLane({
   conflictIds,
   dragPreview,
   currentUserId,
+  onAddCrew,
+  onRemoveCoAssignee,
 }: TechnicianLaneProps) {
   const sortedAppointments = [...appointments].sort(
     (a, b) => new Date(a.scheduledStart).getTime() - new Date(b.scheduledStart).getTime(),
@@ -138,6 +142,8 @@ export function TechnicianLane({
                   onDragStart={onDragStart}
                   hasConflict={conflictIds?.has(appointment.id) ?? false}
                   currentUserId={currentUserId}
+                  onAddCrew={onAddCrew}
+                  onRemoveCoAssignee={onRemoveCoAssignee}
                 />
                 {onReorderWithinLane && (
                   <div

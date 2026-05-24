@@ -55,7 +55,14 @@ export function createProposalsRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const body = req.body as { proposalType?: string; payload?: any; summary?: string; appointmentVersion?: string };
-        if (body.proposalType !== 'reschedule_appointment' && body.proposalType !== 'reassign_appointment') {
+        const SUPPORTED_TYPES = [
+          'reschedule_appointment',
+          'reassign_appointment',
+          'add_crew_member',
+          'remove_crew_member',
+        ] as const;
+        type SupportedType = (typeof SUPPORTED_TYPES)[number];
+        if (!SUPPORTED_TYPES.includes(body.proposalType as SupportedType)) {
           res.status(400).json({ error: 'UNSUPPORTED_PROPOSAL_TYPE', proposalType: body.proposalType });
           return;
         }
@@ -73,7 +80,7 @@ export function createProposalsRouter(
           {
             tenantId: req.auth!.tenantId,
             actorId: req.auth!.userId,
-            proposalType: body.proposalType,
+            proposalType: body.proposalType as SupportedType,
             payload: body.payload,
             summary: body.summary,
             expectedVersion,
