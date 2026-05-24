@@ -6,6 +6,7 @@ import { IssueInvoiceExecutionHandler } from '../handlers/issue-invoice';
 import { UpdateEstimateExecutionHandler } from './update-estimate-handler';
 import { ReassignAppointmentExecutionHandler } from './reassignment-handler';
 import { RescheduleAppointmentExecutionHandler } from './reschedule-handler';
+import { AddCrewMemberExecutionHandler, RemoveCrewMemberExecutionHandler } from './crew-handler';
 import { CancelAppointmentExecutionHandler } from './cancellation-handler';
 import {
   AddNoteExecutionHandler,
@@ -430,6 +431,8 @@ export function createExecutionHandlerRegistry(deps?: {
     new DraftEstimateExecutionHandler(deps?.estimateRepo, deps?.settingsRepo),
     new CreateInvoiceExecutionHandler(deps?.invoiceRepo, deps?.settingsRepo),
     new ReassignAppointmentExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new AddCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo, deps?.feasibilityDeps),
+    new RemoveCrewMemberExecutionHandler(deps?.appointmentRepo, deps?.assignmentRepo, deps?.analyticsRepo),
     new RescheduleAppointmentExecutionHandler(
       deps?.appointmentRepo,
       deps?.assignmentRepo,

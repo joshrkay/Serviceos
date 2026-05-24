@@ -14,13 +14,18 @@ export type CreateSchedulingProposalResult =
 export interface CreateSchedulingInput {
   tenantId: string;
   actorId: string;
-  proposalType: 'reschedule_appointment' | 'reassign_appointment';
+  proposalType:
+    | 'reschedule_appointment'
+    | 'reassign_appointment'
+    | 'add_crew_member'
+    | 'remove_crew_member';
   payload: {
     appointmentId: string;
     newScheduledStart?: string;
     newScheduledEnd?: string;
     toTechnicianId?: string;
     fromTechnicianId?: string;
+    technicianId?: string;
     reason?: string;
   };
   summary?: string;
@@ -57,16 +62,23 @@ export async function createSchedulingProposal(
 
   const proposedStart = input.payload.newScheduledStart ? new Date(input.payload.newScheduledStart) : appointment.scheduledStart;
   const proposedEnd = input.payload.newScheduledEnd ? new Date(input.payload.newScheduledEnd) : appointment.scheduledEnd;
-  const proposedTechnicianId = input.payload.toTechnicianId ?? input.payload.fromTechnicianId ?? '';
+  const proposedTechnicianId =
+    input.payload.toTechnicianId ?? input.payload.technicianId ?? input.payload.fromTechnicianId ?? '';
 
-  const feasibility = await checkFeasibility(
-    {
-      tenantId: input.tenantId, appointment,
-      proposedTechnicianId, proposedScheduledStart: proposedStart, proposedScheduledEnd: proposedEnd,
-    },
-    feasibilityDeps,
-  );
-  if (feasibility.blocking.length > 0) return { kind: 'infeasible', feasibility };
+  // Removing a crew member can never create a conflict, so feasibility is
+  // not run for it. Every other scheduling proposal checks the proposed
+  // technician's calendar before persisting so the dispatcher sees blocking
+  // conflicts immediately.
+  if (input.proposalType !== 'remove_crew_member') {
+    const feasibility = await checkFeasibility(
+      {
+        tenantId: input.tenantId, appointment,
+        proposedTechnicianId, proposedScheduledStart: proposedStart, proposedScheduledEnd: proposedEnd,
+      },
+      feasibilityDeps,
+    );
+    if (feasibility.blocking.length > 0) return { kind: 'infeasible', feasibility };
+  }
 
   const proposal = createProposal({
     tenantId: input.tenantId,
