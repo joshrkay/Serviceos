@@ -85,7 +85,8 @@ flowchart TB
 | **Field** | `/technician/day` | Tech ID defaults to `tech-1` without localStorage |
 | **Public** | `/intake`, `/portal/:token`, `/e/:id`, `/pay/:id`, feedback | Intake header uses hardcoded tenant branding |
 | **Settings** | Profile, team, Stripe, packs, templates, price book, feedback dashboard | Roles, reminders, Zapier → "Coming soon" |
-| **Hidden routes** | Maintenance contracts, revenue-by-source | Not in primary nav |
+| **Integrations** | Google Calendar OAuth + push on appointment create/assign (`CalendarSyncSheet` in Settings) | Update/delete sync deferred (PR 3); not launch-critical path per readiness spec but **built** |
+| **Hidden routes** | Maintenance contracts, revenue-by-source | Not in primary nav; contracts **removed from top-50** per product decision |
 
 **Parallel implementation:** `pages/*` list/detail components exist with API wiring but are **not** in `routes.ts` (superseded by `components/*`).
 
@@ -271,14 +272,21 @@ Columns:
 | WF-45 | In-app voice session (WebSocket) | Owner | P1 | manual | Session completes; proposals optional |
 | WF-46 | View call transcript drawer | Owner | P1 | sweep `/interactions` | Transcript loads without 5xx |
 
-### 4.9 Public & customer self-service (WF-47 – WF-50)
+### 4.9 Public & customer self-service (WF-47 – WF-49)
 
 | ID | Workflow | Actor | Priority | Auto | Pass criteria |
 |----|----------|-------|----------|------|-----------------|
 | WF-47 | Customer portal token: view jobs/estimates/invoices | Customer | P0 | PORTAL-01 | Tabs load token-scoped data only |
 | WF-48 | Portal request service → creates lead/job proposal | Customer | P1 | manual | Request recorded; operator notified |
 | WF-49 | Post-job feedback `/public/feedback/:token` | Customer | P1 | sweep | Rating persisted; dashboard chart updates |
-| WF-50 | Maintenance contract create → linked jobs | Owner | P2 | sweep `/contracts` | Contract row + job linkage (nav hidden) |
+
+### 4.10 Integrations (WF-50)
+
+| ID | Workflow | Actor | Priority | Auto | Pass criteria |
+|----|----------|-------|----------|------|-----------------|
+| WF-50 | **Google Calendar connect → appointment push → verify event** | Owner | P1 | manual + API tests | `POST /api/calendar-integrations/google/connect` returns auth URL; OAuth callback stores integration; creating/assigning an appointment writes `appointment_calendar_events.status='synced'` with `external_event_id`; optional `POST .../google/test-push` succeeds; disconnect clears integration |
+
+**Replaces (deferred from top-50):** maintenance contracts (`/contracts`) — still routed and API-backed, but out of launch E2E scope unless promoted later.
 
 ---
 
@@ -290,7 +298,8 @@ Columns:
 |------------|---------------|--------------|
 | **Matrix row exists** | 22 | WF-04,11,17-21,28-35,42-44,47,33,30,31… (see Matrix column above) |
 | **Journey spec** | 6 | WF-01,06,28-33 chain,06 |
-| **Coverage sweep only** | 12 | WF-02,10,13,14,18,26,27,40,46,49,50, parts of 22 |
+| **Coverage sweep only** | 12 | WF-02,10,13,14,18,26,27,40,46,49, parts of 22 |
+| **API route tests (no E2E yet)** | 1 | WF-50 (`calendar-integrations.route.test.ts`) |
 | **Manual / Twilio** | 10 | WF-07,08,23,24,36-38,42 live call,45,48 |
 
 ### 5.2 Recommended implementation phases
@@ -306,6 +315,7 @@ Columns:
 1. Add `e2e/workflows/` spec files grouped by section (5 specs × ~10 tests).
 2. Reuse matrix helpers (`api-verifier`, `db-verifier`, `report-builder`).
 3. Each WF-ID tagged in test title: `test('WF-28: draft estimate', ...)`.
+4. Add matrix row **`CAL-01`** for WF-50 (OAuth mocked or staging Google test account; assert `appointment_calendar_events` after WF-19).
 
 **Phase C — Close matrix backlog**
 
@@ -343,12 +353,14 @@ Columns:
 
 ---
 
-## 8. Open decisions (for user review)
+## 8. Decisions
 
-1. **Launch persona:** Plan assumes **solo owner-operator** per launch-readiness spec; WF-23–27 (dispatch/tech) stay P0 for codebase reality but could drop to P1 for solo-only launch marketing.
-2. **Environment of record:** Confirm Railway dev URLs as matrix target vs ephemeral-only CI.
-3. **WF-50 (contracts):** Include in top 50 or replace with **Google Calendar sync** (built but not listed)?
-4. **Held-slot workflows:** Add WF-51+ when `CreateBooking` ships, or bump WF-36/42 criteria now?
+| # | Topic | Status |
+|---|--------|--------|
+| 1 | **Launch persona** — solo vs dispatch/tech P0 | **Open** — WF-23–27 remain P0 for codebase reality; can demote for solo-only GTM |
+| 2 | **Environment of record** — Railway dev vs CI ephemeral | **Open** |
+| 3 | **WF-50 slot** — contracts vs Google Calendar | **Resolved (2026-05-24):** WF-50 = **Google Calendar sync**; maintenance contracts deferred |
+| 4 | **Held-slot workflows** | **Open** — add WF-51+ when `CreateBooking` ships, or tighten WF-36/42 now |
 
 ---
 
@@ -370,3 +382,7 @@ For alignment with automation already written:
 `PROV-01`, `PROV-02`, `CUS-01`, `CUS-02`, `EST-01`–`03`, `BILL-01`–`03`, `SCH-01`–`03`, `SMS-01`–`02`, `PAY-01`–`04`, `VOICE-01`–`02`, `ISO-01`–`02`, `PORTAL-01`–`02`, `JRN-01`–`02`, `PORT-01`–`02`, `VOX-01`–`04`, legacy `EST-01`–`06`, `INV-01`–`07`, `AST-01`–`07` (estimates/invoices/assistant specs still run; catalog marks legacy baseline deprecated).
 
 Legacy backlog docs: `qa/backlog/*.md`.
+
+**Proposed matrix row (not yet in `matrix.ts`):**
+
+- **`CAL-01`** — Google Calendar OAuth connect + appointment push (`WF-50`). Depends on `SCH-01` / WF-19; use mocked Google in CI or dedicated staging OAuth client.
