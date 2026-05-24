@@ -1302,6 +1302,8 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    docRevisionRepo: documentRevisionRepo,
+    editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,

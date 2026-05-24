@@ -37,6 +37,8 @@ import {
   CreateEstimateInput,
 } from '../../estimates/estimate';
 import { SettingsRepository, getNextEstimateNumber } from '../../settings/settings';
+import { DocumentRevisionRepository } from '../../ai/document-revision';
+import { EditDeltaRepository } from '../../estimates/edit-delta';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
@@ -390,6 +392,10 @@ export function createExecutionHandlerRegistry(deps?: {
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
   settingsRepo?: SettingsRepository;
+  // Estimate edit history — when wired, voice update_estimate snapshots a
+  // revision + edit delta, matching the authenticated edit path.
+  docRevisionRepo?: DocumentRevisionRepository;
+  editDeltaRepo?: EditDeltaRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
@@ -482,7 +488,12 @@ export function createExecutionHandlerRegistry(deps?: {
     handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
   }
   if (deps?.estimateRepo) {
-    handlers.push(new UpdateEstimateExecutionHandler(deps.estimateRepo));
+    handlers.push(new UpdateEstimateExecutionHandler(
+      deps.estimateRepo,
+      deps.auditRepo,
+      deps.docRevisionRepo,
+      deps.editDeltaRepo,
+    ));
   }
 
   const registry = new Map<ProposalType, ExecutionHandler>();
