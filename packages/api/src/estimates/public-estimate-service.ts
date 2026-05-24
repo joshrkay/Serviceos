@@ -184,6 +184,17 @@ export class PublicEstimateService {
         `Estimate cannot be accepted from status: ${estimate.status}`
       );
     }
+    // Stale-revision guard. Once an estimate has been revised, a caller MUST
+    // prove which version it is accepting — otherwise a cached page or a
+    // direct API call could accept stale, pre-revision pricing. Never-revised
+    // estimates (version 1, no lastRevisedAt) don't need the token, so first
+    // sends stay frictionless.
+    const hasBeenRevised = estimate.version > 1 || estimate.lastRevisedAt !== undefined;
+    if (hasBeenRevised && input.expectedVersion === undefined) {
+      throw new ConflictError(
+        'This estimate was updated. Please reload to review the latest version before accepting.',
+      );
+    }
     if (
       input.expectedVersion !== undefined &&
       input.expectedVersion !== estimate.version

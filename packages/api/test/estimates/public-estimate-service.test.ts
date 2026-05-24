@@ -312,6 +312,19 @@ describe('PublicEstimateService.approve', () => {
     });
     expect(view.status).toBe('accepted');
   });
+
+  it('requires expectedVersion once an estimate has been revised', async () => {
+    const est = await seedEstimate({ version: 2, lastRevisedAt: new Date() });
+    await expect(
+      h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah J' })
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('still accepts a never-revised (v1) estimate without expectedVersion', async () => {
+    const est = await seedEstimate({ version: 1 });
+    const view = await h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah J' });
+    expect(view.status).toBe('accepted');
+  });
 });
 
 describe('PublicEstimateService.decline', () => {
