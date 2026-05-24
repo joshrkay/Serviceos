@@ -3026,7 +3026,23 @@ export const MIGRATIONS = {
     END $do$;
   `,
 
-  '120_estimate_revision_versioning': `
+  // Per-tenant AI config + onboarding AI self-check state. ai_model is seeded
+  // from AI_DEFAULT_MODEL when billing completes so the gateway's tenantOverrides
+  // path has a model to resolve; the verify_ai worker then makes one real
+  // gateway.complete() call and records pass/fail here. ai_api_key_enc is
+  // reserved for a future bring-your-own-key flow (encrypted, unused today).
+  '120_tenant_settings_ai_config': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_model                   TEXT,
+      ADD COLUMN IF NOT EXISTS ai_provider                TEXT,
+      ADD COLUMN IF NOT EXISTS ai_api_key_enc             TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_status     TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verified_at             TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS ai_verification_error      TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_started_at TIMESTAMPTZ;
+  `,
+
+  '121_estimate_revision_versioning': `
     -- Optimistic-lock + customer re-sync support for the estimate
     -- edit/revise flow. 'version' increments on every persisted content
     -- change; the authenticated edit path and the public approve path
@@ -3038,7 +3054,7 @@ export const MIGRATIONS = {
     ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_revised_at TIMESTAMPTZ;
   `,
 
-  '121_estimate_reminders': `
+  '122_estimate_reminders': `
     -- Estimate-reminder worker support. 'reminder_count' caps how many
     -- follow-up nudges a sent-but-unanswered estimate receives;
     -- 'last_reminder_at' records the most recent nudge. The worker also

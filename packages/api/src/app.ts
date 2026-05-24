@@ -156,6 +156,7 @@ import {
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { createVerifyAiWorker } from './workers/verify-ai';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
 import { InMemoryPackActivationRepository } from './settings/pack-activation';
@@ -1503,6 +1504,14 @@ export function createApp(): express.Express {
     workerRegistry.set(
       provisionTwilioWorker.type,
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
+  if (pool && llmGateway) {
+    const verifyAiWorker = createVerifyAiWorker({ pool, gateway: llmGateway, auditRepo });
+    workerRegistry.set(
+      verifyAiWorker.type,
+      verifyAiWorker as import('./queues/queue').WorkerHandler<unknown>
     );
   }
 

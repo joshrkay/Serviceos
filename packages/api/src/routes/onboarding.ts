@@ -19,6 +19,7 @@ import {
   PROVISION_TWILIO_JOB_TYPE,
   type ProvisionTwilioPayload,
 } from '../workers/provision-twilio';
+import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 
 interface OnboardingConfigureBody {
   name: string;
@@ -536,6 +537,50 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'PHONE_RETRY_FAILED',
           message: error instanceof Error ? error.message : 'Failed to retry phone provisioning',
+        });
+      }
+    },
+  );
+
+  router.post(
+    '/ai-check/retry',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool || !queue) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'AI check retry requires database and queue',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        await pool.query(
+          `UPDATE tenant_settings
+             SET ai_verification_status = 'pending',
+                 ai_verification_error = NULL,
+                 updated_at = now()
+           WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const payload: VerifyAiPayload = { tenantId };
+        await queue.send(VERIFY_AI_JOB_TYPE, payload, `verify-ai-retry-${tenantId}`);
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: req.auth!.userId,
+            actorRole: 'owner',
+            eventType: 'tenant.ai_verification_retry',
+            entityType: 'tenant_settings',
+            entityId: tenantId,
+          }),
+        );
+        res.json({ ok: true, enqueued: true });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'AI_CHECK_RETRY_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to retry AI verification',
         });
       }
     },

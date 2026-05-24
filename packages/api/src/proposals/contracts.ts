@@ -3,6 +3,7 @@ import { ProposalType } from './proposal';
 import { ValidationError } from '../shared/errors';
 import { reassignAppointmentPayloadSchema } from './contracts/reassignment';
 import { rescheduleAppointmentPayloadSchema } from './contracts/reschedule';
+import { addCrewMemberPayloadSchema, removeCrewMemberPayloadSchema } from './contracts/crew';
 import { cancelAppointmentPayloadSchema } from './contracts/cancellation';
 import { addNotePayloadSchema } from './contracts/notes';
 import { sendInvoicePayloadSchema } from './contracts/send-invoice';
@@ -198,6 +199,8 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   issue_invoice: issueInvoicePayloadSchema,
   reassign_appointment: reassignAppointmentPayloadSchema,
   reschedule_appointment: rescheduleAppointmentPayloadSchema,
+  add_crew_member: addCrewMemberPayloadSchema,
+  remove_crew_member: removeCrewMemberPayloadSchema,
   cancel_appointment: cancelAppointmentPayloadSchema,
   voice_clarification: voiceClarificationPayloadSchema,
   add_note: addNotePayloadSchema,
