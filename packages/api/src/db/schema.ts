@@ -3026,12 +3026,28 @@ export const MIGRATIONS = {
     END $do$;
   `,
 
+  // Per-tenant AI config + onboarding AI self-check state. ai_model is seeded
+  // from AI_DEFAULT_MODEL when billing completes so the gateway's tenantOverrides
+  // path has a model to resolve; the verify_ai worker then makes one real
+  // gateway.complete() call and records pass/fail here. ai_api_key_enc is
+  // reserved for a future bring-your-own-key flow (encrypted, unused today).
+  '120_tenant_settings_ai_config': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_model                   TEXT,
+      ADD COLUMN IF NOT EXISTS ai_provider                TEXT,
+      ADD COLUMN IF NOT EXISTS ai_api_key_enc             TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_status     TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verified_at             TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS ai_verification_error      TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_started_at TIMESTAMPTZ;
+  `,
+
   // Durable record of tenant hard-deletes. Intentionally NOT tenant-scoped:
   // no FK to tenants (the tenant row is gone by the time we write this) and
   // NO row-level security, so it survives the purge and remains readable
   // cross-tenant by ops. This is the only audit trail of a deprovision, since
   // the tenant's audit_events rows are themselves purged.
-  '120_platform_deprovision_log': `
+  '121_platform_deprovision_log': `
     CREATE TABLE IF NOT EXISTS platform_deprovision_log (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL,
@@ -3045,6 +3061,7 @@ export const MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS idx_deprovision_log_tenant ON platform_deprovision_log(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_deprovision_log_created ON platform_deprovision_log(created_at);
+
   `,
 };
 

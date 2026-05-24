@@ -19,6 +19,7 @@ import {
   type DeprovisionTenantPayload,
 } from '../workers/deprovision-tenant';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
+import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { verifySendGridSignature } from './sendgrid-signature';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
@@ -851,6 +852,31 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.info('Subscription status mirrored from Stripe', {
             customerId: sub.customer, subscriptionId: sub.id, status: sub.status,
           });
+
+          // Once billing reaches a live state, seed the tenant's AI model from
+          // the platform default and enqueue the onboarding AI self-check.
+          // Idempotent: the worker skips if already passed and the COALESCE
+          // never clobbers a model already chosen for the tenant.
+          if ((sub.status === 'trialing' || sub.status === 'active') && deps.pool && deps.queue) {
+            const tenantRes = await deps.pool.query<{ id: string }>(
+              `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
+              [sub.customer],
+            );
+            const tenantId = tenantRes.rows[0]?.id;
+            if (tenantId) {
+              if (config.AI_DEFAULT_MODEL) {
+                await deps.pool.query(
+                  `UPDATE tenant_settings
+                      SET ai_model = COALESCE(ai_model, $2), updated_at = NOW()
+                    WHERE tenant_id = $1`,
+                  [tenantId, config.AI_DEFAULT_MODEL],
+                );
+              }
+              const verifyPayload: VerifyAiPayload = { tenantId };
+              await deps.queue.send(VERIFY_AI_JOB_TYPE, verifyPayload, `verify-ai-${tenantId}`);
+              logger.info('AI verification job enqueued', { tenantId, status: sub.status });
+            }
+          }
         } else {
           logger.warn('customer.subscription.* missing fields', {
             eventId: event.id, type: event.type,

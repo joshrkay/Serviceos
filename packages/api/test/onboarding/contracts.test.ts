@@ -74,6 +74,7 @@ describe('OnboardingStatusResponseSchema', () => {
         { id: 'pack' as const, status: 'current' as const },
         { id: 'phone' as const, status: 'pending' as const },
         { id: 'billing' as const, status: 'pending' as const },
+        { id: 'ai_check' as const, status: 'pending' as const },
         { id: 'test_call' as const, status: 'pending' as const },
       ],
       currentStep: 'pack' as const,

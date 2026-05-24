@@ -13,6 +13,7 @@ const STEP_LABELS: Record<OnboardingStepId, string> = {
   pack: 'Pick your trade',
   phone: 'Phone number',
   billing: 'Start trial',
+  ai_check: 'Verify AI',
   test_call: 'Test call',
 };
 
@@ -62,7 +63,7 @@ export function Sidebar({ status, activeId, onSelect }: SidebarProps) {
         })}
       </ul>
       <div className="mt-6 pt-4 border-t border-slate-200 text-xs text-slate-500">
-        {completedCount} of 6 · keep going
+        {completedCount} of {status.steps.length} · keep going
       </div>
 
       {/* §10 Task 19 — optional polish steps. Only interactive once the

@@ -17,6 +17,8 @@ import {
   TimeRangeDisplay,
 } from '../../components/dispatch/ConfirmProposalDialog';
 import { apiFetch } from '../../utils/api-fetch';
+import { AddCrewDialog } from '../../components/dispatch/AddCrewDialog';
+import { useCreateCrewProposal } from '../../components/dispatch/useCreateCrewProposal';
 import {
   useFeasibilityPreview,
   FeasibilityPreviewInput,
@@ -106,6 +108,8 @@ export function DispatchBoard() {
   const [isSubmittingProposal, setIsSubmittingProposal] = useState(false);
   const [editedStart, setEditedStart] = useState('');
   const [editedEnd, setEditedEnd] = useState('');
+  const [crewDialogAppointmentId, setCrewDialogAppointmentId] = useState<string | null>(null);
+  const { removeCrew } = useCreateCrewProposal();
 
   useDispatchBoardStream(dateParam, data?.boardRevision, refetch);
   useDispatchPresence(selectedDate, dragSource?.appointmentId ?? null);
@@ -231,6 +235,46 @@ export function DispatchBoard() {
       );
     },
     [data],
+  );
+
+  const handleAddCrew = useCallback((appointmentId: string) => {
+    setCrewDialogAppointmentId(appointmentId);
+  }, []);
+
+  const crewExcludeIds = useCallback(
+    (appointmentId: string): string[] => {
+      if (!data) return [];
+      const lane = data.technicianLanes.find((l) =>
+        l.appointments.some((a) => a.id === appointmentId),
+      );
+      const appt = findAppointment(appointmentId);
+      const co = (appt?.coAssignees ?? []).map((c) => c.technicianId);
+      return lane ? [lane.technicianId, ...co] : co;
+    },
+    [data, findAppointment],
+  );
+
+  const handleRemoveCoAssignee = useCallback(
+    async (appointmentId: string, technicianId: string) => {
+      const appt = findAppointment(appointmentId);
+      const result = await removeCrew({
+        appointmentId,
+        technicianId,
+        appointmentVersion: appt?.updatedAt,
+      });
+      if (result.success) {
+        toast.success('Crew removal proposed — pending review');
+        emitProposalsChanged();
+        void refetch();
+      } else if (result.error === 'STALE') {
+        toast.warning('Someone else updated this appointment — refresh and try again.');
+        void refetch();
+      } else {
+        const msg = typeof result.error === 'string' ? result.error : 'Could not remove crew member';
+        toast.error(msg);
+      }
+    },
+    [findAppointment, removeCrew, refetch],
   );
 
   const openConfirmWithSlot = useCallback(
@@ -673,6 +717,8 @@ export function DispatchBoard() {
                 }
                 conflictIds={conflictIds}
                 currentUserId={currentUserId}
+                onAddCrew={handleAddCrew}
+                onRemoveCoAssignee={handleRemoveCoAssignee}
                 dragPreview={
                   dragOverTarget?.kind === 'lane' &&
                   dragOverTarget.technicianId === lane.technicianId &&
@@ -711,6 +757,34 @@ export function DispatchBoard() {
         onConfirm={submitProposal}
         onCancel={cancelPendingDrop}
       />
+
+      {crewDialogAppointmentId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          role="dialog"
+          aria-modal="true"
+          data-testid="add-crew-modal"
+        >
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setCrewDialogAppointmentId(null)}
+          />
+          <div className="relative z-10 w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+            <AddCrewDialog
+              appointmentId={crewDialogAppointmentId}
+              appointmentVersion={findAppointment(crewDialogAppointmentId)?.updatedAt}
+              excludeTechnicianIds={crewExcludeIds(crewDialogAppointmentId)}
+              onCreated={() => {
+                setCrewDialogAppointmentId(null);
+                toast.success('Crew member proposed — pending review');
+                emitProposalsChanged();
+                void refetch();
+              }}
+              onCancel={() => setCrewDialogAppointmentId(null)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
