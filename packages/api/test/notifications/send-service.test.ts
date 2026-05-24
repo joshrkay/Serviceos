@@ -200,6 +200,8 @@ describe('SendService.sendEstimate', () => {
 
   it('P11-002 — localizes the SMS when the customer prefers Spanish', async () => {
     const c = makeCustomer({ preferredLanguage: 'es' });
+  it('preserves the original sentAt on a re-send (set-once)', async () => {
+    const c = makeCustomer();
     await h.customer.create(c);
     const j = makeJob(c.id);
     await h.job.create(j);
@@ -237,6 +239,13 @@ describe('SendService.sendEstimate', () => {
     await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
 
     expect(h.delivery.sentSms[0].body).toContain('your estimate from Acme HVAC is ready');
+    const original = new Date('2020-01-01T00:00:00Z');
+    await h.estimate.update(TENANT, est.id, { sentAt: original, status: 'sent' });
+
+    await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    const persisted = await h.estimate.findById(TENANT, est.id);
+    expect(persisted?.sentAt?.toISOString()).toBe(original.toISOString());
   });
 
   it('sends both SMS and email when channel=both', async () => {

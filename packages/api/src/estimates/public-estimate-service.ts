@@ -52,6 +52,15 @@ export interface PublicEstimateView {
   /** Set when token is past expiry. */
   isExpired: boolean;
   /**
+   * Optimistic-lock / re-sync counter. The customer page captures this
+   * on load and sends it back as `expectedVersion` on approve; a bump
+   * means the business revised the estimate and the page must reload
+   * before the customer can accept.
+   */
+  version: number;
+  /** ISO timestamp of the most recent revise of this (already sent) estimate. */
+  lastRevisedAt?: string;
+  /**
    * Tier 4 (Deposit rules — PR 3a). Deposit context surfaced from
    * the linked job. Customers see the required amount on the
    * approval page before they accept; PR 3b will mint the Stripe
@@ -89,6 +98,13 @@ export interface ApproveEstimateInput {
   signatureData?: string;
   ip?: string;
   userAgent?: string;
+  /**
+   * The estimate `version` the customer was viewing when they accepted.
+   * When supplied and it no longer matches, the estimate was revised
+   * after page load and approval is refused so the customer reviews the
+   * latest version first.
+   */
+  expectedVersion?: number;
 }
 
 export interface DeclineEstimateInput {
@@ -166,6 +182,25 @@ export class PublicEstimateService {
     if (TERMINAL_STATUSES.has(estimate.status)) {
       throw new ConflictError(
         `Estimate cannot be accepted from status: ${estimate.status}`
+      );
+    }
+    // Stale-revision guard. Once an estimate has been revised, a caller MUST
+    // prove which version it is accepting — otherwise a cached page or a
+    // direct API call could accept stale, pre-revision pricing. Never-revised
+    // estimates (version 1, no lastRevisedAt) don't need the token, so first
+    // sends stay frictionless.
+    const hasBeenRevised = estimate.version > 1 || estimate.lastRevisedAt !== undefined;
+    if (hasBeenRevised && input.expectedVersion === undefined) {
+      throw new ConflictError(
+        'This estimate was updated. Please reload to review the latest version before accepting.',
+      );
+    }
+    if (
+      input.expectedVersion !== undefined &&
+      input.expectedVersion !== estimate.version
+    ) {
+      throw new ConflictError(
+        'This estimate was updated after you opened it. Please review the latest version before accepting.',
       );
     }
     const trimmed = input.acceptedByName.trim();
@@ -428,6 +463,8 @@ export class PublicEstimateService {
       rejectedAt: estimate.rejectedAt?.toISOString(),
       rejectedReason: estimate.rejectedReason,
       isExpired,
+      version: estimate.version,
+      lastRevisedAt: estimate.lastRevisedAt?.toISOString(),
       // Tier 4 (Deposit rules — PR 3a). Surface the deposit context
       // from the linked job, with PR 3b's before_approval computation
       // layered on top. Defaults cover legacy jobs (the columns

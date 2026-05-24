@@ -118,7 +118,7 @@ describe('P1-009 — Estimate entity + shared line-item schema', () => {
     ).rejects.toThrow('Invalid transition from draft to accepted');
   });
 
-  it('edit guard — rejects update on sent estimate', async () => {
+  it('edit guard — plain update on a sent estimate routes to the revise flow', async () => {
     const estimate = await createEstimate(
       { tenantId: 'tenant-1', jobId: 'job-1', estimateNumber: 'EST-0001', lineItems: sampleItems, createdBy: 'u-1' },
       repo
@@ -127,7 +127,7 @@ describe('P1-009 — Estimate entity + shared line-item schema', () => {
 
     await expect(
       updateEstimate('tenant-1', estimate.id, { discountCents: 1000 }, repo)
-    ).rejects.toThrow("Cannot edit estimate in 'sent' status");
+    ).rejects.toThrow(/revise/i);
   });
 
   it('zero amount edge case — zero-value line items', async () => {

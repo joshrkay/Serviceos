@@ -3033,6 +3033,42 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS google_review_url TEXT,
       ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
+  // Per-tenant AI config + onboarding AI self-check state. ai_model is seeded
+  // from AI_DEFAULT_MODEL when billing completes so the gateway's tenantOverrides
+  // path has a model to resolve; the verify_ai worker then makes one real
+  // gateway.complete() call and records pass/fail here. ai_api_key_enc is
+  // reserved for a future bring-your-own-key flow (encrypted, unused today).
+  '120_tenant_settings_ai_config': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_model                   TEXT,
+      ADD COLUMN IF NOT EXISTS ai_provider                TEXT,
+      ADD COLUMN IF NOT EXISTS ai_api_key_enc             TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_status     TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verified_at             TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS ai_verification_error      TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_started_at TIMESTAMPTZ;
+  `,
+
+  '121_estimate_revision_versioning': `
+    -- Optimistic-lock + customer re-sync support for the estimate
+    -- edit/revise flow. 'version' increments on every persisted content
+    -- change; the authenticated edit path and the public approve path
+    -- both compare an expected version to reject stale writes. The public
+    -- approval page also reads 'version' to detect that an estimate was
+    -- revised after the customer loaded it. 'last_revised_at' records the
+    -- most recent revise of an already-sent estimate.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_revised_at TIMESTAMPTZ;
+  `,
+
+  '122_estimate_reminders': `
+    -- Estimate-reminder worker support. 'reminder_count' caps how many
+    -- follow-up nudges a sent-but-unanswered estimate receives;
+    -- 'last_reminder_at' records the most recent nudge. The worker also
+    -- needs to find estimates by send age — that uses the existing
+    -- sent_at column with a new sentBefore list filter (no schema change).
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS reminder_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMPTZ;
   `,
 };
 
