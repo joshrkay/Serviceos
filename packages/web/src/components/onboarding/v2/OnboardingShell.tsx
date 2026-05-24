@@ -7,6 +7,7 @@ import { IdentityStep } from './steps/IdentityStep';
 import { PackStep } from './steps/PackStep';
 import { PhoneStep } from './steps/PhoneStep';
 import { BillingStep } from './steps/BillingStep';
+import { AiCheckStep } from './steps/AiCheckStep';
 import { TestCallStep } from './steps/TestCallStep';
 import type { OnboardingStepId } from '../../../types/onboarding';
 
@@ -89,6 +90,9 @@ export function OnboardingShell() {
           />
         )}
         {activeId === 'billing' && <BillingStep />}
+        {activeId === 'ai_check' && (
+          <AiCheckStep status={data} onRetryComplete={() => void refetch()} />
+        )}
         {activeId === 'test_call' && (
           <TestCallStep
             status={data}
