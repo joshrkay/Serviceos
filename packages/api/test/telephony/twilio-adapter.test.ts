@@ -17,6 +17,7 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryVoiceSessionRepository } from '../../src/voice/voice-session';
 import { MEDIA_STREAM_PATH } from '../../src/telephony/media-streams/twilio-mediastream-server';
+import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,25 @@ describe('buildTwiML', () => {
     const xml = buildTwiML([], { gatherActionUrl: '/g' });
     expect(xml).toContain('<Gather');
     expect(xml).not.toContain('<Hangup');
+  });
+
+  it('P11-002: language=es uses the Spanish Polly voice + es-US Gather locale', () => {
+    const xml = buildTwiML(
+      [{ type: 'tts_play', payload: { text: 'Hola' } }],
+      { gatherActionUrl: '/g', language: 'es' },
+    );
+    expect(xml).toContain('<Say voice="Polly.Mia-Neural">Hola</Say>');
+    expect(xml).toContain('language="es-US"');
+  });
+
+  it('P11-002: voiceOverride wins over the language-derived default for <Say>', () => {
+    const xml = buildTwiML(
+      [{ type: 'tts_play', payload: { text: 'Hola' } }],
+      { gatherActionUrl: '/g', language: 'es', voiceOverride: 'Polly.Lupe-Neural' },
+    );
+    expect(xml).toContain('<Say voice="Polly.Lupe-Neural">Hola</Say>');
+    // STT locale still follows language, not the voice override.
+    expect(xml).toContain('language="es-US"');
   });
 
   // ─── P8-014: recordingStatusCallback wiring ────────────────────────────────
@@ -224,6 +244,59 @@ describe('TwilioGatherAdapter.handleInbound', () => {
       tenantId: 'tenant-abc',
     });
     expect(replay).not.toContain('<Record');
+  });
+
+  it('P11-002: a Spanish-default tenant gets a Spanish greeting + voice override, and the replay path keeps them', async () => {
+    const store = new VoiceSessionStore();
+    const settingsRepo = new InMemorySettingsRepository();
+    const now = new Date();
+    const settings: TenantSettings = {
+      id: 's-1',
+      tenantId: 'tenant-es',
+      businessName: 'Acme Plumbing',
+      timezone: 'America/Chicago',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      defaultLanguage: 'es',
+      autoDetectLanguage: true,
+      ttsVoiceEs: 'Polly.Lupe-Neural',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await settingsRepo.create(settings);
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      settingsRepo,
+    });
+
+    const first = await adapter.handleInbound({
+      callSid: 'CA-es',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-es',
+    });
+    expect(first).toContain('Gracias por llamar a Acme Plumbing');
+    expect(first).toContain('language="es-US"');
+    expect(first).toContain('<Say voice="Polly.Lupe-Neural">');
+
+    // Twilio retries the /voice webhook → replay branch. It must keep the
+    // session's Spanish language + voice, not fall back to English.
+    const replay = await adapter.handleInbound({
+      callSid: 'CA-es',
+      from: '+15125550100',
+      to: '+15125550999',
+      tenantId: 'tenant-es',
+    });
+    expect(replay).toContain('Un momento, por favor.');
+    expect(replay).toContain('language="es-US"');
+    expect(replay).toContain('<Say voice="Polly.Lupe-Neural">');
+    expect(replay).not.toContain('One moment, please.');
   });
 
   it('P8-014: handleInbound omits <Record/> when recordingCallbackPath is unset', async () => {

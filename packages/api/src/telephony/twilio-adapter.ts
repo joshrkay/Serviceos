@@ -363,6 +363,13 @@ interface BuildTwimlOpts {
    * so Twilio's built-in recognizer picks the right phonetic model.
    */
   language?: 'en' | 'es';
+  /**
+   * P11-002: per-tenant TTS voice override (settings.ttsVoiceEn/Es).
+   * When set, the `<Say voice>` uses it instead of the language-derived
+   * default Polly voice. The `<Gather>` STT locale still follows
+   * `language`.
+   */
+  voiceOverride?: string;
 }
 
 const GATHER_VOICE_EN = 'Polly.Joanna';
@@ -415,7 +422,8 @@ export function buildTwiML(
       // audible feedback rather than silence; a real prompt registry is a
       // follow-up.
       const sayText = text.length > 0 ? text : '...';
-      const voice = opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN;
+      const voice =
+        opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       parts.push(`<Say voice="${voice}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       parts.push('<Hangup/>');
@@ -527,17 +535,23 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * P11-002 — resolve the spoken language for a new call from the tenant
-   * default (default_language). Customer-level overrides for voice are a
-   * follow-up; the greeting/STT use the tenant default. Falls back to 'en'.
+   * P11-002 — resolve the spoken language + TTS voice for a new call from
+   * the tenant settings (default_language + tts_voice_en/es). Customer-level
+   * overrides for voice are a follow-up; the greeting/STT use the tenant
+   * default. Falls back to 'en' with no voice override.
    */
-  private async resolveTenantLanguage(tenantId: string): Promise<Language> {
-    if (!this.deps.settingsRepo) return 'en';
+  private async resolveTenantLanguage(
+    tenantId: string,
+  ): Promise<{ language: Language; ttsVoice?: string }> {
+    if (!this.deps.settingsRepo) return { language: 'en' };
     try {
       const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-      return settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const language: Language = settings?.defaultLanguage === 'es' ? 'es' : 'en';
+      const ttsVoice =
+        (language === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
+      return { language, ttsVoice };
     } catch {
-      return 'en';
+      return { language: 'en' };
     }
   }
 
@@ -625,9 +639,10 @@ export class TwilioGatherAdapter {
 
     const from = this.callerIdBySession.get(session.id) ?? '';
 
-    // P11-002: resolve + pin the spoken language (tenant default).
-    const language = await this.resolveTenantLanguage(opts.tenantId);
+    // P11-002: resolve + pin the spoken language + TTS voice (tenant default).
+    const { language, ttsVoice } = await this.resolveTenantLanguage(opts.tenantId);
     session.language = language;
+    session.ttsVoice = ttsVoice;
 
     // 1. Recording disclosure (text only — TTS synthesizes the audio).
     const disclosure = await discloseRecording({
@@ -863,8 +878,12 @@ export class TwilioGatherAdapter {
         sessionId: existing.id,
       });
       return buildTwiML(
-        [{ type: 'tts_play', payload: { text: 'One moment, please.' } }],
-        { gatherActionUrl: this.gatherUrl(existing.id) },
+        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', existing.language ?? 'en') } }],
+        {
+          gatherActionUrl: this.gatherUrl(existing.id),
+          ...(existing.language ? { language: existing.language } : {}),
+          ...(existing.ttsVoice ? { voiceOverride: existing.ttsVoice } : {}),
+        },
       );
     }
 
@@ -884,10 +903,12 @@ export class TwilioGatherAdapter {
     // primaryPhone without re-prompting.
     this.callerIdBySession.set(session.id, opts.from ?? '');
 
-    // P11-002: resolve spoken language (tenant default) and pin it on the
-    // session so the greeting, disclosure, and every TwiML build speak it.
-    const language = await this.resolveTenantLanguage(opts.tenantId);
+    // P11-002: resolve spoken language + TTS voice (tenant default) and pin
+    // them on the session so the greeting, disclosure, and every TwiML build
+    // speak it in the right language/voice.
+    const { language, ttsVoice } = await this.resolveTenantLanguage(opts.tenantId);
     session.language = language;
+    session.ttsVoice = ttsVoice;
 
     // 1. Disclose recording (text generation; no TTS — Twilio <Say> handles audio).
     const disclosure = await discloseRecording({
@@ -1025,6 +1046,7 @@ export class TwilioGatherAdapter {
       buildTwiML(expanded, {
         gatherActionUrl: this.gatherUrl(session.id),
         ...(session.language ? { language: session.language } : {}),
+        ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
         ...(this.deps.recordingCallbackPath
           ? { recordingStatusCallback: this.recordingCallbackUrl() }
           : {}),
@@ -1339,6 +1361,7 @@ export class TwilioGatherAdapter {
     const twiml = buildTwiML(sideEffects, {
       gatherActionUrl: this.gatherUrl(sessionId),
       ...(session.language ? { language: session.language } : {}),
+      ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
     });
     const ttsLast = [...sideEffects].reverse().find((e) => e.type === 'tts_play');
     if (ttsLast && typeof ttsLast.payload.text === 'string') {

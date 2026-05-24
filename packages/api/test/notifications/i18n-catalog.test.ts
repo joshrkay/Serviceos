@@ -31,4 +31,19 @@ describe('notifications i18n catalog', () => {
       'Gracias por elegir a Acme',
     );
   });
+
+  it('localizes transactional email subjects (P11-002 review fix #3)', () => {
+    expect(tn('email.payment_receipt.subject', 'en', { business: 'Acme' })).toBe(
+      'Payment received — Acme',
+    );
+    expect(tn('email.payment_receipt.subject', 'es', { business: 'Acme' })).toBe(
+      'Pago recibido — Acme',
+    );
+    expect(tn('email.invoice_overdue.subject', 'es', { business: 'Acme' })).toBe(
+      'Factura vencida — Acme',
+    );
+    expect(tn('email.appointment.subject', 'es', { business: 'Acme' })).toBe(
+      'Acme — actualización de cita',
+    );
+  });
 });

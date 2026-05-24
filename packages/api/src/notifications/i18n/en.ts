@@ -71,6 +71,11 @@ export const en = {
   'email.invoice.number': 'Invoice number: {{number}}',
   'email.invoice.cta_text': 'Pay online here: {{url}}',
   'email.invoice.button': 'Pay Invoice Online',
+
+  // ── Transactional email subjects ─────────────────────────────────────
+  'email.payment_receipt.subject': 'Payment received — {{business}}',
+  'email.invoice_overdue.subject': 'Invoice overdue — {{business}}',
+  'email.appointment.subject': '{{business}} — appointment update',
 } as const;
 
 export type EnglishNotifications = typeof en;

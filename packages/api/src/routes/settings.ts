@@ -104,7 +104,7 @@ export function createSettingsRouter(
     requirePermission('settings:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const settings = await ensureTenantSettings(req.auth!.tenantId, settingsRepo);
+        const settings = await getSettings(req.auth!.tenantId, settingsRepo);
         res.json(projectLanguageSettings(settings));
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

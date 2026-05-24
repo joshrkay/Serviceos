@@ -21,6 +21,7 @@ import {
   renderInvoiceOverdueSms,
 } from './templates';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
+import { tn } from './i18n';
 import type { Language } from '../ai/i18n/i18n';
 
 export interface TransactionalCommsServiceDeps extends CustomerMessageDeliveryDeps {
@@ -148,7 +149,7 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       entityId: invoiceId,
       channels: ['sms', 'email'],
       smsBody: sms.body,
-      emailSubject: `Payment received — ${businessName}`,
+      emailSubject: tn('email.payment_receipt.subject', language, { business: businessName }),
       emailText: sms.body,
       idempotencyKeyPrefix: `payment-receipt:${invoiceId}`,
     });
@@ -186,7 +187,7 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       entityId: invoiceId,
       channels: ['sms', 'email'],
       smsBody: sms.body,
-      emailSubject: `Invoice overdue — ${businessName}`,
+      emailSubject: tn('email.invoice_overdue.subject', language, { business: businessName }),
       emailText: sms.body,
       idempotencyKeyPrefix: `invoice-overdue:${invoiceId}`,
     });
@@ -247,7 +248,7 @@ export class TransactionalCommsService implements SchedulingConfirmationNotifier
       entityId: appointmentId,
       channels,
       smsBody: sms.body,
-      emailSubject: `${businessName} — appointment update`,
+      emailSubject: tn('email.appointment.subject', language, { business: businessName }),
       emailText: sms.body,
       idempotencyKeyPrefix,
     });

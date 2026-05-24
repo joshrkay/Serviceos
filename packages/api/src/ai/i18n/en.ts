@@ -61,6 +61,7 @@ export const en = {
   'greeting.opener_default': 'Thank you for calling {{business}}.',
   'greeting.opener_named': 'Thank you for calling {{business}}. This is {{agent}}.',
   'greeting.cta': 'How can I help you today?',
+  'greeting.one_moment': 'One moment, please.',
 
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hi {{name}}, welcome back.',

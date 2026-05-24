@@ -69,4 +69,9 @@ export const es: Record<keyof EnglishNotifications, string> = {
   'email.invoice.number': 'Número de factura: {{number}}',
   'email.invoice.cta_text': 'Pague en línea aquí: {{url}}',
   'email.invoice.button': 'Pagar factura en línea',
+
+  // ── Transactional email subjects ─────────────────────────────────────
+  'email.payment_receipt.subject': 'Pago recibido — {{business}}',
+  'email.invoice_overdue.subject': 'Factura vencida — {{business}}',
+  'email.appointment.subject': '{{business}} — actualización de cita',
 };
