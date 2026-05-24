@@ -4,6 +4,7 @@ import {
   FeasibilityIssue, TravelTimeSummary,
 } from './feasibility-types';
 import { Appointment } from '../appointments/appointment';
+import { getDayOfWeekInTimezone } from '../appointments/time';
 import { LatLng } from './travel-time/provider';
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -53,7 +54,8 @@ async function availabilityIssues(
   input: FeasibilityInput,
   deps: FeasibilityDependencies,
 ): Promise<FeasibilityIssue[]> {
-  const dayOfWeek = input.proposedScheduledStart.getUTCDay();
+  const timezone = deps.timezone ?? input.appointment.timezone ?? 'UTC';
+  const dayOfWeek = getDayOfWeekInTimezone(input.proposedScheduledStart, timezone);
   const wh = await deps.workingHoursRepo.findByTechnicianAndDay(
     input.tenantId, input.proposedTechnicianId, dayOfWeek,
   );
@@ -63,7 +65,7 @@ async function availabilityIssues(
   );
   const conflicts = detectAvailabilityConflicts(
     input.proposedScheduledStart, input.proposedScheduledEnd,
-    wh, blocks, deps.timezone ?? input.appointment.timezone ?? 'UTC',
+    wh, blocks, timezone,
   );
   return conflicts.map((c) => ({
     check: (c.type === 'outside_working_hours' ? 'working_hours' : 'unavailable_block') as FeasibilityIssue['check'],

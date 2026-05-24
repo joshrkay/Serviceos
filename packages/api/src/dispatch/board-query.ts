@@ -272,7 +272,8 @@ export async function getDispatchBoardData(
 
     // Add availability summary if repos provided
     if (deps.workingHoursRepo) {
-      const dayOfWeek = start.getDay();
+      const [bYear, bMonth, bDay] = dateStr.split('-').map(Number);
+      const dayOfWeek = new Date(Date.UTC(bYear, bMonth - 1, bDay)).getUTCDay();
       const workingHours = await deps.workingHoursRepo.findByTechnicianAndDay(tenantId, techId, dayOfWeek);
 
       let unavailableBlocks: { start: string; end: string; reason?: string }[] = [];
