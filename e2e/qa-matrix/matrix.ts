@@ -28,6 +28,8 @@ export type MatrixModule =
   | 'JOB'
   | 'AGR'
   | 'LEAD'
+  | 'INV'
+  | 'CUST'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -535,6 +537,52 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Agreement pause → resume → cancel lifecycle',
     passCriteria:
       'pause sets status=paused, resume returns it to active, cancel sets status=cancelled; each transition is reflected in API + DB and cancel is terminal',
+    expected: 'pass',
+  },
+
+  // ----- Leads pipeline -----
+  {
+    id: 'LEAD-01',
+    module: 'LEAD',
+    feature: 'Lead stage progression + won-guard',
+    passCriteria:
+      'A lead is advanced new→contacted→qualified→quoted via PATCH (each persisted); a direct PATCH to stage=won is refused (400) — promotion to won must go through convertToCustomer',
+    expected: 'pass',
+  },
+  {
+    id: 'LEAD-02',
+    module: 'LEAD',
+    feature: 'Lead lost with reason',
+    passCriteria:
+      'POST /api/leads/:id/lose with a reason sets stage=lost and records the lost_reason; the lead is removed from the active pipeline',
+    expected: 'pass',
+  },
+
+  // ----- Invoice lifecycle (issue / void) -----
+  {
+    id: 'INV-01',
+    module: 'INV',
+    feature: 'Invoice issue → void lifecycle',
+    passCriteria:
+      'POST /api/invoices creates a draft; /:id/issue moves it to open (issuedAt stamped); /:id/transition status=void voids it — each persisted in the DB',
+    expected: 'pass',
+  },
+  {
+    id: 'INV-02',
+    module: 'INV',
+    feature: 'Invalid invoice transition rejected',
+    passCriteria:
+      'A disallowed transition (draft → void) is refused (4xx) and the invoice stays draft — the invoice state machine is enforced server-side',
+    expected: 'pass',
+  },
+
+  // ----- Customer archive -----
+  {
+    id: 'CUST-03',
+    module: 'CUST',
+    feature: 'Archive customer',
+    passCriteria:
+      'POST /api/customers/:id/archive sets is_archived=true (archived_at stamped); the customer drops out of the default active list',
     expected: 'pass',
   },
 
