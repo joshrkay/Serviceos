@@ -607,6 +607,34 @@ describe('voice-action-router worker', () => {
     expect(payload.invoiceReference).toBe('INV-0042');
   });
 
+  it('routes send_estimate as comms (draft-only, never auto-approves)', async () => {
+    const gateway = gatewayReturning([
+      JSON.stringify({
+        intentType: 'send_estimate',
+        confidence: 0.95,
+        extractedEntities: { jobReference: 'EST-0042', sendChannel: 'sms' },
+      }),
+    ]);
+    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo });
+
+    await worker.handle(
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Text estimate EST-0042 to the customer',
+      }),
+      silentLogger()
+    );
+
+    const byTenant = await proposalRepo.findByTenant('t-1');
+    expect(byTenant).toHaveLength(1);
+    expect(byTenant[0].proposalType).toBe('send_estimate');
+    expect(byTenant[0].status).toBe('draft');
+    const payload = byTenant[0].payload as Record<string, unknown>;
+    expect(payload.channel).toBe('sms');
+    expect(payload.estimateReference).toBe('EST-0042');
+  });
+
   it('routes record_payment as money (draft-only) with amount as integer cents', async () => {
     const gateway = gatewayReturning([
       JSON.stringify({

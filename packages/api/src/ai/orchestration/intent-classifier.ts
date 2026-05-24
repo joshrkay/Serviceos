@@ -26,6 +26,7 @@ export type IntentType =
   | 'reassign_appointment'
   | 'add_note'
   | 'send_invoice'
+  | 'send_estimate'
   | 'record_payment'
   | 'emergency_dispatch'
   // P11-001: voice lookup-skill family. Read-only intents — the
@@ -66,6 +67,7 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'reassign_appointment',
   'add_note',
   'send_invoice',
+  'send_estimate',
   'record_payment',
   'emergency_dispatch',
   'lookup_appointments',
@@ -334,6 +336,14 @@ Supported intents (return exactly ONE):
                            Examples: "Send invoice INV-0042 to Sarah"
                                      "Email the Jones invoice"
                                      "Text the Miller invoice to them"
+- "send_estimate"       — user wants to SEND an existing estimate to a
+                           customer (email or SMS). This is a customer
+                           comms action — never auto-execute, always
+                           require a screen-tap approval. Extract the
+                           estimate reference and sendChannel.
+                           Examples: "Send estimate EST-0042 to Sarah"
+                                     "Email the Jones estimate"
+                                     "Text the Miller estimate to them"
 - "record_payment"      — user wants to log a PAYMENT received against an
                            invoice. This is money-moving — never
                            auto-execute, always require a screen-tap
