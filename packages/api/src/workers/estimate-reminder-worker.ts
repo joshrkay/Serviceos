@@ -84,16 +84,23 @@ export async function runEstimateReminderSweep(
     }
 
     for (const estimate of candidates) {
-      // Only nudge estimates still awaiting a customer response that
-      // haven't already hit the reminder cap. (status is already 'sent',
-      // but firstViewedAt/accepted/rejected are the real "they engaged"
-      // signals.)
-      if (estimate.firstViewedAt || estimate.acceptedAt || estimate.rejectedAt) continue;
+      // Only nudge estimates still awaiting a customer response that haven't
+      // hit the reminder cap. Engagement (a view) and prior reminders count
+      // only if they happened on the CURRENT revision — after a revise the
+      // customer must re-review, so a stale view shouldn't mute the nudge.
+      const revisedAtMs = estimate.lastRevisedAt?.getTime();
+      const viewedCurrent =
+        estimate.firstViewedAt !== undefined &&
+        (revisedAtMs === undefined || estimate.firstViewedAt.getTime() >= revisedAtMs);
+      if (estimate.acceptedAt || estimate.rejectedAt || viewedCurrent) continue;
       if ((estimate.reminderCount ?? 0) >= maxReminders) continue;
-      // Space reminders by reminderAfterDays. Since sentAt is set-once (it no
-      // longer advances on a re-send), gate on the last actual contact —
-      // the most recent reminder, falling back to the original send.
-      const lastContactAt = estimate.lastReminderAt ?? estimate.sentAt;
+      // Space reminders by reminderAfterDays. sentAt is set-once, so gate on
+      // the last actual contact: the most recent reminder for the current
+      // revision, else the original send.
+      const remindedCurrent =
+        estimate.lastReminderAt !== undefined &&
+        (revisedAtMs === undefined || estimate.lastReminderAt.getTime() >= revisedAtMs);
+      const lastContactAt = remindedCurrent ? estimate.lastReminderAt : estimate.sentAt;
       if (lastContactAt && lastContactAt.getTime() >= sentBefore.getTime()) continue;
 
       try {

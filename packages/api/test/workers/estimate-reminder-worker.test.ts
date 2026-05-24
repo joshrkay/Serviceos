@@ -117,6 +117,30 @@ describe('runEstimateReminderSweep', () => {
     expect(sendEstimate).toHaveBeenCalledTimes(2);
   });
 
+  it('re-notifies after a revise even if the customer viewed the prior version', async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    // Viewed before the revision → the view is stale, so the nudge stands.
+    await seedSent({
+      firstViewedAt: new Date(NOW.getTime() - 5 * DAY),
+      lastRevisedAt: new Date(NOW.getTime() - 1 * DAY),
+      reminderCount: 0,
+    });
+    const result = await runEstimateReminderSweep(deps());
+    expect(result.reminders).toBe(1);
+    expect(sendEstimate).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips when the customer viewed the current (post-revision) version', async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    await seedSent({
+      firstViewedAt: new Date(NOW.getTime() - 1 * DAY),
+      lastRevisedAt: new Date(NOW.getTime() - 5 * DAY),
+    });
+    const result = await runEstimateReminderSweep(deps());
+    expect(result.reminders).toBe(0);
+    expect(sendEstimate).not.toHaveBeenCalled();
+  });
+
   it('isolates a single estimate send failure without aborting the rest', async () => {
     const bad = await seedSent({ estimateNumber: 'EST-BAD' });
     await seedSent({ estimateNumber: 'EST-OK' });

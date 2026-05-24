@@ -92,4 +92,13 @@ describe('reviseEstimate (sent estimates)', () => {
     const est = await seed(repo);
     await expect(reviseEstimate('t1', est.id, { discountCents: 1 }, repo)).rejects.toThrow(ValidationError);
   });
+
+  it('resets the reminder budget so the worker re-notifies about the revision', async () => {
+    const est = await seed(repo);
+    await transitionEstimateStatus('t1', est.id, 'sent', repo);
+    await repo.update('t1', est.id, { reminderCount: 1, lastReminderAt: new Date() });
+
+    const revised = await reviseEstimate('t1', est.id, { discountCents: 1000 }, repo);
+    expect(revised?.reminderCount).toBe(0);
+  });
 });

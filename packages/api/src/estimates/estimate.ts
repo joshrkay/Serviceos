@@ -476,6 +476,10 @@ export async function reviseEstimate(
     internalNotes: input.internalNotes ?? existing.internalNotes,
     version: existing.version + 1,
     lastRevisedAt: now,
+    // Reset the reminder budget so the estimate-reminder worker re-notifies
+    // the customer about the revised pricing even if it already reminded
+    // (or the customer already viewed) the prior version.
+    reminderCount: 0,
     updatedAt: now,
   });
 
