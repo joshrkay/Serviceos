@@ -45,6 +45,29 @@ describe('checkFeasibility — availability sub-check', () => {
     expect(r.warnings.some((w) => w.check === 'working_hours')).toBe(true);
   });
 
+  it('resolves working hours using the technician-timezone weekday, not UTC', async () => {
+    // 2026-05-18T02:00Z is Monday in UTC but Sunday 19:00 in America/Los_Angeles.
+    const appt: Appointment = {
+      ...mkAppt(),
+      scheduledStart: new Date('2026-05-18T02:00:00Z'),
+      scheduledEnd: new Date('2026-05-18T03:00:00Z'),
+    };
+    let requestedDay = -1;
+    const d = deps(null);
+    d.workingHoursRepo = {
+      findByTechnicianAndDay: async (_t: string, _tech: string, day: number) => {
+        requestedDay = day;
+        return null;
+      },
+    } as any;
+    await checkFeasibility(
+      { tenantId: 't-1', appointment: appt, proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: appt.scheduledStart, proposedScheduledEnd: appt.scheduledEnd },
+      d,
+    );
+    expect(requestedDay).toBe(0); // Sunday in PT, not Monday (UTC)
+  });
+
   it('emits an unavailable-block warning when the proposal overlaps a block', async () => {
     const appt = mkAppt();
     const blocks = [{
