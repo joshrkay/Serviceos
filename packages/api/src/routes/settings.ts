@@ -50,10 +50,19 @@ function projectLanguageSettings(
   };
 }
 
+// Polly voice id; constrained so a stored value can't inject XML
+// metacharacters into the `<Say voice="...">` TwiML.
+const ttsVoicePatchField = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]+$/, 'Invalid voice id')
+  .max(64)
+  .nullable()
+  .optional();
+
 const languagePatchSchema = z.object({
   defaultLanguage: z.enum(['en', 'es']).optional(),
-  ttsVoiceEn: z.string().min(1).nullable().optional(),
-  ttsVoiceEs: z.string().min(1).nullable().optional(),
+  ttsVoiceEn: ttsVoicePatchField,
+  ttsVoiceEs: ttsVoicePatchField,
   autoDetectLanguage: z.boolean().optional(),
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
 });

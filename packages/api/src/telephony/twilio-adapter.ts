@@ -424,7 +424,7 @@ export function buildTwiML(
       const sayText = text.length > 0 ? text : '...';
       const voice =
         opts.voiceOverride ?? (opts.language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
-      parts.push(`<Say voice="${voice}">${xmlEscape(sayText)}</Say>`);
+      parts.push(`<Say voice="${xmlEscape(voice)}">${xmlEscape(sayText)}</Say>`);
     } else if (fx.type === 'end_session') {
       parts.push('<Hangup/>');
       ended = true;

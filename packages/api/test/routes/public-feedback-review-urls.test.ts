@@ -76,4 +76,28 @@ describe('POST /public/feedback/:token — review URLs', () => {
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ ok: true, reviewUrls: { google: 'https://g.page/r/abc' } });
   });
+
+  it('still returns 201 (without review links) when the settings lookup throws', async () => {
+    // Feedback is persisted before the review-link lookup; a settings read
+    // failure must not turn a successful submission into a 500.
+    const requestRepo = new InMemoryFeedbackRequestRepository();
+    const responseRepo = new InMemoryFeedbackResponseRepository();
+    const throwingSettings = {
+      findByTenant: async () => {
+        throw new Error('settings DB down');
+      },
+    } as unknown as InMemorySettingsRepository;
+    const reqRow = await requestRepo.create(createFeedbackRequest({ tenantId: TENANT, jobId: 'j-2' }));
+
+    const app = express();
+    app.use(express.json());
+    app.use('/public/feedback', createPublicFeedbackRouter(requestRepo, responseRepo, throwingSettings));
+
+    const res = await request(app).post(`/public/feedback/${reqRow.token}`).send({ rating: 5 });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ ok: true });
+    // The response was actually persisted (a retry would 409, not re-create).
+    const replay = await request(app).post(`/public/feedback/${reqRow.token}`).send({ rating: 5 });
+    expect(replay.status).toBe(409);
+  });
 });

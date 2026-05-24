@@ -68,6 +68,17 @@ describe('updateSettingsSchema — call routing + review URLs', () => {
     }
   });
 
+  it('rejects non-https review URL schemes (javascript:/data:/http:)', () => {
+    for (const bad of ['javascript:alert(1)', 'data:text/html,x', 'http://g.page/r/abc']) {
+      expect(updateSettingsSchema.safeParse({ googleReviewUrl: bad }).success, bad).toBe(false);
+    }
+  });
+
+  it('accepts a valid Polly voice id and rejects XML-metachar voice ids', () => {
+    expect(updateSettingsSchema.safeParse({ ttsVoiceEs: 'Polly.Lupe-Neural' }).success).toBe(true);
+    expect(updateSettingsSchema.safeParse({ ttsVoiceEs: 'a"><Say>x' }).success).toBe(false);
+  });
+
   it('rejects a malformed review URL', () => {
     const result = updateSettingsSchema.safeParse({ googleReviewUrl: 'not-a-url' });
     expect(result.success).toBe(false);

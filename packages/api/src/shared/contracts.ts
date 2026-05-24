@@ -250,10 +250,27 @@ export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 const reviewUrlField = z
   .preprocess(
     (v) => (typeof v === 'string' ? v.trim() : v),
-    z.union([z.string().url(), z.literal(''), z.null()]),
+    z.union([
+      // https only — these values are rendered as clickable hrefs on the
+      // public feedback page, so reject javascript:/data:/http: schemes.
+      z.string().url().refine((u) => /^https:\/\//i.test(u), {
+        message: 'Review URL must be an https:// link',
+      }),
+      z.literal(''),
+      z.null(),
+    ]),
   )
   .optional()
   .transform((v) => (v === '' ? null : v));
+
+// Polly voice id (e.g. "Polly.Mia-Neural"). Constrained so a stored value
+// can never inject XML metacharacters into the `<Say voice="...">` TwiML.
+const ttsVoiceField = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]+$/, 'Invalid voice id')
+  .max(64)
+  .nullable()
+  .optional();
 
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
@@ -334,8 +351,8 @@ export const updateSettingsSchema = z.object({
   // consumed by the voice agent + customer-facing comms.
   defaultLanguage: z.enum(['en', 'es']).optional(),
   autoDetectLanguage: z.boolean().optional(),
-  ttsVoiceEn: z.string().min(1).nullable().optional(),
-  ttsVoiceEs: z.string().min(1).nullable().optional(),
+  ttsVoiceEn: ttsVoiceField,
+  ttsVoiceEs: ttsVoiceField,
   spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {

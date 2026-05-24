@@ -119,15 +119,24 @@ export function createPublicFeedbackRouter(
       // customers (4★+), mirroring the Settings copy ("Customers with a
       // 4+ rating will see a button linking here"). Empty/unset links are
       // omitted so the feedback page renders no button.
+      //
+      // Best-effort: the feedback is already persisted above, so a failure
+      // reading settings here must NOT turn a successful submission into a
+      // 500 (a retry would then 409 — a broken-looking form). On any error
+      // we just omit the review links and still return 201.
       let reviewUrls: { google?: string; yelp?: string } | undefined;
       if (parsed.rating >= 4) {
-        const settings = await settingsRepo.findByTenant(request.tenantId);
-        const google = settings?.googleReviewUrl?.trim();
-        const yelp = settings?.yelpReviewUrl?.trim();
-        if (google || yelp) {
-          reviewUrls = {};
-          if (google) reviewUrls.google = google;
-          if (yelp) reviewUrls.yelp = yelp;
+        try {
+          const settings = await settingsRepo.findByTenant(request.tenantId);
+          const google = settings?.googleReviewUrl?.trim();
+          const yelp = settings?.yelpReviewUrl?.trim();
+          if (google || yelp) {
+            reviewUrls = {};
+            if (google) reviewUrls.google = google;
+            if (yelp) reviewUrls.yelp = yelp;
+          }
+        } catch {
+          /* settings read failed — omit review links, submission still succeeded */
         }
       }
 

@@ -139,6 +139,15 @@ describe('buildTwiML', () => {
     expect(xml).toContain('language="es-US"');
   });
 
+  it('XML-escapes the voice attribute so a malformed override cannot break TwiML', () => {
+    const xml = buildTwiML(
+      [{ type: 'tts_play', payload: { text: 'Hi' } }],
+      { gatherActionUrl: '/g', voiceOverride: 'a"><Hangup/>' },
+    );
+    expect(xml).not.toContain('"><Hangup/>');
+    expect(xml).toContain('a&quot;&gt;&lt;Hangup/&gt;');
+  });
+
   // ─── P8-014: recordingStatusCallback wiring ────────────────────────────────
 
   describe('recordingStatusCallback (P8-014 record_call)', () => {
