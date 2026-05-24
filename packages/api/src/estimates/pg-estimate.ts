@@ -112,6 +112,12 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       paramIndex++;
     }
 
+    if (options?.sentBefore) {
+      conditions.push(`sent_at IS NOT NULL AND sent_at < $${paramIndex}`);
+      params.push(options.sentBefore);
+      paramIndex++;
+    }
+
     return { where: `WHERE ${conditions.join(' AND ')}`, params };
   }
 
@@ -278,6 +284,22 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         setClauses.push(`rejected_reason = $${paramIndex++}`);
         values.push(updates.rejectedReason);
       }
+      if (updates.version !== undefined) {
+        setClauses.push(`version = $${paramIndex++}`);
+        values.push(updates.version);
+      }
+      if (updates.lastRevisedAt !== undefined) {
+        setClauses.push(`last_revised_at = $${paramIndex++}`);
+        values.push(updates.lastRevisedAt);
+      }
+      if (updates.reminderCount !== undefined) {
+        setClauses.push(`reminder_count = $${paramIndex++}`);
+        values.push(updates.reminderCount);
+      }
+      if (updates.lastReminderAt !== undefined) {
+        setClauses.push(`last_reminder_at = $${paramIndex++}`);
+        values.push(updates.lastReminderAt);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -415,6 +437,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       acceptedSignatureData: row.accepted_signature_data ?? undefined,
       rejectedAt: row.rejected_at ? new Date(row.rejected_at) : undefined,
       rejectedReason: row.rejected_reason ?? undefined,
+      version: row.version !== undefined && row.version !== null ? Number(row.version) : 1,
+      lastRevisedAt: row.last_revised_at ? new Date(row.last_revised_at) : undefined,
+      reminderCount: row.reminder_count !== undefined && row.reminder_count !== null ? Number(row.reminder_count) : 0,
+      lastReminderAt: row.last_reminder_at ? new Date(row.last_reminder_at) : undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

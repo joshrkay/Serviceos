@@ -337,6 +337,7 @@ import {
 } from './proposals/execution/idempotency-lock';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
+import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { InMemoryWorkingHoursRepository } from './availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from './availability/unavailable-block';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
@@ -360,6 +361,7 @@ import {
 import { TwilioDelayNotificationService } from './notifications/twilio-delay-notification-service';
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
+import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -1235,6 +1237,10 @@ export function createApp(): express.Express {
     nodeEnv: config.NODE_ENV,
     sendService,
   });
+  const estimateDeliveryProvider = resolveEstimateDeliveryProvider({
+    nodeEnv: config.NODE_ENV,
+    sendService,
+  });
   const dispatchAnalyticsRepo = pool
     ? new PgDispatchAnalyticsRepository(pool)
     : new InMemoryDispatchAnalyticsRepository();
@@ -1299,9 +1305,12 @@ export function createApp(): express.Express {
     invoiceRepo,
     estimateRepo,
     settingsRepo,
+    docRevisionRepo: documentRevisionRepo,
+    editDeltaRepo: deltaRepo,
     noteRepo,
     paymentRepo,
     invoiceDeliveryProvider,
+    estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
     schedulingNotifier: transactionalComms,
     transactionalComms,
@@ -2439,6 +2448,7 @@ export function createApp(): express.Express {
       sendService,
       { gateway: llmGateway, proposalRepo },
       { jobRepo, invoiceRepo },
+      { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
     ),
   );
   app.use(
@@ -2863,6 +2873,35 @@ export function createApp(): express.Express {
         });
       } catch (err) {
         appointmentReminderLogger.error('Appointment-reminder sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 60 * 60_000);
+  }
+
+  // Estimate-reminder worker — nudges customers on estimates sent but
+  // unviewed/unaccepted after 3 days (1 reminder, capped). Only runs when
+  // SendService is configured (it re-sends via the unified send path).
+  const estimateReminderLogger = createLogger({
+    service: 'estimate-reminder-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  if (sendService) {
+    setInterval(async () => {
+      try {
+        await runEstimateReminderSweep({
+          estimateRepo,
+          sendService,
+          auditRepo,
+          listTenantIds: async () => {
+            if (!pool) return [];
+            const r = await pool.query('SELECT id FROM tenants');
+            return r.rows.map((row: { id: string }) => row.id);
+          },
+          logger: estimateReminderLogger,
+        });
+      } catch (err) {
+        estimateReminderLogger.error('Estimate-reminder sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       }

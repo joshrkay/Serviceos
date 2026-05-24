@@ -3042,12 +3042,34 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS ai_verification_started_at TIMESTAMPTZ;
   `,
 
+  '121_estimate_revision_versioning': `
+    -- Optimistic-lock + customer re-sync support for the estimate
+    -- edit/revise flow. 'version' increments on every persisted content
+    -- change; the authenticated edit path and the public approve path
+    -- both compare an expected version to reject stale writes. The public
+    -- approval page also reads 'version' to detect that an estimate was
+    -- revised after the customer loaded it. 'last_revised_at' records the
+    -- most recent revise of an already-sent estimate.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_revised_at TIMESTAMPTZ;
+  `,
+
+  '122_estimate_reminders': `
+    -- Estimate-reminder worker support. 'reminder_count' caps how many
+    -- follow-up nudges a sent-but-unanswered estimate receives;
+    -- 'last_reminder_at' records the most recent nudge. The worker also
+    -- needs to find estimates by send age — that uses the existing
+    -- sent_at column with a new sentBefore list filter (no schema change).
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS reminder_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMPTZ;
+  `,
+
   // Durable record of tenant hard-deletes. Intentionally NOT tenant-scoped:
   // no FK to tenants (the tenant row is gone by the time we write this) and
   // NO row-level security, so it survives the purge and remains readable
   // cross-tenant by ops. This is the only audit trail of a deprovision, since
   // the tenant's audit_events rows are themselves purged.
-  '121_platform_deprovision_log': `
+  '123_platform_deprovision_log': `
     CREATE TABLE IF NOT EXISTS platform_deprovision_log (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id UUID NOT NULL,

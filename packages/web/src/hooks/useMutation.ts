@@ -29,9 +29,15 @@ export interface MutationOptions<TBody, TResult> {
 }
 
 export interface MutationResult<TBody, TResult> {
-  mutate: (body: TBody) => Promise<TResult>;
+  mutate: (body: TBody, opts?: { headers?: Record<string, string> }) => Promise<TResult>;
   isLoading: boolean;
   error: string | null;
+}
+
+/** Error thrown by useMutation on a non-OK response; carries the HTTP status
+ *  so callers can branch (e.g. 409 → optimistic-lock conflict). */
+export interface MutationHttpError extends Error {
+  status?: number;
 }
 
 function formatErrorMessage(
@@ -64,15 +70,20 @@ export function useMutation<TBody, TResult>(
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const mutate = useCallback(async (body: TBody): Promise<TResult> => {
+  const mutate = useCallback(async (body: TBody, opts?: { headers?: Record<string, string> }): Promise<TResult> => {
     setIsLoading(true);
     setError(null);
     try {
       const response = await apiFetch(path, {
         method,
         body: JSON.stringify(body),
+        ...(opts?.headers ? { headers: opts.headers } : {}),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const err: MutationHttpError = new Error(`HTTP ${response.status}`);
+        err.status = response.status;
+        throw err;
+      }
       const data = await response.json() as TResult;
 
       // Success toast (configurable; suppress with `false`)

@@ -11,8 +11,10 @@ import { CancelAppointmentExecutionHandler } from './cancellation-handler';
 import {
   AddNoteExecutionHandler,
   SendInvoiceExecutionHandler,
+  SendEstimateExecutionHandler,
   RecordPaymentExecutionHandler,
   InvoiceDeliveryProvider,
+  EstimateDeliveryProvider,
 } from './voice-extended-handlers';
 import { LogExpenseExecutionHandler } from './log-expense-handler';
 import {
@@ -36,6 +38,8 @@ import {
   CreateEstimateInput,
 } from '../../estimates/estimate';
 import { SettingsRepository, getNextEstimateNumber } from '../../settings/settings';
+import { DocumentRevisionRepository } from '../../ai/document-revision';
+import { EditDeltaRepository } from '../../estimates/edit-delta';
 import { DispatchAnalyticsRepository } from '../../dispatch/analytics';
 import { detectOverlappingAppointments } from '../../dispatch/validation';
 import { NoopSchedulingConfirmationNotifier, SchedulingConfirmationNotifier } from './scheduling-notifications';
@@ -389,11 +393,16 @@ export function createExecutionHandlerRegistry(deps?: {
   invoiceRepo?: InvoiceRepository;
   estimateRepo?: EstimateRepository;
   settingsRepo?: SettingsRepository;
+  // Estimate edit history — when wired, voice update_estimate snapshots a
+  // revision + edit delta, matching the authenticated edit path.
+  docRevisionRepo?: DocumentRevisionRepository;
+  editDeltaRepo?: EditDeltaRepository;
   schedulingNotifier?: SchedulingConfirmationNotifier;
   transactionalComms?: TransactionalCommsService;
   noteRepo?: NoteRepository;
   paymentRepo?: PaymentRepository;
   invoiceDeliveryProvider?: InvoiceDeliveryProvider;
+  estimateDeliveryProvider?: EstimateDeliveryProvider;
   analyticsRepo?: DispatchAnalyticsRepository;
   expenseRepo?: ExpenseRepository;
   auditRepo?: AuditRepository;
@@ -453,6 +462,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // mutation path). Production wires the real deps in app.ts.
     new AddNoteExecutionHandler(deps?.noteRepo),
     new SendInvoiceExecutionHandler(deps?.invoiceDeliveryProvider),
+    new SendEstimateExecutionHandler(deps?.estimateDeliveryProvider),
     new RecordPaymentExecutionHandler(
       deps?.paymentRepo,
       deps?.invoiceRepo,
@@ -481,7 +491,12 @@ export function createExecutionHandlerRegistry(deps?: {
     handlers.push(new IssueInvoiceExecutionHandler(deps.invoiceRepo, moneyStateDeps));
   }
   if (deps?.estimateRepo) {
-    handlers.push(new UpdateEstimateExecutionHandler(deps.estimateRepo));
+    handlers.push(new UpdateEstimateExecutionHandler(
+      deps.estimateRepo,
+      deps.auditRepo,
+      deps.docRevisionRepo,
+      deps.editDeltaRepo,
+    ));
   }
 
   const registry = new Map<ProposalType, ExecutionHandler>();

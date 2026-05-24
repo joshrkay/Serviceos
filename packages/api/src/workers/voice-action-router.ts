@@ -28,6 +28,7 @@ import {
   ReassignAppointmentTaskHandler,
   AddNoteTaskHandler,
   SendInvoiceTaskHandler,
+  SendEstimateTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
@@ -153,6 +154,7 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
   reassign_appointment: 'reassign_appointment',
   add_note: 'add_note',
   send_invoice: 'send_invoice',
+  send_estimate: 'send_estimate',
   record_payment: 'record_payment',
   emergency_dispatch: 'emergency_dispatch',
 };
@@ -259,6 +261,7 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
+  handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
   return handlers;
