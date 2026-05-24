@@ -101,6 +101,7 @@ export default defineConfig({
               'public-portal.spec.ts',
               'proposals.spec.ts',
               'reports.spec.ts',
+              'golden-journey.spec.ts',
               'scheduling.spec.ts',
               'sms.spec.ts',
               'voice-extras.spec.ts',

@@ -24,6 +24,7 @@ export type MatrixModule =
   | 'PORTAL'
   | 'PROP'
   | 'RPT'
+  | 'JRN'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -495,6 +496,16 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Time-given-back report',
     passCriteria:
       'GET /api/reports/time-given-back returns 200 with a { data } summary (or 503 NOT_CONFIGURED when the reporter dep is absent)',
+    expected: 'pass',
+  },
+
+  // ----- Golden end-to-end journey -----
+  {
+    id: 'JRN-03',
+    module: 'JRN',
+    feature: 'Golden funnel: intake → lead → convert → job → estimate',
+    passCriteria:
+      'Public intake creates a lead; convert produces a customer; a location + job are created for it; an estimate persists against the job (totals match) — each leg verified in the DB. Delivery/payment legs are attempted and recorded (partial when Stripe/SendGrid are mock).',
     expected: 'pass',
   },
 ];
