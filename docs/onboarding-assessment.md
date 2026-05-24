@@ -1,8 +1,15 @@
 # Onboarding Module Assessment
 
-_Date: 2026-05-24. Scope: the onboarding module (API + web). Read-only assessment across
-four lenses — architecture, code health, code review (correctness), and QA/functional. No code
-was changed. Findings are prioritized P0 (ship-blocker) / P1 (fix soon) / P2 (cleanup)._
+_Date: 2026-05-24. Scope: the onboarding module (API + web). Assessment across four lenses —
+architecture, code health, code review (correctness), and QA/functional. Findings are
+prioritized P0 (ship-blocker) / P1 (fix soon) / P2 (cleanup)._
+
+> **Resolution (2026-05-24):** All three P1s were fixed in the same change set.
+> #1 — `/configure` was removed entirely (see #3). #2 — onboarding reads/writes now use the
+> request-scoped, GUC-bound client (`currentTenantContext()`). #3 — the v1 wizard was retired:
+> the `/configure` endpoint, `OnboardingPage.tsx`, and the `VITE_ONBOARDING_V2_ENABLED` flag are
+> gone; v2 is the only flow. This also resolves P2 #4, #6, and #7. The web changes were verified
+> by typecheck + unit tests but NOT browser-tested in this environment.
 
 ## How onboarding works (baseline)
 Onboarding status is **derived**, not stored: `deriveOnboardingStatus()` computes a 6-step flow

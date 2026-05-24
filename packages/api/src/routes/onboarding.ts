@@ -2,7 +2,8 @@ import { Router, Response } from 'express';
 import type { Pool } from 'pg';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
-import { SettingsRepository, TenantSettings } from '../settings/settings';
+import { currentTenantContext } from '../middleware/tenant-context';
+import { SettingsRepository } from '../settings/settings';
 import { PackActivationRepository, activatePack } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { v4 as uuidv4 } from 'uuid';
@@ -19,26 +20,6 @@ import {
   PROVISION_TWILIO_JOB_TYPE,
   type ProvisionTwilioPayload,
 } from '../workers/provision-twilio';
-
-interface OnboardingConfigureBody {
-  name: string;
-  businessName: string;
-  services: string[];
-  teamSize: string;
-  workerTerm: string;
-  jobTerm: string;
-  estimateTerm: string;
-  automationRules: { id: string; enabled: boolean }[];
-}
-
-/** Map onboarding service names to vertical pack IDs. */
-const SERVICE_TO_PACK: Record<string, string> = {
-  HVAC: 'hvac',
-  Plumbing: 'plumbing',
-  Painting: 'painting',
-  Electrical: 'electrical',
-  Contracting: 'contracting',
-};
 
 export interface OnboardingRouterDeps {
   settingsRepo: SettingsRepository;
@@ -81,95 +62,6 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     }
   );
 
-  router.post(
-    '/configure',
-    requireAuth,
-    requireTenant,
-    async (req: AuthenticatedRequest, res: Response) => {
-      const body = req.body as OnboardingConfigureBody;
-      const tenantId = req.auth!.tenantId;
-      const userId = req.auth!.userId;
-
-      // Validate required fields
-      if (!body?.businessName) {
-        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'businessName is required' });
-        return;
-      }
-
-      const terminologyPreferences: Record<string, string> = {};
-      if (body.workerTerm) terminologyPreferences.workerTerm = body.workerTerm;
-      if (body.jobTerm) terminologyPreferences.jobTerm = body.jobTerm;
-      if (body.estimateTerm) terminologyPreferences.estimateTerm = body.estimateTerm;
-      if (body.teamSize) terminologyPreferences.teamSize = body.teamSize;
-      if (body.name) terminologyPreferences.ownerName = body.name;
-
-      // Upsert tenant settings
-      const existing = await settingsRepo.findByTenant(tenantId);
-      let settings: TenantSettings | null;
-
-      if (existing) {
-        settings = await settingsRepo.update(tenantId, {
-          businessName: body.businessName,
-          terminologyPreferences,
-          activeVerticalPacks: body.services
-            .map(s => SERVICE_TO_PACK[s])
-            .filter(Boolean),
-        });
-      } else {
-        settings = await settingsRepo.create({
-          id: uuidv4(),
-          tenantId,
-          businessName: body.businessName,
-          timezone: 'America/New_York',
-          estimatePrefix: 'EST-',
-          invoicePrefix: 'INV-',
-          nextEstimateNumber: 1001,
-          nextInvoiceNumber: 1001,
-          defaultPaymentTermDays: 30,
-          terminologyPreferences,
-          activeVerticalPacks: body.services
-            .map(s => SERVICE_TO_PACK[s])
-            .filter(Boolean),
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-      }
-
-      // Activate vertical packs for selected services
-      for (const service of body.services) {
-        const packId = SERVICE_TO_PACK[service];
-        if (!packId) continue;
-        try {
-          await activatePack({ tenantId, packId }, packActivationRepo);
-        } catch {
-          // Pack already active — ignore
-        }
-      }
-
-      // Emit audit event
-      await auditRepo.create(createAuditEvent({
-        tenantId,
-        actorId: userId,
-        actorRole: 'owner',
-        eventType: existing ? 'onboarding_update' : 'onboarding_complete',
-        entityType: 'tenant_settings',
-        entityId: settings?.id || tenantId,
-        metadata: {
-          businessName: body.businessName,
-          services: body.services,
-          teamSize: body.teamSize,
-          terminology: terminologyPreferences,
-          automationRules: body.automationRules,
-        },
-      }));
-
-      res.json({
-        settings,
-        activatedPacks: body.services.map(s => SERVICE_TO_PACK[s]).filter(Boolean),
-      });
-    }
-  );
-
   router.put(
     '/identity',
     requireAuth,
@@ -193,8 +85,9 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const tenantId = req.auth!.tenantId;
         const userId = req.auth!.userId;
         const v = parsed.data;
+        const db = currentTenantContext()?.client ?? pool;
 
-        await pool.query(
+        await db.query(
           `INSERT INTO tenant_settings (
              id, tenant_id, business_name, service_area_text, service_area_radius,
              business_hours, job_buffer_minutes, hourly_rate_cents,
@@ -364,7 +257,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             updatedAt: new Date(),
           });
         }
-        await pool.query(
+        const db = currentTenantContext()?.client ?? pool;
+        await db.query(
           `UPDATE tenant_settings
              SET onboarding_test_call_skipped_at = now(), updated_at = now()
            WHERE tenant_id = $1`,
@@ -411,7 +305,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const row = await pool.query<{ business_hours: unknown }>(
+        const db = currentTenantContext()?.client ?? pool;
+        const row = await db.query<{ business_hours: unknown }>(
           `SELECT business_hours FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
           [tenantId],
         );
@@ -450,7 +345,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         }
         const tenantId = req.auth!.tenantId;
         const userId = req.auth!.userId;
-        await pool.query(
+        const db = currentTenantContext()?.client ?? pool;
+        await db.query(
           `UPDATE tenant_settings
              SET business_hours = $2::jsonb, updated_at = now()
            WHERE tenant_id = $1`,
@@ -490,7 +386,8 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const integ = await pool.query<{ status: string }>(
+        const db = currentTenantContext()?.client ?? pool;
+        const integ = await db.query<{ status: string }>(
           `SELECT status FROM tenant_integrations
            WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
           [tenantId],
