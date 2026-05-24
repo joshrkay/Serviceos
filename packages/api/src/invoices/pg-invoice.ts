@@ -10,7 +10,8 @@ import {
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
 } from './invoice';
-import { LineItem, DocumentTotals } from '../shared/billing-engine';
+import { LineItem } from '../shared/billing-engine';
+import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
 
 export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepository {
   constructor(pool: Pool) {
@@ -343,19 +344,6 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     }
   }
 
-  private mapLineItemRow(row: Record<string, any>): LineItem {
-    return {
-      id: row.id,
-      description: row.description,
-      category: row.category,
-      quantity: Number(row.quantity),
-      unitPriceCents: Number(row.unit_price_cents),
-      totalCents: Number(row.total_cents),
-      sortOrder: Number(row.sort_order),
-      taxable: row.taxable,
-    };
-  }
-
   private async fetchLineItems(
     client: PoolClient,
     tenantId: string,
@@ -366,7 +354,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       [invoiceId, tenantId],
     );
 
-    return rows.map((row) => this.mapLineItemRow(row));
+    return rows.map((row) => mapLineItemRow(row));
   }
 
   /**
@@ -389,7 +377,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     const byInvoice = new Map<string, LineItem[]>();
     for (const itemRow of itemRows) {
       const list = byInvoice.get(itemRow.invoice_id) ?? [];
-      list.push(this.mapLineItemRow(itemRow));
+      list.push(mapLineItemRow(itemRow));
       byInvoice.set(itemRow.invoice_id, list);
     }
 
@@ -413,14 +401,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   }
 
   private mapRowToInvoice(row: Record<string, any>, lineItems: LineItem[]): Invoice {
-    const totals: DocumentTotals = {
-      subtotalCents: Number(row.subtotal_cents),
-      taxableSubtotalCents: Number(row.taxable_subtotal_cents),
-      discountCents: Number(row.discount_cents),
-      taxRateBps: Number(row.tax_rate_bps),
-      taxCents: Number(row.tax_cents),
-      totalCents: Number(row.total_cents),
-    };
+    const totals = mapDocumentTotalsRow(row);
 
     return {
       id: row.id,
