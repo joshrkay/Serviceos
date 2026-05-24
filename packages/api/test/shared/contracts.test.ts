@@ -52,6 +52,22 @@ describe('updateSettingsSchema — call routing + review URLs', () => {
     }
   });
 
+  it('normalizes a whitespace-only review URL to null instead of rejecting it', () => {
+    const result = updateSettingsSchema.safeParse({ googleReviewUrl: '   ' });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.googleReviewUrl).toBeNull();
+    }
+  });
+
+  it('trims surrounding whitespace around a valid review URL', () => {
+    const result = updateSettingsSchema.safeParse({ googleReviewUrl: '  https://g.page/r/abc  ' });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.googleReviewUrl).toBe('https://g.page/r/abc');
+    }
+  });
+
   it('rejects a malformed review URL', () => {
     const result = updateSettingsSchema.safeParse({ googleReviewUrl: 'not-a-url' });
     expect(result.success).toBe(false);

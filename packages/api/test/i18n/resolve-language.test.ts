@@ -10,9 +10,16 @@ describe('narrowLanguage', () => {
     expect(narrowLanguage('es')).toBe('es');
   });
 
+  it('maps region-tagged BCP-47 tags to their base language (case-insensitive)', () => {
+    expect(narrowLanguage('es-MX')).toBe('es');
+    expect(narrowLanguage('en-US')).toBe('en');
+    expect(narrowLanguage('ES')).toBe('es');
+    expect(narrowLanguage(' en-GB ')).toBe('en');
+  });
+
   it('returns null for unsupported / empty values', () => {
     expect(narrowLanguage('vi')).toBeNull();
-    expect(narrowLanguage('en-US')).toBeNull();
+    expect(narrowLanguage('fr-FR')).toBeNull();
     expect(narrowLanguage('')).toBeNull();
     expect(narrowLanguage(null)).toBeNull();
     expect(narrowLanguage(undefined)).toBeNull();
@@ -49,5 +56,14 @@ describe('resolveCustomerLanguage', () => {
 
   it('defaults to en when nothing is configured', () => {
     expect(resolveCustomerLanguage({})).toBe('en');
+  });
+
+  it('honors a region-tagged customer preference over the tenant default', () => {
+    expect(
+      resolveCustomerLanguage({
+        customerPreferredLanguage: 'es-MX',
+        tenantDefaultLanguage: 'en',
+      }),
+    ).toBe('es');
   });
 });

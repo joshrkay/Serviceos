@@ -244,6 +244,17 @@ export const createCatalogItemSchema = z.object({
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
+// Public review-link field (Settings → Reviews). Trims the input FIRST so a
+// whitespace-only value ('   ') normalizes to null (cleared) instead of
+// failing validation; a non-empty value must be a valid URL.
+const reviewUrlField = z
+  .preprocess(
+    (v) => (typeof v === 'string' ? v.trim() : v),
+    z.union([z.string().url(), z.literal(''), z.null()]),
+  )
+  .optional()
+  .transform((v) => (v === '' ? null : v));
+
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
   // Codex P2 (PR #316): `.nullable()` so the Business profile sheet
@@ -315,16 +326,10 @@ export const updateSettingsSchema = z.object({
     })
     .partial()
     .optional(),
-  // Public review links (Settings → Reviews). Migration 120. Empty string
+  // Public review links (Settings → Reviews). Migration 120. Whitespace/empty
   // normalizes to null so a cleared field reads back as "not configured".
-  googleReviewUrl: z
-    .union([z.string().trim().url(), z.literal(''), z.null()])
-    .optional()
-    .transform((v) => (v === '' ? null : v)),
-  yelpReviewUrl: z
-    .union([z.string().trim().url(), z.literal(''), z.null()])
-    .optional()
-    .transform((v) => (v === '' ? null : v)),
+  googleReviewUrl: reviewUrlField,
+  yelpReviewUrl: reviewUrlField,
   // P11-002 — tenant language stack. Persisted to tenant_settings and
   // consumed by the voice agent + customer-facing comms.
   defaultLanguage: z.enum(['en', 'es']).optional(),

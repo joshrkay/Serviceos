@@ -297,6 +297,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           paramIndex++;
           continue;
         }
+        // P11-002 — spanish_dispatcher_user_ids is a native Postgres uuid[]
+        // column. Cast the param explicitly so node-pg's array serialization
+        // is interpreted as uuid[] regardless of placeholder context, and
+        // pass null (not '{}') to clear since the column is nullable.
+        if (key === 'spanishDispatcherUserIds') {
+          setClauses.push(`spanish_dispatcher_user_ids = $${paramIndex}::uuid[]`);
+          const v = value as string[] | undefined | null;
+          params.push(Array.isArray(v) ? v : null);
+          paramIndex++;
+          continue;
+        }
         const column = fieldMap[key];
         if (column) {
           setClauses.push(`${column} = $${paramIndex}`);
