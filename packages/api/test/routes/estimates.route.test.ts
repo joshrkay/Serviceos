@@ -168,6 +168,34 @@ describe('PATCH /api/estimates/:id', () => {
     expect(revised.body.customerMessage).toBe('updated pricing');
   });
 
+  it('enforces optimistic locking via If-Match on edits', async () => {
+    const created = await createEstimate(app);
+    expect(created.body.version).toBe(1);
+
+    // Correct version → succeeds and bumps to 2.
+    const ok = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .set('If-Match', '1')
+      .send({ customerMessage: 'first' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.version).toBe(2);
+
+    // Re-using the now-stale version 1 is refused with 409.
+    const stale = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .set('If-Match', '1')
+      .send({ customerMessage: 'second' });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toBe('CONFLICT');
+
+    // Omitting If-Match stays backward compatible (no lock enforced).
+    const noHeader = await request(app)
+      .patch(`/api/estimates/${created.body.id}`)
+      .send({ customerMessage: 'third' });
+    expect(noHeader.status).toBe(200);
+    expect(noHeader.body.version).toBe(3);
+  });
+
   it('returns 404 for unknown id', async () => {
     const res = await request(app)
       .patch('/api/estimates/nope')

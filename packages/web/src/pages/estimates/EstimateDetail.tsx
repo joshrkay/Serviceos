@@ -32,6 +32,8 @@ interface Estimate {
   approvalStatus?: string;
   rejectionReason?: string;
   createdAt: string;
+  /** Optimistic-concurrency token sent back as If-Match on edits. */
+  version?: number;
 }
 
 function formatCents(cents: number): string {
@@ -80,8 +82,16 @@ export function EstimateDetail({ estimateId, onBack }: EstimateDetailProps) {
       const payload = draft.map((d, i) => toLineItemPayload(d, i));
       const res = await apiFetch(`/api/estimates/${data.id}`, {
         method: 'PATCH',
+        // Optimistic concurrency: send the version we loaded so a
+        // concurrent edit is rejected (409) instead of silently clobbered.
+        headers: data.version !== undefined ? { 'If-Match': String(data.version) } : undefined,
         body: JSON.stringify({ lineItems: payload }),
       });
+      if (res.status === 409) {
+        setLineItemError('This estimate was changed elsewhere. Reloading the latest version — review and try again.');
+        refetch();
+        return;
+      }
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
         throw new Error(json?.message ?? `HTTP ${res.status}`);

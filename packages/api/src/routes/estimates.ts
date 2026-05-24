@@ -38,6 +38,22 @@ const logger = createLogger({
 });
 
 /**
+ * Optimistic-concurrency version supplied by the client for an estimate
+ * edit/revise. Read from the `If-Match` header (the convention the
+ * proposals route uses) and falling back to a body `expectedVersion`.
+ * Returns undefined when absent or malformed — the service then skips the
+ * version check, preserving backward compatibility for callers that don't
+ * participate in optimistic locking.
+ */
+function parseExpectedVersion(req: AuthenticatedRequest): number | undefined {
+  const header = req.get?.('If-Match');
+  const raw = header ?? (req.body as { expectedVersion?: unknown } | undefined)?.expectedVersion;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
  * Optional AI dependencies. When provided, mounts POST /suggest, which
  * invokes EstimateTaskHandler to generate AI-suggested line items for
  * the in-app estimate wizard and pricing-review panel. When absent, the
@@ -236,7 +252,7 @@ export function createEstimateRouter(
       const result = await updateEstimate(
         req.auth!.tenantId,
         req.params.id,
-        req.body,
+        { ...req.body, expectedVersion: parseExpectedVersion(req) },
         estimateRepo,
         mutationDeps,
       );
@@ -283,7 +299,7 @@ export function createEstimateRouter(
         const result = await reviseEstimate(
           req.auth!.tenantId,
           req.params.id,
-          req.body,
+          { ...req.body, expectedVersion: parseExpectedVersion(req) },
           estimateRepo,
           mutationDeps,
         );
