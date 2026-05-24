@@ -59,6 +59,12 @@ export const es: Record<keyof EnglishCatalog, string> = {
   'lookup.account.empty':
     'No veo nada destacado en su cuenta en este momento.',
 
+  // ── Telephony greeting (default opener) ──────────────────────────────
+  'greeting.opener_default': 'Gracias por llamar a {{business}}.',
+  'greeting.opener_named': 'Gracias por llamar a {{business}}. Le atiende {{agent}}.',
+  'greeting.cta': '¿En qué puedo ayudarle hoy?',
+  'greeting.one_moment': 'Un momento, por favor.',
+
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hola {{name}}, bienvenido de nuevo.',
   'identify.greet_unknown':

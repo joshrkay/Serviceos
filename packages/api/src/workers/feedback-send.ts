@@ -6,6 +6,8 @@ import { SettingsRepository } from '../settings/settings';
 import { createFeedbackRequest, FeedbackRequestRepository } from '../feedback/feedback-request';
 import { FeedbackDispatcher } from '../feedback/dispatcher';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
+import { resolveCustomerLanguage } from '../i18n/resolve-language';
+import { tn } from '../notifications/i18n';
 
 export interface FeedbackSendPayload {
   tenantId: string;
@@ -64,7 +66,11 @@ export function createFeedbackSendWorker(deps: {
       const businessName = settings?.businessName ?? 'our team';
       const normalizedBase = publicBaseUrl.replace(/\/$/, '');
       const url = `${normalizedBase}/public/feedback/${saved.token}`;
-      const text = `Thanks for choosing ${businessName}. We'd love your feedback: ${url}`;
+      const language = resolveCustomerLanguage({
+        customerPreferredLanguage: customer.preferredLanguage,
+        tenantDefaultLanguage: settings?.defaultLanguage,
+      });
+      const text = tn('sms.feedback.request', language, { business: businessName, url });
 
       await dispatcher.send({ to: customer.primaryPhone, body: text });
 
