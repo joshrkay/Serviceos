@@ -3025,6 +3025,22 @@ export const MIGRATIONS = {
       END IF;
     END $do$;
   `,
+
+  // Per-tenant AI config + onboarding AI self-check state. ai_model is seeded
+  // from AI_DEFAULT_MODEL when billing completes so the gateway's tenantOverrides
+  // path has a model to resolve; the verify_ai worker then makes one real
+  // gateway.complete() call and records pass/fail here. ai_api_key_enc is
+  // reserved for a future bring-your-own-key flow (encrypted, unused today).
+  '120_tenant_settings_ai_config': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_model                   TEXT,
+      ADD COLUMN IF NOT EXISTS ai_provider                TEXT,
+      ADD COLUMN IF NOT EXISTS ai_api_key_enc             TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_status     TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verified_at             TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS ai_verification_error      TEXT,
+      ADD COLUMN IF NOT EXISTS ai_verification_started_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
