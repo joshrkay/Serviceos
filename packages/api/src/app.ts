@@ -149,6 +149,7 @@ import {
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
+import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { InMemoryTechnicianLocationPingRepository } from './telemetry/technician-location-ping';
 import {
   InMemoryTechnicianLocationAuthorizer,
@@ -156,6 +157,7 @@ import {
 } from './telemetry/technician-location-authz';
 import { InMemoryQueue, processMessage } from './queues/queue';
 import { createProvisionTwilioWorker, PROVISION_TWILIO_JOB_TYPE } from './workers/provision-twilio';
+import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createVerifyAiWorker } from './workers/verify-ai';
 import { InMemoryApprovalRepository } from './estimates/approval';
 import { InMemoryEditDeltaRepository } from './estimates/edit-delta';
@@ -1504,6 +1506,12 @@ export function createApp(): express.Express {
     workerRegistry.set(
       provisionTwilioWorker.type,
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+
+    const deprovisionTenantWorker = createDeprovisionTenantWorker({ pool });
+    workerRegistry.set(
+      deprovisionTenantWorker.type,
+      deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
     );
   }
 
@@ -3046,6 +3054,12 @@ export function createApp(): express.Express {
     '/api/admin/feature-flags',
     createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
   );
+
+  // Platform-admin tenant lifecycle (hard-delete / deprovision). Requires a
+  // DB pool; the queue is always present (Pg- or in-memory).
+  if (pool) {
+    app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+  }
 
   // Wire the WS publish-side kill switches: every call to publish()
   // consults the feature flag store at runtime, so flipping

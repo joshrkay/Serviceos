@@ -13,7 +13,6 @@ import { TemplatesPage } from './components/settings/TemplatesPage';
 import { PriceBookPage } from './components/settings/PriceBookPage';
 import { FeedbackDashboard } from './components/settings/FeedbackDashboard';
 import { LanguageSettingsPage } from './pages/settings/LanguageSettings';
-import { OnboardingPage } from './components/onboarding/OnboardingPage';
 import { OnboardingShell } from './components/onboarding/v2/OnboardingShell';
 import { EstimateApprovalPage } from './components/customer/EstimateApprovalPage';
 import { InvoicePaymentPage } from './components/customer/InvoicePaymentPage';
@@ -42,7 +41,6 @@ import { CustomerEdit } from './pages/customers/CustomerEdit';
 import { AppointmentEdit } from './pages/appointments/AppointmentEdit';
 import { useParams, useNavigate } from 'react-router';
 import React from 'react';
-import { isOnboardingV2Enabled } from './lib/runtimeConfig';
 
 // P11-007 — wrappers that pull `:id` from the route and forward it to
 // the typed edit components.
@@ -126,10 +124,10 @@ export const router = createBrowserRouter([
   { path: '/signup', Component: SignupPage },
 
   // ── Fullscreen flows (no Shell chrome) ─────────────────────────────────
-  // §10 onboarding v2 — flag-gated. Off → legacy 9-step wizard.
+  // §10 onboarding — v2 sidebar shell (the legacy v1 wizard was retired).
   {
     path: '/onboarding',
-    Component: isOnboardingV2Enabled() ? OnboardingShell : OnboardingPage,
+    Component: OnboardingShell,
   },
   { path: '/e/:id',      Component: EstimateApprovalPage },
   { path: '/pay/:id',    Component: InvoicePaymentPage },

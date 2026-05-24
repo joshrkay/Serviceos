@@ -14,6 +14,10 @@ import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
+import {
+  DEPROVISION_TENANT_JOB_TYPE,
+  type DeprovisionTenantPayload,
+} from '../workers/deprovision-tenant';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
@@ -877,6 +881,51 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('customer.subscription.* missing fields', {
             eventId: event.id, type: event.type,
           });
+        }
+
+        // Auto-deprovision on cancellation. Gated behind a flag (default off)
+        // because a hard purge is irreversible — we do NOT want a billing
+        // glitch to nuke a paying customer the first time this fires. Only
+        // acts on a true cancellation (deleted event, or status 'canceled'),
+        // never on dunning states (past_due / unpaid / incomplete). Enqueues
+        // a background job; never throws (must not 500 the webhook → Stripe
+        // would retry forever).
+        if (
+          process.env.AUTO_DEPROVISION_ON_CANCEL === 'true' &&
+          deps.queue &&
+          deps.pool &&
+          (event.type === 'customer.subscription.deleted' || sub.status === 'canceled')
+        ) {
+          try {
+            const tenantRow = await deps.pool.query<{ id: string }>(
+              `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
+              [sub.customer],
+            );
+            const tenantId = tenantRow.rows[0]?.id;
+            if (tenantId) {
+              const payload: DeprovisionTenantPayload = {
+                tenantId,
+                reason:
+                  event.type === 'customer.subscription.deleted'
+                    ? 'stripe_subscription_deleted'
+                    : 'stripe_subscription_canceled',
+                actorId: 'system:stripe_webhook',
+              };
+              await deps.queue.send(
+                DEPROVISION_TENANT_JOB_TYPE,
+                payload,
+                `deprovision-${tenantId}`,
+              );
+              logger.warn('Auto-deprovision enqueued on subscription cancellation', {
+                tenantId, customerId: sub.customer, type: event.type,
+              });
+            }
+          } catch (err) {
+            logger.error('Failed to enqueue auto-deprovision', {
+              customerId: sub.customer,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
       }
 

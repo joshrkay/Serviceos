@@ -22,7 +22,6 @@ import {
   useActiveSessions,
 } from '../../hooks/useActiveSessions';
 import { UpgradeNudgeBanner } from '../onboarding/v2/UpgradeNudgeBanner';
-import { isOnboardingV2Enabled } from '../../lib/runtimeConfig';
 import { EscalationPanelHost } from '../dispatch/EscalationPanelHost';
 import {
   usePendingProposals,
@@ -361,8 +360,8 @@ function ShellInner() {
 
       {/* §10 onboarding — early-upgrade nudge. Renders only when the
           30-minute trial threshold has fired (and onboarding is otherwise
-          complete). Gated by VITE_ONBOARDING_V2_ENABLED via the hook. */}
-      {isOnboardingV2Enabled() && <UpgradeNudgeBanner />}
+          complete). */}
+      <UpgradeNudgeBanner />
 
       <div className="flex flex-1 overflow-hidden">
 
