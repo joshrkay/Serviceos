@@ -178,31 +178,58 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+interface CustomerFieldValues {
+  firstName?: string;
+  lastName?: string;
+  companyName?: string;
+  primaryPhone?: string;
+  secondaryPhone?: string;
+  email?: string;
+  preferredChannel?: string;
+}
+
+/**
+ * Field-level rules shared by create and update validation. `alwaysCheckChannel`
+ * is true for updates (the resolved channel is always validated) and false for
+ * creates (only validated when explicitly provided).
+ */
+function validateCustomerFields(
+  fields: CustomerFieldValues,
+  alwaysCheckChannel: boolean
+): string[] {
+  const errors: string[] = [];
+  if (!fields.firstName && !fields.companyName) {
+    errors.push('firstName or companyName is required');
+  }
+  if (fields.firstName && fields.firstName.length > 100) {
+    errors.push('firstName must be 100 characters or fewer');
+  }
+  if (fields.lastName && fields.lastName.length > 100) {
+    errors.push('lastName must be 100 characters or fewer');
+  }
+  if (fields.primaryPhone && !isValidPhone(fields.primaryPhone)) {
+    errors.push('Invalid primaryPhone format');
+  }
+  if (fields.secondaryPhone && !isValidPhone(fields.secondaryPhone)) {
+    errors.push('Invalid secondaryPhone format');
+  }
+  if (fields.email && !isValidEmail(fields.email)) {
+    errors.push('Invalid email format');
+  }
+  if (
+    (alwaysCheckChannel || fields.preferredChannel) &&
+    !['phone', 'email', 'sms', 'none'].includes(fields.preferredChannel as string)
+  ) {
+    errors.push('Invalid preferredChannel');
+  }
+  return errors;
+}
+
 export function validateCustomerInput(input: CreateCustomerInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
-  if (!input.firstName && !input.companyName) {
-    errors.push('firstName or companyName is required');
-  }
-  if (input.firstName && input.firstName.length > 100) {
-    errors.push('firstName must be 100 characters or fewer');
-  }
-  if (input.lastName && input.lastName.length > 100) {
-    errors.push('lastName must be 100 characters or fewer');
-  }
   if (!input.createdBy) errors.push('createdBy is required');
-  if (input.primaryPhone && !isValidPhone(input.primaryPhone)) {
-    errors.push('Invalid primaryPhone format');
-  }
-  if (input.secondaryPhone && !isValidPhone(input.secondaryPhone)) {
-    errors.push('Invalid secondaryPhone format');
-  }
-  if (input.email && !isValidEmail(input.email)) {
-    errors.push('Invalid email format');
-  }
-  if (input.preferredChannel && !['phone', 'email', 'sms', 'none'].includes(input.preferredChannel)) {
-    errors.push('Invalid preferredChannel');
-  }
+  errors.push(...validateCustomerFields(input, false));
   return errors;
 }
 
@@ -210,39 +237,18 @@ export function validateCustomerUpdateInput(
   existing: Customer,
   input: UpdateCustomerInput
 ): string[] {
-  const mergedFirstName = input.firstName ?? existing.firstName;
-  const mergedLastName = input.lastName ?? existing.lastName;
-  const mergedCompanyName = input.companyName ?? existing.companyName;
-  const mergedPrimaryPhone = input.primaryPhone ?? existing.primaryPhone;
-  const mergedSecondaryPhone = input.secondaryPhone ?? existing.secondaryPhone;
-  const mergedEmail = input.email ?? existing.email;
-  const mergedPreferredChannel = input.preferredChannel ?? existing.preferredChannel;
-
-  const errors: string[] = [];
-
-  if (!mergedFirstName && !mergedCompanyName) {
-    errors.push('firstName or companyName is required');
-  }
-  if (mergedFirstName && mergedFirstName.length > 100) {
-    errors.push('firstName must be 100 characters or fewer');
-  }
-  if (mergedLastName && mergedLastName.length > 100) {
-    errors.push('lastName must be 100 characters or fewer');
-  }
-  if (mergedPrimaryPhone && !isValidPhone(mergedPrimaryPhone)) {
-    errors.push('Invalid primaryPhone format');
-  }
-  if (mergedSecondaryPhone && !isValidPhone(mergedSecondaryPhone)) {
-    errors.push('Invalid secondaryPhone format');
-  }
-  if (mergedEmail && !isValidEmail(mergedEmail)) {
-    errors.push('Invalid email format');
-  }
-  if (!['phone', 'email', 'sms', 'none'].includes(mergedPreferredChannel)) {
-    errors.push('Invalid preferredChannel');
-  }
-
-  return errors;
+  return validateCustomerFields(
+    {
+      firstName: input.firstName ?? existing.firstName,
+      lastName: input.lastName ?? existing.lastName,
+      companyName: input.companyName ?? existing.companyName,
+      primaryPhone: input.primaryPhone ?? existing.primaryPhone,
+      secondaryPhone: input.secondaryPhone ?? existing.secondaryPhone,
+      email: input.email ?? existing.email,
+      preferredChannel: input.preferredChannel ?? existing.preferredChannel,
+    },
+    true
+  );
 }
 
 export async function createCustomer(
