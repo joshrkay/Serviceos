@@ -3037,6 +3037,16 @@ export const MIGRATIONS = {
     ALTER TABLE estimates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_revised_at TIMESTAMPTZ;
   `,
+
+  '121_estimate_reminders': `
+    -- Estimate-reminder worker support. 'reminder_count' caps how many
+    -- follow-up nudges a sent-but-unanswered estimate receives;
+    -- 'last_reminder_at' records the most recent nudge. The worker also
+    -- needs to find estimates by send age — that uses the existing
+    -- sent_at column with a new sentBefore list filter (no schema change).
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS reminder_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

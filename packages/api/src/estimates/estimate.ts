@@ -51,6 +51,10 @@ export interface Estimate {
   version: number;
   /** Most recent revise of an already-sent estimate. */
   lastRevisedAt?: Date;
+  /** How many follow-up reminders the estimate-reminder worker has sent. */
+  reminderCount?: number;
+  /** Timestamp of the most recent reminder nudge. */
+  lastReminderAt?: Date;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -116,6 +120,9 @@ export interface EstimateListOptions {
   offset?: number;
   /** Sort direction applied to the canonical sort column (created_at). */
   sort?: 'asc' | 'desc';
+  /** Only estimates whose `sentAt` is strictly before this. Used by the
+   *  estimate-reminder worker to find aging sent estimates. */
+  sentBefore?: Date;
 }
 
 export interface EstimateListResult {
@@ -526,6 +533,10 @@ export class InMemoryEstimateRepository implements EstimateRepository {
     let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId);
     if (options?.status) results = results.filter((e) => e.status === options.status);
     if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
+    if (options?.sentBefore) {
+      const cutoff = options.sentBefore.getTime();
+      results = results.filter((e) => e.sentAt !== undefined && e.sentAt.getTime() < cutoff);
+    }
     if (options?.search) {
       const q = options.search.toLowerCase();
       results = results.filter(
