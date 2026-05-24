@@ -22,6 +22,8 @@ export type MatrixModule =
   | 'VOICE'
   | 'ISO'
   | 'PORTAL'
+  | 'PROP'
+  | 'RPT'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -435,6 +437,65 @@ export const MATRIX: MatrixRow[] = [
       'Records the cases not exercisable in simulated/in-app mode: business-hours enforcement, plan caller-context, phone rate-limiting, tech "out today" SMS, dropped-call recovery, session cost caps',
     expected: 'na',
     expectedReason: 'Require live Twilio (signed webhooks / real call) or non-API config; documented, not driven.',
+  },
+
+  // ----- Proposals / human-approval engine -----
+  {
+    id: 'PROP-01',
+    module: 'PROP',
+    feature: 'Scheduling proposal creation + approval-state guard',
+    passCriteria:
+      'POST /api/proposals (remove_crew_member, If-Match version) persists a draft proposal; rejecting a draft is refused with 409 and leaves the row a draft (human-in-the-loop guard)',
+    expected: 'pass',
+  },
+  {
+    id: 'PROP-02',
+    module: 'PROP',
+    feature: 'Proposal inbox prioritization endpoint',
+    passCriteria:
+      'GET /api/proposals/inbox returns 200 with a well-formed prioritized payload for the tenant (no cross-tenant bleed)',
+    expected: 'pass',
+  },
+  {
+    id: 'PROP-03',
+    module: 'PROP',
+    feature: 'Cross-tenant proposal access denial',
+    passCriteria:
+      "Tenant B cannot GET a proposal created under Tenant A (403/404); the engine never discloses a foreign-tenant proposal",
+    expected: 'pass',
+  },
+  {
+    id: 'PROP-04',
+    module: 'PROP',
+    feature: 'Time-only reschedule proposal does not 500 (regression)',
+    passCriteria:
+      'POST /api/proposals reschedule_appointment with no technician in the payload returns 200 (not 500) for an unassigned appointment — feasibility is skipped when no technician resolves',
+    expected: 'pass',
+  },
+
+  // ----- Reports / analytics -----
+  {
+    id: 'RPT-01',
+    module: 'RPT',
+    feature: 'Money dashboard report',
+    passCriteria:
+      "GET /api/reports/money-dashboard returns 200 with a { data } summary for the tenant month (or 503 NOT_CONFIGURED in an env without the repo)",
+    expected: 'pass',
+  },
+  {
+    id: 'RPT-02',
+    module: 'RPT',
+    feature: 'Revenue-by-source report',
+    passCriteria: 'GET /api/reports/revenue-by-source returns 200 with a { data: [] } attribution array scoped to the tenant',
+    expected: 'pass',
+  },
+  {
+    id: 'RPT-03',
+    module: 'RPT',
+    feature: 'Time-given-back report',
+    passCriteria:
+      'GET /api/reports/time-given-back returns 200 with a { data } summary (or 503 NOT_CONFIGURED when the reporter dep is absent)',
+    expected: 'pass',
   },
 ];
 

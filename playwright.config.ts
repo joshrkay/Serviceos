@@ -99,6 +99,8 @@ export default defineConfig({
               'payments-edge.spec.ts',
               'invoices.spec.ts',
               'public-portal.spec.ts',
+              'proposals.spec.ts',
+              'reports.spec.ts',
               'scheduling.spec.ts',
               'sms.spec.ts',
               'voice-extras.spec.ts',

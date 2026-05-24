@@ -66,10 +66,12 @@ export async function createSchedulingProposal(
     input.payload.toTechnicianId ?? input.payload.technicianId ?? input.payload.fromTechnicianId ?? '';
 
   // Removing a crew member can never create a conflict, so feasibility is
-  // not run for it. Every other scheduling proposal checks the proposed
-  // technician's calendar before persisting so the dispatcher sees blocking
-  // conflicts immediately.
-  if (input.proposalType !== 'remove_crew_member') {
+  // not run for it. We also skip when no technician is resolved — there is no
+  // technician calendar to check against, and querying with an empty id would
+  // 500. Every other scheduling proposal checks the proposed technician's
+  // calendar before persisting so the dispatcher sees blocking conflicts
+  // immediately.
+  if (input.proposalType !== 'remove_crew_member' && proposedTechnicianId !== '') {
     const feasibility = await checkFeasibility(
       {
         tenantId: input.tenantId, appointment,
