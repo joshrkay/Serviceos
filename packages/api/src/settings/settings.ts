@@ -194,6 +194,13 @@ export interface TenantSettings {
    * brand-voice composer uses a neutral default. Explicit `null` clears it.
    */
   brandVoice?: BrandVoiceSettings | null;
+  /**
+   * Public review links shown to satisfied customers (4★+) on the
+   * post-job feedback page. Migration 120. null/undefined = not
+   * configured (no button rendered).
+   */
+  googleReviewUrl?: string | null;
+  yelpReviewUrl?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -251,6 +258,9 @@ export interface UpdateSettingsInput {
   escalationSettings?: Partial<EscalationSettings>;
   /** P4-015 — per-tenant brand voice tone; null clears the field. */
   brandVoice?: BrandVoiceSettings | null;
+  /** Public review links (4★+ feedback page); null clears the field. */
+  googleReviewUrl?: string | null;
+  yelpReviewUrl?: string | null;
 }
 
 export interface SettingsRepository {

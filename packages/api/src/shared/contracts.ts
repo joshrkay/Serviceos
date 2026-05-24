@@ -297,6 +297,34 @@ export const updateSettingsSchema = z.object({
   // B1 — Per-tenant voice persona. null clears the field.
   voiceAgentName: z.string().min(1).max(80).nullable().optional(),
   voiceGreeting: z.string().min(1).max(500).nullable().optional(),
+  // F8 — Call routing & handoff (CallRoutingSheet). Persisted to the
+  // escalation_settings JSONB column (migration 106) and consumed by the
+  // telephony stack via resolveEscalationSettings. Partial: missing keys
+  // fall back to DEFAULT_ESCALATION_SETTINGS on read.
+  escalationSettings: z
+    .object({
+      channel_sms: z.boolean(),
+      channel_in_app: z.boolean(),
+      channel_whisper: z.boolean(),
+      trigger_low_confidence: z.boolean(),
+      trigger_explicit_request: z.boolean(),
+      trigger_keyword_frustration: z.boolean(),
+      trigger_llm_sentiment: z.boolean(),
+      llm_sentiment_threshold: z.number().min(0).max(1),
+      after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
+    })
+    .partial()
+    .optional(),
+  // Public review links (Settings → Reviews). Migration 120. Empty string
+  // normalizes to null so a cleared field reads back as "not configured".
+  googleReviewUrl: z
+    .union([z.string().trim().url(), z.literal(''), z.null()])
+    .optional()
+    .transform((v) => (v === '' ? null : v)),
+  yelpReviewUrl: z
+    .union([z.string().trim().url(), z.literal(''), z.null()])
+    .optional()
+    .transform((v) => (v === '' ? null : v)),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

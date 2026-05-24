@@ -3025,6 +3025,15 @@ export const MIGRATIONS = {
       END IF;
     END $do$;
   `,
+
+  '120_tenant_settings_review_urls': `
+    -- Public review links surfaced to happy customers on the post-job
+    -- feedback page (4★+). Edited in Settings → Reviews; consumed by the
+    -- public feedback POST response. NULL = not configured (no button).
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS google_review_url TEXT,
+      ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

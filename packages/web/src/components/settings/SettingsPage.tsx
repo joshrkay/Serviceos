@@ -51,6 +51,8 @@ export function SettingsPage() {
           autoApplyInternalUpdates?: boolean;
           autoSendAppointmentReminders?: boolean;
           businessName?: string;
+          googleReviewUrl?: string | null;
+          yelpReviewUrl?: string | null;
         };
         if (typeof data.autoApplyInternalUpdates === 'boolean') {
           setAiAuto(data.autoApplyInternalUpdates);
@@ -60,6 +62,12 @@ export function SettingsPage() {
         }
         if (typeof data.businessName === 'string' && data.businessName.trim()) {
           setBusinessName(data.businessName.trim());
+        }
+        if (typeof data.googleReviewUrl === 'string') {
+          setGoogleReviewUrl(data.googleReviewUrl);
+        }
+        if (typeof data.yelpReviewUrl === 'string') {
+          setYelpReviewUrl(data.yelpReviewUrl);
         }
       } catch {
         /* network hiccup — defaults remain */
@@ -224,7 +232,8 @@ export function SettingsPage() {
     setReviewsError('');
     try {
       const res = await apiFetch('/api/settings', {
-        method: 'PATCH',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ googleReviewUrl, yelpReviewUrl }),
       });
       if (!res.ok) {

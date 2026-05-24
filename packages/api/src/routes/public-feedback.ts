@@ -115,7 +115,23 @@ export function createPublicFeedbackRouter(
         );
       }
 
-      res.status(201).json({ ok: true });
+      // Surface the tenant's public review links only to satisfied
+      // customers (4★+), mirroring the Settings copy ("Customers with a
+      // 4+ rating will see a button linking here"). Empty/unset links are
+      // omitted so the feedback page renders no button.
+      let reviewUrls: { google?: string; yelp?: string } | undefined;
+      if (parsed.rating >= 4) {
+        const settings = await settingsRepo.findByTenant(request.tenantId);
+        const google = settings?.googleReviewUrl?.trim();
+        const yelp = settings?.yelpReviewUrl?.trim();
+        if (google || yelp) {
+          reviewUrls = {};
+          if (google) reviewUrls.google = google;
+          if (yelp) reviewUrls.yelp = yelp;
+        }
+      }
+
+      res.status(201).json({ ok: true, ...(reviewUrls ? { reviewUrls } : {}) });
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);

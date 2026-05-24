@@ -96,6 +96,9 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
       if (!raw || typeof raw !== 'object' || Object.keys(raw).length === 0) return undefined;
       return raw as TenantSettings['brandVoice'];
     })(),
+    // Migration 120. NULL → undefined to match the InMemory repo shape.
+    googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
+    yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   };
@@ -231,6 +234,9 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         voiceAgentName: 'voice_agent_name',
         voiceGreeting: 'voice_greeting',
         escalationSettings: 'escalation_settings',
+        // Migration 120 — public review links.
+        googleReviewUrl: 'google_review_url',
+        yelpReviewUrl: 'yelp_review_url',
         updatedAt: 'updated_at',
       };
 
