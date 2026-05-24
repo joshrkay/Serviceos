@@ -57,6 +57,12 @@ export const en = {
   'lookup.account.empty':
     "I'm not seeing anything notable on your account right now.",
 
+  // ── Telephony greeting (default opener) ──────────────────────────────
+  'greeting.opener_default': 'Thank you for calling {{business}}.',
+  'greeting.opener_named': 'Thank you for calling {{business}}. This is {{agent}}.',
+  'greeting.cta': 'How can I help you today?',
+  'greeting.one_moment': 'One moment, please.',
+
   // ── Caller identification ────────────────────────────────────────────
   'identify.greet_known': 'Hi {{name}}, welcome back.',
   'identify.greet_unknown':
