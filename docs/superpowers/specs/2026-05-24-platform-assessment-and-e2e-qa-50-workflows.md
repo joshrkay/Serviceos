@@ -317,7 +317,7 @@ Multi-tech / dispatcher flows. Required for shops with crews; **not** in the sol
 | **Coverage sweep only** | 12 | WF-02,10,13,14,18,26,27,40,46,49, parts of 22 |
 | **API route tests (no E2E yet)** | 1 | WF-50 (`calendar-integrations.route.test.ts`) |
 | **Manual / Twilio** | 10 | WF-07,08,23,24,36-38,42 live call,45,48 |
-| **P1 only (solo launch gate)** | 12 | WF-23–27, WF-21,38,40,41,44–46,48,50 |
+| **P1 only (solo launch gate)** | 25 | WF-09,10,12–15,21,23–27,34,35,38–41,44–46,48,49,50 |
 
 ### 5.2 Recommended implementation phases
 
@@ -365,7 +365,7 @@ Multi-tech / dispatcher flows. Required for shops with crews; **not** in the sol
 |------|--------|
 | **Developer** | Tag PRs with WF-IDs fixed; add regression test per `qa-strategy` |
 | **QA operator** | Weekly matrix run + archive report under `qa/reports/` |
-| **Release manager** | Gate on: smoke + coverage sweep + **all P0 workflows** (38 solo) + critical journey green |
+| **Release manager** | Gate on: smoke + coverage sweep + **all P0 workflows** (25 solo) + critical journey green |
 | **On-call** | Manual WF-07,08,42 on staging before prod promote |
 
 ---
@@ -374,7 +374,7 @@ Multi-tech / dispatcher flows. Required for shops with crews; **not** in the sol
 
 | # | Topic | Status |
 |---|--------|--------|
-| 1 | **Launch persona** — solo vs dispatch/tech P0 | **Resolved (2026-05-24):** **Solo owner-operator** GTM; WF-23–27 demoted to **P1**; P0 release gate = **38 workflows** (§4.0) |
+| 1 | **Launch persona** — solo vs dispatch/tech P0 | **Resolved (2026-05-24):** **Solo owner-operator** GTM; WF-23–27 demoted to **P1**; P0 release gate = **25 workflows** (§4.0) |
 | 2 | **Environment of record** — Railway dev vs CI ephemeral | **Open** |
 | 3 | **WF-50 slot** — contracts vs Google Calendar | **Resolved (2026-05-24):** WF-50 = **Google Calendar sync**; maintenance contracts deferred |
 | 4 | **Held-slot workflows** | **Open** — add WF-51+ when `CreateBooking` ships, or tighten WF-36/42 now |
