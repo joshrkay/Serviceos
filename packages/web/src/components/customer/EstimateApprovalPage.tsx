@@ -34,6 +34,10 @@ interface PublicEstimateView {
   rejectedAt?: string;
   rejectedReason?: string;
   isExpired: boolean;
+  /** Optimistic-lock / re-sync counter. Sent back as expectedVersion on approve. */
+  version: number;
+  /** ISO timestamp the estimate was last revised after sending. */
+  lastRevisedAt?: string;
   /**
    * Tier 4 (Deposit rules — PR 3a). Required deposit cents derived
    * from the linked job. 0 when no rule applies; >0 means the
@@ -156,11 +160,15 @@ function SignatureCanvas({ onChange, canvasRef: externalRef }: {
 
 // ─── Approval sheet ───────────────────────────────────────────────────────
 function ApprovalSheet({
-  estimateNumber, customer, total, token, onClose, onConfirm,
+  estimateNumber, customer, total, token, expectedVersion, onStale, onClose, onConfirm,
 }: {
   estimateNumber: string; customer: string; total: number;
   /** When set, submit calls the real /public/estimates/:token/approve endpoint. */
   token?: string;
+  /** The version the customer is viewing; sent so a stale accept is rejected. */
+  expectedVersion?: number;
+  /** Called when the server reports the estimate changed (409) since load. */
+  onStale?: () => void;
   onClose: () => void; onConfirm: (view?: PublicEstimateView) => void;
 }) {
   const sigRef = useRef<HTMLCanvasElement | null>(null);
@@ -185,8 +193,16 @@ function ApprovalSheet({
             signatureData: signatureData && signatureData.length < 200_000
               ? signatureData
               : undefined,
+            expectedVersion,
           }),
         });
+        if (res.status === 409) {
+          // The estimate was revised after the customer opened it. Bounce
+          // back to the page so they review the latest version first.
+          setLoading(false);
+          onStale?.();
+          return;
+        }
         if (!res.ok) {
           const body = await res.json().catch(() => ({} as any));
           throw new Error(body.message ?? `HTTP ${res.status}`);
@@ -480,6 +496,10 @@ export function EstimateApprovalPage() {
   const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
   const [apiLoading, setApiLoading] = useState(true);
   const [apiNotFound, setApiNotFound] = useState(false);
+  // Set when a background poll detects the business revised the estimate
+  // (version bumped) after the customer opened the page. The banner asks
+  // them to review the latest version; approve is also blocked server-side.
+  const [revised, setRevised] = useState(false);
 
   useEffect(() => {
     if (!id) {
@@ -516,6 +536,34 @@ export function EstimateApprovalPage() {
     })();
     return () => { cancelled = true; };
   }, [id]);
+
+  // Re-sync poll: while the page is open on a live (sent) estimate, poll
+  // for a revision so the customer can't accept stale numbers. When the
+  // version bumps we refresh the displayed data and raise the banner.
+  // Mirrors the invoice payment page's polling approach (useInvoiceStatus).
+  const loadedVersion = apiView?.version;
+  useEffect(() => {
+    if (!id || !apiView || accepted) return;
+    if (apiView.status !== 'sent') return; // terminal states never change
+    let cancelled = false;
+    const POLL_MS = 15_000;
+    const timer = setInterval(async () => {
+      try {
+        const res = await apiFetch(`/public/estimates/${encodeURIComponent(id)}`);
+        if (cancelled || !res.ok) return;
+        const next = await res.json() as PublicEstimateView;
+        if (cancelled) return;
+        setApiView(next);
+        if (next.status === 'accepted') setAccept(true);
+        if (loadedVersion !== undefined && next.version > loadedVersion) {
+          setRevised(true);
+        }
+      } catch {
+        // Transient network error — keep polling.
+      }
+    }, POLL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [id, apiView, accepted, loadedVersion]);
 
   // Mock-data fallback (used when running against a fixture URL or when
   // the public API isn't reachable in dev).
@@ -580,6 +628,13 @@ export function EstimateApprovalPage() {
   return (
     <>
       <div className="min-h-screen bg-slate-50">
+        {revised && (
+          <div className="bg-amber-50 border-b border-amber-200 px-5 py-3 text-center">
+            <p className="text-sm text-amber-800 max-w-lg mx-auto">
+              This estimate was updated by the business. The latest pricing is shown below — please review before accepting.
+            </p>
+          </div>
+        )}
         {/* Branded header */}
         <div className="bg-white border-b border-slate-200 px-5 py-4">
           <div className="max-w-lg mx-auto flex items-center justify-between">
@@ -784,6 +839,8 @@ export function EstimateApprovalPage() {
           customer={customerName}
           total={total}
           token={usingApi ? id : undefined}
+          expectedVersion={apiView?.version}
+          onStale={() => { setRevised(true); setAppr(false); }}
           onClose={() => setAppr(false)}
           onConfirm={(view) => {
             if (view) setApiView(view);
