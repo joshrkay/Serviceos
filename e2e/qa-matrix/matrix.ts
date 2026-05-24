@@ -25,6 +25,9 @@ export type MatrixModule =
   | 'PROP'
   | 'RPT'
   | 'JRN'
+  | 'JOB'
+  | 'AGR'
+  | 'LEAD'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -496,6 +499,42 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Time-given-back report',
     passCriteria:
       'GET /api/reports/time-given-back returns 200 with a { data } summary (or 503 NOT_CONFIGURED when the reporter dep is absent)',
+    expected: 'pass',
+  },
+
+  // ----- Jobs lifecycle -----
+  {
+    id: 'JOB-01',
+    module: 'JOB',
+    feature: 'Job status lifecycle (new → scheduled → in_progress → completed)',
+    passCriteria:
+      'POST /api/jobs creates a job in `new`; POST /:id/transition walks it scheduled → in_progress → completed, each step persisting the new status in the DB',
+    expected: 'pass',
+  },
+  {
+    id: 'JOB-02',
+    module: 'JOB',
+    feature: 'Invalid job transition rejected',
+    passCriteria:
+      'A disallowed transition (new → completed) is refused (4xx) and leaves the job in its original status — the lifecycle state machine is enforced server-side',
+    expected: 'pass',
+  },
+
+  // ----- Service agreements (recurring) -----
+  {
+    id: 'AGR-01',
+    module: 'AGR',
+    feature: 'Create recurring service agreement',
+    passCriteria:
+      'POST /api/agreements persists an active agreement with the recurrence rule, price, and next-run scheduling; GET /:id resolves it with run history',
+    expected: 'pass',
+  },
+  {
+    id: 'AGR-02',
+    module: 'AGR',
+    feature: 'Agreement pause → resume → cancel lifecycle',
+    passCriteria:
+      'pause sets status=paused, resume returns it to active, cancel sets status=cancelled; each transition is reflected in API + DB and cancel is terminal',
     expected: 'pass',
   },
 
