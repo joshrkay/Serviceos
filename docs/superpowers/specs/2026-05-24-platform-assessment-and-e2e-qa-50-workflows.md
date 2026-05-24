@@ -21,6 +21,8 @@
 
 **Primary risk:** Thousands of unit tests pass while user-visible flows break (documented in `qa/reports/2026-05-11/OPERATOR-CHECKLIST.md` after PR #339). The fix path is layered E2E: route sweep → matrix → full journeys → voice/Twilio soak.
 
+**Launch GTM (decision #1):** E2E gates target the **solo owner-operator** — one person runs phone, schedule, and money. Multi-tech **dispatch board** and dedicated **field-tech** surfaces are built in code but are **P1** for release QA (not launch blockers). See §4.0 and §8.
+
 ---
 
 ## 2. What has been built (by layer)
@@ -179,7 +181,19 @@ Green unit tests alone are **not** evidence (per `docs/qa-strategy.md` on QA bra
 
 ## 4. The 50 most important user workflows
 
-Priority: **P0** = launch blocker / money / phone; **P1** = core loop; **P2** = important but deferrable.
+Priority: **P0** = launch blocker for **solo owner-operator** GTM (phone, money, schedule-as-owner, inbox); **P1** = core loop or **multi-tech / dispatch** (built, not launch-gated); **P2** = deferrable.
+
+### 4.0 Solo launch scope
+
+Per [launch-readiness spec](./2026-05-14-serviceos-launch-readiness-design.md), launch exposes the owner as the only operator at the product surface. The codebase still has dispatch lanes, technician day view, and mode toggles — they are **out of the P0 release gate** until multi-tech GTM.
+
+| In scope (P0 E2E gate) | Out of P0 gate (P1, still in top-50) |
+|------------------------|--------------------------------------|
+| Voice inbound + inbox approve + schedule as owner | WF-23–27 dispatch & field-tech UX |
+| Lead → job → estimate → pay | Drag-assign feasibility board |
+| Onboarding + Twilio + Stripe | Tech `/technician/day`, `?view=tech` |
+
+**P0 workflow count for solo launch gate: 25** (50 total catalog; WF-23–27 plus 20 other P1 rows).
 
 Columns:
 
@@ -222,19 +236,21 @@ Columns:
 | ID | Workflow | Actor | Priority | Auto | Pass criteria |
 |----|----------|-------|----------|------|-----------------|
 | WF-17 | Create job from customer | Owner | P0 | SCH-01 / sweep | Job row + appears on `/jobs` |
-| WF-18 | Job lifecycle: scheduled → in progress → complete | Owner / tech | P0 | sweep | Status transitions audit-logged |
+| WF-18 | Job lifecycle: scheduled → in progress → complete | Owner (solo) | P0 | sweep | Status transitions audit-logged |
 | WF-19 | Create appointment on schedule calendar | Owner | P0 | SCH-01 | Appointment visible week view |
 | WF-20 | Reschedule appointment (UI + API) | Owner | P0 | SCH-02 | Window + version update; single assignment |
 | WF-21 | Cancel appointment | Owner | P1 | SCH-03 / voice | Status canceled; dispatch event |
 | WF-22 | Clock in / out time entry on job | Tech | P1 | sweep tech view | Time entry rows; weekly hours API |
 
-### 4.5 Dispatch & field (WF-23 – WF-27)
+### 4.5 Dispatch & field (WF-23 – WF-27) — **P1 for solo launch**
+
+Multi-tech / dispatcher flows. Required for shops with crews; **not** in the solo owner-operator release gate.
 
 | ID | Workflow | Actor | Priority | Auto | Pass criteria |
 |----|----------|-------|----------|------|-----------------|
-| WF-23 | Dispatch: drag unassigned → technician lane | Dispatcher | P0 | manual + sweep `/dispatch` | Assignment proposal or direct assign per product rules |
+| WF-23 | Dispatch: drag unassigned → technician lane | Dispatcher | P1 | manual + sweep `/dispatch` | Assignment proposal or direct assign per product rules |
 | WF-24 | Feasibility preview before confirm | Dispatcher | P1 | manual | Overlap/travel warnings surface |
-| WF-25 | Approve schedule proposal from dispatch | Owner | P0 | inbox | Proposal executed; calendar updates |
+| WF-25 | Approve schedule proposal from dispatch | Owner | P1 | inbox | Proposal executed; calendar updates |
 | WF-26 | Technician day view: arrival + status SMS | Tech | P1 | sweep `/technician/day` | Status update + optional customer notify |
 | WF-27 | Tech job view `?view=tech` status CTAs | Tech | P1 | sweep | Mobile CTAs change job state |
 
@@ -301,6 +317,7 @@ Columns:
 | **Coverage sweep only** | 12 | WF-02,10,13,14,18,26,27,40,46,49, parts of 22 |
 | **API route tests (no E2E yet)** | 1 | WF-50 (`calendar-integrations.route.test.ts`) |
 | **Manual / Twilio** | 10 | WF-07,08,23,24,36-38,42 live call,45,48 |
+| **P1 only (solo launch gate)** | 12 | WF-23–27, WF-21,38,40,41,44–46,48,50 |
 
 ### 5.2 Recommended implementation phases
 
@@ -348,7 +365,7 @@ Columns:
 |------|--------|
 | **Developer** | Tag PRs with WF-IDs fixed; add regression test per `qa-strategy` |
 | **QA operator** | Weekly matrix run + archive report under `qa/reports/` |
-| **Release manager** | Gate on: smoke + coverage sweep + critical journey green |
+| **Release manager** | Gate on: smoke + coverage sweep + **all P0 workflows** (38 solo) + critical journey green |
 | **On-call** | Manual WF-07,08,42 on staging before prod promote |
 
 ---
@@ -357,7 +374,7 @@ Columns:
 
 | # | Topic | Status |
 |---|--------|--------|
-| 1 | **Launch persona** — solo vs dispatch/tech P0 | **Open** — WF-23–27 remain P0 for codebase reality; can demote for solo-only GTM |
+| 1 | **Launch persona** — solo vs dispatch/tech P0 | **Resolved (2026-05-24):** **Solo owner-operator** GTM; WF-23–27 demoted to **P1**; P0 release gate = **38 workflows** (§4.0) |
 | 2 | **Environment of record** — Railway dev vs CI ephemeral | **Open** |
 | 3 | **WF-50 slot** — contracts vs Google Calendar | **Resolved (2026-05-24):** WF-50 = **Google Calendar sync**; maintenance contracts deferred |
 | 4 | **Held-slot workflows** | **Open** — add WF-51+ when `CreateBooking` ships, or tighten WF-36/42 now |
