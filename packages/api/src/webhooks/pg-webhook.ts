@@ -32,11 +32,24 @@ export class PgWebhookRepository extends PgBaseRepository implements WebhookRepo
     });
   }
 
+  /**
+   * Idempotent insert. Uses ON CONFLICT (source, idempotency_key) DO
+   * NOTHING so a concurrent redelivery cannot create a duplicate row or
+   * throw a unique-violation. Returns the row that actually persisted:
+   *
+   *   - clean insert  → the event we passed (returned id === event.id)
+   *   - conflict      → the PRE-EXISTING row (a different id)
+   *
+   * `handleWebhookEvent` detects the id mismatch to recognise that it lost
+   * the insert race and re-applies its status-based dedup, which is what
+   * makes its read-then-create flow safe under concurrent delivery.
+   */
   async create(event: WebhookEvent): Promise<WebhookEvent> {
     return this.withClient(async (client) => {
-      const result = await client.query(
+      const inserted = await client.query(
         `INSERT INTO webhook_events (id, source, event_type, idempotency_key, payload, status, error_message, processed_at, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (source, idempotency_key) DO NOTHING
          RETURNING *`,
         [
           event.id,
@@ -50,7 +63,20 @@ export class PgWebhookRepository extends PgBaseRepository implements WebhookRepo
           event.createdAt,
         ]
       );
-      return mapRow(result.rows[0]);
+      if (inserted.rowCount && inserted.rowCount > 0) {
+        return mapRow(inserted.rows[0]);
+      }
+
+      // Lost the (source, idempotency_key) race — return the existing row
+      // so handleWebhookEvent can dedup against its status.
+      const existing = await client.query(
+        `SELECT * FROM webhook_events WHERE source = $1 AND idempotency_key = $2`,
+        [event.source, event.idempotencyKey]
+      );
+      if (existing.rows.length === 0) {
+        throw new Error('webhook_events conflict reported but row missing');
+      }
+      return mapRow(existing.rows[0]);
     });
   }
 

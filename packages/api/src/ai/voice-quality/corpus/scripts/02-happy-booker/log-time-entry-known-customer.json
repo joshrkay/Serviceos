@@ -1,0 +1,53 @@
+{
+  "id": "log-time-entry-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550405",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_log_time_entry",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_time_tech",
+        "tenantId": "t_02_log_time_entry",
+        "firstName": "Mike",
+        "lastName": "Tech",
+        "displayName": "Mike Tech",
+        "companyName": null,
+        "primaryPhone": "+15555550405",
+        "secondaryPhone": null,
+        "email": "mike.tech@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Clock me in on the Miller job.",
+      "expected": {
+        "intent": "log_time_entry",
+        "proposalType": "log_time_entry",
+        "slots": {
+          "entryType": "job"
+        },
+        "spokenAnswerMatches": "I've drafted a time entry for review; an operator will confirm before it's logged.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { X, Check, Receipt } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
-import { uiLineItemsToApiPayload, type UiLineItem } from '../../lib/lineItems';
+import { type UiLineItem } from '../../lib/lineItems';
 
 export interface ConvertToInvoiceInput {
   estimateId: string;
@@ -29,7 +29,6 @@ export function ConvertToInvoiceSheet({
   const [error, setError] = useState<string | null>(null);
 
   const total = input.lineItems.reduce((s, i) => s + i.qty * i.rate, 0);
-  const lineItems = uiLineItemsToApiPayload(input.lineItems);
 
   async function convert() {
     if (!input.jobId) {
@@ -39,16 +38,13 @@ export function ConvertToInvoiceSheet({
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch('/api/invoices', {
+      // The backend convert route bills the customer's locked selection,
+      // links the invoice to the estimate, credits any paid deposit, and
+      // is idempotent — so no line-item payload is sent from the client.
+      const res = await apiFetch(`/api/estimates/${input.estimateId}/convert-to-invoice`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jobId: input.jobId,
-          estimateId: input.estimateId,
-          lineItems,
-          discountCents: input.discountCents ?? 0,
-          taxRateBps: input.taxRateBps ?? 0,
-        }),
+        body: JSON.stringify({}),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

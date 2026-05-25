@@ -4,6 +4,8 @@ import {
   handleWebhookEvent,
   InMemoryWebhookRepository,
 } from '../../src/webhooks/webhook-handler';
+import { createWebhookRouter } from '../../src/webhooks/routes';
+import type { AppConfig } from '../../src/shared/config';
 
 describe('P0-014 — Webhook security and idempotency foundation', () => {
   const secret = 'whsec_test_secret_key';
@@ -167,6 +169,53 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
     expect(second.duplicate).toBe(false);
   });
 
+  it('Blocker 1 — create-conflict (durable repo) dedups by the winning row status (PROCESSED → duplicate)', async () => {
+    // Simulate the read-then-create race a Postgres repo resolves via
+    // INSERT ... ON CONFLICT DO NOTHING: findByIdempotencyKey misses
+    // (the concurrent insert isn't visible yet), then create returns the
+    // PRE-EXISTING row, which has a DIFFERENT id. handleWebhookEvent must
+    // detect the id mismatch and dedup by that row's status.
+    const winner = {
+      id: 'winner-processed',
+      source: 'stripe',
+      eventType: 'charge.refunded',
+      idempotencyKey: 'evt_race',
+      payload: {} as Record<string, unknown>,
+      status: 'processed' as const,
+      createdAt: new Date(),
+    };
+    const repo = {
+      findByIdempotencyKey: async () => null,
+      create: async () => ({ ...winner }),
+      updateStatus: async () => {},
+    };
+
+    const result = await handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_race', repo);
+    expect(result.event.id).toBe('winner-processed');
+    expect(result.duplicate).toBe(true);
+  });
+
+  it('Blocker 1 — create-conflict whose winning row FAILED still allows retry', async () => {
+    const winner = {
+      id: 'winner-failed',
+      source: 'stripe',
+      eventType: 'charge.refunded',
+      idempotencyKey: 'evt_race2',
+      payload: {} as Record<string, unknown>,
+      status: 'failed' as const,
+      createdAt: new Date(),
+    };
+    const repo = {
+      findByIdempotencyKey: async () => null,
+      create: async () => ({ ...winner }),
+      updateStatus: async () => {},
+    };
+
+    const result = await handleWebhookEvent('stripe', 'charge.refunded', {}, 'evt_race2', repo);
+    expect(result.event.id).toBe('winner-failed');
+    expect(result.duplicate).toBe(false);
+  });
+
   it('validation — malformed signature format rejected', () => {
     const valid = verifyWebhookSignature('payload', 'no-format', secret);
     expect(valid).toBe(false);
@@ -183,5 +232,14 @@ describe('P0-014 — Webhook security and idempotency foundation', () => {
     const payload = JSON.stringify({ event: 'test' });
     const valid = verifyWebhookSignature(payload, 't=notanumber,v1=abcdef', secret);
     expect(valid).toBe(false);
+  });
+});
+
+describe('Blocker 1 — createWebhookRouter durable-idempotency guard', () => {
+  it('throws in production when no durable webhookRepo is supplied', () => {
+    const config = { NODE_ENV: 'prod' } as AppConfig;
+    expect(() => createWebhookRouter(config, {})).toThrow(
+      /durable webhookRepo is required in production/,
+    );
   });
 });

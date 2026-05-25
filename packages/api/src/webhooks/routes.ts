@@ -1,6 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { AppConfig } from '../shared/config';
-import { verifyWebhookSignature, handleWebhookEvent, InMemoryWebhookRepository } from './webhook-handler';
+import {
+  verifyWebhookSignature,
+  handleWebhookEvent,
+  InMemoryWebhookRepository,
+  WebhookRepository,
+} from './webhook-handler';
 import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
@@ -29,9 +34,6 @@ import { dispatchInboundSms } from '../sms/inbound-dispatch';
 import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
-
-// Shared in-memory repo for dev — swap for DB-backed repo in production
-const webhookRepo = new InMemoryWebhookRepository();
 
 export interface WebhookRouterDeps {
   tenantRepo?: TenantRepository;
@@ -102,10 +104,32 @@ export interface WebhookRouterDeps {
   };
   /** §7 Layer A — payment receipt SMS/email after Stripe checkout completes. */
   paymentReceiptNotifier?: PaymentReceiptNotifier;
+  /**
+   * Blocker 1 — durable idempotency store backing the Stripe/Clerk dedup
+   * (`handleWebhookEvent`). MUST be supplied in production: the in-memory
+   * fallback is wiped on restart and not shared across instances, so
+   * Stripe/Clerk retries would re-process (duplicate deposit credit,
+   * duplicate tenant bootstrap). `createWebhookRouter` throws in
+   * production when this is absent.
+   */
+  webhookRepo?: WebhookRepository;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
   const router = Router();
+
+  // Blocker 1 — Stripe/Clerk webhook idempotency store. Durable (Postgres)
+  // in production; falls back to an in-memory map for tests/dev. Fail fast
+  // if a production deploy forgot to wire the durable repo rather than
+  // silently running with non-durable, per-instance dedup.
+  if (config.NODE_ENV === 'prod' && !deps.webhookRepo) {
+    throw new Error(
+      'createWebhookRouter: a durable webhookRepo is required in production ' +
+        '(in-memory webhook idempotency is wiped on restart and not shared ' +
+        'across instances, allowing duplicate Stripe/Clerk processing)',
+    );
+  }
+  const webhookRepo: WebhookRepository = deps.webhookRepo ?? new InMemoryWebhookRepository();
 
   /**
    * POST /webhooks/clerk
@@ -785,6 +809,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentRepo,
             moneyStateDeps,
             deps.paymentReceiptNotifier,
+            deps.auditRepo,
+            { actorRole: 'system', correlationId: paymentIntentRef },
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
@@ -808,6 +834,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.paymentRepo,
                   moneyStateDeps,
                   deps.paymentReceiptNotifier,
+                  deps.auditRepo,
+                  { actorRole: 'system', correlationId: paymentIntentRef },
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
