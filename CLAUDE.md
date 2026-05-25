@@ -1,10 +1,21 @@
 # AI Service OS — Claude Code Context
 
 ## Project Structure
-- /infra — AWS CDK stacks (TypeScript)
+Canonical product (deployed on Railway):
 - /packages/api — Backend API (TypeScript, Node, Express)
 - /packages/web — Frontend (React, TypeScript, Tailwind)
 - /packages/shared — Shared types, contracts, constants
+
+Deployment: /railway.toml + /Dockerfile (Railway is the deploy target).
+See /docs/deployment.md.
+
+NOT deployed / experimental — do not mistake for production (each has a
+README explaining why):
+- /infra — AWS CDK stacks; built but deployed by nothing.
+- /service-os-app — Next.js prototype that bypasses the proposal/audit gate.
+- /service-os-agent — Python LangGraph prototype with known defects.
+- /supabase_migration.sql — schema for the service-os-app prototype only;
+  unrelated to the canonical in-code migrations (packages/api/src/db/schema.ts).
 
 ## Core Patterns
 - All money: integer cents, never floating point
