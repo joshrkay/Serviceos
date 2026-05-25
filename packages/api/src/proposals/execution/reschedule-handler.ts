@@ -14,6 +14,7 @@ import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 import { TransactionalCommsService } from '../../notifications/transactional-comms-service';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
+import { boardDateFromAppointment } from '../../dispatch/board-revision';
 
 export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reschedule_appointment';
@@ -196,7 +197,16 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
         await this.transactionalComms.notifyRescheduled(context.tenantId, appointmentId);
       }
 
+      // Spatial board sync. When a reschedule crosses calendar days, BOTH
+      // boards must refresh: the new day (appointment appears) and the old
+      // day (appointment leaves). Notifying only the new day would leave a
+      // stale card on a dispatcher viewing the original day.
       notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
+      const oldDate = boardDateFromAppointment(appointment.scheduledStart);
+      const newDate = boardDateFromAppointment(updated.scheduledStart);
+      if (oldDate !== newDate) {
+        notifyDispatchBoardChanged(context.tenantId, appointment.scheduledStart);
+      }
 
       return {
         success: true,

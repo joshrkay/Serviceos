@@ -55,6 +55,18 @@ import {
   updateCustomer,
 } from '../../customers/customer';
 import { LocationRepository } from '../../locations/location';
+import { LeadRepository } from '../../leads/lead';
+import { ConvertLeadExecutionHandler } from './convert-lead-handler';
+import {
+  ConfirmAppointmentExecutionHandler,
+  MarkLeadLostExecutionHandler,
+  AddServiceLocationExecutionHandler,
+  LogTimeEntryExecutionHandler,
+  NotifyDelayExecutionHandler,
+  RequestFeedbackExecutionHandler,
+} from './full-app-voice-handlers';
+import { TimeEntryService } from '../../time-tracking/time-entry-service';
+import { FeedbackRequestRepository } from '../../feedback/feedback-request';
 import { LineItem } from '../../shared/billing-engine';
 
 export interface ExecutionContext {
@@ -414,6 +426,12 @@ export function createExecutionHandlerRegistry(deps?: {
   serviceCreditRepo?: ServiceCreditRepository;
   googleReplyResolver?: GoogleBusinessReplyResolver;
   reviewPrivateMessageSender?: ReviewPrivateMessageSender;
+  // convert_lead / mark_lead_lost wiring. When absent the handler
+  // degrades to a passthrough so in-memory tests can omit it.
+  leadRepo?: LeadRepository;
+  // Wave-2 full-app voice handlers. All optional; absent → passthrough.
+  timeEntryService?: TimeEntryService;
+  feedbackRepo?: FeedbackRequestRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -469,8 +487,16 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.invoiceRepo,
       moneyStateDeps,
       deps?.transactionalComms,
+      deps?.auditRepo,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
+    new ConfirmAppointmentExecutionHandler(deps?.appointmentRepo),
+    new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
+    new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
+    new LogTimeEntryExecutionHandler(deps?.timeEntryService),
+    new NotifyDelayExecutionHandler(),
+    new RequestFeedbackExecutionHandler(deps?.feedbackRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
     // degraded behavior. Action class 'comms' guarantees the proposal

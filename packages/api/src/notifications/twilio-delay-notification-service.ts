@@ -1,6 +1,6 @@
 import { DelayNotificationService } from './delay-notifications';
 import { MessageDeliveryProvider } from './delivery-provider';
-import { DispatchRepository } from './dispatch-repository';
+import { DispatchEntityType, DispatchRepository } from './dispatch-repository';
 
 /**
  * Real implementation of DelayNotificationService that routes delay notices
@@ -20,12 +20,14 @@ export class TwilioDelayNotificationService implements DelayNotificationService 
     destination: string;
     message: string;
     idempotencyKey: string;
+    entityType?: DispatchEntityType;
     metadata?: Record<string, unknown>;
   }): Promise<{ providerMessageId?: string }> {
     const entityId =
       typeof request.metadata?.appointmentId === 'string'
         ? request.metadata.appointmentId
         : request.customerId;
+    const entityType: DispatchEntityType = request.entityType ?? 'delay_notice';
 
     if (request.channel === 'sms') {
       const result = await this.delivery.sendSms({
@@ -36,7 +38,7 @@ export class TwilioDelayNotificationService implements DelayNotificationService 
       });
       await this.dispatchRepo.create({
         tenantId: request.tenantId,
-        entityType: 'delay_notice',
+        entityType,
         entityId,
         channel: 'sms',
         recipient: request.destination,
@@ -58,7 +60,7 @@ export class TwilioDelayNotificationService implements DelayNotificationService 
     });
     await this.dispatchRepo.create({
       tenantId: request.tenantId,
-      entityType: 'delay_notice',
+      entityType,
       entityId,
       channel: 'email',
       recipient: request.destination,

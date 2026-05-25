@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { CancelAppointmentExecutionHandler } from '../../../src/proposals/execution/cancellation-handler';
 import { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
+import { getDispatchBoardEventBus } from '../../../src/dispatch/board-event-bus';
 
 describe('P6-014 — Execution for cancellation proposals', () => {
   let handler: CancelAppointmentExecutionHandler;
@@ -72,6 +73,26 @@ describe('P6-014 — Execution for cancellation proposals', () => {
     });
     const result = await handler.execute(proposal, context);
     expect(result.success).toBe(false);
+  });
+
+  it('refreshes the dispatch board for the appointment day on cancel', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    const boardDates: string[] = [];
+    const unsub = getDispatchBoardEventBus().subscribe(tenantId, '2026-03-14', (e) => {
+      if (e.type === 'board_updated') boardDates.push(e.date);
+    });
+    await handler.execute(
+      makeProposal({ appointmentId: appt.id, reason: 'Customer cancelled', cancellationType: 'customer_request' }),
+      context,
+    );
+    unsub();
+    expect(boardDates).toContain('2026-03-14');
   });
 
   it('rejects cancelling a completed appointment', async () => {

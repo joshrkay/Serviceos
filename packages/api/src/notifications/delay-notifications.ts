@@ -4,6 +4,7 @@ import { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { DispatchAnalyticsRepository, captureDispatchEvent } from '../dispatch/analytics';
+import { DispatchEntityType } from './dispatch-repository';
 import { Logger } from '../logging/logger';
 
 export type DelayNotificationChannel = 'sms' | 'email' | 'in_app';
@@ -16,6 +17,11 @@ export interface DelayNotificationService {
     destination: string;
     message: string;
     idempotencyKey: string;
+    /**
+     * Dispatch entity type recorded on the message_dispatches row. Defaults
+     * to 'delay_notice'; the en-route path passes 'appointment_en_route'.
+     */
+    entityType?: DispatchEntityType;
     metadata?: Record<string, unknown>;
   }): Promise<{ providerMessageId?: string }>;
 }
@@ -118,6 +124,23 @@ export function selectDelayTemplate(variants: DelayTemplateVariants, delayMinute
   return variants.m10;
 }
 
+export interface EnRouteTemplateRenderInput {
+  customerName: string;
+  technicianName?: string;
+  etaWindow?: { start: Date; end: Date; timezone?: string };
+}
+
+/**
+ * Neutral "on the way" message — distinct from the delay variants. Sent when
+ * a technician departs for the customer's appointment.
+ */
+export function renderEnRouteTemplate(input: EnRouteTemplateRenderInput): string {
+  const greeting = input.customerName ? `Hi ${input.customerName}, ` : 'Hi, ';
+  const tech = input.technicianName ? `${input.technicianName} is` : 'our technician is';
+  const etaText = formatEtaWindow(input.etaWindow);
+  return `${greeting}${tech} on the way to your appointment.${etaText}`;
+}
+
 function isSameServiceDay(a: Date, b: Date, timezone = 'UTC'): boolean {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     year: 'numeric',
@@ -199,6 +222,35 @@ export class NextCustomerSelector {
 
     return { appointment: nextAppointment, customer, channel, destination };
   }
+
+  /**
+   * Resolve the customer ON the given appointment (not the next one). Used by
+   * the en-route notice: "on my way" targets the appointment the technician
+   * is currently heading to, not the downstream appointment a delay impacts.
+   */
+  async selectCurrent(
+    tenantId: string,
+    appointmentId: string,
+  ): Promise<NextCustomerSelection | null> {
+    const appointment = await this.appointmentRepo.findById(tenantId, appointmentId);
+    if (!appointment) return null;
+    if (
+      appointment.status === 'canceled' ||
+      appointment.status === 'completed' ||
+      appointment.status === 'no_show'
+    ) {
+      return null;
+    }
+
+    const job = await this.jobRepo.findById(tenantId, appointment.jobId);
+    if (!job) return null;
+
+    const customer = await this.customerRepo.findById(tenantId, job.customerId);
+    if (!customer) return null;
+
+    const { channel, destination } = resolveCustomerChannel(customer);
+    return { appointment, customer, channel, destination };
+  }
 }
 
 export interface DelayNoticeQueuePayload {
@@ -212,6 +264,10 @@ export interface DelayNoticeQueuePayload {
   destination?: string;
   message: string;
   idempotencyKey: string;
+  /** Discriminates delay notices from en-route notices on the shared worker. */
+  kind?: 'delay' | 'en_route';
+  /** Dispatch entity type to record. Defaults to 'delay_notice'. */
+  entityType?: DispatchEntityType;
 }
 
 export interface EnqueueDelayNoticeInput {
@@ -323,6 +379,89 @@ export class DelayNotificationCoordinator {
         destination: target.destination,
         message,
         idempotencyKey,
+        kind: 'delay',
+      },
+      idempotencyKey,
+    );
+
+    return idempotencyKey;
+  }
+
+  /**
+   * Enqueue a neutral "on the way" notice for the customer ON the given
+   * appointment. Reuses the delay delivery worker (consent, DNC, retries,
+   * dispatch recording) but targets the current appointment and stamps an
+   * 'appointment_en_route' dispatch entity type.
+   */
+  async enqueueEnRouteNotice(input: {
+    tenantId: string;
+    appointmentId: string;
+    technicianName?: string;
+  }): Promise<string | null> {
+    const target = await this.selector.selectCurrent(input.tenantId, input.appointmentId);
+    if (!target) return null;
+
+    const idempotencyKey = `${target.appointment.id}:en_route`;
+    const existing = await this.stateRepo.findByKey(idempotencyKey);
+    if (
+      existing?.status === 'queued' ||
+      existing?.status === 'retrying' ||
+      existing?.status === 'sent' ||
+      existing?.status === 'fallback_in_app'
+    ) {
+      return idempotencyKey;
+    }
+
+    const etaWindow = {
+      start: target.appointment.arrivalWindowStart ?? target.appointment.scheduledStart,
+      end: target.appointment.arrivalWindowEnd ?? target.appointment.scheduledEnd,
+      timezone: target.appointment.timezone,
+    };
+    const message = renderEnRouteTemplate({
+      customerName: target.customer.firstName || target.customer.displayName,
+      technicianName: input.technicianName,
+      etaWindow,
+    });
+
+    await this.stateRepo.upsert({
+      idempotencyKey,
+      tenantId: input.tenantId,
+      appointmentId: target.appointment.id,
+      delayVersion: 0,
+      status: target.channel === 'in_app' ? 'fallback_in_app' : 'queued',
+      channel: target.channel,
+      attempts: 0,
+      maxAttempts: this.queue.getConfig().maxRetries,
+      updatedAt: new Date(),
+    });
+
+    if (target.channel === 'in_app') {
+      await this.internalAlertSink.createDelayAlert({
+        tenantId: input.tenantId,
+        appointmentId: target.appointment.id,
+        customerId: target.customer.id,
+        message,
+        idempotencyKey,
+        metadata: { kind: 'en_route' },
+      });
+      return idempotencyKey;
+    }
+
+    await this.queue.send<DelayNoticeQueuePayload>(
+      DelayNotificationCoordinator.QUEUE_TYPE,
+      {
+        tenantId: input.tenantId,
+        appointmentId: target.appointment.id,
+        delayVersion: 0,
+        delayMinutes: 0,
+        targetCustomerId: target.customer.id,
+        customerName: target.customer.displayName,
+        channel: target.channel,
+        destination: target.destination,
+        message,
+        idempotencyKey,
+        kind: 'en_route',
+        entityType: 'appointment_en_route',
       },
       idempotencyKey,
     );
@@ -349,6 +488,7 @@ export function createDelayNotificationWorker(deps: {
         maxAttempts: message.maxAttempts,
       } as const;
 
+      const isEnRoute = payload.kind === 'en_route';
       try {
         const response = await deps.service.sendDelayNotice({
           tenantId: payload.tenantId,
@@ -357,6 +497,7 @@ export function createDelayNotificationWorker(deps: {
           destination: payload.destination || '',
           message: payload.message,
           idempotencyKey: payload.idempotencyKey,
+          entityType: payload.entityType,
           metadata: {
             delayMinutes: payload.delayMinutes,
             appointmentId: payload.appointmentId,
@@ -371,10 +512,15 @@ export function createDelayNotificationWorker(deps: {
           updatedAt: new Date(),
         });
 
-        await captureDispatchEvent(deps.analyticsRepo, payload.tenantId, 'delay_notice_sent', {
-          appointmentId: payload.appointmentId,
-          metadata: { channel: payload.channel, delayVersion: payload.delayVersion },
-        });
+        await captureDispatchEvent(
+          deps.analyticsRepo,
+          payload.tenantId,
+          isEnRoute ? 'en_route_notice_sent' : 'delay_notice_sent',
+          {
+            appointmentId: payload.appointmentId,
+            metadata: { channel: payload.channel, delayVersion: payload.delayVersion },
+          },
+        );
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         const isTransient = error instanceof DelayNotificationTransientError;
@@ -389,16 +535,21 @@ export function createDelayNotificationWorker(deps: {
         });
 
         if (!isTransient || exhausted) {
-          await captureDispatchEvent(deps.analyticsRepo, payload.tenantId, 'delay_notice_failed', {
-            appointmentId: payload.appointmentId,
-            metadata: {
-              channel: payload.channel,
-              delayVersion: payload.delayVersion,
-              transient: isTransient,
-              exhausted,
-              error: err.message,
+          await captureDispatchEvent(
+            deps.analyticsRepo,
+            payload.tenantId,
+            isEnRoute ? 'en_route_notice_failed' : 'delay_notice_failed',
+            {
+              appointmentId: payload.appointmentId,
+              metadata: {
+                channel: payload.channel,
+                delayVersion: payload.delayVersion,
+                transient: isTransient,
+                exhausted,
+                error: err.message,
+              },
             },
-          });
+          );
           logger.error('Delay notification delivery failed', {
             appointmentId: payload.appointmentId,
             error: err.message,

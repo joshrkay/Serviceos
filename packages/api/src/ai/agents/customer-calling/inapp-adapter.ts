@@ -213,6 +213,15 @@ export function intentToProposalType(intent: string | undefined): ProposalType {
     case 'create_job': return 'create_job';
     case 'add_note': return 'add_note';
     case 'emergency_dispatch': return 'emergency_dispatch';
+    case 'update_customer': return 'update_customer';
+    case 'log_expense': return 'log_expense';
+    case 'convert_lead': return 'convert_lead';
+    case 'confirm_appointment': return 'confirm_appointment';
+    case 'mark_lead_lost': return 'mark_lead_lost';
+    case 'add_service_location': return 'add_service_location';
+    case 'log_time_entry': return 'log_time_entry';
+    case 'notify_delay': return 'notify_delay';
+    case 'request_feedback': return 'request_feedback';
     default: return 'voice_clarification';
   }
 }

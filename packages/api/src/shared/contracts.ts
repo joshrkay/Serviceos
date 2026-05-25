@@ -113,6 +113,11 @@ const lineItemSchema = z.object({
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Good-better-best tiers + optional add-ons (estimates only).
+  groupKey: z.string().min(1).max(120).optional(),
+  groupLabel: z.string().min(1).max(200).optional(),
+  isOptional: z.boolean().optional(),
+  isDefaultSelected: z.boolean().optional(),
 });
 
 export const createCustomerSchema = z.object({

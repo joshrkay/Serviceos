@@ -2,10 +2,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
   Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
-  MapPin, FileText, Calendar, Clock, User,
+  MapPin, FileText, Calendar, Clock, User, Download,
 } from 'lucide-react';
 import { estimates, customers, calcEstimateTotal } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
+import { printEstimateDocument } from '../../lib/estimatePdf';
 
 interface PublicEstimateView {
   id: string;
@@ -17,11 +18,18 @@ interface PublicEstimateView {
   businessPhone?: string;
   businessEmail?: string;
   lineItems: Array<{
+    id: string;
     description: string;
     quantity: number;
     unitPriceCents: number;
     totalCents: number;
+    groupKey?: string;
+    groupLabel?: string;
+    isOptional?: boolean;
+    isDefaultSelected?: boolean;
   }>;
+  /** True when the estimate has tier options or optional add-ons to choose. */
+  hasSelectableItems?: boolean;
   totalCents: number;
   subtotalCents: number;
   taxCents: number;
@@ -160,13 +168,15 @@ function SignatureCanvas({ onChange, canvasRef: externalRef }: {
 
 // ─── Approval sheet ───────────────────────────────────────────────────────
 function ApprovalSheet({
-  estimateNumber, customer, total, token, expectedVersion, onStale, onClose, onConfirm,
+  estimateNumber, customer, total, token, expectedVersion, selectedLineItemIds, onStale, onClose, onConfirm,
 }: {
   estimateNumber: string; customer: string; total: number;
   /** When set, submit calls the real /public/estimates/:token/approve endpoint. */
   token?: string;
   /** The version the customer is viewing; sent so a stale accept is rejected. */
   expectedVersion?: number;
+  /** Good-better-best selection, when the estimate has selectable items. */
+  selectedLineItemIds?: string[];
   /** Called when the server reports the estimate changed (409) since load. */
   onStale?: () => void;
   onClose: () => void; onConfirm: (view?: PublicEstimateView) => void;
@@ -194,6 +204,7 @@ function ApprovalSheet({
               ? signatureData
               : undefined,
             expectedVersion,
+            selectedLineItemIds,
           }),
         });
         if (res.status === 409) {
@@ -500,6 +511,9 @@ export function EstimateApprovalPage() {
   // (version bumped) after the customer opened the page. The banner asks
   // them to review the latest version; approve is also blocked server-side.
   const [revised, setRevised] = useState(false);
+  // Good-better-best: the line-item ids the customer has chosen. Null
+  // until the estimate loads, then seeded from the server's defaults.
+  const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
 
   useEffect(() => {
     if (!id) {
@@ -579,18 +593,96 @@ export function EstimateApprovalPage() {
   const customerName    = apiView?.customerName    ?? mockEst.customer;
   const customerAddress = apiView?.customerAddress ?? mockCustomer?.address ?? '';
   const description     = apiView?.customerMessage ?? mockEst.description;
-  const total           = apiView ? apiView.totalCents / 100 : calcEstimateTotal(mockEst);
   const validUntilText  = apiView?.validUntil
     ? apiView.validUntil.slice(0, 10)
     : mockEst.validUntil;
+  // Good-better-best selection. `selectable` items (tier options + add-ons)
+  // are chosen by the customer; everything else is always billed. Seed the
+  // selection from the server defaults the first time the estimate loads.
+  const apiItems = apiView?.lineItems ?? [];
+  const hasSelectable = apiView?.hasSelectableItems ?? false;
+  const isSelectable = (li: { isOptional?: boolean; groupKey?: string }) =>
+    Boolean(li.isOptional || li.groupKey);
+  useEffect(() => {
+    if (!apiView || !hasSelectable || selectedIds !== null) return;
+    // Seed one option per tier group (the flagged default, else the first
+    // by order) plus any pre-checked add-ons — matching the server's
+    // default resolution so the preview total is correct on first load.
+    const seed: string[] = [];
+    const groups = new Map<string, typeof apiView.lineItems>();
+    for (const li of apiView.lineItems) {
+      if (li.groupKey) {
+        const arr = groups.get(li.groupKey) ?? [];
+        arr.push(li);
+        groups.set(li.groupKey, arr);
+      } else if (li.isOptional && li.isDefaultSelected) {
+        seed.push(li.id);
+      }
+    }
+    for (const items of groups.values()) {
+      const chosen = items.find(i => i.isDefaultSelected) ?? items[0];
+      if (chosen) seed.push(chosen.id);
+    }
+    setSelectedIds(seed);
+  }, [apiView, hasSelectable, selectedIds]);
+
+  const chosen = new Set(selectedIds ?? []);
+  const billedApiItems = hasSelectable
+    ? apiItems.filter(li => !isSelectable(li) || chosen.has(li.id))
+    : apiItems;
+
+  // Group the selectable items: tier groups (radio) keyed by groupKey,
+  // standalone add-ons (checkbox) collected separately.
+  const tierGroups = new Map<string, { label: string; items: typeof apiItems }>();
+  const addOns: typeof apiItems = [];
+  for (const li of apiItems) {
+    if (li.groupKey) {
+      const g = tierGroups.get(li.groupKey) ?? { label: li.groupLabel ?? 'Options', items: [] };
+      g.items.push(li);
+      tierGroups.set(li.groupKey, g);
+    } else if (li.isOptional) {
+      addOns.push(li);
+    }
+  }
+
+  // Client-side preview total. The server recomputes authoritatively on
+  // approve; this just keeps the displayed figure in sync with the choice.
+  const selectedSubtotalCents = billedApiItems.reduce((s, li) => s + li.totalCents, 0);
+  const effRateBps = apiView && apiView.subtotalCents > apiView.discountCents
+    ? Math.round((apiView.taxCents * 10000) / (apiView.subtotalCents - apiView.discountCents))
+    : 0;
+  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0)) * effRateBps) / 10000);
+  const previewTotalCents = Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0) + previewTaxCents);
+
+  function selectTier(groupKey: string, itemId: string) {
+    setSelectedIds(prev => {
+      const group = tierGroups.get(groupKey);
+      const groupIds = new Set(group?.items.map(i => i.id) ?? []);
+      const next = (prev ?? []).filter(id => !groupIds.has(id));
+      next.push(itemId);
+      return next;
+    });
+  }
+  function toggleAddOn(itemId: string) {
+    setSelectedIds(prev => {
+      const set = new Set(prev ?? []);
+      if (set.has(itemId)) set.delete(itemId);
+      else set.add(itemId);
+      return [...set];
+    });
+  }
+
   const lineItems       = apiView
-    ? apiView.lineItems.map(li => ({
+    ? billedApiItems.map(li => ({
         description: li.description,
         qty: li.quantity,
         rate: li.unitPriceCents / 100,
       }))
     : mockEst.lineItems;
   const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
+  const total           = apiView
+    ? (hasSelectable ? previewTotalCents : apiView.totalCents) / 100
+    : calcEstimateTotal(mockEst);
   const isExpired       = apiView?.isExpired ?? false;
   const isAlreadyDeclined = apiView?.status === 'rejected';
 
@@ -699,6 +791,71 @@ export function EstimateApprovalPage() {
             )}
           </div>
 
+          {/* Good-better-best: tier groups + optional add-ons. Shown only
+              when the estimate has selectable items. Drives the preview
+              total above; the server recomputes on approve. */}
+          {hasSelectable && (
+            <div className="mb-4 flex flex-col gap-4">
+              {[...tierGroups.entries()].map(([groupKey, group]) => (
+                <div key={groupKey} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                  <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+                    <p className="text-xs text-slate-500">{group.label} · choose one</p>
+                  </div>
+                  <div className="divide-y divide-slate-50">
+                    {group.items.map(item => {
+                      const isSel = chosen.has(item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => selectTier(groupKey, item.id)}
+                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                        >
+                          <span className="flex items-center gap-3 min-w-0">
+                            <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
+                              {isSel && <span className="size-1.5 rounded-full bg-white" />}
+                            </span>
+                            <span className="text-sm text-slate-800 truncate">{item.description}</span>
+                          </span>
+                          <span className="text-sm text-slate-900 shrink-0">${(item.totalCents / 100).toLocaleString()}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+
+              {addOns.length > 0 && (
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                  <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100">
+                    <p className="text-xs text-slate-500">Optional add-ons</p>
+                  </div>
+                  <div className="divide-y divide-slate-50">
+                    {addOns.map(item => {
+                      const isSel = chosen.has(item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => toggleAddOn(item.id)}
+                          className={`flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors ${isSel ? 'bg-blue-50' : 'hover:bg-slate-50'}`}
+                        >
+                          <span className="flex items-center gap-3 min-w-0">
+                            <span className={`flex size-4 shrink-0 items-center justify-center rounded border ${isSel ? 'border-blue-600 bg-blue-600' : 'border-slate-300'}`}>
+                              {isSel && <Check size={11} className="text-white" />}
+                            </span>
+                            <span className="text-sm text-slate-800 truncate">{item.description}</span>
+                          </span>
+                          <span className="text-sm text-slate-900 shrink-0">+${(item.totalCents / 100).toLocaleString()}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Line items */}
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden mb-4">
             <div className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-2.5 bg-slate-50 border-b border-slate-100">
@@ -730,6 +887,22 @@ export function EstimateApprovalPage() {
               <p className="text-white" style={{ fontSize: '1.15rem' }}>${total.toLocaleString()}</p>
             </div>
           </div>
+
+          <button
+            onClick={() => printEstimateDocument({
+              estimateNumber,
+              customerName,
+              businessName,
+              businessContact: businessPhone,
+              description,
+              validUntil: validUntilText,
+              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              totalDollars: total,
+            })}
+            className="mb-4 flex items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+          >
+            <Download size={12} /> Download PDF
+          </button>
 
           {/* Deposit notice — Tier 4 (Deposit rules — PR 3a). When the
               tenant has a deposit rule and the estimate qualifies, the
@@ -840,6 +1013,7 @@ export function EstimateApprovalPage() {
           total={total}
           token={usingApi ? id : undefined}
           expectedVersion={apiView?.version}
+          selectedLineItemIds={hasSelectable ? (selectedIds ?? []) : undefined}
           onStale={() => { setRevised(true); setAppr(false); }}
           onClose={() => setAppr(false)}
           onConfirm={(view) => {
