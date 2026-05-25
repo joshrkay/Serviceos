@@ -594,30 +594,10 @@ export function EstimateApprovalPage() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [id, apiView, accepted, loadedVersion]);
 
-  // Mock-data fallback (used when running against a fixture URL or when
-  // the public API isn't reachable in dev).
-  const mockEst = estimates.find(e =>
-    e.id === id || e.estimateNumber.toLowerCase().replace('-', '') === id?.toLowerCase()
-  ) ?? estimates[0];
-  const mockCustomer = customers.find(c => c.id === mockEst.customerId);
-
-  const usingApi = apiView !== null;
-  const estimateNumber  = apiView?.estimateNumber  ?? mockEst.estimateNumber;
-  const businessName    = apiView?.businessName    ?? 'Fieldly Pro Services';
-  const businessPhone   = apiView?.businessPhone   ?? '(512) 555-0000';
-  const customerName    = apiView?.customerName    ?? mockEst.customer;
-  const customerAddress = apiView?.customerAddress ?? mockCustomer?.address ?? '';
-  const description     = apiView?.customerMessage ?? mockEst.description;
-  const validUntilText  = apiView?.validUntil
-    ? apiView.validUntil.slice(0, 10)
-    : mockEst.validUntil;
-  // Good-better-best selection. `selectable` items (tier options + add-ons)
-  // are chosen by the customer; everything else is always billed. Seed the
-  // selection from the server defaults the first time the estimate loads.
-  const apiItems = apiView?.lineItems ?? [];
+  // Good-better-best: seed the customer's selection from the server
+  // defaults once the estimate loads. Selectable items (tier options +
+  // add-ons) are chosen by the customer; everything else is always billed.
   const hasSelectable = apiView?.hasSelectableItems ?? false;
-  const isSelectable = (li: { isOptional?: boolean; groupKey?: string }) =>
-    Boolean(li.isOptional || li.groupKey);
   useEffect(() => {
     if (!apiView || !hasSelectable || selectedIds !== null) return;
     // Seed one option per tier group (the flagged default, else the first
@@ -640,66 +620,6 @@ export function EstimateApprovalPage() {
     }
     setSelectedIds(seed);
   }, [apiView, hasSelectable, selectedIds]);
-
-  const chosen = new Set(selectedIds ?? []);
-  const billedApiItems = hasSelectable
-    ? apiItems.filter(li => !isSelectable(li) || chosen.has(li.id))
-    : apiItems;
-
-  // Group the selectable items: tier groups (radio) keyed by groupKey,
-  // standalone add-ons (checkbox) collected separately.
-  const tierGroups = new Map<string, { label: string; items: typeof apiItems }>();
-  const addOns: typeof apiItems = [];
-  for (const li of apiItems) {
-    if (li.groupKey) {
-      const g = tierGroups.get(li.groupKey) ?? { label: li.groupLabel ?? 'Options', items: [] };
-      g.items.push(li);
-      tierGroups.set(li.groupKey, g);
-    } else if (li.isOptional) {
-      addOns.push(li);
-    }
-  }
-
-  // Client-side preview total. The server recomputes authoritatively on
-  // approve; this just keeps the displayed figure in sync with the choice.
-  const selectedSubtotalCents = billedApiItems.reduce((s, li) => s + li.totalCents, 0);
-  const effRateBps = apiView && apiView.subtotalCents > apiView.discountCents
-    ? Math.round((apiView.taxCents * 10000) / (apiView.subtotalCents - apiView.discountCents))
-    : 0;
-  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0)) * effRateBps) / 10000);
-  const previewTotalCents = Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0) + previewTaxCents);
-
-  function selectTier(groupKey: string, itemId: string) {
-    setSelectedIds(prev => {
-      const group = tierGroups.get(groupKey);
-      const groupIds = new Set(group?.items.map(i => i.id) ?? []);
-      const next = (prev ?? []).filter(id => !groupIds.has(id));
-      next.push(itemId);
-      return next;
-    });
-  }
-  function toggleAddOn(itemId: string) {
-    setSelectedIds(prev => {
-      const set = new Set(prev ?? []);
-      if (set.has(itemId)) set.delete(itemId);
-      else set.add(itemId);
-      return [...set];
-    });
-  }
-
-  const lineItems       = apiView
-    ? billedApiItems.map(li => ({
-        description: li.description,
-        qty: li.quantity,
-        rate: li.unitPriceCents / 100,
-      }))
-    : mockEst.lineItems;
-  const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
-  const total           = apiView
-    ? (hasSelectable ? previewTotalCents : apiView.totalCents) / 100
-    : calcEstimateTotal(mockEst);
-  const isExpired       = apiView?.isExpired ?? false;
-  const isAlreadyDeclined = apiView?.status === 'rejected';
 
   if (apiLoading) {
     return (
@@ -736,14 +656,66 @@ export function EstimateApprovalPage() {
   const customerName    = apiView.customerName;
   const customerAddress = apiView.customerAddress ?? '';
   const description     = apiView.customerMessage ?? '';
-  const total           = apiView.totalCents / 100;
   const validUntilText  = apiView.validUntil ? apiView.validUntil.slice(0, 10) : '';
-  const lineItems       = apiView.lineItems.map(li => ({
+
+  // Good-better-best derivations. `selectable` items (tier options +
+  // add-ons) are chosen by the customer; everything else is always billed.
+  const apiItems = apiView.lineItems;
+  const isSelectable = (li: { isOptional?: boolean; groupKey?: string }) =>
+    Boolean(li.isOptional || li.groupKey);
+  const chosen = new Set(selectedIds ?? []);
+  const billedApiItems = hasSelectable
+    ? apiItems.filter(li => !isSelectable(li) || chosen.has(li.id))
+    : apiItems;
+
+  // Group the selectable items: tier groups (radio) keyed by groupKey,
+  // standalone add-ons (checkbox) collected separately.
+  const tierGroups = new Map<string, { label: string; items: typeof apiItems }>();
+  const addOns: typeof apiItems = [];
+  for (const li of apiItems) {
+    if (li.groupKey) {
+      const g = tierGroups.get(li.groupKey) ?? { label: li.groupLabel ?? 'Options', items: [] };
+      g.items.push(li);
+      tierGroups.set(li.groupKey, g);
+    } else if (li.isOptional) {
+      addOns.push(li);
+    }
+  }
+
+  // Client-side preview total. The server recomputes authoritatively on
+  // approve; this just keeps the displayed figure in sync with the choice.
+  const selectedSubtotalCents = billedApiItems.reduce((s, li) => s + li.totalCents, 0);
+  const effRateBps = apiView.subtotalCents > apiView.discountCents
+    ? Math.round((apiView.taxCents * 10000) / (apiView.subtotalCents - apiView.discountCents))
+    : 0;
+  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - apiView.discountCents) * effRateBps) / 10000);
+  const previewTotalCents = Math.max(0, selectedSubtotalCents - apiView.discountCents + previewTaxCents);
+
+  function selectTier(groupKey: string, itemId: string) {
+    setSelectedIds(prev => {
+      const group = tierGroups.get(groupKey);
+      const groupIds = new Set(group?.items.map(i => i.id) ?? []);
+      const next = (prev ?? []).filter(id => !groupIds.has(id));
+      next.push(itemId);
+      return next;
+    });
+  }
+  function toggleAddOn(itemId: string) {
+    setSelectedIds(prev => {
+      const set = new Set(prev ?? []);
+      if (set.has(itemId)) set.delete(itemId);
+      else set.add(itemId);
+      return [...set];
+    });
+  }
+
+  const lineItems       = billedApiItems.map(li => ({
     description: li.description,
     qty: li.quantity,
     rate: li.unitPriceCents / 100,
   }));
   const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
+  const total           = (hasSelectable ? previewTotalCents : apiView.totalCents) / 100;
   const isExpired       = apiView.isExpired;
   const isAlreadyDeclined = apiView.status === 'rejected';
 
