@@ -12,6 +12,12 @@ import {
   UpdateCustomerTaskHandler,
   LogExpenseTaskHandler,
   ConvertLeadTaskHandler,
+  ConfirmAppointmentTaskHandler,
+  MarkLeadLostTaskHandler,
+  AddServiceLocationTaskHandler,
+  LogTimeEntryTaskHandler,
+  NotifyDelayTaskHandler,
+  RequestFeedbackTaskHandler,
 } from '../../../src/ai/tasks/voice-extended-tasks';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
 import { ConvertLeadExecutionHandler } from '../../../src/proposals/execution/convert-lead-handler';
@@ -96,6 +102,62 @@ describe('ConvertLeadTaskHandler', () => {
     expect(res.proposal.proposalType).toBe('convert_lead');
     expect(res.proposal.payload.leadReference).toBe('the Johnson lead');
     expect(missingFieldsFor(res.proposal)).toContain('leadId');
+  });
+});
+
+describe('wave-2 task handlers', () => {
+  it('confirm_appointment resolves the single active appointment when a repo is wired', async () => {
+    const repo = {
+      listWithMeta: async () => ({ data: [{ id: 'appt-1', status: 'scheduled' }] }),
+    } as unknown as import('../../../src/appointments/appointment').AppointmentRepository;
+    const res = await new ConfirmAppointmentTaskHandler(repo).handle(ctx({}));
+    expect(res.proposal.proposalType).toBe('confirm_appointment');
+    expect(res.proposal.payload.appointmentId).toBe('appt-1');
+    expect(missingFieldsFor(res.proposal)).not.toContain('appointmentId');
+  });
+
+  it('mark_lead_lost carries reason + reference and flags leadId missing', async () => {
+    const res = await new MarkLeadLostTaskHandler().handle(
+      ctx({ message: 'lost it', existingEntities: { leadReference: 'the Davis lead', lostReason: 'price' } }),
+    );
+    expect(res.proposal.proposalType).toBe('mark_lead_lost');
+    expect(res.proposal.payload.leadReference).toBe('the Davis lead');
+    expect(res.proposal.payload.reason).toBe('price');
+    expect(missingFieldsFor(res.proposal)).toContain('leadId');
+  });
+
+  it('add_service_location requires structured address resolution', async () => {
+    const res = await new AddServiceLocationTaskHandler().handle(
+      ctx({ customerId: 'cust-1', existingEntities: { serviceAddress: '412 Oak St' } }),
+    );
+    expect(res.proposal.proposalType).toBe('add_service_location');
+    expect(res.proposal.payload.addressText).toBe('412 Oak St');
+    const missing = missingFieldsFor(res.proposal);
+    expect(missing).toContain('street1');
+    expect(missing).toContain('postalCode');
+  });
+
+  it('log_time_entry defaults entryType to job', async () => {
+    const res = await new LogTimeEntryTaskHandler().handle(ctx({ existingEntities: {} }));
+    expect(res.proposal.proposalType).toBe('log_time_entry');
+    expect(res.proposal.payload.entryType).toBe('job');
+  });
+
+  it('notify_delay carries delay minutes and flags appointmentId when unresolved', async () => {
+    const res = await new NotifyDelayTaskHandler().handle(
+      ctx({ existingEntities: { appointmentReference: 'the 10am', delayMinutes: 30 } }),
+    );
+    expect(res.proposal.proposalType).toBe('notify_delay');
+    expect(res.proposal.payload.delayMinutes).toBe(30);
+    expect(missingFieldsFor(res.proposal)).toContain('appointmentId');
+  });
+
+  it('request_feedback carries the job reference', async () => {
+    const res = await new RequestFeedbackTaskHandler().handle(
+      ctx({ existingEntities: { jobReference: 'the Johnson job' } }),
+    );
+    expect(res.proposal.proposalType).toBe('request_feedback');
+    expect(res.proposal.payload.jobReference).toBe('the Johnson job');
   });
 });
 

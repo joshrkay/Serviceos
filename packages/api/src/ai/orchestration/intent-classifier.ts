@@ -35,6 +35,13 @@ export type IntentType =
   | 'update_customer'
   | 'log_expense'
   | 'convert_lead'
+  // Phase: full-app voice coverage (wave 2). All proposal-driving.
+  | 'confirm_appointment'
+  | 'mark_lead_lost'
+  | 'add_service_location'
+  | 'log_time_entry'
+  | 'notify_delay'
+  | 'request_feedback'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
   // of the proposal-draft path.
@@ -79,6 +86,12 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'update_customer',
   'log_expense',
   'convert_lead',
+  'confirm_appointment',
+  'mark_lead_lost',
+  'add_service_location',
+  'log_time_entry',
+  'notify_delay',
+  'request_feedback',
   'lookup_appointments',
   'lookup_invoices',
   'lookup_balance',
@@ -163,6 +176,15 @@ export interface ExtractedEntities {
   // (caller name or "the Johnson lead"). The execution handler resolves
   // it to a concrete leadId.
   leadReference?: string;
+  // mark_lead_lost: why the lead was lost ("went with a competitor").
+  lostReason?: string;
+  // add_service_location: freeform address the caller stated. The
+  // execution handler / review UI parses it into street/city/state/zip.
+  serviceAddress?: string;
+  // log_time_entry: which kind of time is being logged.
+  timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
+  // notify_delay: how many minutes late the crew is running.
+  delayMinutes?: number;
 }
 
 /**
@@ -425,6 +447,45 @@ Supported intents (return exactly ONE):
                            Examples: "Convert the Johnson lead to a customer"
                                      "Turn that new lead into a customer"
                                      "The Davis lead signed — convert them"
+- "confirm_appointment" — user wants to mark an EXISTING scheduled
+                           appointment as confirmed (the customer
+                           confirmed they'll be there). Extract
+                           appointmentReference.
+                           Examples: "Confirm tomorrow's 2pm appointment"
+                                     "Mark the Miller appointment confirmed"
+                                     "The customer confirmed Tuesday's visit"
+- "mark_lead_lost"      — user wants to mark an existing lead as LOST
+                           (they won't convert). Extract leadReference and
+                           lostReason when stated.
+                           Examples: "Mark the Johnson lead as lost"
+                                     "We lost the Davis lead, went with a competitor"
+                                     "Close out that lead — they're not interested"
+- "add_service_location" — user wants to ADD a new service address to an
+                           existing customer. Extract customerName and the
+                           full serviceAddress as stated.
+                           Examples: "Add a service location for Sarah at 412 Oak Street"
+                                     "New address for the Acme account: 88 Industrial Way, Denver CO"
+                                     "Add a second property for Jordan — 12 Pine Lane"
+- "log_time_entry"      — technician wants to start tracking time (clock
+                           in) on a job or task. Extract jobReference and
+                           timeEntryType (job / drive / break / admin).
+                           Examples: "Clock me in on the Miller job"
+                                     "Start my drive time"
+                                     "Log time on the Rodriguez install"
+- "notify_delay"        — user wants to tell a customer the crew is
+                           running late. Customer-facing comms — never
+                           auto-execute. Extract appointmentReference and
+                           delayMinutes when stated.
+                           Examples: "Let the 10am know we're running 30 minutes behind"
+                                     "Tell the Miller job we're delayed about an hour"
+                                     "Text the customer that we'll be 20 minutes late"
+- "request_feedback"    — user wants to send a post-job feedback / review
+                           request to a customer. Customer-facing comms —
+                           never auto-execute. Extract the jobReference or
+                           customerName.
+                           Examples: "Send a feedback request for the Johnson job"
+                                     "Ask Sarah to leave a review"
+                                     "Request feedback on the completed Miller work"
 - "operator_request"   — caller explicitly asks to speak with a person,
                           dispatcher, owner, or asks to leave the AI agent.
                           Skip normal intent confirmation — escalate
@@ -573,7 +634,11 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "expenseDescription": "<string, optional — what the expense was for on log_expense>",
     "expenseCategory": "<materials|fuel|tools|subcontractor|vehicle|insurance|office|other, optional — on log_expense>",
     "vendor": "<string, optional — who was paid on log_expense>",
-    "leadReference": "<string, optional — the lead being converted on convert_lead>"
+    "leadReference": "<string, optional — the lead being converted/lost on convert_lead/mark_lead_lost>",
+    "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
+    "serviceAddress": "<string, optional — full address on add_service_location>",
+    "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>",
+    "delayMinutes": <integer minutes, optional — on notify_delay>
   }
 }
 
@@ -655,6 +720,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     'office',
     'other',
   ] as const;
+  const TIME_ENTRY_TYPES = ['job', 'drive', 'break', 'admin'] as const;
 
   /**
    * Validate an LLM-provided value against a fixed allowed-set.
@@ -722,6 +788,15 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.vendor === 'string') extracted.vendor = ee.vendor;
     // convert_lead fields
     if (typeof ee.leadReference === 'string') extracted.leadReference = ee.leadReference;
+    // mark_lead_lost fields
+    if (typeof ee.lostReason === 'string') extracted.lostReason = ee.lostReason;
+    // add_service_location fields
+    if (typeof ee.serviceAddress === 'string') extracted.serviceAddress = ee.serviceAddress;
+    // log_time_entry fields
+    const timeEntryType = pickEnum(ee, 'timeEntryType', TIME_ENTRY_TYPES);
+    if (timeEntryType) extracted.timeEntryType = timeEntryType;
+    // notify_delay fields
+    if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

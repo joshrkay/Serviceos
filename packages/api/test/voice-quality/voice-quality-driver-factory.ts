@@ -105,6 +105,34 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
       ? slots.leadReference
       : 'the lead on this call';
   }
+  if (intent === 'confirm_appointment') {
+    entities.appointmentReference = typeof slots.appointmentReference === 'string'
+      ? slots.appointmentReference
+      : 'the appointment';
+  }
+  if (intent === 'mark_lead_lost') {
+    entities.leadReference = typeof slots.leadReference === 'string'
+      ? slots.leadReference
+      : 'the lead on this call';
+    if (typeof slots.reason === 'string') entities.lostReason = slots.reason;
+  }
+  if (intent === 'add_service_location') {
+    entities.serviceAddress = typeof slots.serviceAddress === 'string'
+      ? slots.serviceAddress
+      : '412 Oak Street';
+  }
+  if (intent === 'log_time_entry') {
+    entities.timeEntryType = typeof slots.entryType === 'string' ? slots.entryType : 'job';
+  }
+  if (intent === 'notify_delay') {
+    entities.appointmentReference = typeof slots.appointmentReference === 'string'
+      ? slots.appointmentReference
+      : 'the appointment';
+    if (typeof slots.delayMinutes === 'number') entities.delayMinutes = slots.delayMinutes;
+  }
+  if (intent === 'request_feedback') {
+    if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
+  }
   return JSON.stringify({
     intentType: intent,
     confidence: 0.95,

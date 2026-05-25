@@ -510,6 +510,173 @@ export class ConvertLeadTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── confirm_appointment ─────────────
+//
+// Marks an existing appointment confirmed. Resolves the caller's single
+// active appointment when an appointmentRepo is wired; otherwise carries
+// the free-text reference and flags appointmentId missing.
+export class ConfirmAppointmentTaskHandler implements TaskHandler {
+  readonly taskType = 'confirm_appointment' as const;
+
+  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── mark_lead_lost ─────────────
+//
+// Closes out a lead. The classifier returns a free-text lead reference;
+// leadId is resolved by the review UI / execution handler. A reason is
+// always carried (defaults to the transcript) since loseLead requires one.
+export class MarkLeadLostTaskHandler implements TaskHandler {
+  readonly taskType = 'mark_lead_lost' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      reason: ee.lostReason && ee.lostReason.length > 0 ? ee.lostReason : context.message,
+    };
+    const missing: string[] = ['leadId'];
+
+    const reference = ee.leadReference ?? ee.customerName;
+    if (reference) payload.leadReference = reference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── add_service_location ─────────────
+//
+// Attaches a new service address to a customer. The classifier only has
+// a freeform address string; the structured street/city/state/zip are
+// resolved by the review UI, so they're flagged missing.
+export class AddServiceLocationTaskHandler implements TaskHandler {
+  readonly taskType = 'add_service_location' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (context.customerId) {
+      payload.customerId = context.customerId;
+    } else if (ee.customerName) {
+      payload.customerReference = ee.customerName;
+      missing.push('customerId');
+    } else {
+      missing.push('customerId');
+    }
+
+    if (ee.serviceAddress) payload.addressText = ee.serviceAddress;
+    // The executor needs structured fields — always require resolution.
+    missing.push('street1', 'city', 'state', 'postalCode');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── log_time_entry ─────────────
+//
+// Clocks the speaking technician in on a job/task. entryType defaults to
+// 'job'. jobReference is carried for the executor to resolve to a jobId.
+export class LogTimeEntryTaskHandler implements TaskHandler {
+  readonly taskType = 'log_time_entry' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      entryType: ee.timeEntryType ?? 'job',
+    };
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── notify_delay ─────────────
+//
+// Outbound delay notice to a customer. Comms-class — never auto-approves.
+export class NotifyDelayTaskHandler implements TaskHandler {
+  readonly taskType = 'notify_delay' as const;
+
+  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
+
+    if (typeof ee.delayMinutes === 'number' && ee.delayMinutes > 0) {
+      payload.delayMinutes = ee.delayMinutes;
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── request_feedback ─────────────
+//
+// Sends a post-job feedback/review request. Comms-class.
+export class RequestFeedbackTaskHandler implements TaskHandler {
+  readonly taskType = 'request_feedback' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+    else if (ee.customerName) payload.customerReference = ee.customerName;
+    else missing.push('jobId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── create_job (LLM-free variant for voice) ─────────────
 //
 // The task-handlers.ts CreateJobTaskHandler is a plain passthrough
