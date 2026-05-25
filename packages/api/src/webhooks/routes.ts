@@ -121,8 +121,11 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   // Blocker 1 — Stripe/Clerk webhook idempotency store. Durable (Postgres)
   // in production; falls back to an in-memory map for tests/dev. Fail fast
   // if a production deploy forgot to wire the durable repo rather than
-  // silently running with non-durable, per-instance dedup.
-  if ((config.NODE_ENV === 'prod' || config.NODE_ENV === 'production') && !deps.webhookRepo) {
+  // silently running with non-durable, per-instance dedup. Guard on the raw
+  // env (like app.ts) so an unnormalized 'production' still trips it; the
+  // parsed config.NODE_ENV is already narrowed to 'prod' by loadConfig.
+  const rawNodeEnv = process.env.NODE_ENV;
+  if ((rawNodeEnv === 'prod' || rawNodeEnv === 'production') && !deps.webhookRepo) {
     throw new Error(
       'createWebhookRouter: a durable webhookRepo is required in production ' +
         '(in-memory webhook idempotency is wiped on restart and not shared ' +
