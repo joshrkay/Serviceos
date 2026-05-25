@@ -19,7 +19,8 @@ export type DispatchEntityType =
   | 'appointment_reminder'
   | 'payment_receipt'
   | 'invoice_overdue'
-  | 'delay_notice';
+  | 'delay_notice'
+  | 'appointment_en_route';
 export type DispatchChannel = 'sms' | 'email';
 export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
 

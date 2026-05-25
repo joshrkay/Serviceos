@@ -23,12 +23,22 @@ import { toErrorResponse } from '../shared/errors';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
-import { JobRepository } from '../jobs/job';
+import { JobRepository, createJob } from '../jobs/job';
 import { AgreementRepository } from '../agreements/agreement';
-import { AppointmentRepository } from '../appointments/appointment';
+import { Appointment, AppointmentRepository, createAppointment } from '../appointments/appointment';
+import { AssignmentRepository } from '../appointments/assignment';
+import { LocationRepository } from '../locations/location';
 import { LeadRepository } from '../leads/lead';
-import { AuditRepository } from '../audit/audit';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { SettingsRepository } from '../settings/settings';
+import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
+import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
+import {
+  TenantTransactionRunner,
+  InMemoryTransactionRunner,
+} from '../db/tenant-transaction';
 import {
   PaymentLinkProvider,
   PaymentLinkResult,
@@ -50,6 +60,13 @@ export interface PublicPortalDeps {
   appointmentRepo: AppointmentRepository;
   leadRepo: LeadRepository;
   auditRepo?: AuditRepository;
+  /** Required for the self-service booking routes (availability + book). */
+  assignmentRepo?: AssignmentRepository;
+  locationRepo?: LocationRepository;
+  proposalRepo?: ProposalRepository;
+  settingsRepo?: SettingsRepository;
+  /** Wraps the self-service booking writes in one atomic, slot-locked txn. */
+  transactionRunner?: TenantTransactionRunner;
   /** Optional — when present, /invoices entries get a `payNowUrl`. */
   paymentLinkProvider?: PaymentLinkProvider;
   /** Default currency for payment-link generation. Defaults to 'usd'. */
@@ -73,6 +90,73 @@ const requestServiceSchema = z.object({
    */
   summary: z.string().trim().min(1).max(2000),
 });
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const availabilityQuerySchema = z.object({
+  from: z.string().regex(DATE_RE, 'from must be YYYY-MM-DD'),
+  to: z.string().regex(DATE_RE, 'to must be YYYY-MM-DD'),
+  durationMin: z.coerce.number().int().min(15).max(480).default(60),
+});
+
+const bookSchema = z.object({
+  slotStart: z.string().datetime(),
+  slotEnd: z.string().datetime(),
+  summary: z.string().trim().min(1).max(2000),
+  locationId: z.string().uuid().optional(),
+});
+
+/** A self-service hold survives 24h before the finder treats the slot as free. */
+const BOOKING_HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_BOOKING_TIMEZONE = 'America/New_York';
+/** Customers can't self-cancel/reschedule inside this window before start. */
+const SELF_CHANGE_CUTOFF_MS = 2 * 60 * 60 * 1000;
+
+const cancelSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+});
+
+const rescheduleSchema = z.object({
+  slotStart: z.string().datetime(),
+  slotEnd: z.string().datetime(),
+});
+
+async function resolveTenantTimezone(
+  deps: PublicPortalDeps,
+  tenantId: string,
+): Promise<string> {
+  if (!deps.settingsRepo) return DEFAULT_BOOKING_TIMEZONE;
+  const settings = await deps.settingsRepo.findByTenant(tenantId);
+  return settings?.timezone || DEFAULT_BOOKING_TIMEZONE;
+}
+
+/**
+ * Write a 409 SLOT_TAKEN response with the next open slots in a 7-day window.
+ * Shared by the book and reschedule routes — both fail the same way when the
+ * requested slot was claimed between availability fetch and submission.
+ */
+async function respondSlotTaken(
+  deps: PublicPortalDeps,
+  res: Response,
+  args: { tenantId: string; slotStart: Date; slotEnd: Date; timezone: string; message: string },
+): Promise<void> {
+  const durationMin = Math.round((args.slotEnd.getTime() - args.slotStart.getTime()) / 60000);
+  const alternatives = await findBookableSlots(
+    { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+    {
+      tenantId: args.tenantId,
+      fromDate: args.slotStart.toISOString().slice(0, 10),
+      toDate: new Date(args.slotStart.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      timezone: args.timezone,
+      durationMin,
+    },
+  );
+  res.status(409).json({
+    error: 'SLOT_TAKEN',
+    message: args.message,
+    alternatives: alternatives.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString() })),
+  });
+}
 
 function ensurePortal(req: PortalRequest, res: Response): boolean {
   if (!req.portal) {
@@ -357,7 +441,412 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     }
   });
 
+  /**
+   * GET /:token/availability?from=YYYY-MM-DD&to=YYYY-MM-DD&durationMin=60
+   *
+   * Returns open booking slots within the tenant's business hours, in the
+   * tenant timezone. Read-only — never reserves anything.
+   */
+  router.get('/:token/availability', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId } = req.portal!;
+      const parsed = availabilityQuerySchema.parse(req.query);
+      const timezone = await resolveTenantTimezone(deps, tenantId);
+
+      const slots = await findBookableSlots(
+        { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+        {
+          tenantId,
+          fromDate: parsed.from,
+          toDate: parsed.to,
+          timezone,
+          durationMin: parsed.durationMin,
+        },
+      );
+
+      res.json({
+        timezone,
+        durationMin: parsed.durationMin,
+        slots: slots.map((s) => ({
+          start: s.start.toISOString(),
+          end: s.end.toISOString(),
+        })),
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * POST /:token/book
+   *
+   * Customer self-service booking. Re-verifies the slot is still open, then
+   * creates a job + a tentative held appointment and a `create_booking`
+   * proposal for the dispatcher to confirm. Never auto-confirms — the
+   * appointment stays held (24h) until a human approves the proposal.
+   */
+  router.post('/:token/book', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+
+      if (!deps.proposalRepo) {
+        res
+          .status(503)
+          .json({ error: 'UNAVAILABLE', message: 'Self-service booking is not configured' });
+        return;
+      }
+
+      const parsed = bookSchema.parse(req.body ?? {});
+      const slotStart = new Date(parsed.slotStart);
+      const slotEnd = new Date(parsed.slotEnd);
+      if (slotEnd.getTime() <= slotStart.getTime()) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'slotEnd must be after slotStart' });
+        return;
+      }
+      if (slotStart.getTime() < Date.now()) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Cannot book a slot in the past' });
+        return;
+      }
+
+      const customer = await deps.customerRepo.findById(tenantId, customerId);
+      if (!customer) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
+
+      // Resolve the service location: an explicit (customer-owned) one, else
+      // the customer's primary, else their only location.
+      const locationId = await resolveBookingLocation(deps, tenantId, customerId, parsed.locationId);
+      if (!locationId) {
+        res
+          .status(422)
+          .json({ error: 'NO_LOCATION', message: 'No service location on file. Please contact us to book.' });
+        return;
+      }
+
+      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const finderDeps = {
+        appointmentRepo: deps.appointmentRepo,
+        assignmentRepo: deps.assignmentRepo,
+      };
+      const createdBy = `portal:customer:${customerId}`;
+      const runner = deps.transactionRunner ?? new InMemoryTransactionRunner();
+
+      // Atomic reservation: one transaction wraps the slot re-check and all
+      // writes (job + held appointment + proposal + audit), so a mid-sequence
+      // failure can't orphan a Job. A transaction-scoped advisory lock keyed
+      // on the slot serializes concurrent bookings for the same window — the
+      // second waits, then sees the first's hold and is told the slot is taken.
+      const outcome = await runner.run(tenantId, async ({ lock }) => {
+        await lock(`book:${slotStart.toISOString()}`);
+
+        const stillFree = await isSlotFree(finderDeps, {
+          tenantId,
+          start: slotStart,
+          end: slotEnd,
+        });
+        if (!stillFree) {
+          return { ok: false as const };
+        }
+
+        const job = await createJob(
+          {
+            tenantId,
+            customerId,
+            locationId,
+            summary: parsed.summary,
+            createdBy,
+            actorRole: 'customer_portal',
+          },
+          deps.jobRepo,
+          deps.auditRepo,
+        );
+
+        const held = await createAppointment(
+          {
+            tenantId,
+            jobId: job.id,
+            scheduledStart: slotStart,
+            scheduledEnd: slotEnd,
+            timezone,
+            notes: parsed.summary,
+            createdBy,
+            holdPendingApproval: true,
+            holdExpiryAt: new Date(Date.now() + BOOKING_HOLD_WINDOW_MS),
+          },
+          deps.appointmentRepo,
+        );
+
+        // No sourceTrustTier — a customer-initiated booking is never
+        // auto-approved. It lands as a draft proposal for the dispatcher.
+        const proposal = createProposal({
+          tenantId,
+          proposalType: 'create_booking',
+          payload: { appointmentId: held.id },
+          summary: `Customer requested booking: ${parsed.summary}`,
+          explanation: 'Submitted via the customer portal. Confirm to finalize the appointment.',
+          sourceContext: { source: 'customer_portal', customerId, jobId: job.id },
+          createdBy,
+          expiresAt: held.holdExpiryAt,
+        });
+        const persisted = await deps.proposalRepo!.create(proposal);
+
+        if (deps.auditRepo) {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: createdBy,
+              actorRole: 'customer_portal',
+              eventType: 'appointment.booking_requested',
+              entityType: 'appointment',
+              entityId: held.id,
+              metadata: { proposalId: persisted.id, jobId: job.id },
+            }),
+          );
+        }
+
+        return { ok: true as const, held, proposalId: persisted.id };
+      });
+
+      if (!outcome.ok) {
+        await respondSlotTaken(deps, res, {
+          tenantId,
+          slotStart,
+          slotEnd,
+          timezone,
+          message: 'That time was just booked. Here are the next available slots.',
+        });
+        return;
+      }
+
+      // Post-commit side effect: the tentative hold should appear on any open
+      // dispatch board for that day immediately, flagged pending approval.
+      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
+
+      res.status(201).json({
+        status: 'pending_confirmation',
+        proposalId: outcome.proposalId,
+        appointmentId: outcome.held.id,
+        scheduledStart: outcome.held.scheduledStart.toISOString(),
+        scheduledEnd: outcome.held.scheduledEnd.toISOString(),
+        timezone,
+        message: "Thanks! We'll confirm your appointment shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * POST /:token/appointments/:id/cancel
+   *
+   * Customer-initiated cancellation. Emits a `cancel_appointment` proposal
+   * for dispatcher confirmation rather than mutating directly — approval
+   * fires the existing cancellation notification.
+   */
+  router.post('/:token/appointments/:id/cancel', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+      if (!deps.proposalRepo) {
+        res.status(503).json({ error: 'UNAVAILABLE', message: 'Self-service changes are not configured' });
+        return;
+      }
+
+      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, req.params.id, res);
+      if (!owned) return;
+
+      const parsed = cancelSchema.parse(req.body ?? {});
+      const createdBy = `portal:customer:${customerId}`;
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'cancel_appointment',
+        payload: {
+          appointmentId: owned.id,
+          reason: parsed.reason || 'Customer requested cancellation via portal',
+          cancellationType: 'customer_request',
+        },
+        summary: 'Customer requested to cancel their appointment',
+        sourceContext: { source: 'customer_portal', customerId },
+        createdBy,
+      });
+      const persisted = await deps.proposalRepo.create(proposal);
+      await emitPortalAudit(deps, {
+        tenantId,
+        createdBy,
+        eventType: 'appointment.cancel_requested',
+        entityId: owned.id,
+        metadata: { proposalId: persisted.id },
+      });
+      // Surface the "change requested" badge live on any open board for the
+      // appointment's day, even though nothing has moved spatially yet.
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
+
+      res.status(201).json({
+        status: 'pending_confirmation',
+        proposalId: persisted.id,
+        message: "We've received your cancellation request and will confirm shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * POST /:token/appointments/:id/reschedule
+   *
+   * Customer-initiated reschedule. Verifies the new slot is still open, then
+   * emits a `reschedule_appointment` proposal for dispatcher confirmation.
+   */
+  router.post('/:token/appointments/:id/reschedule', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+      if (!deps.proposalRepo) {
+        res.status(503).json({ error: 'UNAVAILABLE', message: 'Self-service changes are not configured' });
+        return;
+      }
+
+      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, req.params.id, res);
+      if (!owned) return;
+
+      const parsed = rescheduleSchema.parse(req.body ?? {});
+      const slotStart = new Date(parsed.slotStart);
+      const slotEnd = new Date(parsed.slotEnd);
+      if (slotEnd.getTime() <= slotStart.getTime() || slotStart.getTime() < Date.now()) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid new time slot' });
+        return;
+      }
+
+      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const finderDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
+      const free = await isSlotFree(finderDeps, { tenantId, start: slotStart, end: slotEnd });
+      if (!free) {
+        await respondSlotTaken(deps, res, {
+          tenantId,
+          slotStart,
+          slotEnd,
+          timezone,
+          message: 'That time is no longer available. Here are other open times.',
+        });
+        return;
+      }
+
+      const createdBy = `portal:customer:${customerId}`;
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'reschedule_appointment',
+        payload: {
+          appointmentId: owned.id,
+          newScheduledStart: slotStart.toISOString(),
+          newScheduledEnd: slotEnd.toISOString(),
+          reason: 'Customer requested reschedule via portal',
+        },
+        summary: 'Customer requested to reschedule their appointment',
+        sourceContext: { source: 'customer_portal', customerId },
+        createdBy,
+      });
+      const persisted = await deps.proposalRepo.create(proposal);
+      await emitPortalAudit(deps, {
+        tenantId,
+        createdBy,
+        eventType: 'appointment.reschedule_requested',
+        entityId: owned.id,
+        metadata: { proposalId: persisted.id },
+      });
+      // Surface the "change requested" badge live on the current day's board.
+      notifyDispatchBoardChanged(tenantId, owned.scheduledStart);
+
+      res.status(201).json({
+        status: 'pending_confirmation',
+        proposalId: persisted.id,
+        message: "We've received your reschedule request and will confirm shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
   return router;
+}
+
+/**
+ * Load an appointment, confirm it belongs to the portal customer, and that
+ * it's still in a customer-changeable state and outside the cutoff window.
+ * Writes the appropriate error response and returns null on any failure.
+ */
+async function loadOwnedChangeableAppointment(
+  deps: PublicPortalDeps,
+  tenantId: string,
+  customerId: string,
+  appointmentId: string,
+  res: Response,
+): Promise<Appointment | null> {
+  const appointment = await deps.appointmentRepo.findById(tenantId, appointmentId);
+  if (!appointment) {
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+    return null;
+  }
+  const job = await deps.jobRepo.findById(tenantId, appointment.jobId);
+  if (!job || job.customerId !== customerId) {
+    // Don't disclose existence of other customers' appointments.
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+    return null;
+  }
+  if (appointment.status === 'canceled' || appointment.status === 'completed' || appointment.status === 'no_show') {
+    res.status(409).json({ error: 'NOT_CHANGEABLE', message: 'This appointment can no longer be changed online.' });
+    return null;
+  }
+  if (appointment.scheduledStart.getTime() - Date.now() < SELF_CHANGE_CUTOFF_MS) {
+    res.status(409).json({
+      error: 'TOO_LATE',
+      message: 'This appointment is too soon to change online. Please call us.',
+    });
+    return null;
+  }
+  return appointment;
+}
+
+async function emitPortalAudit(
+  deps: PublicPortalDeps,
+  input: { tenantId: string; createdBy: string; eventType: string; entityId: string; metadata?: Record<string, unknown> },
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.createdBy,
+      actorRole: 'customer_portal',
+      eventType: input.eventType,
+      entityType: 'appointment',
+      entityId: input.entityId,
+      metadata: input.metadata,
+    }),
+  );
+}
+
+async function resolveBookingLocation(
+  deps: PublicPortalDeps,
+  tenantId: string,
+  customerId: string,
+  requestedLocationId: string | undefined,
+): Promise<string | null> {
+  if (!deps.locationRepo) return null;
+  const locations = await deps.locationRepo.findByCustomer(tenantId, customerId);
+  const active = locations.filter((l) => !l.isArchived);
+  if (requestedLocationId) {
+    const match = active.find((l) => l.id === requestedLocationId);
+    return match ? match.id : null;
+  }
+  const primary = active.find((l) => l.isPrimary);
+  if (primary) return primary.id;
+  return active.length > 0 ? active[0].id : null;
 }
 
 interface InvoicePayload {

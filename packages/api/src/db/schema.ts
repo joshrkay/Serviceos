@@ -3094,6 +3094,22 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS google_review_url TEXT,
       ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
   `,
+
+  // 125 — widen message_dispatches entity_type to cover every dispatch type
+  // the application emits. Migration 092 only listed a subset; bring the
+  // CHECK in line with the DispatchEntityType union and add the new
+  // 'appointment_en_route' notice used by the "on my way" feature.
+  '125_dispatch_entity_en_route': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route'
+        ));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
