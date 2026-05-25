@@ -61,6 +61,22 @@ describe('Postgres integration — webhooks', () => {
     // create race on Postgres.
     const result = await repo.create(makeEvent({ idempotencyKey: event.idempotencyKey }));
     expect(result.id).toBe(event.id);
+  it('is idempotent on a duplicate (source, idempotencyKey) — returns the existing row, no throw', async () => {
+    const event = makeEvent();
+    await repo.create(event);
+
+    // Same source + idempotency key, different id. create() uses
+    // INSERT ... ON CONFLICT (source, idempotency_key) DO NOTHING, so it must
+    // NOT throw on the duplicate — it returns the PRE-EXISTING row (the
+    // original id, not the new one) and creates no second row. handleWebhookEvent
+    // relies on this to dedup concurrent redeliveries safely.
+    const dup = makeEvent({ idempotencyKey: event.idempotencyKey });
+    const result = await repo.create(dup);
+    expect(result.id).toBe(event.id);
+    expect(result.id).not.toBe(dup.id);
+
+    const found = await repo.findByIdempotencyKey(event.source, event.idempotencyKey);
+    expect(found?.id).toBe(event.id);
   });
 
   it('updateStatus to processed stamps processed_at; failed leaves it null', async () => {

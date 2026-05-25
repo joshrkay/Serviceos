@@ -164,6 +164,14 @@ export async function handleWebhookEvent(
   // and this branch is a no-op there.)
   if (created.id !== event.id) {
     return classifyExisting(created);
+    if (created.status === 'processed') {
+      return { event: created, duplicate: true };
+    }
+    if (created.status === 'failed') {
+      return { event: created, duplicate: false };
+    }
+    const ageMs = Date.now() - created.createdAt.getTime();
+    return { event: created, duplicate: ageMs < INFLIGHT_STALENESS_MS };
   }
 
   return { event: created, duplicate: false };
