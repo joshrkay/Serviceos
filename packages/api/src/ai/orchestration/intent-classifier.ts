@@ -29,6 +29,19 @@ export type IntentType =
   | 'send_estimate'
   | 'record_payment'
   | 'emergency_dispatch'
+  // Phase: full-app voice coverage. update_customer / log_expense reuse
+  // existing proposal types + execution handlers; convert_lead is a new
+  // capability. All three are proposal-driving (operator + inbound).
+  | 'update_customer'
+  | 'log_expense'
+  | 'convert_lead'
+  // Phase: full-app voice coverage (wave 2). All proposal-driving.
+  | 'confirm_appointment'
+  | 'mark_lead_lost'
+  | 'add_service_location'
+  | 'log_time_entry'
+  | 'notify_delay'
+  | 'request_feedback'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
   // of the proposal-draft path.
@@ -40,6 +53,9 @@ export type IntentType =
   | 'lookup_account_summary'
   | 'lookup_customer'
   | 'lookup_estimates'
+  // Phase: full-app voice coverage — owner/tenant-scoped read-only lookups.
+  | 'lookup_availability'
+  | 'lookup_leads'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -70,6 +86,15 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'send_estimate',
   'record_payment',
   'emergency_dispatch',
+  'update_customer',
+  'log_expense',
+  'convert_lead',
+  'confirm_appointment',
+  'mark_lead_lost',
+  'add_service_location',
+  'log_time_entry',
+  'notify_delay',
+  'request_feedback',
   'lookup_appointments',
   'lookup_invoices',
   'lookup_balance',
@@ -78,6 +103,8 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_account_summary',
   'lookup_customer',
   'lookup_estimates',
+  'lookup_availability',
+  'lookup_leads',
   'language_switch',
   'operator_request',
   'confirm',
@@ -129,6 +156,40 @@ export interface ExtractedEntities {
   paymentReference?: string;
   // create_job intent: title of the new job.
   jobTitle?: string;
+  // update_customer intent. These hold the NEW values the caller wants
+  // written to an EXISTING customer record (resolved via customerName or
+  // the identified caller). Kept distinct from create_customer's
+  // displayName/email/phone so a "change my number" command can never be
+  // mistaken for a new-customer signup.
+  updatedName?: string;
+  updatedEmail?: string;
+  updatedPhone?: string;
+  updatedAddress?: string;
+  // log_expense intent. amount (existing field) carries the cents value.
+  expenseDescription?: string;
+  expenseCategory?:
+    | 'materials'
+    | 'fuel'
+    | 'tools'
+    | 'subcontractor'
+    | 'vehicle'
+    | 'insurance'
+    | 'office'
+    | 'other';
+  vendor?: string;
+  // convert_lead intent: free-text reference to the lead being converted
+  // (caller name or "the Johnson lead"). The execution handler resolves
+  // it to a concrete leadId.
+  leadReference?: string;
+  // mark_lead_lost: why the lead was lost ("went with a competitor").
+  lostReason?: string;
+  // add_service_location: freeform address the caller stated. The
+  // execution handler / review UI parses it into street/city/state/zip.
+  serviceAddress?: string;
+  // log_time_entry: which kind of time is being logged.
+  timeEntryType?: 'job' | 'drive' | 'break' | 'admin';
+  // notify_delay: how many minutes late the crew is running.
+  delayMinutes?: number;
 }
 
 /**
@@ -364,6 +425,72 @@ Supported intents (return exactly ONE):
                                      "My pipes burst and water is everywhere"
                                      "No heat and it's 10 degrees outside"
                                      "I smell burning from my AC unit"
+- "update_customer"     — user wants to CHANGE the contact details on an
+                           EXISTING customer record (phone, email, name,
+                           address). Distinct from create_customer — this
+                           edits a record that already exists. Put the
+                           customer being edited in customerName and the
+                           NEW values in updatedName / updatedEmail /
+                           updatedPhone / updatedAddress.
+                           Examples: "Update Sarah's phone to 555-0182"
+                                     "Change the email on the Acme account to ops@acme.com"
+                                     "My new number is 555-0143" (inbound caller)
+                                     "Fix the spelling of Jordan's last name to Lee"
+- "log_expense"         — owner/technician logs a business expense for a
+                           job or the business. Capture-class, moves no
+                           money. Extract amount (integer cents),
+                           expenseCategory (materials/fuel/tools/
+                           subcontractor/vehicle/insurance/office/other),
+                           vendor, expenseDescription, and the job it
+                           applies to (jobReference).
+                           Examples: "Log 240 dollars at the supply house for the Johnson job"
+                                     "Add a 55 dollar fuel expense"
+                                     "Record 1200 to the subcontractor for the Miller install"
+- "convert_lead"        — user wants to CONVERT an existing lead into a
+                           customer (the lead said yes / booked). Extract
+                           leadReference (the lead's name or descriptor).
+                           Examples: "Convert the Johnson lead to a customer"
+                                     "Turn that new lead into a customer"
+                                     "The Davis lead signed — convert them"
+- "confirm_appointment" — user wants to mark an EXISTING scheduled
+                           appointment as confirmed (the customer
+                           confirmed they'll be there). Extract
+                           appointmentReference.
+                           Examples: "Confirm tomorrow's 2pm appointment"
+                                     "Mark the Miller appointment confirmed"
+                                     "The customer confirmed Tuesday's visit"
+- "mark_lead_lost"      — user wants to mark an existing lead as LOST
+                           (they won't convert). Extract leadReference and
+                           lostReason when stated.
+                           Examples: "Mark the Johnson lead as lost"
+                                     "We lost the Davis lead, went with a competitor"
+                                     "Close out that lead — they're not interested"
+- "add_service_location" — user wants to ADD a new service address to an
+                           existing customer. Extract customerName and the
+                           full serviceAddress as stated.
+                           Examples: "Add a service location for Sarah at 412 Oak Street"
+                                     "New address for the Acme account: 88 Industrial Way, Denver CO"
+                                     "Add a second property for Jordan — 12 Pine Lane"
+- "log_time_entry"      — technician wants to start tracking time (clock
+                           in) on a job or task. Extract jobReference and
+                           timeEntryType (job / drive / break / admin).
+                           Examples: "Clock me in on the Miller job"
+                                     "Start my drive time"
+                                     "Log time on the Rodriguez install"
+- "notify_delay"        — user wants to tell a customer the crew is
+                           running late. Customer-facing comms — never
+                           auto-execute. Extract appointmentReference and
+                           delayMinutes when stated.
+                           Examples: "Let the 10am know we're running 30 minutes behind"
+                                     "Tell the Miller job we're delayed about an hour"
+                                     "Text the customer that we'll be 20 minutes late"
+- "request_feedback"    — user wants to send a post-job feedback / review
+                           request to a customer. Customer-facing comms —
+                           never auto-execute. Extract the jobReference or
+                           customerName.
+                           Examples: "Send a feedback request for the Johnson job"
+                                     "Ask Sarah to leave a review"
+                                     "Request feedback on the completed Miller work"
 - "operator_request"   — caller explicitly asks to speak with a person,
                           dispatcher, owner, or asks to leave the AI agent.
                           Skip normal intent confirmation — escalate
@@ -459,6 +586,19 @@ Supported intents (return exactly ONE):
                                      "Did you send me an estimate yet?"
                                      "What's the status of my quote?"
                                      "How much was that estimate?"
+- "lookup_availability" — caller/operator is ASKING what appointment
+                           slots are open. Read-only — routed to the
+                           lookup_availability skill, which speaks the
+                           next open windows.
+                           Examples: "What slots do you have open this week?"
+                                     "When's your next availability?"
+                                     "Do you have anything open Thursday?"
+                                     "What times can you come out?"
+- "lookup_leads"        — owner/dispatcher is ASKING about the lead
+                           pipeline (count of open leads). Read-only.
+                           Examples: "How many open leads do we have?"
+                                     "What's in the lead pipeline?"
+                                     "How many leads are still open?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
@@ -504,7 +644,19 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job>"
+    "jobTitle": "<string, optional — title of new job on create_job>",
+    "updatedName": "<string, optional — new name on update_customer>",
+    "updatedEmail": "<string, optional — new email on update_customer>",
+    "updatedPhone": "<string, optional — new phone on update_customer>",
+    "updatedAddress": "<string, optional — new address on update_customer>",
+    "expenseDescription": "<string, optional — what the expense was for on log_expense>",
+    "expenseCategory": "<materials|fuel|tools|subcontractor|vehicle|insurance|office|other, optional — on log_expense>",
+    "vendor": "<string, optional — who was paid on log_expense>",
+    "leadReference": "<string, optional — the lead being converted/lost on convert_lead/mark_lead_lost>",
+    "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>",
+    "serviceAddress": "<string, optional — full address on add_service_location>",
+    "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>",
+    "delayMinutes": <integer minutes, optional — on notify_delay>
   }
 }
 
@@ -576,6 +728,17 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   ] as const;
   const SEND_CHANNELS = ['email', 'sms'] as const;
   const PAYMENT_METHODS = ['cash', 'check', 'card', 'other'] as const;
+  const EXPENSE_CATEGORIES = [
+    'materials',
+    'fuel',
+    'tools',
+    'subcontractor',
+    'vehicle',
+    'insurance',
+    'office',
+    'other',
+  ] as const;
+  const TIME_ENTRY_TYPES = ['job', 'drive', 'break', 'admin'] as const;
 
   /**
    * Validate an LLM-provided value against a fixed allowed-set.
@@ -631,6 +794,27 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
     // create_job fields
     if (typeof ee.jobTitle === 'string') extracted.jobTitle = ee.jobTitle;
+    // update_customer fields
+    if (typeof ee.updatedName === 'string') extracted.updatedName = ee.updatedName;
+    if (typeof ee.updatedEmail === 'string') extracted.updatedEmail = ee.updatedEmail;
+    if (typeof ee.updatedPhone === 'string') extracted.updatedPhone = ee.updatedPhone;
+    if (typeof ee.updatedAddress === 'string') extracted.updatedAddress = ee.updatedAddress;
+    // log_expense fields
+    if (typeof ee.expenseDescription === 'string') extracted.expenseDescription = ee.expenseDescription;
+    const expenseCategory = pickEnum(ee, 'expenseCategory', EXPENSE_CATEGORIES);
+    if (expenseCategory) extracted.expenseCategory = expenseCategory;
+    if (typeof ee.vendor === 'string') extracted.vendor = ee.vendor;
+    // convert_lead fields
+    if (typeof ee.leadReference === 'string') extracted.leadReference = ee.leadReference;
+    // mark_lead_lost fields
+    if (typeof ee.lostReason === 'string') extracted.lostReason = ee.lostReason;
+    // add_service_location fields
+    if (typeof ee.serviceAddress === 'string') extracted.serviceAddress = ee.serviceAddress;
+    // log_time_entry fields
+    const timeEntryType = pickEnum(ee, 'timeEntryType', TIME_ENTRY_TYPES);
+    if (timeEntryType) extracted.timeEntryType = timeEntryType;
+    // notify_delay fields
+    if (typeof ee.delayMinutes === 'number') extracted.delayMinutes = ee.delayMinutes;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

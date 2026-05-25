@@ -1,0 +1,53 @@
+{
+  "id": "update-customer-email-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550312",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_update_customer_email",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_update_email_acme",
+        "tenantId": "t_02_update_customer_email",
+        "firstName": "Alex",
+        "lastName": "Rivera",
+        "displayName": "Alex Rivera",
+        "companyName": "Acme Corp",
+        "primaryPhone": "+15555550312",
+        "secondaryPhone": null,
+        "email": "old@acme.com",
+        "preferredChannel": "email",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "This is Alex at Acme. Please change the email on our account to ops@acme.com.",
+      "expected": {
+        "intent": "update_customer",
+        "proposalType": "update_customer",
+        "slots": {
+          "email": "ops@acme.com"
+        },
+        "spokenAnswerMatches": "I've drafted an update to the email on your account for review; an operator will confirm before it's applied.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

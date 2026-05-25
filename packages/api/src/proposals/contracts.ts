@@ -142,6 +142,96 @@ export const issueInvoicePayloadSchema = z.object({
   paymentTermDays: z.number().int().min(1).max(365).optional(),
 });
 
+// convert_lead: promote an existing lead to a customer. The classifier
+// only has a free-text reference ("the Johnson lead"), so the task
+// handler carries `leadReference` and flags `leadId` missing until the
+// review UI / execution handler resolves a concrete lead. Either a
+// resolved `leadId` (uuid) or a `leadReference` must be present.
+export const convertLeadPayloadSchema = z
+  .object({
+    leadId: z.string().uuid().optional(),
+    leadReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.leadId || v.leadReference), {
+    message: 'leadId or leadReference is required',
+  });
+
+// confirm_appointment: mark an existing appointment confirmed. Resolved
+// appointmentId (uuid) by execution time; appointmentReference carries
+// the free-text reference until the review UI resolves it.
+export const confirmAppointmentPayloadSchema = z
+  .object({
+    appointmentId: z.string().uuid().optional(),
+    appointmentReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.appointmentId || v.appointmentReference), {
+    message: 'appointmentId or appointmentReference is required',
+  });
+
+// mark_lead_lost: close out a lead. lostReason is required by the
+// loseLead service, so the contract pins it.
+export const markLeadLostPayloadSchema = z
+  .object({
+    leadId: z.string().uuid().optional(),
+    leadReference: z.string().min(1).optional(),
+    reason: z.string().min(1),
+  })
+  .refine((v) => Boolean(v.leadId || v.leadReference), {
+    message: 'leadId or leadReference is required',
+  });
+
+// add_service_location: attach a new service address to a customer. The
+// classifier only has a free-text address, so the structured fields are
+// resolved by the review UI; either a resolved customerId or a
+// customerReference must be present.
+export const addServiceLocationPayloadSchema = z
+  .object({
+    customerId: z.string().uuid().optional(),
+    customerReference: z.string().min(1).optional(),
+    addressText: z.string().min(1).optional(),
+    label: z.string().optional(),
+    street1: z.string().optional(),
+    street2: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    postalCode: z.string().optional(),
+  })
+  .refine((v) => Boolean(v.customerId || v.customerReference), {
+    message: 'customerId or customerReference is required',
+  });
+
+// log_time_entry: clock a technician in on a job/task. userId comes from
+// the execution context (the speaking technician). jobReference is
+// optional — break/admin time may not attach to a job.
+export const logTimeEntryPayloadSchema = z.object({
+  entryType: z.enum(['job', 'drive', 'break', 'admin']),
+  jobId: z.string().uuid().optional(),
+  jobReference: z.string().optional(),
+  notes: z.string().optional(),
+});
+
+// notify_delay: outbound delay notice to a customer. Comms-class.
+export const notifyDelayPayloadSchema = z
+  .object({
+    appointmentId: z.string().uuid().optional(),
+    appointmentReference: z.string().min(1).optional(),
+    delayMinutes: z.number().int().positive().optional(),
+  })
+  .refine((v) => Boolean(v.appointmentId || v.appointmentReference), {
+    message: 'appointmentId or appointmentReference is required',
+  });
+
+// request_feedback: send a post-job feedback/review request. Comms-class.
+export const requestFeedbackPayloadSchema = z
+  .object({
+    jobId: z.string().uuid().optional(),
+    jobReference: z.string().min(1).optional(),
+    customerReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.jobId || v.jobReference || v.customerReference), {
+    message: 'jobId, jobReference, or customerReference is required',
+  });
+
 // voice_clarification: emitted when the voice classifier cannot route
 // a transcript (intent='unknown' OR confidence below threshold). It is
 // NOT a mutation — it surfaces in the operator's feed as "I heard X
@@ -208,6 +298,13 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   send_estimate: sendEstimatePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
   log_expense: logExpensePayloadSchema,
+  convert_lead: convertLeadPayloadSchema,
+  confirm_appointment: confirmAppointmentPayloadSchema,
+  mark_lead_lost: markLeadLostPayloadSchema,
+  add_service_location: addServiceLocationPayloadSchema,
+  log_time_entry: logTimeEntryPayloadSchema,
+  notify_delay: notifyDelayPayloadSchema,
+  request_feedback: requestFeedbackPayloadSchema,
   emergency_dispatch: z.object({
     callerPhone: z.string().optional(),
     emergencyDescription: z.string(),

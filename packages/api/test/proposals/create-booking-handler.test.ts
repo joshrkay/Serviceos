@@ -5,6 +5,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { createAppointment, updateAppointment } from '../../src/appointments/appointment';
 import type { Appointment } from '../../src/appointments/appointment';
 import { createProposal } from '../../src/proposals/proposal';
+import { getDispatchBoardEventBus } from '../../src/dispatch/board-event-bus';
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
 
@@ -77,6 +78,17 @@ describe('CreateBookingExecutionHandler', () => {
 
     const events = await auditRepo.findByEntity(tenantA, 'appointment', appt.id);
     expect(events.some((e) => e.eventType === 'appointment.booked')).toBe(true);
+  });
+
+  it('refreshes the dispatch board for the appointment day on confirm', async () => {
+    const appt = await makeHeldAppointment(appointmentRepo, new Date('2099-01-01T00:00:00Z'));
+    const boardEvents: string[] = [];
+    const unsub = getDispatchBoardEventBus().subscribe(tenantA, '2026-06-01', (e) => {
+      if (e.type === 'board_updated') boardEvents.push(e.date);
+    });
+    await handler.execute(bookingProposal(appt.id), { tenantId: tenantA, executedBy: 'owner-1' });
+    unsub();
+    expect(boardEvents).toContain('2026-06-01');
   });
 
   it('is idempotent — an already-confirmed appointment still succeeds', async () => {
