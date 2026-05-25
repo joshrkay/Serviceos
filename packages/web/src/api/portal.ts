@@ -167,6 +167,20 @@ export const portalApi = {
     if (opts.durationMin) qs.set('durationMin', String(opts.durationMin));
     return getJson<PortalAvailability>(`${base(token)}/availability?${qs.toString()}`);
   },
+  cancelAppointment: (token: string, appointmentId: string, reason?: string) =>
+    postJson<{ status: string; proposalId: string; message: string }>(
+      `${base(token)}/appointments/${encodeURIComponent(appointmentId)}/cancel`,
+      { reason },
+    ),
+  rescheduleAppointment: (
+    token: string,
+    appointmentId: string,
+    slot: { slotStart: string; slotEnd: string },
+  ) =>
+    postJson<{ status: string; proposalId: string; message: string }>(
+      `${base(token)}/appointments/${encodeURIComponent(appointmentId)}/reschedule`,
+      slot,
+    ),
   book: async (token: string, input: BookInput): Promise<BookResult> => {
     const res = await fetch(`${base(token)}/book`, {
       method: 'POST',

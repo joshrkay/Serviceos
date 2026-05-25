@@ -102,6 +102,17 @@ const bookSchema = z.object({
 /** A self-service hold survives 24h before the finder treats the slot as free. */
 const BOOKING_HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_BOOKING_TIMEZONE = 'America/New_York';
+/** Customers can't self-cancel/reschedule inside this window before start. */
+const SELF_CHANGE_CUTOFF_MS = 2 * 60 * 60 * 1000;
+
+const cancelSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+});
+
+const rescheduleSchema = z.object({
+  slotStart: z.string().datetime(),
+  slotEnd: z.string().datetime(),
+});
 
 async function resolveTenantTimezone(
   deps: PublicPortalDeps,
@@ -590,7 +601,195 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     }
   });
 
+  /**
+   * POST /:token/appointments/:id/cancel
+   *
+   * Customer-initiated cancellation. Emits a `cancel_appointment` proposal
+   * for dispatcher confirmation rather than mutating directly — approval
+   * fires the existing cancellation notification.
+   */
+  router.post('/:token/appointments/:id/cancel', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+      if (!deps.proposalRepo) {
+        res.status(503).json({ error: 'UNAVAILABLE', message: 'Self-service changes are not configured' });
+        return;
+      }
+
+      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, req.params.id, res);
+      if (!owned) return;
+
+      const parsed = cancelSchema.parse(req.body ?? {});
+      const createdBy = `portal:customer:${customerId}`;
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'cancel_appointment',
+        payload: {
+          appointmentId: owned.id,
+          reason: parsed.reason || 'Customer requested cancellation via portal',
+          cancellationType: 'customer_request',
+        },
+        summary: 'Customer requested to cancel their appointment',
+        sourceContext: { source: 'customer_portal', customerId },
+        createdBy,
+      });
+      const persisted = await deps.proposalRepo.create(proposal);
+      await emitPortalAudit(deps, {
+        tenantId,
+        createdBy,
+        eventType: 'appointment.cancel_requested',
+        entityId: owned.id,
+        metadata: { proposalId: persisted.id },
+      });
+
+      res.status(201).json({
+        status: 'pending_confirmation',
+        proposalId: persisted.id,
+        message: "We've received your cancellation request and will confirm shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * POST /:token/appointments/:id/reschedule
+   *
+   * Customer-initiated reschedule. Verifies the new slot is still open, then
+   * emits a `reschedule_appointment` proposal for dispatcher confirmation.
+   */
+  router.post('/:token/appointments/:id/reschedule', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+      if (!deps.proposalRepo) {
+        res.status(503).json({ error: 'UNAVAILABLE', message: 'Self-service changes are not configured' });
+        return;
+      }
+
+      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, req.params.id, res);
+      if (!owned) return;
+
+      const parsed = rescheduleSchema.parse(req.body ?? {});
+      const slotStart = new Date(parsed.slotStart);
+      const slotEnd = new Date(parsed.slotEnd);
+      if (slotEnd.getTime() <= slotStart.getTime() || slotStart.getTime() < Date.now()) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid new time slot' });
+        return;
+      }
+
+      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const finderDeps = { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo };
+      const free = await isSlotFree(finderDeps, { tenantId, start: slotStart, end: slotEnd });
+      if (!free) {
+        const durationMin = Math.round((slotEnd.getTime() - slotStart.getTime()) / 60000);
+        const alternatives = await findBookableSlots(finderDeps, {
+          tenantId,
+          fromDate: slotStart.toISOString().slice(0, 10),
+          toDate: new Date(slotStart.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+          timezone,
+          durationMin,
+        });
+        res.status(409).json({
+          error: 'SLOT_TAKEN',
+          message: 'That time is no longer available. Here are other open times.',
+          alternatives: alternatives.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString() })),
+        });
+        return;
+      }
+
+      const createdBy = `portal:customer:${customerId}`;
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'reschedule_appointment',
+        payload: {
+          appointmentId: owned.id,
+          newScheduledStart: slotStart.toISOString(),
+          newScheduledEnd: slotEnd.toISOString(),
+          reason: 'Customer requested reschedule via portal',
+        },
+        summary: 'Customer requested to reschedule their appointment',
+        sourceContext: { source: 'customer_portal', customerId },
+        createdBy,
+      });
+      const persisted = await deps.proposalRepo.create(proposal);
+      await emitPortalAudit(deps, {
+        tenantId,
+        createdBy,
+        eventType: 'appointment.reschedule_requested',
+        entityId: owned.id,
+        metadata: { proposalId: persisted.id },
+      });
+
+      res.status(201).json({
+        status: 'pending_confirmation',
+        proposalId: persisted.id,
+        message: "We've received your reschedule request and will confirm shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
   return router;
+}
+
+/**
+ * Load an appointment, confirm it belongs to the portal customer, and that
+ * it's still in a customer-changeable state and outside the cutoff window.
+ * Writes the appropriate error response and returns null on any failure.
+ */
+async function loadOwnedChangeableAppointment(
+  deps: PublicPortalDeps,
+  tenantId: string,
+  customerId: string,
+  appointmentId: string,
+  res: Response,
+): Promise<{ id: string } | null> {
+  const appointment = await deps.appointmentRepo.findById(tenantId, appointmentId);
+  if (!appointment) {
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+    return null;
+  }
+  const job = await deps.jobRepo.findById(tenantId, appointment.jobId);
+  if (!job || job.customerId !== customerId) {
+    // Don't disclose existence of other customers' appointments.
+    res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+    return null;
+  }
+  if (appointment.status === 'canceled' || appointment.status === 'completed' || appointment.status === 'no_show') {
+    res.status(409).json({ error: 'NOT_CHANGEABLE', message: 'This appointment can no longer be changed online.' });
+    return null;
+  }
+  if (appointment.scheduledStart.getTime() - Date.now() < SELF_CHANGE_CUTOFF_MS) {
+    res.status(409).json({
+      error: 'TOO_LATE',
+      message: 'This appointment is too soon to change online. Please call us.',
+    });
+    return null;
+  }
+  return { id: appointment.id };
+}
+
+async function emitPortalAudit(
+  deps: PublicPortalDeps,
+  input: { tenantId: string; createdBy: string; eventType: string; entityId: string; metadata?: Record<string, unknown> },
+): Promise<void> {
+  if (!deps.auditRepo) return;
+  await deps.auditRepo.create(
+    createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.createdBy,
+      actorRole: 'customer_portal',
+      eventType: input.eventType,
+      entityType: 'appointment',
+      entityId: input.entityId,
+      metadata: input.metadata,
+    }),
+  );
 }
 
 async function resolveBookingLocation(

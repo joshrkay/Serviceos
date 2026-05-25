@@ -248,3 +248,84 @@ describe('POST /:token/book', () => {
     expect(res.status).toBe(400);
   });
 });
+
+async function seedOwnedAppointment(h: Awaited<ReturnType<typeof build>>, start: string, end: string) {
+  const job = await h.jobRepo.create({
+    id: uuidv4(),
+    tenantId: TENANT,
+    customerId: h.customer.id,
+    locationId: h.location.id,
+    jobNumber: 'JOB-0001',
+    summary: 'Existing',
+    status: 'scheduled',
+    priority: 'normal',
+    createdBy: ACTOR,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  return createAppointment(
+    { tenantId: TENANT, jobId: job.id, scheduledStart: new Date(start), scheduledEnd: new Date(end), timezone: 'UTC', createdBy: ACTOR },
+    h.appointmentRepo,
+  );
+}
+
+describe('POST /:token/appointments/:id/cancel', () => {
+  it('emits a cancel_appointment proposal (pending confirmation)', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const appt = await seedOwnedAppointment(h, '2030-06-03T15:00:00Z', '2030-06-03T16:00:00Z');
+
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${appt.id}/cancel`)
+      .send({ reason: 'Out of town' });
+
+    expect(res.status).toBe(201);
+    const proposal = await h.proposalRepo.findById(TENANT, res.body.proposalId);
+    expect(proposal?.proposalType).toBe('cancel_appointment');
+    expect(proposal?.payload.appointmentId).toBe(appt.id);
+  });
+
+  it('refuses to cancel another customer\'s appointment with 404', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    // Appointment whose job belongs to no customer in this portal.
+    const orphan = await createAppointment(
+      { tenantId: TENANT, jobId: uuidv4(), scheduledStart: new Date('2030-06-03T15:00:00Z'), scheduledEnd: new Date('2030-06-03T16:00:00Z'), timezone: 'UTC', createdBy: ACTOR },
+      h.appointmentRepo,
+    );
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${orphan.id}/cancel`)
+      .send({});
+    expect(res.status).toBe(404);
+  });
+
+  it('refuses to cancel inside the cutoff window with 409', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const soonEnd = new Date(Date.now() + 90 * 60 * 1000).toISOString();
+    const appt = await seedOwnedAppointment(h, soon, soonEnd);
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${appt.id}/cancel`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('TOO_LATE');
+  });
+});
+
+describe('POST /:token/appointments/:id/reschedule', () => {
+  it('emits a reschedule_appointment proposal for an open slot', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const appt = await seedOwnedAppointment(h, '2030-06-03T15:00:00Z', '2030-06-03T16:00:00Z');
+
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${appt.id}/reschedule`)
+      .send({ slotStart: '2030-06-04T18:00:00Z', slotEnd: '2030-06-04T19:00:00Z' });
+
+    expect(res.status).toBe(201);
+    const proposal = await h.proposalRepo.findById(TENANT, res.body.proposalId);
+    expect(proposal?.proposalType).toBe('reschedule_appointment');
+    expect(proposal?.payload.newScheduledStart).toBe('2030-06-04T18:00:00.000Z');
+  });
+});
