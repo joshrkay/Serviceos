@@ -100,6 +100,7 @@ import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
+import { TimeEntryService } from './time-tracking/time-entry-service';
 import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
@@ -1300,6 +1301,11 @@ export function createApp(): express.Express {
         customerRepo,
       )
     : undefined;
+  // Built ahead of the execution registry so the notify_delay handler can
+  // send a real delay notice; reused by the delay-notification worker below.
+  const delayNotificationService = messageDelivery
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    : new NoopDelayNotificationService();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -1324,6 +1330,13 @@ export function createApp(): express.Express {
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
+    // Full-app voice capability execution deps (convert_lead / mark_lead_lost,
+    // log_time_entry, request_feedback, notify_delay). Without these the
+    // respective handlers degrade to a validated passthrough.
+    leadRepo,
+    timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
+    feedbackRepo: feedbackRequestRepo,
+    delayNotificationService,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
@@ -1418,9 +1431,6 @@ export function createApp(): express.Express {
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
   );
-  const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
-    : new NoopDelayNotificationService();
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
     stateRepo: delayNoticeStateRepo,
@@ -1858,6 +1868,7 @@ export function createApp(): express.Express {
     agreementRepo,
     moneyDashboardRepo,
     catalogRepo,
+    availabilityFinder,
     lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',

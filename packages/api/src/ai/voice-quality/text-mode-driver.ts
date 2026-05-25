@@ -95,6 +95,8 @@ import { lookupEstimates } from '../skills/lookup-estimates';
 import { lookupLeads } from '../skills/lookup-leads';
 import { lookupRevenue } from '../skills/lookup-revenue';
 import { lookupCatalog } from '../skills/lookup-catalog';
+import { lookupAvailability } from '../skills/lookup-availability';
+import type { AvailabilityFinder } from '../tasks/availability-finder';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 
 // Repos (mutation handlers + lookup deps).
@@ -183,6 +185,7 @@ export interface TextModeDriverDeps {
   agreementRepo?: AgreementRepository;
   moneyDashboardRepo?: MoneyDashboardRepository;
   catalogRepo?: CatalogItemRepository;
+  availabilityFinder?: AvailabilityFinder;
   /** Optional audit-trail of every lookup. */
   lookupEvents?: LookupEventService;
   /** Used as `userId` on synthesized voice-action-router messages. */
@@ -1193,6 +1196,28 @@ export class TextModeDriver implements AgentDriver {
             lookupExecutedEvent(intentType, performance.now() - startMs, true),
           );
           return result.summary;
+        }
+        case 'lookup_availability': {
+          if (!this.deps.availabilityFinder) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const from = this.deps.now ? this.deps.now() : new Date();
+          const result = await lookupAvailability(
+            {
+              tenantId,
+              searchFrom: from,
+              searchTo: new Date(from.getTime() + 14 * 24 * 60 * 60 * 1000),
+              durationMs: 2 * 60 * 60 * 1000,
+            },
+            this.deps.availabilityFinder,
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.status === 'unavailable'
+            ? LOOKUP_NOT_WIRED_FALLBACK
+            : result.message;
         }
         default:
           return LOOKUP_NOT_WIRED_FALLBACK;

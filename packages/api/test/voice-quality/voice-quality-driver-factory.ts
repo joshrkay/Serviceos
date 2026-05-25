@@ -18,6 +18,7 @@ import {
 import { TextModeDriver, type AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
 import { InMemoryCatalogItemRepository } from '../../src/catalog/catalog-item';
+import { DefaultAvailabilityFinder } from '../../src/ai/tasks/availability-finder';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
@@ -317,6 +318,9 @@ export function makeVoiceQualityDriverFactory(
       auditRepo: fctx.repos.auditRepo,
       moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
       catalogRepo: new InMemoryCatalogItemRepository(),
+      availabilityFinder: new DefaultAvailabilityFinder({
+        appointmentRepo: fctx.repos.appointmentRepo,
+      }),
       onCallRepo,
       dncRepo,
       settingsRepo,
