@@ -11,6 +11,7 @@ import {
 import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
+import { AuditRepository } from '../../audit/audit';
 
 export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'reassign_appointment';
@@ -20,6 +21,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly feasibilityDeps?: FeasibilityDependencies,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -95,7 +97,12 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         );
         const toRemove = existingAssignments.find((a) => a.technicianId === fromTechnicianId);
         if (toRemove) {
-          await unassignTechnician(context.tenantId, toRemove.id, this.assignmentRepo);
+          await unassignTechnician(context.tenantId, toRemove.id, this.assignmentRepo, {
+            auditRepo: this.auditRepo,
+            actorId: context.executedBy,
+            appointmentId,
+            technicianId: toRemove.technicianId,
+          });
         }
       }
 
@@ -122,7 +129,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         technicianRole: 'technician',
         isPrimary: true,
         assignedBy: context.executedBy,
-      }, this.assignmentRepo);
+      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
 
       if (this.analyticsRepo) {
         await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'reassigned', {
