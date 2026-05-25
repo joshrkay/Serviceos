@@ -537,11 +537,15 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
       // Atomic reservation: one transaction wraps the slot re-check and all
       // writes (job + held appointment + proposal + audit), so a mid-sequence
-      // failure can't orphan a Job. A transaction-scoped advisory lock keyed
-      // on the slot serializes concurrent bookings for the same window — the
-      // second waits, then sees the first's hold and is told the slot is taken.
+      // failure can't orphan a Job. A transaction-scoped advisory lock
+      // serializes the tenant's concurrent bookings: a per-slotStart key is
+      // unsafe because overlapping windows with different starts (10:00-11:00
+      // vs 10:30-11:30) would take different locks and both pass isSlotFree.
+      // Locking per-tenant guarantees the second booking observes the first's
+      // committed hold via isSlotFree; booking concurrency per tenant is low,
+      // so the brief serialization is acceptable.
       const outcome = await runner.run(tenantId, async ({ lock }) => {
-        await lock(`book:${slotStart.toISOString()}`);
+        await lock('book');
 
         const stillFree = await isSlotFree(finderDeps, {
           tenantId,
