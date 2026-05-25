@@ -37,7 +37,15 @@ export interface BoardAppointment {
   editing?: BoardAppointmentEditing | null;
   /** Non-primary (crew) technicians assigned to this appointment, if any. */
   coAssignees?: BoardCoAssignee[];
+  /**
+   * A customer-initiated cancel/reschedule proposal is open against this
+   * appointment, awaiting dispatcher confirmation. Drives the "change
+   * requested" badge so the board shows the pending request before approval.
+   */
+  pendingChange?: PendingChangeKind;
 }
+
+export type PendingChangeKind = 'cancel' | 'reschedule';
 
 export interface TechnicianLane {
   technicianId: string;
@@ -79,6 +87,12 @@ export interface BoardQueryDependencies {
   getAppointmentLateness?: (appointment: Appointment, technicianId?: string) => Promise<DispatchLatenessResult | undefined>;
   /** When set, enriches appointments with `editing` from dispatch presence. */
   viewingUserId?: string;
+  /**
+   * Resolves which appointments have an open customer-initiated change
+   * request. Returns a map of appointmentId → kind. Wired from the proposal
+   * repository in the route so board-query stays decoupled from proposals.
+   */
+  getPendingChangeRequests?: (appointmentIds: string[]) => Promise<Map<string, PendingChangeKind>>;
 }
 
 function getTimezoneOffsetMs(date: Date, timezone: string): number {
@@ -110,6 +124,7 @@ function toBoardAppointment(
   boardDate?: string,
   viewingUserId?: string,
   coAssignees?: BoardCoAssignee[],
+  pendingChange?: PendingChangeKind,
 ): BoardAppointment {
   const editing = boardDate
     ? getEditingOnAppointment(appointment.tenantId, boardDate, appointment.id, viewingUserId)
@@ -137,6 +152,7 @@ function toBoardAppointment(
     lateness,
     editing,
     ...(coAssignees && coAssignees.length > 0 ? { coAssignees } : {}),
+    ...(pendingChange ? { pendingChange } : {}),
   };
 }
 
@@ -232,6 +248,11 @@ export async function getDispatchBoardData(
       .filter((a) => !a.isPrimary)
       .map((a) => ({ technicianId: a.technicianId, technicianName: techNameMap.get(a.technicianId) ?? a.technicianId }));
 
+  // Open customer-initiated change requests, keyed by appointment id.
+  const pendingChangeMap = deps.getPendingChangeRequests
+    ? await deps.getPendingChangeRequests(appointments.map((a) => a.id))
+    : new Map<string, PendingChangeKind>();
+
   // Build unassigned list
   const unassignedLatenessResults = deps.getAppointmentLateness
     ? await Promise.all(
@@ -252,6 +273,7 @@ export async function getDispatchBoardData(
       dateStr,
       deps.viewingUserId,
       coAssigneesFor(appt.id),
+      pendingChangeMap.get(appt.id),
     ),
   );
 
@@ -280,6 +302,7 @@ export async function getDispatchBoardData(
         dateStr,
         deps.viewingUserId,
         coAssigneesFor(appointment.id),
+        pendingChangeMap.get(appointment.id),
       ),
     );
 
