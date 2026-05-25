@@ -37,6 +37,8 @@ export type MatrixModule =
   | 'CAT'
   | 'CONV'
   | 'LOC'
+  | 'ME'
+  | 'MC'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -686,6 +688,26 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Revise a sent estimate (versioned snapshot)',
     passCriteria:
       'A draft estimate is transitioned to sent, then POST /:id/revise (If-Match=version) bumps version to 2, stamps last_revised_at, and writes a prior-version snapshot row to document_revisions',
+    expected: 'pass',
+  },
+
+  // ----- Current user (/api/me) -----
+  {
+    id: 'ME-01',
+    module: 'ME',
+    feature: 'Current-user profile + mode switch',
+    passCriteria:
+      'GET /api/me returns the authenticated user_id/tenant_id/role; POST /api/me/mode rejects an invalid mode (400) and accepts a valid one (204), emitting a mode_switched audit event',
+    expected: 'pass',
+  },
+
+  // ----- Maintenance contracts -----
+  {
+    id: 'MC-01',
+    module: 'MC',
+    feature: 'Create + read a maintenance contract',
+    passCriteria:
+      'POST /api/maintenance-contracts creates an active contract; GET /:id and the list return it; a maintenance_contract.created audit event is recorded',
     expected: 'pass',
   },
 

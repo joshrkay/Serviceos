@@ -115,6 +115,8 @@ export default defineConfig({
               'locations.spec.ts',
               'estimate-revise.spec.ts',
               'appointments-lifecycle.spec.ts',
+              'me.spec.ts',
+              'maintenance-contracts.spec.ts',
               'golden-journey.spec.ts',
               'scheduling.spec.ts',
               'sms.spec.ts',
