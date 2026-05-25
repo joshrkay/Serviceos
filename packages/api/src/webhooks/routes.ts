@@ -1,6 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { AppConfig } from '../shared/config';
-import { verifyWebhookSignature, handleWebhookEvent, InMemoryWebhookRepository } from './webhook-handler';
+import {
+  verifyWebhookSignature,
+  handleWebhookEvent,
+  InMemoryWebhookRepository,
+  WebhookRepository,
+} from './webhook-handler';
 import { createLogger } from '../logging/logger';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import { SettingsRepository } from '../settings/settings';
@@ -14,6 +19,10 @@ import { BillingService } from '../billing/subscription';
 import { StripeConnectService } from '../billing/stripe-connect';
 import { NotFoundError, ValidationError } from '../shared/errors';
 import { Queue } from '../queues/queue';
+import {
+  DEPROVISION_TENANT_JOB_TYPE,
+  type DeprovisionTenantPayload,
+} from '../workers/deprovision-tenant';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
@@ -25,9 +34,6 @@ import { dispatchInboundSms } from '../sms/inbound-dispatch';
 import { lookupDroppedCallSession } from '../telephony/dropped-call-session-bridge';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
-
-// Shared in-memory repo for dev — swap for DB-backed repo in production
-const webhookRepo = new InMemoryWebhookRepository();
 
 export interface WebhookRouterDeps {
   tenantRepo?: TenantRepository;
@@ -98,10 +104,32 @@ export interface WebhookRouterDeps {
   };
   /** §7 Layer A — payment receipt SMS/email after Stripe checkout completes. */
   paymentReceiptNotifier?: PaymentReceiptNotifier;
+  /**
+   * Blocker 1 — durable idempotency store backing the Stripe/Clerk dedup
+   * (`handleWebhookEvent`). MUST be supplied in production: the in-memory
+   * fallback is wiped on restart and not shared across instances, so
+   * Stripe/Clerk retries would re-process (duplicate deposit credit,
+   * duplicate tenant bootstrap). `createWebhookRouter` throws in
+   * production when this is absent.
+   */
+  webhookRepo?: WebhookRepository;
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
   const router = Router();
+
+  // Blocker 1 — Stripe/Clerk webhook idempotency store. Durable (Postgres)
+  // in production; falls back to an in-memory map for tests/dev. Fail fast
+  // if a production deploy forgot to wire the durable repo rather than
+  // silently running with non-durable, per-instance dedup.
+  if (config.NODE_ENV === 'prod' && !deps.webhookRepo) {
+    throw new Error(
+      'createWebhookRouter: a durable webhookRepo is required in production ' +
+        '(in-memory webhook idempotency is wiped on restart and not shared ' +
+        'across instances, allowing duplicate Stripe/Clerk processing)',
+    );
+  }
+  const webhookRepo: WebhookRepository = deps.webhookRepo ?? new InMemoryWebhookRepository();
 
   /**
    * POST /webhooks/clerk
@@ -781,6 +809,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentRepo,
             moneyStateDeps,
             deps.paymentReceiptNotifier,
+            deps.auditRepo,
+            { actorRole: 'system', correlationId: paymentIntentRef },
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
@@ -804,6 +834,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.paymentRepo,
                   moneyStateDeps,
                   deps.paymentReceiptNotifier,
+                  deps.auditRepo,
+                  { actorRole: 'system', correlationId: paymentIntentRef },
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
@@ -877,6 +909,51 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           logger.warn('customer.subscription.* missing fields', {
             eventId: event.id, type: event.type,
           });
+        }
+
+        // Auto-deprovision on cancellation. Gated behind a flag (default off)
+        // because a hard purge is irreversible — we do NOT want a billing
+        // glitch to nuke a paying customer the first time this fires. Only
+        // acts on a true cancellation (deleted event, or status 'canceled'),
+        // never on dunning states (past_due / unpaid / incomplete). Enqueues
+        // a background job; never throws (must not 500 the webhook → Stripe
+        // would retry forever).
+        if (
+          process.env.AUTO_DEPROVISION_ON_CANCEL === 'true' &&
+          deps.queue &&
+          deps.pool &&
+          (event.type === 'customer.subscription.deleted' || sub.status === 'canceled')
+        ) {
+          try {
+            const tenantRow = await deps.pool.query<{ id: string }>(
+              `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
+              [sub.customer],
+            );
+            const tenantId = tenantRow.rows[0]?.id;
+            if (tenantId) {
+              const payload: DeprovisionTenantPayload = {
+                tenantId,
+                reason:
+                  event.type === 'customer.subscription.deleted'
+                    ? 'stripe_subscription_deleted'
+                    : 'stripe_subscription_canceled',
+                actorId: 'system:stripe_webhook',
+              };
+              await deps.queue.send(
+                DEPROVISION_TENANT_JOB_TYPE,
+                payload,
+                `deprovision-${tenantId}`,
+              );
+              logger.warn('Auto-deprovision enqueued on subscription cancellation', {
+                tenantId, customerId: sub.customer, type: event.type,
+              });
+            }
+          } catch (err) {
+            logger.error('Failed to enqueue auto-deprovision', {
+              customerId: sub.customer,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
       }
 

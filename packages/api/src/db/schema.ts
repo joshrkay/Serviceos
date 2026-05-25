@@ -3041,6 +3041,142 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS ai_verification_error      TEXT,
       ADD COLUMN IF NOT EXISTS ai_verification_started_at TIMESTAMPTZ;
   `,
+
+  '121_estimate_revision_versioning': `
+    -- Optimistic-lock + customer re-sync support for the estimate
+    -- edit/revise flow. 'version' increments on every persisted content
+    -- change; the authenticated edit path and the public approve path
+    -- both compare an expected version to reject stale writes. The public
+    -- approval page also reads 'version' to detect that an estimate was
+    -- revised after the customer loaded it. 'last_revised_at' records the
+    -- most recent revise of an already-sent estimate.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_revised_at TIMESTAMPTZ;
+  `,
+
+  '122_estimate_reminders': `
+    -- Estimate-reminder worker support. 'reminder_count' caps how many
+    -- follow-up nudges a sent-but-unanswered estimate receives;
+    -- 'last_reminder_at' records the most recent nudge. The worker also
+    -- needs to find estimates by send age — that uses the existing
+    -- sent_at column with a new sentBefore list filter (no schema change).
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS reminder_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS last_reminder_at TIMESTAMPTZ;
+  `,
+
+  // Durable record of tenant hard-deletes. Intentionally NOT tenant-scoped:
+  // no FK to tenants (the tenant row is gone by the time we write this) and
+  // NO row-level security, so it survives the purge and remains readable
+  // cross-tenant by ops. This is the only audit trail of a deprovision, since
+  // the tenant's audit_events rows are themselves purged.
+  '123_platform_deprovision_log': `
+    CREATE TABLE IF NOT EXISTS platform_deprovision_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL,
+      reason TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      twilio_released BOOLEAN NOT NULL DEFAULT FALSE,
+      twilio_subaccount_sid TEXT,
+      twilio_error TEXT,
+      rows_deleted JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_deprovision_log_tenant ON platform_deprovision_log(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_deprovision_log_created ON platform_deprovision_log(created_at);
+
+  `,
+
+  '124_tenant_settings_review_urls': `
+    -- Public review links surfaced to happy customers on the post-job
+    -- feedback page (4★+). Edited in Settings → Reviews; consumed by the
+    -- public feedback POST response. NULL = not configured (no button).
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS google_review_url TEXT,
+      ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
+  `,
+
+  // Restored from main: a prior merge into this branch dropped this
+  // migration while the snapshot still referenced it. It widens the
+  // message_dispatches entity_type CHECK to cover the transactional-comms
+  // types the app actually emits (reminders, receipts, overdue, en_route).
+  // Ordered before 125_estimates_deleted_at so insertion order stays
+  // lexicographically non-decreasing.
+  '125_dispatch_entity_en_route': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route'
+        ));
+  `,
+
+  '125_estimates_deleted_at': `
+    -- Soft-delete support for estimates. A non-null deleted_at hides the
+    -- estimate from every read path (list/get/job/token lookups) without
+    -- destroying the row, preserving the audit trail and any linked
+    -- invoice. Accepted estimates are never deletable (enforced in the
+    -- service layer). The partial index keeps the hot "live estimates"
+    -- scans cheap by only indexing the soft-deleted minority.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_estimates_deleted
+      ON estimates(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL;
+  `,
+
+  '126_invoices_estimate_unique': `
+    -- One invoice per estimate. The convert-to-invoice flow is idempotent
+    -- at the application layer (it returns the existing invoice), and this
+    -- partial unique index is the DB-level backstop against a double
+    -- convert racing two requests. NULL estimate_id (invoices not made
+    -- from an estimate) is unconstrained.
+    --
+    -- Deploy safety: if existing data already has two invoices pointing at
+    -- the same estimate (possible via the legacy POST /api/invoices path),
+    -- a UNIQUE index would FAIL the whole migration batch. Detect that and
+    -- fall back to a plain index, leaving app-level idempotency as the
+    -- guard, so the deploy never breaks on dirty data.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM invoices
+        WHERE estimate_id IS NOT NULL
+        GROUP BY estimate_id HAVING COUNT(*) > 1
+      ) THEN
+        CREATE INDEX IF NOT EXISTS idx_invoices_estimate
+          ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+        RAISE WARNING 'invoices.estimate_id has duplicates; created NON-unique index. Reconcile duplicates then add the unique index manually.';
+      ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_estimate
+          ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+      END IF;
+    END $$;
+  `,
+
+  '127_estimate_line_item_options': `
+    -- Good-better-best tiers + optional add-ons on estimate line items.
+    --   group_key (non-null)  -> the item is one option in a mutually
+    --     exclusive group; the customer picks exactly one per group_key.
+    --   group_label           -> human label for the group (e.g. "Roof tier").
+    --   is_optional + null group_key -> a standalone add-on (checkbox).
+    --   null group_key + is_optional=false -> always billed (the default).
+    --   is_default_selected   -> pre-checked tier/add-on shown on first view.
+    ALTER TABLE estimate_line_items
+      ADD COLUMN IF NOT EXISTS group_key TEXT,
+      ADD COLUMN IF NOT EXISTS group_label TEXT,
+      ADD COLUMN IF NOT EXISTS is_optional BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS is_default_selected BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  '128_estimates_accepted_selection': `
+    -- Locks the customer's good-better-best / add-on selection at accept
+    -- time. JSONB array of the estimate_line_item ids the customer chose;
+    -- NULL means no optional/tiered items (the whole estimate stands as-is).
+    -- The converted invoice reads this snapshot so a later revise can't
+    -- change what the customer actually agreed to.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_selection JSONB;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -19,6 +19,7 @@ import {
   renderInvoiceSms,
 } from './templates';
 import { DeliveryError } from './notification-errors';
+import { resolveCustomerLanguage } from '../i18n/resolve-language';
 
 export type SendChannel = 'sms' | 'email' | 'both';
 
@@ -114,7 +115,11 @@ export class SendService {
       throw new NotFoundError('Customer', job.customerId);
     }
 
-    const businessName = await this.resolveBusinessName(input.tenantId);
+    const { businessName, tenantDefaultLanguage } = await this.resolveBusinessContext(input.tenantId);
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage,
+    });
     const viewToken = estimate.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
       estimate.viewTokenExpiresAt ?? new Date(Date.now() + ESTIMATE_TOKEN_TTL_MS);
@@ -164,6 +169,7 @@ export class SendService {
                   businessName,
                   viewUrl,
                   customMessage: input.customMessage,
+                  language,
                 })
               : this.renderEstimateEmailMessage(target.recipient, {
                   customerName: customer.displayName,
@@ -172,6 +178,7 @@ export class SendService {
                   businessName,
                   viewUrl,
                   customMessage: input.customMessage,
+                  language,
                 }),
         })
       )
@@ -202,7 +209,10 @@ export class SendService {
     await this.deps.estimateRepo.update(input.tenantId, estimate.id, {
       viewToken,
       viewTokenExpiresAt,
-      sentAt: now,
+      // Set-once: sentAt records the FIRST send so re-sends (e.g. the
+      // reminder worker) don't overwrite the original send date the UI and
+      // voice readback display. lastDispatchId still tracks the latest send.
+      sentAt: estimate.sentAt ?? now,
       lastDispatchId: sent[sent.length - 1].dispatchId,
       status: estimate.status === 'draft' || estimate.status === 'ready_for_review'
         ? 'sent'
@@ -240,7 +250,11 @@ export class SendService {
       throw new NotFoundError('Customer', job.customerId);
     }
 
-    const businessName = await this.resolveBusinessName(input.tenantId);
+    const { businessName, tenantDefaultLanguage } = await this.resolveBusinessContext(input.tenantId);
+    const language = resolveCustomerLanguage({
+      customerPreferredLanguage: customer.preferredLanguage,
+      tenantDefaultLanguage,
+    });
     const viewToken = invoice.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
       invoice.viewTokenExpiresAt ?? new Date(Date.now() + INVOICE_TOKEN_TTL_MS);
@@ -288,6 +302,7 @@ export class SendService {
                   viewUrl,
                   dueDateIso: invoice.dueDate?.toISOString(),
                   customMessage: input.customMessage,
+                  language,
                 })
               : this.renderInvoiceEmailMessage(target.recipient, {
                   customerName: customer.displayName,
@@ -297,6 +312,7 @@ export class SendService {
                   viewUrl,
                   dueDateIso: invoice.dueDate?.toISOString(),
                   customMessage: input.customMessage,
+                  language,
                 }),
         })
       )
@@ -340,9 +356,14 @@ export class SendService {
     };
   }
 
-  private async resolveBusinessName(tenantId: string): Promise<string> {
+  private async resolveBusinessContext(
+    tenantId: string,
+  ): Promise<{ businessName: string; tenantDefaultLanguage?: string | null }> {
     const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-    return settings?.businessName ?? 'Your service team';
+    return {
+      businessName: settings?.businessName ?? 'Your service team',
+      tenantDefaultLanguage: settings?.defaultLanguage ?? null,
+    };
   }
 
   /**

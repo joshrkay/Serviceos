@@ -113,6 +113,11 @@ const lineItemSchema = z.object({
   totalCents: z.number().int().nonnegative(),
   sortOrder: z.number().int(),
   taxable: z.boolean(),
+  // Good-better-best tiers + optional add-ons (estimates only).
+  groupKey: z.string().min(1).max(120).optional(),
+  groupLabel: z.string().min(1).max(200).optional(),
+  isOptional: z.boolean().optional(),
+  isDefaultSelected: z.boolean().optional(),
 });
 
 export const createCustomerSchema = z.object({
@@ -244,6 +249,34 @@ export const createCatalogItemSchema = z.object({
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
+// Public review-link field (Settings → Reviews). Trims the input FIRST so a
+// whitespace-only value ('   ') normalizes to null (cleared) instead of
+// failing validation; a non-empty value must be a valid URL.
+const reviewUrlField = z
+  .preprocess(
+    (v) => (typeof v === 'string' ? v.trim() : v),
+    z.union([
+      // https only — these values are rendered as clickable hrefs on the
+      // public feedback page, so reject javascript:/data:/http: schemes.
+      z.string().url().refine((u) => /^https:\/\//i.test(u), {
+        message: 'Review URL must be an https:// link',
+      }),
+      z.literal(''),
+      z.null(),
+    ]),
+  )
+  .optional()
+  .transform((v) => (v === '' ? null : v));
+
+// Polly voice id (e.g. "Polly.Mia-Neural"). Constrained so a stored value
+// can never inject XML metacharacters into the `<Say voice="...">` TwiML.
+const ttsVoiceField = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]+$/, 'Invalid voice id')
+  .max(64)
+  .nullable()
+  .optional();
+
 export const updateSettingsSchema = z.object({
   businessName: z.string().min(1).optional(),
   // Codex P2 (PR #316): `.nullable()` so the Business profile sheet
@@ -297,6 +330,35 @@ export const updateSettingsSchema = z.object({
   // B1 — Per-tenant voice persona. null clears the field.
   voiceAgentName: z.string().min(1).max(80).nullable().optional(),
   voiceGreeting: z.string().min(1).max(500).nullable().optional(),
+  // F8 — Call routing & handoff (CallRoutingSheet). Persisted to the
+  // escalation_settings JSONB column (migration 106) and consumed by the
+  // telephony stack via resolveEscalationSettings. Partial: missing keys
+  // fall back to DEFAULT_ESCALATION_SETTINGS on read.
+  escalationSettings: z
+    .object({
+      channel_sms: z.boolean(),
+      channel_in_app: z.boolean(),
+      channel_whisper: z.boolean(),
+      trigger_low_confidence: z.boolean(),
+      trigger_explicit_request: z.boolean(),
+      trigger_keyword_frustration: z.boolean(),
+      trigger_llm_sentiment: z.boolean(),
+      llm_sentiment_threshold: z.number().min(0).max(1),
+      after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
+    })
+    .partial()
+    .optional(),
+  // Public review links (Settings → Reviews). Migration 120. Whitespace/empty
+  // normalizes to null so a cleared field reads back as "not configured".
+  googleReviewUrl: reviewUrlField,
+  yelpReviewUrl: reviewUrlField,
+  // P11-002 — tenant language stack. Persisted to tenant_settings and
+  // consumed by the voice agent + customer-facing comms.
+  defaultLanguage: z.enum(['en', 'es']).optional(),
+  autoDetectLanguage: z.boolean().optional(),
+  ttsVoiceEn: ttsVoiceField,
+  ttsVoiceEs: ttsVoiceField,
+  spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
 }).superRefine((val, ctx) => {
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {

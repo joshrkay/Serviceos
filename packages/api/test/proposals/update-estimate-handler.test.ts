@@ -13,6 +13,7 @@ import {
   EstimateRepository,
 } from '../../src/estimates/estimate';
 import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
 
@@ -79,6 +80,21 @@ describe('UpdateEstimateExecutionHandler', () => {
     expect(updated!.lineItems).toHaveLength(3);
     expect(updated!.lineItems[2].description).toBe('Disposal fee');
     expect(updated!.totals.subtotalCents).toBe(15000 + 85000 + 7500);
+  });
+
+  it('bumps version and emits an audit event so the stale-accept guard catches voice edits', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const h = new UpdateEstimateExecutionHandler(estimateRepo, auditRepo);
+    await estimateRepo.update('t-1', 'est-1', { version: 1 });
+
+    const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+    expect(result.success).toBe(true);
+
+    const updated = await estimateRepo.findById('t-1', 'est-1');
+    expect(updated!.version).toBe(2);
+
+    const events = await auditRepo.findByEntity('t-1', 'estimate', 'est-1');
+    expect(events.some((e) => e.eventType === 'estimate.updated')).toBe(true);
   });
 
   it('supports a chain of edits in a single proposal', async () => {

@@ -86,7 +86,46 @@ test in that file.
 
 ## Implementation Decisions (add during build)
 
-### D-011: [Template — copy for new decisions]
+### D-011: PRD v2 reframes the product as an AI back office for owner-operators
+**Date:** 2026-05-17
+**Decision:** The product is an **AI back office that the owner runs from
+SMS**, not a CRM with AI assist. The canonical PRD is now `docs/PRD.md`
+(v2.0); the prior phase-based execution document is preserved verbatim at
+`docs/PRD-execution-catalog.md` as the source of truth for v1 stories that
+v2 does not amend. The product is delivered in four waves rather than eight
+phases; v1 phases P6 (dispatch board), P10-001 (customer portal), P10-002
+(exec dashboard), P12 (field ops), P13 (multi-location), P14 (inventory),
+and P15–P19 (premium tiers) are deferred to post-PMF or cut because they
+violate locked decision #14 ("no feature ships that adds admin work to the
+owner's day"). Eleven new stories are added to deliver the trust mechanisms
+(supervisor agent, confidence markers, end-of-day digest with "what I
+wasn't sure about" section, SMS approval transport, brand-voice
+configurator, dropped-call recovery, vulnerability triage, correction-loop
+UX, Google review monitoring, tech "I'm out" status, negotiation
+guardrail) that the day-in-the-life requires.
+**Rationale:** The v1 PRD optimized for engineering execution but implicitly
+framed the product as a CRM with AI assist. The customer the founding
+sentence commits to — the owner-operator who learned the trade — does not
+want a CRM; they want their phone to stop ringing and their business side
+to run itself. The trust differentiator (the AI tells the truth when it
+is wrong) does not exist in any competitor and was absent from v1.
+**Story:** Drives PRD v2 §9 stories N-001..N-011 (dispatch IDs P2-034,
+P2-035, P2-036, P2-037, P2-038, P4-015, P5-020, P6-028, P7-026, P8-015,
+P8-016) — see `docs/stories/wave-2-strategic-stories.md`.
+**Alternatives rejected:**
+- Keep v1 PRD as-is and layer the strategy on top. Rejected because the
+  framing mismatch propagates through every downstream artifact (pitch
+  deck, sales script, design system, onboarding).
+- Cut v1 entirely and write from scratch. Rejected because the platform
+  plumbing (P0, P1, P2 proposal engine, LLM gateway, P4 vertical packs)
+  is correct and well-specified — only the surface and sequencing
+  change.
+**Companion documents:** `docs/strategy/day-in-the-life.md` (personas +
+bad-day failure modes + the 14 locked product decisions),
+`docs/strategy/roadmap-audit.md` (full mapping of v1 phases to v2 waves
+with cut / defer / pull-forward rationale).
+
+### D-012: [Template — copy for new decisions]
 **Date:** YYYY-MM-DD
 **Decision:** [What was decided]
 **Rationale:** [Why this choice over alternatives]

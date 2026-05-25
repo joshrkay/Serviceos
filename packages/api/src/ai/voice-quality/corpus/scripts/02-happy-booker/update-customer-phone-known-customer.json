@@ -1,0 +1,53 @@
+{
+  "id": "update-customer-phone-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550311",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_update_customer_phone",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_update_phone_jane",
+        "tenantId": "t_02_update_customer_phone",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550311",
+        "secondaryPhone": null,
+        "email": "jane.smith@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith. Can you update my phone number on file to 555-0143?",
+      "expected": {
+        "intent": "update_customer",
+        "proposalType": "update_customer",
+        "slots": {
+          "phone": "+15555550143"
+        },
+        "spokenAnswerMatches": "I've drafted an update to your contact details for review; an operator will confirm before it's applied.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

@@ -16,6 +16,9 @@ import {
   type CassetteMode,
 } from '../../src/ai/voice-quality/cassette-gateway';
 import { TextModeDriver, type AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
+import { InMemoryMoneyDashboardRepository } from '../../src/reports/money-dashboard';
+import { InMemoryCatalogItemRepository } from '../../src/catalog/catalog-item';
+import { DefaultAvailabilityFinder } from '../../src/ai/tasks/availability-finder';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
@@ -62,7 +65,8 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (OPERATOR_REQUEST_SCRIPTS.has(script.id)) intent = 'operator_request';
   if (script.id === 'cost-cap-drain') intent = 'lookup_account_summary';
 
-  const entities: Record<string, string> = {};
+  const slots = (turn.expected.slots ?? {}) as Record<string, unknown>;
+  const entities: Record<string, unknown> = {};
   if (intent === 'create_customer') {
     const name = displayNameFromCaller(turn.caller);
     if (name) entities.displayName = name;
@@ -75,6 +79,62 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'reschedule_appointment') {
     entities.appointmentReference = 'the appointment';
     entities.newDateTimeDescription = 'the requested new time';
+  }
+  // Full-app voice coverage intents — surface the entities each task
+  // handler needs so the proposal payload is well-formed. Values are
+  // drawn from the turn's expected slots where present, with sensible
+  // defaults so a script can pin just the intent + proposalType.
+  if (intent === 'update_customer') {
+    if (typeof slots.phone === 'string') entities.updatedPhone = slots.phone;
+    if (typeof slots.email === 'string') entities.updatedEmail = slots.email;
+    if (typeof slots.name === 'string') entities.updatedName = slots.name;
+    if (typeof slots.address === 'string') entities.updatedAddress = slots.address;
+    if (
+      !entities.updatedPhone &&
+      !entities.updatedEmail &&
+      !entities.updatedName &&
+      !entities.updatedAddress
+    ) {
+      entities.updatedPhone = '+15555550199';
+    }
+  }
+  if (intent === 'log_expense') {
+    entities.amount = typeof slots.amountCents === 'number' ? slots.amountCents : 24000;
+    entities.expenseCategory = typeof slots.category === 'string' ? slots.category : 'materials';
+    if (typeof slots.vendor === 'string') entities.vendor = slots.vendor;
+  }
+  if (intent === 'convert_lead') {
+    entities.leadReference = typeof slots.leadReference === 'string'
+      ? slots.leadReference
+      : 'the lead on this call';
+  }
+  if (intent === 'confirm_appointment') {
+    entities.appointmentReference = typeof slots.appointmentReference === 'string'
+      ? slots.appointmentReference
+      : 'the appointment';
+  }
+  if (intent === 'mark_lead_lost') {
+    entities.leadReference = typeof slots.leadReference === 'string'
+      ? slots.leadReference
+      : 'the lead on this call';
+    if (typeof slots.reason === 'string') entities.lostReason = slots.reason;
+  }
+  if (intent === 'add_service_location') {
+    entities.serviceAddress = typeof slots.serviceAddress === 'string'
+      ? slots.serviceAddress
+      : '412 Oak Street';
+  }
+  if (intent === 'log_time_entry') {
+    entities.timeEntryType = typeof slots.entryType === 'string' ? slots.entryType : 'job';
+  }
+  if (intent === 'notify_delay') {
+    entities.appointmentReference = typeof slots.appointmentReference === 'string'
+      ? slots.appointmentReference
+      : 'the appointment';
+    if (typeof slots.delayMinutes === 'number') entities.delayMinutes = slots.delayMinutes;
+  }
+  if (intent === 'request_feedback') {
+    if (typeof slots.jobReference === 'string') entities.jobReference = slots.jobReference;
   }
   return JSON.stringify({
     intentType: intent,
@@ -256,6 +316,11 @@ export function makeVoiceQualityDriverFactory(
       jobRepo: fctx.repos.jobRepo,
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
+      moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
+      catalogRepo: new InMemoryCatalogItemRepository(),
+      availabilityFinder: new DefaultAvailabilityFinder({
+        appointmentRepo: fctx.repos.appointmentRepo,
+      }),
       onCallRepo,
       dncRepo,
       settingsRepo,

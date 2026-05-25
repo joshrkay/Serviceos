@@ -57,7 +57,7 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
   async findById(tenantId: string, id: string): Promise<Estimate | null> {
     return this.withTenant(tenantId, async (client) => {
       const { rows } = await client.query(
-        `SELECT * FROM estimates WHERE id = $1 AND tenant_id = $2`,
+        `SELECT * FROM estimates WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
         [id, tenantId],
       );
 
@@ -71,7 +71,7 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
   async findByJob(tenantId: string, jobId: string): Promise<Estimate[]> {
     return this.withTenant(tenantId, async (client) => {
       const { rows } = await client.query(
-        `SELECT * FROM estimates WHERE tenant_id = $1 AND job_id = $2 ORDER BY created_at DESC`,
+        `SELECT * FROM estimates WHERE tenant_id = $1 AND job_id = $2 AND deleted_at IS NULL ORDER BY created_at DESC`,
         [tenantId, jobId],
       );
 
@@ -87,7 +87,7 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
     where: string;
     params: unknown[];
   } {
-    const conditions: string[] = ['tenant_id = $1'];
+    const conditions: string[] = ['tenant_id = $1', 'deleted_at IS NULL'];
     const params: unknown[] = [tenantId];
     let paramIndex = 2;
 
@@ -109,6 +109,12 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         `(estimate_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex})`
       );
       params.push(searchParam);
+      paramIndex++;
+    }
+
+    if (options?.sentBefore) {
+      conditions.push(`sent_at IS NOT NULL AND sent_at < $${paramIndex}`);
+      params.push(options.sentBefore);
       paramIndex++;
     }
 
@@ -278,6 +284,30 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
         setClauses.push(`rejected_reason = $${paramIndex++}`);
         values.push(updates.rejectedReason);
       }
+      if (updates.version !== undefined) {
+        setClauses.push(`version = $${paramIndex++}`);
+        values.push(updates.version);
+      }
+      if (updates.lastRevisedAt !== undefined) {
+        setClauses.push(`last_revised_at = $${paramIndex++}`);
+        values.push(updates.lastRevisedAt);
+      }
+      if (updates.reminderCount !== undefined) {
+        setClauses.push(`reminder_count = $${paramIndex++}`);
+        values.push(updates.reminderCount);
+      }
+      if (updates.lastReminderAt !== undefined) {
+        setClauses.push(`last_reminder_at = $${paramIndex++}`);
+        values.push(updates.lastReminderAt);
+      }
+      if (updates.acceptedSelection !== undefined) {
+        setClauses.push(`accepted_selection = $${paramIndex++}`);
+        values.push(JSON.stringify(updates.acceptedSelection));
+      }
+      if (updates.deletedAt !== undefined) {
+        setClauses.push(`deleted_at = $${paramIndex++}`);
+        values.push(updates.deletedAt);
+      }
 
       if (setClauses.length > 0) {
         values.push(id, tenantId);
@@ -314,8 +344,9 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       await client.query(
         `INSERT INTO estimate_line_items (
           id, tenant_id, estimate_id, description, category,
-          quantity, unit_price_cents, total_cents, sort_order, taxable
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          quantity, unit_price_cents, total_cents, sort_order, taxable,
+          group_key, group_label, is_optional, is_default_selected
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [
           rowId,
           tenantId,
@@ -327,6 +358,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
           item.totalCents,
           item.sortOrder,
           item.taxable,
+          item.groupKey ?? null,
+          item.groupLabel ?? null,
+          item.isOptional ?? false,
+          item.isDefaultSelected ?? false,
         ],
       );
     }
@@ -377,6 +412,10 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
     tenantId: string,
     id: string,
   ): Promise<Estimate | null> {
+    // No deleted_at filter here: this is the reload-after-write used by
+    // update(), which must return the row it just wrote — including a
+    // soft-delete that sets deleted_at. The deleted_at filter belongs on
+    // the public read paths (findById/findByJob/list/findByViewToken).
     const { rows } = await client.query(
       `SELECT * FROM estimates WHERE id = $1 AND tenant_id = $2`,
       [id, tenantId],
@@ -415,6 +454,12 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
       acceptedSignatureData: row.accepted_signature_data ?? undefined,
       rejectedAt: row.rejected_at ? new Date(row.rejected_at) : undefined,
       rejectedReason: row.rejected_reason ?? undefined,
+      version: row.version !== undefined && row.version !== null ? Number(row.version) : 1,
+      lastRevisedAt: row.last_revised_at ? new Date(row.last_revised_at) : undefined,
+      reminderCount: row.reminder_count !== undefined && row.reminder_count !== null ? Number(row.reminder_count) : 0,
+      lastReminderAt: row.last_reminder_at ? new Date(row.last_reminder_at) : undefined,
+      acceptedSelection: Array.isArray(row.accepted_selection) ? row.accepted_selection : undefined,
+      deletedAt: row.deleted_at ? new Date(row.deleted_at) : undefined,
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),

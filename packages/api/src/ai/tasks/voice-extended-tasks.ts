@@ -332,6 +332,33 @@ export class SendInvoiceTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── send_estimate ─────────────
+//
+// Comms class — never auto-approves. Mirrors SendInvoiceTaskHandler:
+// the classifier only has a free-text reference at this point, so the
+// proposal carries estimateReference and flags estimateId as missing;
+// the operator resolves it in the review card before approval.
+export class SendEstimateTaskHandler implements TaskHandler {
+  readonly taskType = 'send_estimate' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      channel: ee.sendChannel ?? 'email',
+    };
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.estimateReference = ee.jobReference;
+    else if (ee.customerName) payload.estimateReference = ee.customerName;
+    else missing.push('estimateId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── record_payment ─────────────
 //
 // Money class — never auto-approves under any confidence.
@@ -379,6 +406,272 @@ export class EmergencyDispatchTaskHandler implements TaskHandler {
 
     return {
       proposal: createProposal(inputFor(context, this.taskType, payload, [])),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── update_customer ─────────────
+//
+// Edits contact details on an EXISTING customer. The concrete
+// customerId comes from the identified caller (inbound) when present;
+// the operator path has no caller identity, so customerId is flagged
+// missing and the review UI resolves the customerName reference. The
+// classifier's updated* fields map onto the proposal payload's
+// name/email/phone/address. Capture-class — reuses the existing
+// UpdateCustomerExecutionHandler.
+export class UpdateCustomerTaskHandler implements TaskHandler {
+  readonly taskType = 'update_customer' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (context.customerId) {
+      payload.customerId = context.customerId;
+    } else {
+      if (ee.customerName) payload.customerReference = ee.customerName;
+      missing.push('customerId');
+    }
+
+    if (ee.updatedName) payload.name = ee.updatedName;
+    if (ee.updatedEmail) payload.email = ee.updatedEmail;
+    if (ee.updatedPhone) payload.phone = ee.updatedPhone;
+    if (ee.updatedAddress) payload.address = ee.updatedAddress;
+
+    // At least one field must change for the update to be meaningful.
+    if (!ee.updatedName && !ee.updatedEmail && !ee.updatedPhone && !ee.updatedAddress) {
+      missing.push('updatedField');
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── log_expense ─────────────
+//
+// Owner/technician logs a business expense. Capture-class, moves no
+// money. Reuses the existing LogExpenseExecutionHandler. spentAt
+// defaults to today (the operator can edit before approval). jobId is
+// optional on the contract, so a missing job reference does not block.
+export class LogExpenseTaskHandler implements TaskHandler {
+  readonly taskType = 'log_expense' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      category: ee.expenseCategory ?? 'other',
+      description: ee.expenseDescription ?? context.message,
+      spentAt: new Date().toISOString().slice(0, 10),
+    };
+    const missing: string[] = [];
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.amountCents = ee.amount;
+    } else {
+      missing.push('amountCents');
+    }
+
+    if (ee.vendor) payload.vendor = ee.vendor;
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── convert_lead ─────────────
+//
+// Promotes an existing lead to a customer. The classifier only has a
+// free-text reference, so the payload carries leadReference and flags
+// leadId missing — the review UI / execution handler resolves the lead.
+export class ConvertLeadTaskHandler implements TaskHandler {
+  readonly taskType = 'convert_lead' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const reference = ee.leadReference ?? ee.customerName;
+    if (reference) payload.leadReference = reference;
+    missing.push('leadId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── confirm_appointment ─────────────
+//
+// Marks an existing appointment confirmed. Resolves the caller's single
+// active appointment when an appointmentRepo is wired; otherwise carries
+// the free-text reference and flags appointmentId missing.
+export class ConfirmAppointmentTaskHandler implements TaskHandler {
+  readonly taskType = 'confirm_appointment' as const;
+
+  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── mark_lead_lost ─────────────
+//
+// Closes out a lead. The classifier returns a free-text lead reference;
+// leadId is resolved by the review UI / execution handler. A reason is
+// always carried (defaults to the transcript) since loseLead requires one.
+export class MarkLeadLostTaskHandler implements TaskHandler {
+  readonly taskType = 'mark_lead_lost' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      reason: ee.lostReason && ee.lostReason.length > 0 ? ee.lostReason : context.message,
+    };
+    const missing: string[] = ['leadId'];
+
+    const reference = ee.leadReference ?? ee.customerName;
+    if (reference) payload.leadReference = reference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── add_service_location ─────────────
+//
+// Attaches a new service address to a customer. The classifier only has
+// a freeform address string; the structured street/city/state/zip are
+// resolved by the review UI, so they're flagged missing.
+export class AddServiceLocationTaskHandler implements TaskHandler {
+  readonly taskType = 'add_service_location' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (context.customerId) {
+      payload.customerId = context.customerId;
+    } else if (ee.customerName) {
+      payload.customerReference = ee.customerName;
+      missing.push('customerId');
+    } else {
+      missing.push('customerId');
+    }
+
+    if (ee.serviceAddress) payload.addressText = ee.serviceAddress;
+    // The executor needs structured fields — always require resolution.
+    missing.push('street1', 'city', 'state', 'postalCode');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── log_time_entry ─────────────
+//
+// Clocks the speaking technician in on a job/task. entryType defaults to
+// 'job'. jobReference is carried for the executor to resolve to a jobId.
+export class LogTimeEntryTaskHandler implements TaskHandler {
+  readonly taskType = 'log_time_entry' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      entryType: ee.timeEntryType ?? 'job',
+    };
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, [])),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── notify_delay ─────────────
+//
+// Outbound delay notice to a customer. Comms-class — never auto-approves.
+export class NotifyDelayTaskHandler implements TaskHandler {
+  readonly taskType = 'notify_delay' as const;
+
+  constructor(private readonly appointmentRepo?: AppointmentRepository) {}
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const resolvedId = await resolveActiveAppointmentId(this.appointmentRepo, context.tenantId);
+    if (resolvedId) {
+      payload.appointmentId = resolvedId;
+    } else if (ee.appointmentReference) {
+      payload.appointmentReference = ee.appointmentReference;
+      missing.push('appointmentId');
+    } else {
+      missing.push('appointmentId');
+    }
+
+    if (typeof ee.delayMinutes === 'number' && ee.delayMinutes > 0) {
+      payload.delayMinutes = ee.delayMinutes;
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── request_feedback ─────────────
+//
+// Sends a post-job feedback/review request. Comms-class.
+export class RequestFeedbackTaskHandler implements TaskHandler {
+  readonly taskType = 'request_feedback' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+    else if (ee.customerName) payload.customerReference = ee.customerName;
+    else missing.push('jobId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
       taskType: this.taskType,
     };
   }

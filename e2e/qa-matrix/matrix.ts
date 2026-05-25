@@ -22,6 +22,23 @@ export type MatrixModule =
   | 'VOICE'
   | 'ISO'
   | 'PORTAL'
+  | 'PROP'
+  | 'RPT'
+  | 'JRN'
+  | 'JOB'
+  | 'AGR'
+  | 'LEAD'
+  | 'INV'
+  | 'CUST'
+  | 'FLAG'
+  | 'TIME'
+  | 'SET'
+  | 'NOTE'
+  | 'CAT'
+  | 'CONV'
+  | 'LOC'
+  | 'ME'
+  | 'MC'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -320,6 +337,22 @@ export const MATRIX: MatrixRow[] = [
     expected: 'partial',
     expectedReason: 'No REST cancel; only the voice/AI path emits cancel_appointment. Requires AI + worker.',
   },
+  {
+    id: 'SCH-04',
+    module: 'SCH',
+    feature: 'Appointment status lifecycle (confirm → in progress → complete)',
+    passCriteria:
+      'PUT /api/appointments/:id walks the appointment through confirmed → in_progress → completed; each transition persists to appointments.status in the DB',
+    expected: 'pass',
+  },
+  {
+    id: 'SCH-05',
+    module: 'SCH',
+    feature: 'Running-late delay notice (virtual status)',
+    passCriteria:
+      'PUT /api/appointments/:id with status=running_late + delayMinutes returns queued=true and does NOT change the stored status (it enqueues a customer delay notice rather than transitioning)',
+    expected: 'pass',
+  },
 
   // ----- SMS / notifications -----
   {
@@ -435,6 +468,257 @@ export const MATRIX: MatrixRow[] = [
       'Records the cases not exercisable in simulated/in-app mode: business-hours enforcement, plan caller-context, phone rate-limiting, tech "out today" SMS, dropped-call recovery, session cost caps',
     expected: 'na',
     expectedReason: 'Require live Twilio (signed webhooks / real call) or non-API config; documented, not driven.',
+  },
+
+  // ----- Proposals / human-approval engine -----
+  {
+    id: 'PROP-01',
+    module: 'PROP',
+    feature: 'Scheduling proposal creation + approval-state guard',
+    passCriteria:
+      'POST /api/proposals (remove_crew_member, If-Match version) persists a draft proposal; rejecting a draft is refused with 409 and leaves the row a draft (human-in-the-loop guard)',
+    expected: 'pass',
+  },
+  {
+    id: 'PROP-02',
+    module: 'PROP',
+    feature: 'Proposal inbox prioritization endpoint',
+    passCriteria:
+      'GET /api/proposals/inbox returns 200 with a well-formed prioritized payload for the tenant (no cross-tenant bleed)',
+    expected: 'pass',
+  },
+  {
+    id: 'PROP-03',
+    module: 'PROP',
+    feature: 'Cross-tenant proposal access denial',
+    passCriteria:
+      "Tenant B cannot GET a proposal created under Tenant A (403/404); the engine never discloses a foreign-tenant proposal",
+    expected: 'pass',
+  },
+  {
+    id: 'PROP-04',
+    module: 'PROP',
+    feature: 'Time-only reschedule proposal does not 500 (regression)',
+    passCriteria:
+      'POST /api/proposals reschedule_appointment with no technician in the payload returns 200 (not 500) for an unassigned appointment — feasibility is skipped when no technician resolves',
+    expected: 'pass',
+  },
+
+  // ----- Reports / analytics -----
+  {
+    id: 'RPT-01',
+    module: 'RPT',
+    feature: 'Money dashboard report',
+    passCriteria:
+      "GET /api/reports/money-dashboard returns 200 with a { data } summary for the tenant month (or 503 NOT_CONFIGURED in an env without the repo)",
+    expected: 'pass',
+  },
+  {
+    id: 'RPT-02',
+    module: 'RPT',
+    feature: 'Revenue-by-source report',
+    passCriteria: 'GET /api/reports/revenue-by-source returns 200 with a { data: [] } attribution array scoped to the tenant',
+    expected: 'pass',
+  },
+  {
+    id: 'RPT-03',
+    module: 'RPT',
+    feature: 'Time-given-back report',
+    passCriteria:
+      'GET /api/reports/time-given-back returns 200 with a { data } summary (or 503 NOT_CONFIGURED when the reporter dep is absent)',
+    expected: 'pass',
+  },
+
+  // ----- Jobs lifecycle -----
+  {
+    id: 'JOB-01',
+    module: 'JOB',
+    feature: 'Job status lifecycle (new → scheduled → in_progress → completed)',
+    passCriteria:
+      'POST /api/jobs creates a job in `new`; POST /:id/transition walks it scheduled → in_progress → completed, each step persisting the new status in the DB',
+    expected: 'pass',
+  },
+  {
+    id: 'JOB-02',
+    module: 'JOB',
+    feature: 'Invalid job transition rejected',
+    passCriteria:
+      'A disallowed transition (new → completed) is refused (4xx) and leaves the job in its original status — the lifecycle state machine is enforced server-side',
+    expected: 'pass',
+  },
+
+  // ----- Service agreements (recurring) -----
+  {
+    id: 'AGR-01',
+    module: 'AGR',
+    feature: 'Create recurring service agreement',
+    passCriteria:
+      'POST /api/agreements persists an active agreement with the recurrence rule, price, and next-run scheduling; GET /:id resolves it with run history',
+    expected: 'pass',
+  },
+  {
+    id: 'AGR-02',
+    module: 'AGR',
+    feature: 'Agreement pause → resume → cancel lifecycle',
+    passCriteria:
+      'pause sets status=paused, resume returns it to active, cancel sets status=cancelled; each transition is reflected in API + DB and cancel is terminal',
+    expected: 'pass',
+  },
+
+  // ----- Leads pipeline -----
+  {
+    id: 'LEAD-01',
+    module: 'LEAD',
+    feature: 'Lead stage progression + won-guard',
+    passCriteria:
+      'A lead is advanced new→contacted→qualified→quoted via PATCH (each persisted); a direct PATCH to stage=won is refused (400) — promotion to won must go through convertToCustomer',
+    expected: 'pass',
+  },
+  {
+    id: 'LEAD-02',
+    module: 'LEAD',
+    feature: 'Lead lost with reason',
+    passCriteria:
+      'POST /api/leads/:id/lose with a reason sets stage=lost and records the lost_reason; the lead is removed from the active pipeline',
+    expected: 'pass',
+  },
+
+  // ----- Invoice lifecycle (issue / void) -----
+  {
+    id: 'INV-01',
+    module: 'INV',
+    feature: 'Invoice issue → void lifecycle',
+    passCriteria:
+      'POST /api/invoices creates a draft; /:id/issue moves it to open (issuedAt stamped); /:id/transition status=void voids it — each persisted in the DB',
+    expected: 'pass',
+  },
+  {
+    id: 'INV-02',
+    module: 'INV',
+    feature: 'Invalid invoice transition rejected',
+    passCriteria:
+      'A disallowed transition (draft → void) is refused (4xx) and the invoice stays draft — the invoice state machine is enforced server-side',
+    expected: 'pass',
+  },
+
+  // ----- Customer archive -----
+  {
+    id: 'CUST-03',
+    module: 'CUST',
+    feature: 'Archive customer',
+    passCriteria:
+      'POST /api/customers/:id/archive sets is_archived=true (archived_at stamped); the customer drops out of the default active list',
+    expected: 'pass',
+  },
+
+  // ----- Feature flags -----
+  {
+    id: 'FLAG-01',
+    module: 'FLAG',
+    feature: 'Feature-flag admin is platform-admin gated',
+    passCriteria:
+      'A tenant owner is refused (401/403/503) on both GET and PUT against /api/admin/feature-flags — the platform-admin gate blocks tenant-level callers from toggling platform flags',
+    expected: 'pass',
+  },
+
+  // ----- Time tracking -----
+  {
+    id: 'TIME-01',
+    module: 'TIME',
+    feature: 'Technician clock-in → clock-out',
+    passCriteria:
+      'POST /api/time-entries/clock-in opens an entry (201); POST /clock-out closes it; the DB time_entries row records both timestamps for the tenant',
+    expected: 'pass',
+  },
+
+  // ----- Tenant settings -----
+  {
+    id: 'SET-01',
+    module: 'SET',
+    feature: 'Read + update tenant settings',
+    passCriteria:
+      'GET /api/settings returns the tenant settings; PUT /api/settings updates a field (e.g. businessName) and a subsequent GET reflects it',
+    expected: 'pass',
+  },
+
+  // ----- Notes -----
+  {
+    id: 'NOTE-01',
+    module: 'NOTE',
+    feature: 'Note CRUD on a job',
+    passCriteria:
+      'POST /api/notes creates a note on a job; GET lists it; PUT edits the content; DELETE removes it and the list/DB no longer contain it',
+    expected: 'pass',
+  },
+
+  // ----- Catalog / price book -----
+  {
+    id: 'CAT-01',
+    module: 'CAT',
+    feature: 'Catalog item CRUD',
+    passCriteria:
+      'POST /api/catalog/items creates an item; it appears in the list; PUT updates its price; DELETE archives/removes it from the active list',
+    expected: 'pass',
+  },
+
+  // ----- Conversations / messages -----
+  {
+    id: 'CONV-01',
+    module: 'CONV',
+    feature: 'Conversation + message thread',
+    passCriteria:
+      'POST /api/conversations creates a thread; POST /:id/messages appends a text message; GET /:id/messages returns it in order',
+    expected: 'pass',
+  },
+
+  // ----- Service locations -----
+  {
+    id: 'LOC-01',
+    module: 'LOC',
+    feature: 'Service location lifecycle',
+    passCriteria:
+      'POST /api/locations creates a location for a customer; GET /:id returns it; PUT /:id updates a field; POST /:id/archive marks it archived (is_archived=true in the DB)',
+    expected: 'pass',
+  },
+
+  // ----- Estimate revise (sent → versioned revision) -----
+  {
+    id: 'EST-R1',
+    module: 'EST',
+    feature: 'Revise a sent estimate (versioned snapshot)',
+    passCriteria:
+      'A draft estimate is transitioned to sent, then POST /:id/revise (If-Match=version) bumps version to 2, stamps last_revised_at, and writes a prior-version snapshot row to document_revisions',
+    expected: 'pass',
+  },
+
+  // ----- Current user (/api/me) -----
+  {
+    id: 'ME-01',
+    module: 'ME',
+    feature: 'Current-user profile + mode switch',
+    passCriteria:
+      'GET /api/me returns the authenticated user_id/tenant_id/role; POST /api/me/mode rejects an invalid mode (400) and accepts a valid one (204), emitting a mode_switched audit event',
+    expected: 'pass',
+  },
+
+  // ----- Maintenance contracts -----
+  {
+    id: 'MC-01',
+    module: 'MC',
+    feature: 'Create + read a maintenance contract',
+    passCriteria:
+      'POST /api/maintenance-contracts creates an active contract; GET /:id and the list return it; a maintenance_contract.created audit event is recorded',
+    expected: 'pass',
+  },
+
+  // ----- Golden end-to-end journey -----
+  {
+    id: 'JRN-03',
+    module: 'JRN',
+    feature: 'Golden funnel: intake → lead → convert → job → estimate → invoice issued',
+    passCriteria:
+      'Public intake → lead → convert → location → job → estimate (totals checked) → estimate sent → invoice created+issued (open), each verified in the DB. The delivery/payment tail (SendGrid/Stripe) is attempted; PASS when the delivery leg is accepted, PARTIAL when it is mock/unavailable (no false pass).',
+    expected: 'pass',
   },
 ];
 

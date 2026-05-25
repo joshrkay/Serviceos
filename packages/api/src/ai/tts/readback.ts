@@ -70,6 +70,9 @@ export function buildReadbackScript(proposal: Proposal): string {
     case 'send_invoice':
       // Comms — explicitly require screen-tap.
       return `Ready to send an invoice: ${summaryFor(proposal)}. Tap to confirm on screen.`;
+    case 'send_estimate':
+      // Comms — explicitly require screen-tap.
+      return `Ready to send an estimate: ${summaryFor(proposal)}. Tap to confirm on screen.`;
     case 'record_payment':
       // Money — explicitly require screen-tap.
       return `Ready to record a payment: ${summaryFor(proposal)}. Tap to confirm on screen.`;

@@ -1,4 +1,10 @@
-import { Estimate, EstimateRepository } from './estimate';
+import { Estimate, EstimateRepository, transitionEstimateStatus } from './estimate';
+import {
+  calculateDocumentTotals,
+  hasSelectableLineItems,
+  resolveSelectedLineItems,
+  validateLineItemSelection,
+} from '../shared/billing-engine';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { LocationRepository } from '../locations/location';
@@ -30,11 +36,22 @@ export interface PublicEstimateView {
   businessPhone?: string;
   businessEmail?: string;
   lineItems: Array<{
+    id: string;
     description: string;
     quantity: number;
     unitPriceCents: number;
     totalCents: number;
+    /** Non-null = one option in a mutually-exclusive tier group. */
+    groupKey?: string;
+    /** Label for the tier group. */
+    groupLabel?: string;
+    /** Customer-selectable (tier option or standalone add-on). */
+    isOptional?: boolean;
+    /** Pre-selected on first view. */
+    isDefaultSelected?: boolean;
   }>;
+  /** True when the estimate has tier options or optional add-ons to choose. */
+  hasSelectableItems: boolean;
   totalCents: number;
   subtotalCents: number;
   taxCents: number;
@@ -51,6 +68,15 @@ export interface PublicEstimateView {
   rejectedReason?: string;
   /** Set when token is past expiry. */
   isExpired: boolean;
+  /**
+   * Optimistic-lock / re-sync counter. The customer page captures this
+   * on load and sends it back as `expectedVersion` on approve; a bump
+   * means the business revised the estimate and the page must reload
+   * before the customer can accept.
+   */
+  version: number;
+  /** ISO timestamp of the most recent revise of this (already sent) estimate. */
+  lastRevisedAt?: string;
   /**
    * Tier 4 (Deposit rules — PR 3a). Deposit context surfaced from
    * the linked job. Customers see the required amount on the
@@ -89,6 +115,21 @@ export interface ApproveEstimateInput {
   signatureData?: string;
   ip?: string;
   userAgent?: string;
+  /**
+   * The estimate `version` the customer was viewing when they accepted.
+   * When supplied and it no longer matches, the estimate was revised
+   * after page load and approval is refused so the customer reviews the
+   * latest version first.
+   */
+  expectedVersion?: number;
+  /**
+   * Good-better-best: the estimate_line_item ids the customer chose
+   * (tier options + add-ons). Required when the estimate has selectable
+   * items; ignored otherwise. The server validates the selection and
+   * recomputes the accepted total from it — the client total is never
+   * trusted.
+   */
+  selectedLineItemIds?: string[];
 }
 
 export interface DeclineEstimateInput {
@@ -159,6 +200,10 @@ export class PublicEstimateService {
     if (this.isExpired(estimate)) {
       throw new ConflictError('Estimate link has expired');
     }
+    // Validity-date expiry beats approval: a lapsed quote can't be
+    // accepted at stale pricing. Mark it expired so the pipeline reflects
+    // reality, then refuse.
+    await this.expireIfPastValidUntil(estimate);
     if (estimate.status === 'accepted') {
       // Idempotent: return current view rather than throwing on double-click.
       return this.toView(estimate);
@@ -168,9 +213,69 @@ export class PublicEstimateService {
         `Estimate cannot be accepted from status: ${estimate.status}`
       );
     }
+    // One accepted estimate per job. If a different estimate on the same
+    // job is already accepted (and thus convertible to an invoice),
+    // refuse so the job can't end up with two competing accepted quotes
+    // that both bill. The dispatcher can decline/reopen the other first.
+    const siblings = await this.deps.estimateRepo.findByJob(estimate.tenantId, estimate.jobId);
+    if (siblings.some((s) => s.id !== estimate.id && s.status === 'accepted')) {
+      throw new ConflictError(
+        'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+      );
+    }
+    // Stale-revision guard. Once an estimate has been revised, a caller MUST
+    // prove which version it is accepting — otherwise a cached page or a
+    // direct API call could accept stale, pre-revision pricing. Never-revised
+    // estimates (version 1, no lastRevisedAt) don't need the token, so first
+    // sends stay frictionless.
+    const hasBeenRevised = estimate.version > 1 || estimate.lastRevisedAt !== undefined;
+    if (hasBeenRevised && input.expectedVersion === undefined) {
+      throw new ConflictError(
+        'This estimate was updated. Please reload to review the latest version before accepting.',
+      );
+    }
+    if (
+      input.expectedVersion !== undefined &&
+      input.expectedVersion !== estimate.version
+    ) {
+      throw new ConflictError(
+        'This estimate was updated after you opened it. Please review the latest version before accepting.',
+      );
+    }
     const trimmed = input.acceptedByName.trim();
     if (trimmed.length < 2) {
       throw new ValidationError('acceptedByName must be at least 2 characters');
+    }
+
+    // Good-better-best: resolve the customer's selection and recompute
+    // the accepted total from it. The client total is never trusted —
+    // everything below (deposit gate, persisted totals, the eventual
+    // invoice) uses this server-side figure.
+    const selectable = hasSelectableLineItems(estimate.lineItems);
+    let acceptedSelection: string[] | undefined;
+    let acceptedTotals = estimate.totals;
+    if (selectable) {
+      const selectedIds = input.selectedLineItemIds;
+      if (selectedIds === undefined) {
+        throw new ValidationError('A selection is required for this estimate');
+      }
+      const selectionErrors = validateLineItemSelection(estimate.lineItems, selectedIds);
+      if (selectionErrors.length > 0) {
+        throw new ValidationError(selectionErrors.join('; '));
+      }
+      const billed = resolveSelectedLineItems(estimate.lineItems, selectedIds);
+      if (billed.length === 0) {
+        // An estimate of only optional rows with nothing selected would
+        // accept at $0 and then fail to convert (no billable lines). Refuse
+        // up front so we never persist an unconvertible acceptance.
+        throw new ValidationError('Select at least one item before accepting this estimate');
+      }
+      acceptedTotals = calculateDocumentTotals(
+        billed,
+        estimate.totals.discountCents,
+        estimate.totals.taxRateBps,
+      );
+      acceptedSelection = billed.map((li) => li.id);
     }
 
     // Tier 4 (Deposit rules — PR 3b). When the tenant runs the
@@ -182,7 +287,7 @@ export class PublicEstimateService {
     const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
     if (policy === 'before_approval' && settings) {
-      const requiredFromRule = evaluateDepositRule(settings, estimate.totals.totalCents);
+      const requiredFromRule = evaluateDepositRule(settings, acceptedTotals.totalCents);
       if (requiredFromRule > 0) {
         const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
         const paid = job?.depositPaidCents ?? 0;
@@ -198,6 +303,8 @@ export class PublicEstimateService {
       estimate.id,
       {
         status: 'accepted',
+        totals: acceptedTotals,
+        acceptedSelection,
         acceptedAt: now,
         acceptedByName: trimmed,
         acceptedByIp: input.ip,
@@ -272,6 +379,7 @@ export class PublicEstimateService {
     if (this.isExpired(estimate)) {
       throw new ConflictError('Estimate link has expired');
     }
+    await this.expireIfPastValidUntil(estimate);
     if (estimate.status === 'rejected') {
       return this.toView(estimate);
     }
@@ -341,7 +449,33 @@ export class PublicEstimateService {
     return estimate.viewTokenExpiresAt.getTime() < Date.now();
   }
 
+  /**
+   * Validity-date expiry precedence. When a sent estimate is past its
+   * `validUntil`, transition it to 'expired' and refuse the action so a
+   * lapsed quote can neither be accepted nor declined at stale terms.
+   * No-op for estimates with no validity date or one still in the future.
+   */
+  private async expireIfPastValidUntil(estimate: Estimate): Promise<void> {
+    if (!estimate.validUntil) return;
+    if (estimate.validUntil.getTime() >= Date.now()) return;
+    if (estimate.status !== 'sent') return;
+    await transitionEstimateStatus(
+      estimate.tenantId,
+      estimate.id,
+      'expired',
+      this.deps.estimateRepo,
+    );
+    throw new ConflictError('This estimate has expired and can no longer be actioned.');
+  }
+
   private async toView(estimate: Estimate): Promise<PublicEstimateView> {
+    // Once accepted, narrow the displayed line items to the customer's
+    // locked good-better-best selection so the rows shown match the stored
+    // total (the estimate keeps every option row for history/clone).
+    const acceptedSelection = estimate.acceptedSelection;
+    const displayItems = acceptedSelection && acceptedSelection.length > 0
+      ? estimate.lineItems.filter((li) => acceptedSelection.includes(li.id))
+      : estimate.lineItems;
     const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
     const [customer, settings, locs] = await Promise.all([
       job ? this.deps.customerRepo.findById(estimate.tenantId, job.customerId) : Promise.resolve(null),
@@ -358,7 +492,13 @@ export class PublicEstimateService {
           .filter(Boolean).join(', ');
       }
     }
-    const isExpired = this.isExpired(estimate);
+    const isExpired = this.isExpired(estimate) ||
+      // A sent estimate past its validity date reads as expired so the
+      // page disables Approve/Decline, matching the server's enforcement
+      // (expireIfPastValidUntil) without writing on a GET.
+      (!!estimate.validUntil &&
+        estimate.validUntil.getTime() < Date.now() &&
+        estimate.status === 'sent');
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
 
     // Tier 4 (Deposit rules — PR 3b). For tenants on the
@@ -410,12 +550,21 @@ export class PublicEstimateService {
       // that surfaces a null value.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
-      lineItems: estimate.lineItems.map((li) => ({
+      lineItems: displayItems.map((li) => ({
+        id: li.id,
         description: li.description,
         quantity: li.quantity,
         unitPriceCents: li.unitPriceCents,
         totalCents: li.totalCents,
+        groupKey: li.groupKey,
+        groupLabel: li.groupLabel,
+        isOptional: li.isOptional,
+        isDefaultSelected: li.isDefaultSelected,
       })),
+      // Only offer the picker before acceptance. Once accepted, the line
+      // items are already narrowed to the chosen set (above) and the total
+      // reflects it, so the page shows a plain summary.
+      hasSelectableItems: !acceptedSelection && hasSelectableLineItems(estimate.lineItems),
       totalCents: estimate.totals.totalCents,
       subtotalCents: estimate.totals.subtotalCents,
       taxCents: estimate.totals.taxCents,
@@ -428,6 +577,8 @@ export class PublicEstimateService {
       rejectedAt: estimate.rejectedAt?.toISOString(),
       rejectedReason: estimate.rejectedReason,
       isExpired,
+      version: estimate.version,
+      lastRevisedAt: estimate.lastRevisedAt?.toISOString(),
       // Tier 4 (Deposit rules — PR 3a). Surface the deposit context
       // from the linked job, with PR 3b's before_approval computation
       // layered on top. Defaults cover legacy jobs (the columns

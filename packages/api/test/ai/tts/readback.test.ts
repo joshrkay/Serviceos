@@ -40,6 +40,7 @@ describe('readback — isVoiceApprovable', () => {
   it('refuses voice approval for money / comms / irreversible', () => {
     expect(isVoiceApprovable('record_payment')).toBe(false); // money
     expect(isVoiceApprovable('send_invoice')).toBe(false); // comms
+    expect(isVoiceApprovable('send_estimate')).toBe(false); // comms
     expect(isVoiceApprovable('cancel_appointment')).toBe(false); // irreversible
   });
 });
@@ -60,6 +61,13 @@ describe('readback — buildReadbackScript', () => {
     const s = buildReadbackScript(fakeProposal({ proposalType: 'send_invoice' }));
     expect(s).not.toContain('Say approve');
     expect(s.toLowerCase()).toContain('tap to confirm on screen');
+  });
+
+  it('forces screen-tap cue on comms proposals (send_estimate)', () => {
+    const s = buildReadbackScript(fakeProposal({ proposalType: 'send_estimate' }));
+    expect(s).not.toContain('Say approve');
+    expect(s.toLowerCase()).toContain('tap to confirm on screen');
+    expect(s.toLowerCase()).toContain('send an estimate');
   });
 
   it('forces screen-tap cue on irreversible proposals (cancel_appointment)', () => {

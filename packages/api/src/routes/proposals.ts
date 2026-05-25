@@ -92,6 +92,7 @@ export function createProposalsRouter(
           case 'created': res.status(200).json(result.proposal); return;
           case 'missing_version': res.status(400).json({ error: 'MISSING_VERSION' }); return;
           case 'invalid_version': res.status(400).json({ error: 'INVALID_VERSION' }); return;
+          case 'missing_technician': res.status(400).json({ error: 'MISSING_TECHNICIAN', proposalType: result.proposalType }); return;
           case 'not_found': res.status(404).json({ error: 'APPOINTMENT_NOT_FOUND' }); return;
           case 'stale': res.status(409).json({
             error: 'STALE_APPOINTMENT',

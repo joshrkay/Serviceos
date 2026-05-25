@@ -117,11 +117,6 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
-  // Phase-13 voice_sessions + per-user current_mode + tenant-level
-  // backup-supervisor / unsupervised routing. Body byte-identical to
-  // the original 063_create_voice_sessions_and_modes entry from the
-  // p12-mode-switching branch; key bumped to 066 on merge because
-  // main claimed 063–065 first.
   ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
   ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
@@ -177,6 +172,16 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['117_tech_status_today', '5f2224447036245f802ac7aeeb333fb46614670526fdc621285a4200d321a55a'],
   ['118_jobs_money_state', '2f7263cff926f33f21d8b01da9b01feb892c4f61ba09b8a1eafd404f455f8010'],
   ['119_view_token_lookup_functions', '0d4251c8391c2cdf6c1cb8120cf50e92c739e62db3a80cc8eaeb0b48579711a3'],
+  ['120_tenant_settings_ai_config', 'e81e1e5ccef2b65ce8412ea57ccbca4b319a2ca67d9846ebc1c0ba871943a3b1'],
+  ['121_estimate_revision_versioning', '9f1c9074e2f31c07b01e9a7f50989e89da5c198135017f8c31aa6906449d05c2'],
+  ['122_estimate_reminders', '5f6c29e7825508f8e4a1d62e889fc93d5dfca96af26e9d0a1f8ae613a56d0cd2'],
+  ['123_platform_deprovision_log', 'c05fefacd43c39abd95305589cc12404e46f2a3c2a85b556a7ecd15dae283e3a'],
+  ['124_tenant_settings_review_urls', '889419f461a2e292ff89c910528927715eee23435bf69e74c4fac832fe8ef3b2'],
+  ['125_dispatch_entity_en_route', '113fdf2a2aaba8da7250518612817363ffa77110f1d8c60ace32fcc255f55dc6'],
+  ['125_estimates_deleted_at', '45ded6b32cd90fe40623332dafa7932ee33afbf6a8abb7df2afa117e04f72eec'],
+  ['126_invoices_estimate_unique', 'b85be06a1ce1aa7d739ce2700e5a7fed6d08b757e6c58be92d136eea77846e44'],
+  ['127_estimate_line_item_options', 'b6c373ef8aa306b24a1ea4c12f17fd5432446c00c3f1bd761050ff4dc7185ea5'],
+  ['128_estimates_accepted_selection', 'bd49424960f39937bd085b19263e7fc7d7372275ac76d5cd5f004a44c395ca71'],
 ];
 
 function hashMigration(value: string): string {

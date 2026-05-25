@@ -30,6 +30,33 @@ describe('P1-017 — Tenant business settings and numbering preferences', () => 
     expect(settings.nextEstimateNumber).toBe(1);
     expect(settings.nextInvoiceNumber).toBe(1);
     expect(settings.defaultPaymentTermDays).toBe(30);
+    // P11-002 — language stack seeded with safe defaults.
+    expect(settings.defaultLanguage).toBe('en');
+    expect(settings.autoDetectLanguage).toBe(true);
+  });
+
+  it('P11-002 — persists language settings end-to-end', async () => {
+    await createSettings({ tenantId: 'tenant-lang', businessName: 'Bilingual Co' }, repo);
+    const updated = await updateSettings(
+      'tenant-lang',
+      {
+        defaultLanguage: 'es',
+        autoDetectLanguage: false,
+        ttsVoiceEs: 'Polly.Lupe',
+        spanishDispatcherUserIds: ['11111111-1111-1111-1111-111111111111'],
+      },
+      repo,
+    );
+    expect(updated?.defaultLanguage).toBe('es');
+    expect(updated?.autoDetectLanguage).toBe(false);
+    expect(updated?.ttsVoiceEs).toBe('Polly.Lupe');
+    expect(updated?.spanishDispatcherUserIds).toEqual([
+      '11111111-1111-1111-1111-111111111111',
+    ]);
+
+    const reread = await getSettings('tenant-lang', repo);
+    expect(reread?.defaultLanguage).toBe('es');
+    expect(reread?.autoDetectLanguage).toBe(false);
   });
 
   it('happy path — creates settings with custom values', async () => {

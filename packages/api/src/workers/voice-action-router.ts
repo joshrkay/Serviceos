@@ -28,9 +28,19 @@ import {
   ReassignAppointmentTaskHandler,
   AddNoteTaskHandler,
   SendInvoiceTaskHandler,
+  SendEstimateTaskHandler,
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
+  UpdateCustomerTaskHandler,
+  LogExpenseTaskHandler,
+  ConvertLeadTaskHandler,
+  ConfirmAppointmentTaskHandler,
+  MarkLeadLostTaskHandler,
+  AddServiceLocationTaskHandler,
+  LogTimeEntryTaskHandler,
+  NotifyDelayTaskHandler,
+  RequestFeedbackTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 
@@ -153,8 +163,18 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
   reassign_appointment: 'reassign_appointment',
   add_note: 'add_note',
   send_invoice: 'send_invoice',
+  send_estimate: 'send_estimate',
   record_payment: 'record_payment',
   emergency_dispatch: 'emergency_dispatch',
+  update_customer: 'update_customer',
+  log_expense: 'log_expense',
+  convert_lead: 'convert_lead',
+  confirm_appointment: 'confirm_appointment',
+  mark_lead_lost: 'mark_lead_lost',
+  add_service_location: 'add_service_location',
+  log_time_entry: 'log_time_entry',
+  notify_delay: 'notify_delay',
+  request_feedback: 'request_feedback',
 };
 
 /**
@@ -259,8 +279,18 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('reassign_appointment', new ReassignAppointmentTaskHandler());
   handlers.set('add_note', new AddNoteTaskHandler());
   handlers.set('send_invoice', new SendInvoiceTaskHandler());
+  handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
+  handlers.set('update_customer', new UpdateCustomerTaskHandler());
+  handlers.set('log_expense', new LogExpenseTaskHandler());
+  handlers.set('convert_lead', new ConvertLeadTaskHandler());
+  handlers.set('confirm_appointment', new ConfirmAppointmentTaskHandler(deps.appointmentRepo));
+  handlers.set('mark_lead_lost', new MarkLeadLostTaskHandler());
+  handlers.set('add_service_location', new AddServiceLocationTaskHandler());
+  handlers.set('log_time_entry', new LogTimeEntryTaskHandler());
+  handlers.set('notify_delay', new NotifyDelayTaskHandler(deps.appointmentRepo));
+  handlers.set('request_feedback', new RequestFeedbackTaskHandler());
   return handlers;
 }
 

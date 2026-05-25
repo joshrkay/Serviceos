@@ -1,0 +1,53 @@
+{
+  "id": "convert-lead-after-quote",
+  "bucket": "03-lead-capture",
+  "callerId": "+15555550322",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_03_convert_lead_quote",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_03_convert_quote_owner",
+        "tenantId": "t_03_convert_lead_quote",
+        "firstName": "Dana",
+        "lastName": "Dispatcher",
+        "displayName": "Dana Dispatcher",
+        "companyName": null,
+        "primaryPhone": "+15555550322",
+        "secondaryPhone": null,
+        "email": "dana@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "The Davis lead just accepted — turn that lead into a customer for me.",
+      "expected": {
+        "intent": "convert_lead",
+        "proposalType": "convert_lead",
+        "slots": {
+          "leadReference": "the Davis lead"
+        },
+        "spokenAnswerMatches": "I've drafted converting the Davis lead into a customer for review; an operator will confirm before it's applied.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}
