@@ -67,6 +67,7 @@ import {
 } from './full-app-voice-handlers';
 import { TimeEntryService } from '../../time-tracking/time-entry-service';
 import { FeedbackRequestRepository } from '../../feedback/feedback-request';
+import { DelayNotificationService } from '../../notifications/delay-notifications';
 import { LineItem } from '../../shared/billing-engine';
 
 export interface ExecutionContext {
@@ -432,6 +433,7 @@ export function createExecutionHandlerRegistry(deps?: {
   // Wave-2 full-app voice handlers. All optional; absent → passthrough.
   timeEntryService?: TimeEntryService;
   feedbackRepo?: FeedbackRequestRepository;
+  delayNotificationService?: DelayNotificationService;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -495,7 +497,12 @@ export function createExecutionHandlerRegistry(deps?: {
     new MarkLeadLostExecutionHandler(deps?.leadRepo, deps?.auditRepo),
     new AddServiceLocationExecutionHandler(deps?.locationRepo, deps?.auditRepo),
     new LogTimeEntryExecutionHandler(deps?.timeEntryService),
-    new NotifyDelayExecutionHandler(),
+    new NotifyDelayExecutionHandler(
+      deps?.delayNotificationService,
+      deps?.appointmentRepo,
+      deps?.jobRepo,
+      deps?.customerRepo,
+    ),
     new RequestFeedbackExecutionHandler(deps?.feedbackRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
