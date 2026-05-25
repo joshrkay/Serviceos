@@ -809,6 +809,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             deps.paymentRepo,
             moneyStateDeps,
             deps.paymentReceiptNotifier,
+            deps.auditRepo,
+            { actorRole: 'system', correlationId: paymentIntentRef },
           );
           logger.info('Invoice marked paid via Stripe checkout', { tenantId, invoiceId, amountTotal });
         } catch (payErr) {
@@ -832,6 +834,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                   deps.paymentRepo,
                   moneyStateDeps,
                   deps.paymentReceiptNotifier,
+                  deps.auditRepo,
+                  { actorRole: 'system', correlationId: paymentIntentRef },
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: invoice.amountDueCents,
