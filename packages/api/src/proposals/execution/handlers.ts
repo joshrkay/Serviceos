@@ -486,6 +486,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.invoiceRepo,
       moneyStateDeps,
       deps?.transactionalComms,
+      deps?.auditRepo,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
