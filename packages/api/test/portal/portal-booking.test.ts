@@ -195,6 +195,24 @@ describe('booking-availability service', () => {
     expect(await isSlotFree({ appointmentRepo }, { tenantId: TENANT, start, end })).toBe(true);
   });
 
+  it('snaps same-day slots to the 30-minute grid when clamped to now', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    // "Now" is 10:13:27 ET on a summer weekday (EDT, UTC-4) → 14:13:27Z.
+    const now = new Date('2030-06-03T14:13:27Z');
+    const slots = await findBookableSlots(
+      { appointmentRepo },
+      { tenantId: TENANT, fromDate: '2030-06-03', toDate: '2030-06-03', timezone: 'America/New_York', durationMin: 60, maxSlots: 5, now },
+    );
+    expect(slots.length).toBeGreaterThan(0);
+    // First offered slot must be a clean :00/:30 boundary at/after now, not 10:13.
+    expect(slots[0].start.getTime()).toBeGreaterThanOrEqual(now.getTime());
+    for (const s of slots) {
+      const min = s.start.getUTCMinutes();
+      expect(min === 0 || min === 30).toBe(true);
+      expect(s.start.getUTCSeconds()).toBe(0);
+    }
+  });
+
   it('isSlotFree returns false once the slot is held', async () => {
     const appointmentRepo = new InMemoryAppointmentRepository();
     const start = new Date('2030-06-03T15:00:00Z');

@@ -24,8 +24,18 @@ export interface BusinessHours {
 
 export const DEFAULT_BUSINESS_HOURS: BusinessHours = { openHour: 8, closeHour: 17 };
 const HOUR_MS = 60 * 60 * 1000;
+/** Booking cadence — slots are offered on a 30-minute grid from business open. */
+const GRANULARITY_MS = 30 * 60 * 1000;
 const MAX_RANGE_DAYS = 21;
 const MAX_SLOTS = 20;
+
+/** Round `t` up to the next multiple of `granularityMs` measured from `anchor`. */
+function snapUpFrom(t: number, anchor: number, granularityMs: number): number {
+  if (t <= anchor) return anchor;
+  const delta = t - anchor;
+  const rem = delta % granularityMs;
+  return rem === 0 ? t : t + (granularityMs - rem);
+}
 
 export interface BookableSlotsDeps {
   appointmentRepo: AppointmentRepository;
@@ -67,38 +77,47 @@ export async function findBookableSlots(
   const now = input.now ?? new Date();
   const finder = buildFinder(deps);
 
-  const slots: OpenSlot[] = [];
+  // Build the per-day business-hour search windows first (bounded), then query
+  // them in parallel — sequential per-day round-trips add avoidable latency.
+  const windows: { start: Date; end: Date }[] = [];
   let dayMidnight = tzMidnight(input.fromDate, tz);
   const lastMidnight = tzMidnight(input.toDate, tz);
   let guard = 0;
-
-  while (
-    dayMidnight.getTime() <= lastMidnight.getTime() &&
-    slots.length < maxSlots &&
-    guard < MAX_RANGE_DAYS
-  ) {
+  while (dayMidnight.getTime() <= lastMidnight.getTime() && guard < MAX_RANGE_DAYS) {
     guard++;
-    const winStart = new Date(dayMidnight.getTime() + bh.openHour * HOUR_MS);
-    const winEnd = new Date(dayMidnight.getTime() + bh.closeHour * HOUR_MS);
-    // Never offer a slot in the past — clamp the day's window to `now`.
-    const effectiveStart = winStart.getTime() < now.getTime() ? now : winStart;
-
-    if (effectiveStart.getTime() + durationMs <= winEnd.getTime()) {
-      const result = await finder.find({
-        tenantId: input.tenantId,
-        searchFrom: effectiveStart,
-        searchTo: winEnd,
-        durationMs,
-        technicianId: input.technicianId,
-        count: maxSlots - slots.length,
-        bufferMs: DEFAULT_BUFFER_MS,
-      });
-      if (result.ok) slots.push(...result.slots);
+    const winStart = dayMidnight.getTime() + bh.openHour * HOUR_MS;
+    const winEnd = dayMidnight.getTime() + bh.closeHour * HOUR_MS;
+    // Never offer a slot in the past, and keep the booking cadence clean by
+    // snapping a clamped start up to the next grid boundary from business open.
+    const effectiveStart =
+      winStart < now.getTime() ? snapUpFrom(now.getTime(), winStart, GRANULARITY_MS) : winStart;
+    if (effectiveStart + durationMs <= winEnd) {
+      windows.push({ start: new Date(effectiveStart), end: new Date(winEnd) });
     }
-
     dayMidnight = addCalendarDays(dayMidnight, 1, tz);
   }
 
+  const perWindow = await Promise.all(
+    windows.map((w) =>
+      finder.find({
+        tenantId: input.tenantId,
+        searchFrom: w.start,
+        searchTo: w.end,
+        durationMs,
+        technicianId: input.technicianId,
+        count: maxSlots,
+        granularityMs: GRANULARITY_MS,
+        bufferMs: DEFAULT_BUFFER_MS,
+      }),
+    ),
+  );
+
+  // Windows are already in chronological order; flatten and cap.
+  const slots: OpenSlot[] = [];
+  for (const result of perWindow) {
+    if (result.ok) slots.push(...result.slots);
+    if (slots.length >= maxSlots) break;
+  }
   return slots.slice(0, maxSlots);
 }
 

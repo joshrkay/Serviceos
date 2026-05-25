@@ -459,7 +459,15 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
       if (!response.ok) {
         throw new Error('Failed to send "on my way" notice');
       }
-      setOnMyWayNotified((current) => ({ ...current, [appointmentId]: true }));
+      // The endpoint returns 202 even when nobody could be notified (e.g. no
+      // customer contact on file). Only show the success state — and disable
+      // retries — when a recipient was actually reached.
+      const body = await response.json().catch(() => ({}));
+      if (body?.notified === true) {
+        setOnMyWayNotified((current) => ({ ...current, [appointmentId]: true }));
+      } else {
+        setError('No contact on file for this customer — no notice was sent.');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send "on my way" notice');
     } finally {
