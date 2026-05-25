@@ -213,6 +213,16 @@ export class PublicEstimateService {
         `Estimate cannot be accepted from status: ${estimate.status}`
       );
     }
+    // One accepted estimate per job. If a different estimate on the same
+    // job is already accepted (and thus convertible to an invoice),
+    // refuse so the job can't end up with two competing accepted quotes
+    // that both bill. The dispatcher can decline/reopen the other first.
+    const siblings = await this.deps.estimateRepo.findByJob(estimate.tenantId, estimate.jobId);
+    if (siblings.some((s) => s.id !== estimate.id && s.status === 'accepted')) {
+      throw new ConflictError(
+        'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+      );
+    }
     // Stale-revision guard. Once an estimate has been revised, a caller MUST
     // prove which version it is accepting — otherwise a cached page or a
     // direct API call could accept stale, pre-revision pricing. Never-revised
@@ -453,6 +463,13 @@ export class PublicEstimateService {
   }
 
   private async toView(estimate: Estimate): Promise<PublicEstimateView> {
+    // Once accepted, narrow the displayed line items to the customer's
+    // locked good-better-best selection so the rows shown match the stored
+    // total (the estimate keeps every option row for history/clone).
+    const acceptedSelection = estimate.acceptedSelection;
+    const displayItems = acceptedSelection && acceptedSelection.length > 0
+      ? estimate.lineItems.filter((li) => acceptedSelection.includes(li.id))
+      : estimate.lineItems;
     const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
     const [customer, settings, locs] = await Promise.all([
       job ? this.deps.customerRepo.findById(estimate.tenantId, job.customerId) : Promise.resolve(null),
@@ -527,7 +544,7 @@ export class PublicEstimateService {
       // that surfaces a null value.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
-      lineItems: estimate.lineItems.map((li) => ({
+      lineItems: displayItems.map((li) => ({
         id: li.id,
         description: li.description,
         quantity: li.quantity,
@@ -538,7 +555,10 @@ export class PublicEstimateService {
         isOptional: li.isOptional,
         isDefaultSelected: li.isDefaultSelected,
       })),
-      hasSelectableItems: hasSelectableLineItems(estimate.lineItems),
+      // Only offer the picker before acceptance. Once accepted, the line
+      // items are already narrowed to the chosen set (above) and the total
+      // reflects it, so the page shows a plain summary.
+      hasSelectableItems: !acceptedSelection && hasSelectableLineItems(estimate.lineItems),
       totalCents: estimate.totals.totalCents,
       subtotalCents: estimate.totals.subtotalCents,
       taxCents: estimate.totals.taxCents,

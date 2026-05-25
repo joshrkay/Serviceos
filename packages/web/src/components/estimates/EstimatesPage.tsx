@@ -70,6 +70,8 @@ interface ApiEstimate {
   customerId?: string;
   /** Optimistic-concurrency token sent back as If-Match on edits. */
   version?: number;
+  /** Locked good-better-best selection (line-item ids) once accepted. */
+  acceptedSelection?: string[];
 }
 
 /** Convert ApiLineItem to UI LineItem for the editor */
@@ -837,7 +839,17 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   }
 
   // Sync lineItems from API data when it loads
-  const apiLineItems = est?.lineItems ?? [];
+  // Once accepted with a good-better-best selection, show only the billed
+  // rows so the line items and the total match what the customer agreed to
+  // (the estimate keeps every option row underneath for history/clone).
+  const acceptedSel = est?.acceptedSelection;
+  const apiLineItems = (() => {
+    const all = est?.lineItems ?? [];
+    if (acceptedSel && acceptedSel.length > 0) {
+      return all.filter((li) => li.id && acceptedSel.includes(li.id));
+    }
+    return all;
+  })();
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
   const total    = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);

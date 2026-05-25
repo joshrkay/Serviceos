@@ -604,7 +604,25 @@ export function EstimateApprovalPage() {
     Boolean(li.isOptional || li.groupKey);
   useEffect(() => {
     if (!apiView || !hasSelectable || selectedIds !== null) return;
-    setSelectedIds(apiView.lineItems.filter(li => isSelectable(li) && li.isDefaultSelected).map(li => li.id));
+    // Seed one option per tier group (the flagged default, else the first
+    // by order) plus any pre-checked add-ons — matching the server's
+    // default resolution so the preview total is correct on first load.
+    const seed: string[] = [];
+    const groups = new Map<string, typeof apiView.lineItems>();
+    for (const li of apiView.lineItems) {
+      if (li.groupKey) {
+        const arr = groups.get(li.groupKey) ?? [];
+        arr.push(li);
+        groups.set(li.groupKey, arr);
+      } else if (li.isOptional && li.isDefaultSelected) {
+        seed.push(li.id);
+      }
+    }
+    for (const items of groups.values()) {
+      const chosen = items.find(i => i.isDefaultSelected) ?? items[0];
+      if (chosen) seed.push(chosen.id);
+    }
+    setSelectedIds(seed);
   }, [apiView, hasSelectable, selectedIds]);
 
   const chosen = new Set(selectedIds ?? []);

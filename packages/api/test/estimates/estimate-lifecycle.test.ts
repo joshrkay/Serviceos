@@ -134,6 +134,18 @@ describe('Billing engine — good-better-best selection', () => {
     expect(resolved.map((li) => li.id).sort()).toEqual(['addon', 'base', 'better']);
   });
 
+  it('defaults a tier group with no flagged default to its first option', () => {
+    const noDefault: LineItem[] = [
+      { ...buildLineItem('base', 'Diagnostic', 1, 5000, 0, true) },
+      { ...buildLineItem('g1', 'Tier A', 1, 10000, 1, true), groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      { ...buildLineItem('g2', 'Tier B', 1, 20000, 2, true), groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+    ];
+    // No isDefaultSelected anywhere — the group must still contribute one
+    // option (the first by sortOrder) so the total isn't understated.
+    const resolved = resolveSelectedLineItems(noDefault);
+    expect(resolved.map((li) => li.id).sort()).toEqual(['base', 'g1']);
+  });
+
   it('rejects a selection with zero or multiple tier options', () => {
     expect(validateLineItemSelection(lineItems, ['addon'])).toContain('Select exactly one option for "Plan"');
     expect(validateLineItemSelection(lineItems, ['good', 'better'])).toContain('Select exactly one option for "Plan"');

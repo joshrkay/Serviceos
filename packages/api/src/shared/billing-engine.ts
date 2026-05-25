@@ -90,10 +90,40 @@ export function resolveSelectedLineItems(
 ): LineItem[] {
   const selectable = (li: LineItem) => Boolean(li.isOptional || li.groupKey);
   if (selectedIds === undefined) {
-    return lineItems.filter((li) => !selectable(li) || li.isDefaultSelected);
+    // Default selection: always-included items, each tier group's default
+    // (or its first option by sortOrder when none is flagged, so a group is
+    // never silently dropped from the total), and any pre-checked add-ons.
+    const result: LineItem[] = [];
+    const groups = new Map<string, LineItem[]>();
+    for (const li of lineItems) {
+      if (li.groupKey) {
+        const arr = groups.get(li.groupKey) ?? [];
+        arr.push(li);
+        groups.set(li.groupKey, arr);
+      } else if (li.isOptional) {
+        if (li.isDefaultSelected) result.push(li);
+      } else {
+        result.push(li);
+      }
+    }
+    for (const items of groups.values()) {
+      const sorted = [...items].sort((a, b) => a.sortOrder - b.sortOrder);
+      const chosen = sorted.find((i) => i.isDefaultSelected) ?? sorted[0];
+      if (chosen) result.push(chosen);
+    }
+    return result;
   }
   const chosen = new Set(selectedIds);
   return lineItems.filter((li) => !selectable(li) || chosen.has(li.id));
+}
+
+/**
+ * The default selection ids (one per tier group + pre-checked add-ons +
+ * always-included). Used by the UI to seed its initial selection so the
+ * client preview matches the server's default resolution.
+ */
+export function defaultSelectionIds(lineItems: LineItem[]): string[] {
+  return resolveSelectedLineItems(lineItems).map((li) => li.id);
 }
 
 /**
