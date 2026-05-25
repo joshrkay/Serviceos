@@ -112,6 +112,8 @@ export default defineConfig({
               'notes.spec.ts',
               'catalog.spec.ts',
               'conversations.spec.ts',
+              'locations.spec.ts',
+              'estimate-revise.spec.ts',
               'golden-journey.spec.ts',
               'scheduling.spec.ts',
               'sms.spec.ts',

@@ -36,6 +36,7 @@ export type MatrixModule =
   | 'NOTE'
   | 'CAT'
   | 'CONV'
+  | 'LOC'
   | 'LEGACY';
 export type MatrixExpectation = 'pass' | 'partial' | 'fail' | 'na';
 
@@ -649,6 +650,26 @@ export const MATRIX: MatrixRow[] = [
     feature: 'Conversation + message thread',
     passCriteria:
       'POST /api/conversations creates a thread; POST /:id/messages appends a text message; GET /:id/messages returns it in order',
+    expected: 'pass',
+  },
+
+  // ----- Service locations -----
+  {
+    id: 'LOC-01',
+    module: 'LOC',
+    feature: 'Service location lifecycle',
+    passCriteria:
+      'POST /api/locations creates a location for a customer; GET /:id returns it; PUT /:id updates a field; POST /:id/archive marks it archived (is_archived=true in the DB)',
+    expected: 'pass',
+  },
+
+  // ----- Estimate revise (sent → versioned revision) -----
+  {
+    id: 'EST-R1',
+    module: 'EST',
+    feature: 'Revise a sent estimate (versioned snapshot)',
+    passCriteria:
+      'A draft estimate is transitioned to sent, then POST /:id/revise (If-Match=version) bumps version to 2, stamps last_revised_at, and writes a prior-version snapshot row to document_revisions',
     expected: 'pass',
   },
 
