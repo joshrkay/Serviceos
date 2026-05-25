@@ -100,6 +100,7 @@ import { RepoBackedTimeGivenBackReporter } from './reports/time-given-back';
 import { createTimeEntriesRouter } from './routes/time-entries';
 import { InMemoryTimeEntryRepository } from './time-tracking/time-entry';
 import { PgTimeEntryRepository } from './time-tracking/pg-time-entry';
+import { TimeEntryService } from './time-tracking/time-entry-service';
 import {
   PgRevenueBySourceRepository,
   InMemoryRevenueBySourceRepository,
@@ -773,6 +774,11 @@ export function createApp(): express.Express {
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+  // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
+  // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
+  // without a pool (tests/dev) so createWebhookRouter falls back to its
+  // in-memory map. createWebhookRouter throws if this is missing in prod.
+  const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
@@ -870,6 +876,7 @@ export function createApp(): express.Express {
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     auditRepo: webhookAuditRepo,
     webhookEventRepo,
+    webhookRepo,
     integrationResolver,
   };
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
@@ -1003,16 +1010,7 @@ export function createApp(): express.Express {
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
-  // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
-  // is wired here so a future webhook handler can pull it from app-level
-  // wiring without re-instantiating. The webhooks/routes.ts router still
-  // uses its own InMemoryWebhookRepository for the legacy
-  // (provider/event/svix-id) shape — that one is unchanged.
-  const webhookEventRepo2   = webhookEventRepo;
   const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
-  // Reference the variable so TS doesn't drop it; downstream consumers will
-  // attach in a follow-up PR.
-  void webhookEventRepo2;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
@@ -1301,6 +1299,11 @@ export function createApp(): express.Express {
         customerRepo,
       )
     : undefined;
+  // Built ahead of the execution registry so the notify_delay handler can
+  // send a real delay notice; reused by the delay-notification worker below.
+  const delayNotificationService = messageDelivery
+    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
+    : new NoopDelayNotificationService();
   const executionHandlers = createExecutionHandlerRegistry({
     customerRepo,
     jobRepo,
@@ -1325,6 +1328,13 @@ export function createApp(): express.Express {
     ...(serviceCreditRepo ? { serviceCreditRepo } : {}),
     ...(googleReplyResolver ? { googleReplyResolver } : {}),
     ...(reviewPrivateMessageSender ? { reviewPrivateMessageSender } : {}),
+    // Full-app voice capability execution deps (convert_lead / mark_lead_lost,
+    // log_time_entry, request_feedback, notify_delay). Without these the
+    // respective handlers degrade to a validated passthrough.
+    leadRepo,
+    timeEntryService: new TimeEntryService(timeEntryRepo, auditRepo),
+    feedbackRepo: feedbackRequestRepo,
+    delayNotificationService,
   });
   // §11 H1: IdempotencyGuard + advisory lock per (tenant, key). Keys
   // default to `proposal-run:{tenant}:{id}` when callers omit one.
@@ -1419,9 +1429,6 @@ export function createApp(): express.Express {
     new NextCustomerSelector(appointmentRepo, assignmentRepo, jobRepo, customerRepo),
     delayNoticeStateRepo,
   );
-  const delayNotificationService = messageDelivery
-    ? new TwilioDelayNotificationService(messageDelivery, dispatchRepo)
-    : new NoopDelayNotificationService();
   const delayNotificationWorker = createDelayNotificationWorker({
     service: delayNotificationService,
     stateRepo: delayNoticeStateRepo,
@@ -1822,6 +1829,13 @@ export function createApp(): express.Express {
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
   const telephonyCallControl = new DefaultTwilioCallControl();
+  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
+  // money-dashboard repo the /api/reports router uses below.
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1850,6 +1864,9 @@ export function createApp(): express.Express {
     appointmentRepo,
     invoiceRepo,
     agreementRepo,
+    moneyDashboardRepo,
+    catalogRepo,
+    availabilityFinder,
     lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -2521,11 +2538,6 @@ export function createApp(): express.Express {
   const revenueBySourceRepo = pool
     ? new PgRevenueBySourceRepository(pool)
     : new InMemoryRevenueBySourceRepository();
-  const moneyDashboardRepo = new PgMoneyDashboardRepository(
-    invoiceRepo,
-    paymentRepo,
-    expenseRepo,
-  );
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
     settingsRepo,

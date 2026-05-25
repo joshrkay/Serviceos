@@ -151,7 +151,7 @@ function isSameServiceDay(a: Date, b: Date, timezone = 'UTC'): boolean {
   return formatter.format(a) === formatter.format(b);
 }
 
-function resolveCustomerChannel(customer: Customer): { channel: DelayNotificationChannel; destination?: string } {
+export function resolveCustomerChannel(customer: Customer): { channel: DelayNotificationChannel; destination?: string } {
   if (customer.preferredChannel === 'sms') {
     if (customer.smsConsent && customer.primaryPhone) {
       return { channel: 'sms', destination: customer.primaryPhone };
