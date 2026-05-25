@@ -13,6 +13,9 @@ const ROUTED_COMPONENTS = [
   'components/estimates/NewEstimateFlow.tsx',
   'components/estimates/EstimatesPage.tsx',
   'components/invoices/InvoicesPage.tsx',
+  // Public, unauthenticated customer page — must never render fixture data
+  // (it would leak another customer's details). See Blocker 8.
+  'components/customer/EstimateApprovalPage.tsx',
 ];
 
 /** Value imports from mock-data are forbidden; `import type` is allowed. */

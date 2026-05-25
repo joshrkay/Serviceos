@@ -14,6 +14,7 @@ import {
 } from '../../invoices/payment';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
+import { AuditRepository } from '../../audit/audit';
 
 /**
  * Execution handlers for the Stage-2 voice intents.
@@ -142,6 +143,7 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
     private readonly invoiceRepo?: InvoiceRepository,
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
     private readonly paymentReceiptNotifier?: PaymentReceiptNotifier,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -182,6 +184,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
         this.paymentRepo,
         this.moneyStateDeps,
         this.paymentReceiptNotifier,
+        this.auditRepo,
+        { actorRole: 'system', correlationId: proposal.id },
       );
       return { success: true, resultEntityId: payment.id };
     } catch (err) {

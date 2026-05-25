@@ -3,12 +3,13 @@ import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
-  Briefcase, MapPin,
+  Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { apiFetch } from '../../utils/api-fetch';
+import { printEstimateDocument } from '../../lib/estimatePdf';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -16,7 +17,7 @@ import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
-type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined' | 'Expired';
 
 interface EstCompat {
   id: string;
@@ -70,6 +71,8 @@ interface ApiEstimate {
   customerId?: string;
   /** Optimistic-concurrency token sent back as If-Match on edits. */
   version?: number;
+  /** Locked good-better-best selection (line-item ids) once accepted. */
+  acceptedSelection?: string[];
 }
 
 /** Convert ApiLineItem to UI LineItem for the editor */
@@ -496,9 +499,25 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             <p className="text-sm text-slate-700">Customer preview</p>
             <p className="text-xs text-slate-400">What {est.customer.split(' ')[0]} sees when they open the link</p>
           </div>
-          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-            <X size={15} className="text-slate-500" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => printEstimateDocument({
+                estimateNumber: est.estimateNumber,
+                customerName: est.customer,
+                businessName: 'Fieldly Pro Services',
+                businessContact: 'Austin, TX · (512) 555-0000',
+                description: est.description,
+                validUntil: est.validUntil,
+                lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              })}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
+            >
+              <Download size={12} /> PDF
+            </button>
+            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
+              <X size={15} className="text-slate-500" />
+            </button>
+          </div>
         </div>
 
         {/* Document body */}
@@ -732,6 +751,50 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [previewOpen,  setPreviewOpen]  = useState(false);
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
+  const [actionBusy,   setActionBusy]   = useState(false);
+  const [actionError,  setActionError]  = useState<string | null>(null);
+
+  async function handleClone() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}/clone`, { method: 'POST' });
+      if (!res.ok) throw new Error(`Could not clone estimate (HTTP ${res.status})`);
+      const clone = (await res.json()) as { id: string };
+      navigate(`/estimates/${clone.id}`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to clone estimate');
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm('Delete this estimate? It will be removed from your list.')) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) throw new Error(`Could not delete estimate (HTTP ${res.status})`);
+      onBack();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete estimate');
+      setActionBusy(false);
+    }
+  }
+
+  async function handleReopen() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      await transitionEstimate({ status: 'draft' });
+      await refetch();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to reopen estimate');
+    } finally {
+      setActionBusy(false);
+    }
+  }
 
   // Enriched customer/location from the linked job
   const [enrichedCustomer, setEnrichedCustomer] = useState<{ name: string; id: string; phone?: string; email?: string } | null>(null);
@@ -793,14 +856,28 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   }
 
   // Sync lineItems from API data when it loads
-  const apiLineItems = est?.lineItems ?? [];
+  // Once accepted with a good-better-best selection, show only the billed
+  // rows so the line items and the total match what the customer agreed to
+  // (the estimate keeps every option row underneath for history/clone).
+  const acceptedSel = est?.acceptedSelection;
+  const apiLineItems = (() => {
+    const all = est?.lineItems ?? [];
+    if (acceptedSel && acceptedSel.length > 0) {
+      return all.filter((li) => li.id && acceptedSel.includes(li.id));
+    }
+    return all;
+  })();
   const uiLineItems = lineItems.length > 0 ? lineItems : apiLineItems.map(apiLineToUi);
 
   const total    = uiLineItems.reduce((s, i) => s + i.qty * i.rate, 0);
   const customer = est?.customer;
   const apiStatus = wasSent ? 'sent' : (est?.status ?? 'draft');
   const status   = normalizeEstimateStatus(apiStatus) as EstimateStatus;
-  const editable = status === 'Draft';
+  // Editability follows the RAW status, not the normalized label: the API
+  // folds `expired` into the "Draft" label, but the backend blocks edits on
+  // expired/rejected. Keying off the raw status avoids offering an edit that
+  // would 409. Reopen (rejected/expired -> draft) is the supported path.
+  const editable = apiStatus === 'draft' || apiStatus === 'ready_for_review';
 
   if (isLoading) {
     return (
@@ -1012,12 +1089,40 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     <FileText size={14} /> Convert to invoice
                   </button>
                 )}
+                {(est.status === 'rejected' || est.status === 'expired') && (
+                  <button
+                    onClick={() => void handleReopen()}
+                    disabled={actionBusy}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw size={14} /> Reopen as draft
+                  </button>
+                )}
                 <button
                   onClick={() => setPreviewOpen(true)}
                   className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
                 >
                   <Eye size={14} /> Preview document
                 </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void handleClone()}
+                    disabled={actionBusy}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    <Copy size={14} /> Duplicate
+                  </button>
+                  {est.status !== 'accepted' && (
+                    <button
+                      onClick={() => void handleDelete()}
+                      disabled={actionBusy}
+                      className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 bg-white text-red-600 py-3 text-sm hover:bg-red-50 transition-colors disabled:opacity-50"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  )}
+                </div>
+                {actionError && <p className="text-xs text-red-600">{actionError}</p>}
               </div>
 
               {/* Follow-up note for viewed/sent */}
@@ -1031,6 +1136,20 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </div>
                   <p className={`text-xs ${status === 'Viewed' ? 'text-violet-600' : 'text-amber-600'}`}>
                     {status === 'Viewed' ? 'Follow up if they have questions' : 'Awaiting response'}
+                  </p>
+                </div>
+              )}
+
+              {(status === 'Expired' || status === 'Declined') && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Clock size={12} className="text-slate-500" />
+                    <p className="text-xs text-slate-600">
+                      {status === 'Expired' ? 'This estimate expired' : 'Customer declined this estimate'}
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Reopen it as a draft to revise and resend.
                   </p>
                 </div>
               )}
@@ -1086,11 +1205,12 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
 // ─── API status → UI tab value mapping ───────────────────────────────────
 const API_STATUS_FOR_TAB: Record<EstimateStatus | 'All', string[]> = {
   All:      [],
-  Draft:    ['draft', 'expired'],
+  Draft:    ['draft'],
   Sent:     ['ready_for_review', 'sent'],
   Viewed:   [],
   Approved: ['accepted'],
   Declined: ['rejected'],
+  Expired:  ['expired'],
 };
 
 // ─── Estimates List ───────────────────────────────────────────────────────
@@ -1100,6 +1220,8 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
   { label: 'Sent',     value: 'Sent'     },
   { label: 'Viewed',   value: 'Viewed'   },
   { label: 'Approved', value: 'Approved' },
+  { label: 'Declined', value: 'Declined' },
+  { label: 'Expired',  value: 'Expired'  },
 ];
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {
