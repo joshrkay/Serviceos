@@ -844,7 +844,11 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const customer = est?.customer;
   const apiStatus = wasSent ? 'sent' : (est?.status ?? 'draft');
   const status   = normalizeEstimateStatus(apiStatus) as EstimateStatus;
-  const editable = status === 'Draft';
+  // Editability follows the RAW status, not the normalized label: the API
+  // folds `expired` into the "Draft" label, but the backend blocks edits on
+  // expired/rejected. Keying off the raw status avoids offering an edit that
+  // would 409. Reopen (rejected/expired -> draft) is the supported path.
+  const editable = apiStatus === 'draft' || apiStatus === 'ready_for_review';
 
   if (isLoading) {
     return (

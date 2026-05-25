@@ -3113,8 +3113,27 @@ export const MIGRATIONS = {
     -- partial unique index is the DB-level backstop against a double
     -- convert racing two requests. NULL estimate_id (invoices not made
     -- from an estimate) is unconstrained.
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_estimate
-      ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+    --
+    -- Deploy safety: if existing data already has two invoices pointing at
+    -- the same estimate (possible via the legacy POST /api/invoices path),
+    -- a UNIQUE index would FAIL the whole migration batch. Detect that and
+    -- fall back to a plain index, leaving app-level idempotency as the
+    -- guard, so the deploy never breaks on dirty data.
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM invoices
+        WHERE estimate_id IS NOT NULL
+        GROUP BY estimate_id HAVING COUNT(*) > 1
+      ) THEN
+        CREATE INDEX IF NOT EXISTS idx_invoices_estimate
+          ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+        RAISE WARNING 'invoices.estimate_id has duplicates; created NON-unique index. Reconcile duplicates then add the unique index manually.';
+      ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_estimate
+          ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+      END IF;
+    END $$;
   `,
 
   '127_estimate_line_item_options': `

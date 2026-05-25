@@ -243,6 +243,42 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
     });
   });
 
+  describe('Phase 2 — convert race', () => {
+    it('two concurrent converts yield one invoice (unique-index backstop)', async () => {
+      const jobId = await newJob();
+      const est = await seedEstimate(jobId, [buildLineItem(crypto.randomUUID(), 'Repair', 1, 15000, 0, true)], { status: 'accepted' });
+      const auditRepo = new InMemoryAuditRepository();
+      const convertDeps = { estimateRepo, invoiceRepo, jobRepo, settingsRepo, auditRepo, paymentRepo, actorId: tenant.userId, logger };
+
+      const [a, b] = await Promise.all([
+        convertEstimateToInvoice(tenant.tenantId, est.id, convertDeps),
+        convertEstimateToInvoice(tenant.tenantId, est.id, convertDeps),
+      ]);
+      expect(a!.id).toBe(b!.id);
+      const linked = (await invoiceRepo.findByJob(tenant.tenantId, jobId)).filter((i) => i.estimateId === est.id);
+      expect(linked).toHaveLength(1);
+    });
+  });
+
+  describe('Phase 4 — public view reflects validity expiry', () => {
+    it('marks a lapsed sent estimate as expired and non-actionable on GET', async () => {
+      const jobId = await newJob();
+      const token = `viewexpiry-${crypto.randomUUID()}`;
+      await seedEstimate(
+        jobId,
+        [buildLineItem(crypto.randomUUID(), 'Labor', 1, 5000, 0, true)],
+        { status: 'sent', viewToken: token, sentAt: new Date(), validUntil: new Date(Date.now() - 60_000) },
+      );
+      const service = new PublicEstimateService({
+        estimateRepo, jobRepo, customerRepo, locationRepo, settingsRepo,
+        auditRepo: new InMemoryAuditRepository(),
+      });
+      const view = await service.getByToken(token);
+      expect(view.isExpired).toBe(true);
+      expect(view.isActionable).toBe(false);
+    });
+  });
+
   describe('Phase 4 — validity expiry precedence', () => {
     it('expires (and refuses) a decline on an estimate past valid_until', async () => {
       const jobId = await newJob();

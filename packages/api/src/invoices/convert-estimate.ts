@@ -71,22 +71,37 @@ export async function convertEstimateToInvoice(
 
   const job = (await deps.jobRepo.findById(tenantId, estimate.jobId)) as Job | null;
 
-  const invoice = await createInvoiceWithNextNumber(
-    {
-      tenantId,
-      jobId: estimate.jobId,
-      estimateId: estimate.id,
-      lineItems: billedItems,
-      discountCents: estimate.totals.discountCents,
-      taxRateBps: estimate.totals.taxRateBps,
-      customerMessage: estimate.customerMessage,
-      originatingLeadId: job?.originatingLeadId,
-      createdBy: deps.actorId,
-    },
-    deps.invoiceRepo,
-    deps.settingsRepo,
-    deps.auditRepo,
-  );
+  let invoice;
+  try {
+    invoice = await createInvoiceWithNextNumber(
+      {
+        tenantId,
+        jobId: estimate.jobId,
+        estimateId: estimate.id,
+        lineItems: billedItems,
+        discountCents: estimate.totals.discountCents,
+        taxRateBps: estimate.totals.taxRateBps,
+        customerMessage: estimate.customerMessage,
+        originatingLeadId: job?.originatingLeadId,
+        createdBy: deps.actorId,
+      },
+      deps.invoiceRepo,
+      deps.settingsRepo,
+      deps.auditRepo,
+    );
+  } catch (err) {
+    // Concurrency backstop: a racing convert may have inserted the linked
+    // invoice between our findByJob check and this insert, tripping the
+    // uq_invoices_estimate unique index (Postgres 23505). Re-fetch and
+    // return the winner's invoice so both callers get a consistent result.
+    const code = (err as { code?: string } | undefined)?.code;
+    if (code === '23505') {
+      const raced = (await deps.invoiceRepo.findByJob(tenantId, estimate.jobId))
+        .find((inv) => inv.estimateId === estimate.id);
+      if (raced) return raced;
+    }
+    throw err;
+  }
 
   let result = invoice;
   if (deps.paymentRepo && job) {

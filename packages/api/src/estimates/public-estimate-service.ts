@@ -469,7 +469,13 @@ export class PublicEstimateService {
           .filter(Boolean).join(', ');
       }
     }
-    const isExpired = this.isExpired(estimate);
+    const isExpired = this.isExpired(estimate) ||
+      // A sent estimate past its validity date reads as expired so the
+      // page disables Approve/Decline, matching the server's enforcement
+      // (expireIfPastValidUntil) without writing on a GET.
+      (!!estimate.validUntil &&
+        estimate.validUntil.getTime() < Date.now() &&
+        estimate.status === 'sent');
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
 
     // Tier 4 (Deposit rules — PR 3b). For tenants on the
