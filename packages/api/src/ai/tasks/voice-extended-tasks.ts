@@ -411,6 +411,105 @@ export class EmergencyDispatchTaskHandler implements TaskHandler {
   }
 }
 
+// ───────────── update_customer ─────────────
+//
+// Edits contact details on an EXISTING customer. The concrete
+// customerId comes from the identified caller (inbound) when present;
+// the operator path has no caller identity, so customerId is flagged
+// missing and the review UI resolves the customerName reference. The
+// classifier's updated* fields map onto the proposal payload's
+// name/email/phone/address. Capture-class — reuses the existing
+// UpdateCustomerExecutionHandler.
+export class UpdateCustomerTaskHandler implements TaskHandler {
+  readonly taskType = 'update_customer' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    if (context.customerId) {
+      payload.customerId = context.customerId;
+    } else {
+      if (ee.customerName) payload.customerReference = ee.customerName;
+      missing.push('customerId');
+    }
+
+    if (ee.updatedName) payload.name = ee.updatedName;
+    if (ee.updatedEmail) payload.email = ee.updatedEmail;
+    if (ee.updatedPhone) payload.phone = ee.updatedPhone;
+    if (ee.updatedAddress) payload.address = ee.updatedAddress;
+
+    // At least one field must change for the update to be meaningful.
+    if (!ee.updatedName && !ee.updatedEmail && !ee.updatedPhone && !ee.updatedAddress) {
+      missing.push('updatedField');
+    }
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── log_expense ─────────────
+//
+// Owner/technician logs a business expense. Capture-class, moves no
+// money. Reuses the existing LogExpenseExecutionHandler. spentAt
+// defaults to today (the operator can edit before approval). jobId is
+// optional on the contract, so a missing job reference does not block.
+export class LogExpenseTaskHandler implements TaskHandler {
+  readonly taskType = 'log_expense' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {
+      category: ee.expenseCategory ?? 'other',
+      description: ee.expenseDescription ?? context.message,
+      spentAt: new Date().toISOString().slice(0, 10),
+    };
+    const missing: string[] = [];
+
+    if (typeof ee.amount === 'number' && ee.amount > 0) {
+      payload.amountCents = ee.amount;
+    } else {
+      missing.push('amountCents');
+    }
+
+    if (ee.vendor) payload.vendor = ee.vendor;
+    if (ee.jobReference) payload.jobReference = ee.jobReference;
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
+// ───────────── convert_lead ─────────────
+//
+// Promotes an existing lead to a customer. The classifier only has a
+// free-text reference, so the payload carries leadReference and flags
+// leadId missing — the review UI / execution handler resolves the lead.
+export class ConvertLeadTaskHandler implements TaskHandler {
+  readonly taskType = 'convert_lead' as const;
+
+  async handle(context: TaskContext): Promise<TaskResult> {
+    const ee = entitiesFrom(context);
+    const payload: Record<string, unknown> = {};
+    const missing: string[] = [];
+
+    const reference = ee.leadReference ?? ee.customerName;
+    if (reference) payload.leadReference = reference;
+    missing.push('leadId');
+
+    return {
+      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      taskType: this.taskType,
+    };
+  }
+}
+
 // ───────────── create_job (LLM-free variant for voice) ─────────────
 //
 // The task-handlers.ts CreateJobTaskHandler is a plain passthrough

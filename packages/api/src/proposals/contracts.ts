@@ -142,6 +142,20 @@ export const issueInvoicePayloadSchema = z.object({
   paymentTermDays: z.number().int().min(1).max(365).optional(),
 });
 
+// convert_lead: promote an existing lead to a customer. The classifier
+// only has a free-text reference ("the Johnson lead"), so the task
+// handler carries `leadReference` and flags `leadId` missing until the
+// review UI / execution handler resolves a concrete lead. Either a
+// resolved `leadId` (uuid) or a `leadReference` must be present.
+export const convertLeadPayloadSchema = z
+  .object({
+    leadId: z.string().uuid().optional(),
+    leadReference: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.leadId || v.leadReference), {
+    message: 'leadId or leadReference is required',
+  });
+
 // voice_clarification: emitted when the voice classifier cannot route
 // a transcript (intent='unknown' OR confidence below threshold). It is
 // NOT a mutation — it surfaces in the operator's feed as "I heard X
@@ -208,6 +222,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
   send_estimate: sendEstimatePayloadSchema,
   record_payment: recordPaymentPayloadSchema,
   log_expense: logExpensePayloadSchema,
+  convert_lead: convertLeadPayloadSchema,
   emergency_dispatch: z.object({
     callerPhone: z.string().optional(),
     emergencyDescription: z.string(),

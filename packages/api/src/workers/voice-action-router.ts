@@ -32,6 +32,9 @@ import {
   RecordPaymentTaskHandler,
   CreateJobVoiceTaskHandler,
   EmergencyDispatchTaskHandler,
+  UpdateCustomerTaskHandler,
+  LogExpenseTaskHandler,
+  ConvertLeadTaskHandler,
 } from '../ai/tasks/voice-extended-tasks';
 import { instrument } from '../monitoring/instrumentation';
 
@@ -157,6 +160,9 @@ const INTENT_TO_PROPOSAL_TYPE: Partial<Record<Exclude<IntentType, 'unknown'>, Pr
   send_estimate: 'send_estimate',
   record_payment: 'record_payment',
   emergency_dispatch: 'emergency_dispatch',
+  update_customer: 'update_customer',
+  log_expense: 'log_expense',
+  convert_lead: 'convert_lead',
 };
 
 /**
@@ -264,6 +270,9 @@ function buildHandlers(deps: VoiceActionRouterDeps): Map<ProposalType, TaskHandl
   handlers.set('send_estimate', new SendEstimateTaskHandler());
   handlers.set('record_payment', new RecordPaymentTaskHandler());
   handlers.set('emergency_dispatch', new EmergencyDispatchTaskHandler());
+  handlers.set('update_customer', new UpdateCustomerTaskHandler());
+  handlers.set('log_expense', new LogExpenseTaskHandler());
+  handlers.set('convert_lead', new ConvertLeadTaskHandler());
   return handlers;
 }
 

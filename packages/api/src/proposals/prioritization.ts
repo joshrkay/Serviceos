@@ -39,6 +39,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // Expense logging is informational — captured after the fact, never
   // gates any other work.
   log_expense: 5,
+  // Converting a lead is CRM follow-up work — same tier as create_customer.
+  convert_lead: 4,
   emergency_dispatch: 1,
   onboarding_tenant_settings: 6,
   onboarding_service_category: 7,

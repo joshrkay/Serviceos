@@ -55,6 +55,8 @@ import {
   updateCustomer,
 } from '../../customers/customer';
 import { LocationRepository } from '../../locations/location';
+import { LeadRepository } from '../../leads/lead';
+import { ConvertLeadExecutionHandler } from './convert-lead-handler';
 import { LineItem } from '../../shared/billing-engine';
 
 export interface ExecutionContext {
@@ -413,6 +415,9 @@ export function createExecutionHandlerRegistry(deps?: {
   serviceCreditRepo?: ServiceCreditRepository;
   googleReplyResolver?: GoogleBusinessReplyResolver;
   reviewPrivateMessageSender?: ReviewPrivateMessageSender;
+  // convert_lead wiring. When absent the handler degrades to a
+  // passthrough so in-memory tests can omit it.
+  leadRepo?: LeadRepository;
 }): Map<ProposalType, ExecutionHandler> {
   // §6 Time-to-Cash. Built once; passed to the handlers that call the
   // widened money-mutation domain functions (recordPayment, issueInvoice).
@@ -470,6 +475,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.transactionalComms,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
+    new ConvertLeadExecutionHandler(deps?.leadRepo, deps?.customerRepo, deps?.auditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;
     // see ReviewResponseExecutionHandler constructor for per-dep
     // degraded behavior. Action class 'comms' guarantees the proposal

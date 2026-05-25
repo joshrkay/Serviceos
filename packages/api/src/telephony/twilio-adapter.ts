@@ -307,6 +307,9 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     case 'create_job': return 'create_job';
     case 'add_note': return 'add_note';
     case 'emergency_dispatch': return 'emergency_dispatch';
+    case 'update_customer': return 'update_customer';
+    case 'log_expense': return 'log_expense';
+    case 'convert_lead': return 'convert_lead';
     default: return 'voice_clarification';
   }
 }

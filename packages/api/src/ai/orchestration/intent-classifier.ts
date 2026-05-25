@@ -29,6 +29,12 @@ export type IntentType =
   | 'send_estimate'
   | 'record_payment'
   | 'emergency_dispatch'
+  // Phase: full-app voice coverage. update_customer / log_expense reuse
+  // existing proposal types + execution handlers; convert_lead is a new
+  // capability. All three are proposal-driving (operator + inbound).
+  | 'update_customer'
+  | 'log_expense'
+  | 'convert_lead'
   // P11-001: voice lookup-skill family. Read-only intents — the
   // adapter routes these straight to the `lookup_*` skill instead
   // of the proposal-draft path.
@@ -70,6 +76,9 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'send_estimate',
   'record_payment',
   'emergency_dispatch',
+  'update_customer',
+  'log_expense',
+  'convert_lead',
   'lookup_appointments',
   'lookup_invoices',
   'lookup_balance',
@@ -129,6 +138,31 @@ export interface ExtractedEntities {
   paymentReference?: string;
   // create_job intent: title of the new job.
   jobTitle?: string;
+  // update_customer intent. These hold the NEW values the caller wants
+  // written to an EXISTING customer record (resolved via customerName or
+  // the identified caller). Kept distinct from create_customer's
+  // displayName/email/phone so a "change my number" command can never be
+  // mistaken for a new-customer signup.
+  updatedName?: string;
+  updatedEmail?: string;
+  updatedPhone?: string;
+  updatedAddress?: string;
+  // log_expense intent. amount (existing field) carries the cents value.
+  expenseDescription?: string;
+  expenseCategory?:
+    | 'materials'
+    | 'fuel'
+    | 'tools'
+    | 'subcontractor'
+    | 'vehicle'
+    | 'insurance'
+    | 'office'
+    | 'other';
+  vendor?: string;
+  // convert_lead intent: free-text reference to the lead being converted
+  // (caller name or "the Johnson lead"). The execution handler resolves
+  // it to a concrete leadId.
+  leadReference?: string;
 }
 
 /**
@@ -364,6 +398,33 @@ Supported intents (return exactly ONE):
                                      "My pipes burst and water is everywhere"
                                      "No heat and it's 10 degrees outside"
                                      "I smell burning from my AC unit"
+- "update_customer"     — user wants to CHANGE the contact details on an
+                           EXISTING customer record (phone, email, name,
+                           address). Distinct from create_customer — this
+                           edits a record that already exists. Put the
+                           customer being edited in customerName and the
+                           NEW values in updatedName / updatedEmail /
+                           updatedPhone / updatedAddress.
+                           Examples: "Update Sarah's phone to 555-0182"
+                                     "Change the email on the Acme account to ops@acme.com"
+                                     "My new number is 555-0143" (inbound caller)
+                                     "Fix the spelling of Jordan's last name to Lee"
+- "log_expense"         — owner/technician logs a business expense for a
+                           job or the business. Capture-class, moves no
+                           money. Extract amount (integer cents),
+                           expenseCategory (materials/fuel/tools/
+                           subcontractor/vehicle/insurance/office/other),
+                           vendor, expenseDescription, and the job it
+                           applies to (jobReference).
+                           Examples: "Log 240 dollars at the supply house for the Johnson job"
+                                     "Add a 55 dollar fuel expense"
+                                     "Record 1200 to the subcontractor for the Miller install"
+- "convert_lead"        — user wants to CONVERT an existing lead into a
+                           customer (the lead said yes / booked). Extract
+                           leadReference (the lead's name or descriptor).
+                           Examples: "Convert the Johnson lead to a customer"
+                                     "Turn that new lead into a customer"
+                                     "The Davis lead signed — convert them"
 - "operator_request"   — caller explicitly asks to speak with a person,
                           dispatcher, owner, or asks to leave the AI agent.
                           Skip normal intent confirmation — escalate
@@ -504,7 +565,15 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
     "sendChannel": "<email|sms, optional — on send_invoice>",
     "paymentMethod": "<cash|check|card|other, optional — on record_payment>",
     "paymentReference": "<string, optional — check number or memo on record_payment>",
-    "jobTitle": "<string, optional — title of new job on create_job>"
+    "jobTitle": "<string, optional — title of new job on create_job>",
+    "updatedName": "<string, optional — new name on update_customer>",
+    "updatedEmail": "<string, optional — new email on update_customer>",
+    "updatedPhone": "<string, optional — new phone on update_customer>",
+    "updatedAddress": "<string, optional — new address on update_customer>",
+    "expenseDescription": "<string, optional — what the expense was for on log_expense>",
+    "expenseCategory": "<materials|fuel|tools|subcontractor|vehicle|insurance|office|other, optional — on log_expense>",
+    "vendor": "<string, optional — who was paid on log_expense>",
+    "leadReference": "<string, optional — the lead being converted on convert_lead>"
   }
 }
 
@@ -576,6 +645,16 @@ export function parseClassifierJson(content: string): IntentClassification | nul
   ] as const;
   const SEND_CHANNELS = ['email', 'sms'] as const;
   const PAYMENT_METHODS = ['cash', 'check', 'card', 'other'] as const;
+  const EXPENSE_CATEGORIES = [
+    'materials',
+    'fuel',
+    'tools',
+    'subcontractor',
+    'vehicle',
+    'insurance',
+    'office',
+    'other',
+  ] as const;
 
   /**
    * Validate an LLM-provided value against a fixed allowed-set.
@@ -631,6 +710,18 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
     // create_job fields
     if (typeof ee.jobTitle === 'string') extracted.jobTitle = ee.jobTitle;
+    // update_customer fields
+    if (typeof ee.updatedName === 'string') extracted.updatedName = ee.updatedName;
+    if (typeof ee.updatedEmail === 'string') extracted.updatedEmail = ee.updatedEmail;
+    if (typeof ee.updatedPhone === 'string') extracted.updatedPhone = ee.updatedPhone;
+    if (typeof ee.updatedAddress === 'string') extracted.updatedAddress = ee.updatedAddress;
+    // log_expense fields
+    if (typeof ee.expenseDescription === 'string') extracted.expenseDescription = ee.expenseDescription;
+    const expenseCategory = pickEnum(ee, 'expenseCategory', EXPENSE_CATEGORIES);
+    if (expenseCategory) extracted.expenseCategory = expenseCategory;
+    if (typeof ee.vendor === 'string') extracted.vendor = ee.vendor;
+    // convert_lead fields
+    if (typeof ee.leadReference === 'string') extracted.leadReference = ee.leadReference;
     if (Object.keys(extracted).length > 0) {
       result.extractedEntities = extracted;
     }

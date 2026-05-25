@@ -62,7 +62,8 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (OPERATOR_REQUEST_SCRIPTS.has(script.id)) intent = 'operator_request';
   if (script.id === 'cost-cap-drain') intent = 'lookup_account_summary';
 
-  const entities: Record<string, string> = {};
+  const slots = (turn.expected.slots ?? {}) as Record<string, unknown>;
+  const entities: Record<string, unknown> = {};
   if (intent === 'create_customer') {
     const name = displayNameFromCaller(turn.caller);
     if (name) entities.displayName = name;
@@ -75,6 +76,34 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'reschedule_appointment') {
     entities.appointmentReference = 'the appointment';
     entities.newDateTimeDescription = 'the requested new time';
+  }
+  // Full-app voice coverage intents — surface the entities each task
+  // handler needs so the proposal payload is well-formed. Values are
+  // drawn from the turn's expected slots where present, with sensible
+  // defaults so a script can pin just the intent + proposalType.
+  if (intent === 'update_customer') {
+    if (typeof slots.phone === 'string') entities.updatedPhone = slots.phone;
+    if (typeof slots.email === 'string') entities.updatedEmail = slots.email;
+    if (typeof slots.name === 'string') entities.updatedName = slots.name;
+    if (typeof slots.address === 'string') entities.updatedAddress = slots.address;
+    if (
+      !entities.updatedPhone &&
+      !entities.updatedEmail &&
+      !entities.updatedName &&
+      !entities.updatedAddress
+    ) {
+      entities.updatedPhone = '+15555550199';
+    }
+  }
+  if (intent === 'log_expense') {
+    entities.amount = typeof slots.amountCents === 'number' ? slots.amountCents : 24000;
+    entities.expenseCategory = typeof slots.category === 'string' ? slots.category : 'materials';
+    if (typeof slots.vendor === 'string') entities.vendor = slots.vendor;
+  }
+  if (intent === 'convert_lead') {
+    entities.leadReference = typeof slots.leadReference === 'string'
+      ? slots.leadReference
+      : 'the lead on this call';
   }
   return JSON.stringify({
     intentType: intent,
