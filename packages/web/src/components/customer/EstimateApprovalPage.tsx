@@ -23,6 +23,7 @@ interface PublicEstimateView {
     quantity: number;
     unitPriceCents: number;
     totalCents: number;
+    taxable?: boolean;
     groupKey?: string;
     groupLabel?: string;
     isOptional?: boolean;
@@ -30,6 +31,8 @@ interface PublicEstimateView {
   }>;
   /** True when the estimate has tier options or optional add-ons to choose. */
   hasSelectableItems?: boolean;
+  /** Tax rate (basis points) so the preview mirrors server tax math exactly. */
+  taxRateBps?: number;
   totalCents: number;
   subtotalCents: number;
   taxCents: number;
@@ -645,14 +648,17 @@ export function EstimateApprovalPage() {
     }
   }
 
-  // Client-side preview total. The server recomputes authoritatively on
-  // approve; this just keeps the displayed figure in sync with the choice.
+  // Client-side preview total. Mirrors billing-engine.calculateDocumentTotals
+  // exactly — tax is applied only to the SELECTED taxable items (after
+  // discount), so changing the taxable composition (e.g. picking a
+  // non-taxable tier) tracks the server's accepted total. The server still
+  // recomputes authoritatively on approve.
   const selectedSubtotalCents = billedApiItems.reduce((s, li) => s + li.totalCents, 0);
-  const effRateBps = apiView && apiView.subtotalCents > apiView.discountCents
-    ? Math.round((apiView.taxCents * 10000) / (apiView.subtotalCents - apiView.discountCents))
-    : 0;
-  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0)) * effRateBps) / 10000);
-  const previewTotalCents = Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0) + previewTaxCents);
+  const selectedTaxableCents = billedApiItems.filter(li => li.taxable).reduce((s, li) => s + li.totalCents, 0);
+  const discountCents = apiView?.discountCents ?? 0;
+  const taxRateBps = apiView?.taxRateBps ?? 0;
+  const previewTaxCents = Math.round((Math.max(0, selectedTaxableCents - discountCents) * taxRateBps) / 10000);
+  const previewTotalCents = Math.max(0, selectedSubtotalCents - discountCents + previewTaxCents);
 
   function selectTier(groupKey: string, itemId: string) {
     setSelectedIds(prev => {

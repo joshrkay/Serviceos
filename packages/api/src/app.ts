@@ -1617,6 +1617,9 @@ export function createApp(): express.Express {
     // D2-1d: emit public_estimate.{approved,declined} with the
     // synthetic public:<tokenHash> actor on every public approve/decline.
     auditRepo,
+    // Roll up job money state when a lapsed estimate is auto-expired on the
+    // public path, so the job doesn't stay stuck in 'estimate_sent'.
+    moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: requestLogger },
   });
   app.use('/public/estimates', createPublicEstimatesRouter(publicEstimateService));
 
