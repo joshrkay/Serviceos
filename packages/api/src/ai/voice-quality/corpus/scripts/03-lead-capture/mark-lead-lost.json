@@ -1,0 +1,54 @@
+{
+  "id": "mark-lead-lost",
+  "bucket": "03-lead-capture",
+  "callerId": "+15555550403",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_03_mark_lead_lost",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_03_lost_owner",
+        "tenantId": "t_03_mark_lead_lost",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555550403",
+        "secondaryPhone": null,
+        "email": "sam.lost@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Mark the Johnson lead as lost — they went with a competitor.",
+      "expected": {
+        "intent": "mark_lead_lost",
+        "proposalType": "mark_lead_lost",
+        "slots": {
+          "leadReference": "the Johnson lead",
+          "reason": "went with a competitor"
+        },
+        "spokenAnswerMatches": "I've drafted marking the Johnson lead as lost for review; an operator will confirm before it's applied.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}
