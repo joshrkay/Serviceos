@@ -300,7 +300,7 @@ Launch gate = all four sub-thresholds met simultaneously, AND no regression vs p
 
 - `docs/quality/crm-deep-state-and-edges.md` — the source CRM state analysis
 - `docs/voice-production-readiness.md` — three implementation paths discussed
-- `docs/PRD.md` — phase-based execution PRD
+- `docs/PRD-execution-catalog.md` — phase-based execution PRD (v1; superseded by `docs/PRD.md` v2 as the canonical product reference)
 - `docs/stories/phase-17-gap-stories.md` — Phase 17 voice/UI parity stories (P17-001..010)
 - `packages/api/src/ai/skills/` — current voice skills (16 .ts files)
 - See: `docs/superpowers/runbooks/voice-quality-cassette-refresh.md` for the refresh procedure
