@@ -21,10 +21,12 @@
  *  - Public routes (health, /e/:viewToken, /pay/:viewToken, public
  *    payments) MUST NOT receive this middleware: they have no tenantId.
  *    app.ts is responsible for mounting it only on protected routes.
- *  - Commit happens on `res.finish` (response fully flushed); rollback
- *    happens on `res.close` if it fires before `finish` (client
- *    disconnect, error). A boolean guard ensures release fires exactly
- *    once.
+ *  - On `res.finish` (response fully flushed) we COMMIT only when the
+ *    status is < 400; a >=400 response rolls back so partial writes from
+ *    a failed request never persist. Rollback also happens on `res.close`
+ *    if it fires before `finish` (client disconnect). A boolean guard
+ *    ensures release fires exactly once. Routes that must commit despite
+ *    a >=400 status can set `res.locals.forceCommit = true`.
  */
 import type { Request, Response, NextFunction } from 'express';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -136,7 +138,17 @@ export function withTenantTransaction(pool: Pool) {
       }
     };
     res.once('finish', () => {
-      void cleanup(true);
+      // Commit only on a success status. `async-route` converts a thrown
+      // handler error into a >=400 response (which still fires `finish`),
+      // so committing unconditionally here would persist partial writes
+      // from a request that failed midway — e.g. the first of two writes
+      // succeeding while the second throws. Roll back on any >=400.
+      //
+      // Escape hatch: a route that intentionally writes *and* returns a
+      // client error (rare — e.g. recording an attempt while returning
+      // 409) can force the commit with `res.locals.forceCommit = true`.
+      const commit = res.statusCode < 400 || res.locals?.forceCommit === true;
+      void cleanup(commit);
     });
     res.once('close', () => {
       void cleanup(false);

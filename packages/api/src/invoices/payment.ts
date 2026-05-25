@@ -2,6 +2,22 @@ import { v4 as uuidv4 } from 'uuid';
 import { Invoice, InvoiceRepository } from './invoice';
 import { ValidationError } from '../shared/errors';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+
+/**
+ * Optional audit context for `recordPayment`. When `auditRepo` is wired,
+ * recording a payment emits a `payment.recorded` event (plus an
+ * `invoice.status_changed` event when the invoice status flips). Emitted
+ * after the invoice update so it participates in the caller's
+ * request-scoped transaction (authenticated /api routes) and commits or
+ * rolls back atomically with the payment + invoice writes.
+ */
+export interface RecordPaymentAuditContext {
+  /** Actor role to stamp (defaults to 'system' for webhook/automation paths). */
+  actorRole?: string;
+  /** Correlation id (e.g. Stripe payment_intent / event id) for traceability. */
+  correlationId?: string;
+}
 
 export interface PaymentReceiptNotifier {
   notifyPaymentReceived(
@@ -147,6 +163,8 @@ export async function recordPayment(
   paymentRepo: PaymentRepository,
   moneyStateDeps?: RefreshJobMoneyStateDeps,
   paymentReceiptNotifier?: PaymentReceiptNotifier,
+  auditRepo?: AuditRepository,
+  auditContext?: RecordPaymentAuditContext,
 ): Promise<{ payment: Payment; invoice: Invoice }> {
   const errors = validatePaymentInput(input);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
@@ -200,6 +218,54 @@ export async function recordPayment(
     status: newStatus,
     updatedAt: new Date(),
   });
+
+  // Audit trail (CLAUDE.md: "All mutations: emit audit events"). Emitted
+  // before the best-effort money-state rollup so that — on authenticated
+  // /api routes, which run inside the request-scoped transaction — the
+  // audit row commits or rolls back atomically with the payment + invoice
+  // writes. A failure here intentionally bubbles: a payment with no audit
+  // record is not an acceptable committed state.
+  if (auditRepo) {
+    const actorRole = auditContext?.actorRole ?? 'system';
+    const correlationId = auditContext?.correlationId;
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.processedBy,
+        actorRole,
+        eventType: 'payment.recorded',
+        entityType: 'invoice',
+        entityId: input.invoiceId,
+        correlationId,
+        metadata: {
+          paymentId: payment.id,
+          amountCents: payment.amountCents,
+          method: payment.method,
+          providerReference: payment.providerReference ?? null,
+          newInvoiceStatus: (updatedInvoice ?? invoice).status,
+        },
+      }),
+    );
+
+    if (updatedInvoice && updatedInvoice.status !== invoice.status) {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.processedBy,
+          actorRole,
+          eventType: 'invoice.status_changed',
+          entityType: 'invoice',
+          entityId: input.invoiceId,
+          correlationId,
+          metadata: {
+            oldStatus: invoice.status,
+            newStatus: updatedInvoice.status,
+            paymentId: payment.id,
+          },
+        }),
+      );
+    }
+  }
 
   // §6 Time-to-Cash. Roll the job's money-state forward (best-effort —
   // the payment + invoice writes already succeeded; a rollup failure

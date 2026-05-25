@@ -468,6 +468,7 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.invoiceRepo,
       moneyStateDeps,
       deps?.transactionalComms,
+      deps?.auditRepo,
     ),
     new LogExpenseExecutionHandler(deps?.expenseRepo, deps?.auditRepo),
     // P7-026 PR c — review-response handler. Wired with optional deps;

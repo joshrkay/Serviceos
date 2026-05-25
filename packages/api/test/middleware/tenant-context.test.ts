@@ -434,6 +434,68 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(sqls).not.toContain('COMMIT');
   });
 
+  it('rollback on error — handler throws (500) does not commit partial writes', async () => {
+    const { pool, calls } = makeMockPool();
+    // Simulate a multi-write handler: first write succeeds, then it throws.
+    // buildApp's route wrapper turns the throw into a 500 response, which
+    // fires `finish` — the middleware must ROLLBACK, not COMMIT.
+    const app = buildApp(pool, async () => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (1)');
+      throw new Error('second write failed');
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(500);
+    await new Promise((r) => setImmediate(r));
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('INSERT INTO things (id) VALUES (1)');
+    expect(sqls).toContain('ROLLBACK');
+    expect(sqls).not.toContain('COMMIT');
+  });
+
+  it('rollback on client-error response (4xx) — partial writes are not persisted', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (2)');
+      res.status(409).json({ error: 'CONFLICT' });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(409);
+    await new Promise((r) => setImmediate(r));
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('ROLLBACK');
+    expect(sqls).not.toContain('COMMIT');
+  });
+
+  it('forceCommit escape hatch — commits despite a >=400 status', async () => {
+    const { pool, calls } = makeMockPool();
+    const app = buildApp(pool, async (_req, res) => {
+      const ctx = currentTenantContext();
+      await ctx!.client.query('INSERT INTO things (id) VALUES (3)');
+      res.locals.forceCommit = true;
+      res.status(409).json({ error: 'CONFLICT_BUT_PERSISTED' });
+    });
+
+    const response = await request(app)
+      .get('/protected/echo')
+      .set('x-test-tenant', TENANT_A);
+
+    expect(response.status).toBe(409);
+    await new Promise((r) => setImmediate(r));
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain('COMMIT');
+    expect(sqls).not.toContain('ROLLBACK');
+  });
+
   it('AsyncLocalStorage scope is request-local (does not leak between async tasks)', async () => {
     // Outside any middleware run, currentTenantContext() must be
     // undefined — proving we don't rely on a module-level mutable
