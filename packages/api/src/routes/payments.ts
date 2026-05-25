@@ -57,6 +57,8 @@ export function createPaymentRouter(
         paymentRepo,
         refreshDeps,
         paymentReceiptNotifier,
+        auditRepo,
+        { actorRole: req.auth!.role },
       );
       res.status(201).json(result);
     })
