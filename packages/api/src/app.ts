@@ -2430,6 +2430,7 @@ export function createApp(): express.Express {
       jobRepo,
       customerRepo,
       locationRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,

@@ -187,6 +187,8 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [promptStats, setPromptStats] = useState<Record<string, { count: number; lastRaisedAt: number; lastConfidence: number }>>({});
   const [aiQuestion, setAiQuestion] = useState('Where is my next appointment?');
   const [aiAnswer, setAiAnswer] = useState<string | null>(null);
+  const [onMyWaySending, setOnMyWaySending] = useState<string | null>(null);
+  const [onMyWayNotified, setOnMyWayNotified] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     async function fetchAppointments() {
@@ -446,6 +448,25 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     }
   }
 
+  async function sendOnMyWay(appointmentId: string) {
+    setOnMyWaySending(appointmentId);
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/dispatch/appointments/${appointmentId}/en-route`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to send "on my way" notice');
+      }
+      setOnMyWayNotified((current) => ({ ...current, [appointmentId]: true }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send "on my way" notice');
+    } finally {
+      setOnMyWaySending(null);
+    }
+  }
+
   async function sendDelayNotification(accepted: boolean) {
     setShowDelayPrompt(false);
     setDelayPromptAcknowledged(true);
@@ -598,6 +619,19 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
                       View job →
                     </button>
                   )}
+
+                  <button
+                    type="button"
+                    data-testid="technician-day-on-my-way"
+                    disabled={onMyWaySending === appt.id || onMyWayNotified[appt.id]}
+                    onClick={() => void sendOnMyWay(appt.id)}
+                  >
+                    {onMyWayNotified[appt.id]
+                      ? 'Customer notified ✓'
+                      : onMyWaySending === appt.id
+                        ? 'Sending…'
+                        : 'On my way'}
+                  </button>
 
                   {!isEditing ? (
                     <button
