@@ -36,6 +36,10 @@ import { createLead } from '../leads/lead-service';
 import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
+  TenantTransactionRunner,
+  InMemoryTransactionRunner,
+} from '../db/tenant-transaction';
+import {
   PaymentLinkProvider,
   PaymentLinkResult,
 } from '../payments/payment-link-provider';
@@ -61,6 +65,8 @@ export interface PublicPortalDeps {
   locationRepo?: LocationRepository;
   proposalRepo?: ProposalRepository;
   settingsRepo?: SettingsRepository;
+  /** Wraps the self-service booking writes in one atomic, slot-locked txn. */
+  transactionRunner?: TenantTransactionRunner;
   /** Optional — when present, /invoices entries get a `payNowUrl`. */
   paymentLinkProvider?: PaymentLinkProvider;
   /** Default currency for payment-link generation. Defaults to 'usd'. */
@@ -526,15 +532,86 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
       };
+      const createdBy = `portal:customer:${customerId}`;
+      const runner = deps.transactionRunner ?? new InMemoryTransactionRunner();
 
-      // Concurrency guard: confirm the slot is still open. If it was taken
-      // since the customer fetched availability, offer alternatives.
-      const stillFree = await isSlotFree(finderDeps, {
-        tenantId,
-        start: slotStart,
-        end: slotEnd,
+      // Atomic reservation: one transaction wraps the slot re-check and all
+      // writes (job + held appointment + proposal + audit), so a mid-sequence
+      // failure can't orphan a Job. A transaction-scoped advisory lock keyed
+      // on the slot serializes concurrent bookings for the same window — the
+      // second waits, then sees the first's hold and is told the slot is taken.
+      const outcome = await runner.run(tenantId, async ({ lock }) => {
+        await lock(`book:${slotStart.toISOString()}`);
+
+        const stillFree = await isSlotFree(finderDeps, {
+          tenantId,
+          start: slotStart,
+          end: slotEnd,
+        });
+        if (!stillFree) {
+          return { ok: false as const };
+        }
+
+        const job = await createJob(
+          {
+            tenantId,
+            customerId,
+            locationId,
+            summary: parsed.summary,
+            createdBy,
+            actorRole: 'customer_portal',
+          },
+          deps.jobRepo,
+          deps.auditRepo,
+        );
+
+        const held = await createAppointment(
+          {
+            tenantId,
+            jobId: job.id,
+            scheduledStart: slotStart,
+            scheduledEnd: slotEnd,
+            timezone,
+            notes: parsed.summary,
+            createdBy,
+            holdPendingApproval: true,
+            holdExpiryAt: new Date(Date.now() + BOOKING_HOLD_WINDOW_MS),
+          },
+          deps.appointmentRepo,
+        );
+
+        // No sourceTrustTier — a customer-initiated booking is never
+        // auto-approved. It lands as a draft proposal for the dispatcher.
+        const proposal = createProposal({
+          tenantId,
+          proposalType: 'create_booking',
+          payload: { appointmentId: held.id },
+          summary: `Customer requested booking: ${parsed.summary}`,
+          explanation: 'Submitted via the customer portal. Confirm to finalize the appointment.',
+          sourceContext: { source: 'customer_portal', customerId, jobId: job.id },
+          createdBy,
+          expiresAt: held.holdExpiryAt,
+        });
+        const persisted = await deps.proposalRepo!.create(proposal);
+
+        if (deps.auditRepo) {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: createdBy,
+              actorRole: 'customer_portal',
+              eventType: 'appointment.booking_requested',
+              entityType: 'appointment',
+              entityId: held.id,
+              metadata: { proposalId: persisted.id, jobId: job.id },
+            }),
+          );
+        }
+
+        return { ok: true as const, held, proposalId: persisted.id };
       });
-      if (!stillFree) {
+
+      if (!outcome.ok) {
         await respondSlotTaken(deps, res, {
           tenantId,
           slotStart,
@@ -545,73 +622,16 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
-      const createdBy = `portal:customer:${customerId}`;
-      const job = await createJob(
-        {
-          tenantId,
-          customerId,
-          locationId,
-          summary: parsed.summary,
-          createdBy,
-          actorRole: 'customer_portal',
-        },
-        deps.jobRepo,
-        deps.auditRepo,
-      );
-
-      const held = await createAppointment(
-        {
-          tenantId,
-          jobId: job.id,
-          scheduledStart: slotStart,
-          scheduledEnd: slotEnd,
-          timezone,
-          notes: parsed.summary,
-          createdBy,
-          holdPendingApproval: true,
-          holdExpiryAt: new Date(Date.now() + BOOKING_HOLD_WINDOW_MS),
-        },
-        deps.appointmentRepo,
-      );
-
-      // No sourceTrustTier — a customer-initiated booking is never
-      // auto-approved. It lands as a draft proposal for the dispatcher.
-      const proposal = createProposal({
-        tenantId,
-        proposalType: 'create_booking',
-        payload: { appointmentId: held.id },
-        summary: `Customer requested booking: ${parsed.summary}`,
-        explanation: 'Submitted via the customer portal. Confirm to finalize the appointment.',
-        sourceContext: { source: 'customer_portal', customerId, jobId: job.id },
-        createdBy,
-        expiresAt: held.holdExpiryAt,
-      });
-      const persisted = await deps.proposalRepo.create(proposal);
-
-      // Spatial board sync: the tentative hold should appear on any open
+      // Post-commit side effect: the tentative hold should appear on any open
       // dispatch board for that day immediately, flagged pending approval.
-      notifyDispatchBoardChanged(tenantId, held.scheduledStart);
-
-      if (deps.auditRepo) {
-        await deps.auditRepo.create(
-          createAuditEvent({
-            tenantId,
-            actorId: createdBy,
-            actorRole: 'customer_portal',
-            eventType: 'appointment.booking_requested',
-            entityType: 'appointment',
-            entityId: held.id,
-            metadata: { proposalId: persisted.id, jobId: job.id },
-          }),
-        );
-      }
+      notifyDispatchBoardChanged(tenantId, outcome.held.scheduledStart);
 
       res.status(201).json({
         status: 'pending_confirmation',
-        proposalId: persisted.id,
-        appointmentId: held.id,
-        scheduledStart: held.scheduledStart.toISOString(),
-        scheduledEnd: held.scheduledEnd.toISOString(),
+        proposalId: outcome.proposalId,
+        appointmentId: outcome.held.id,
+        scheduledStart: outcome.held.scheduledStart.toISOString(),
+        scheduledEnd: outcome.held.scheduledEnd.toISOString(),
         timezone,
         message: "Thanks! We'll confirm your appointment shortly.",
       });
