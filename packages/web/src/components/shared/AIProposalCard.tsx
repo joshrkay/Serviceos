@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { toast } from 'sonner';
 import {
   Check, Pencil, X, Sparkles, ChevronDown, ChevronUp,
   Brain, Receipt, Calendar, MessageCircle, AlertCircle, Copy,
@@ -55,7 +56,14 @@ const CONFIDENCE_CONFIG = {
 interface Props {
   proposal: AIProposal;
   compact?: boolean;
-  onApprove?: () => void;
+  /**
+   * Invoked when the operator approves. May be async — the card awaits it
+   * and treats a thrown error (or rejected promise) as a failure: the
+   * optimistic "Approved" state is reverted and an error toast is shown.
+   * This is the human-approval gate, so a failed call must NOT look like
+   * success.
+   */
+  onApprove?: () => void | Promise<void>;
   onReject?: () => void;
 }
 
@@ -63,9 +71,29 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
   const [status,       setStatus]       = useState<'Pending' | 'Approved' | 'Rejected'>(proposal.status);
   const [showReason,   setShowReason]   = useState(false);
   const [editing,      setEditing]      = useState(false);
+  const [isApproving,  setIsApproving]  = useState(false);
   const [fieldValues,  setFieldValues]  = useState<Record<string, string>>(
     Object.fromEntries((proposal.editFields ?? []).map(f => [f.key, f.value]))
   );
+
+  // Optimistically flip to Approved, then await the handler. On failure
+  // revert to the prior state and surface a toast — never leave a failed
+  // approval showing "Applied successfully".
+  const runApprove = async (onDone?: () => void) => {
+    if (isApproving) return;
+    const prevStatus = status;
+    setStatus('Approved');
+    setIsApproving(true);
+    onDone?.();
+    try {
+      await onApprove?.();
+    } catch {
+      setStatus(prevStatus);
+      toast.error('Couldn’t apply this suggestion. Please try again.');
+    } finally {
+      setIsApproving(false);
+    }
+  };
 
   const cfg   = TYPE_CONFIG[proposal.type] ?? TYPE_CONFIG.Alert;
   const Icon  = cfg.icon;
@@ -126,10 +154,11 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { setStatus('Approved'); setEditing(false); onApprove?.(); }}
-              className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs text-white hover:bg-blue-700 transition-colors"
+              onClick={() => { void runApprove(() => setEditing(false)); }}
+              disabled={isApproving}
+              className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs text-white hover:bg-blue-700 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
             >
-              <Check size={12} /> Save & apply
+              <Check size={12} /> {isApproving ? 'Applying…' : 'Save & apply'}
             </button>
             <button
               onClick={() => setEditing(false)}
@@ -259,11 +288,11 @@ export function AIProposalCard({ proposal, compact, onApprove, onReject }: Props
       <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/80 px-4 py-2.5">
         {proposal.type !== 'Clarification' && (
           <button
-            onClick={() => { setStatus('Approved'); onApprove?.(); }}
-            disabled={Boolean(proposal.missingFields && proposal.missingFields.length > 0)}
+            onClick={() => { void runApprove(); }}
+            disabled={isApproving || Boolean(proposal.missingFields && proposal.missingFields.length > 0)}
             className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs text-white hover:bg-blue-700 active:bg-blue-800 transition-colors disabled:bg-slate-300 disabled:cursor-not-allowed"
           >
-            <Check size={12} /> Approve
+            <Check size={12} /> {isApproving ? 'Applying…' : 'Approve'}
           </button>
         )}
 
