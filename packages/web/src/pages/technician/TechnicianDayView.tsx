@@ -187,6 +187,8 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
   const [promptStats, setPromptStats] = useState<Record<string, { count: number; lastRaisedAt: number; lastConfidence: number }>>({});
   const [aiQuestion, setAiQuestion] = useState('Where is my next appointment?');
   const [aiAnswer, setAiAnswer] = useState<string | null>(null);
+  const [onMyWaySending, setOnMyWaySending] = useState<string | null>(null);
+  const [onMyWayNotified, setOnMyWayNotified] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     async function fetchAppointments() {
@@ -446,6 +448,33 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
     }
   }
 
+  async function sendOnMyWay(appointmentId: string) {
+    setOnMyWaySending(appointmentId);
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/dispatch/appointments/${appointmentId}/en-route`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        throw new Error('Failed to send "on my way" notice');
+      }
+      // The endpoint returns 202 even when nobody could be notified (e.g. no
+      // customer contact on file). Only show the success state — and disable
+      // retries — when a recipient was actually reached.
+      const body = await response.json().catch(() => ({}));
+      if (body?.notified === true) {
+        setOnMyWayNotified((current) => ({ ...current, [appointmentId]: true }));
+      } else {
+        setError('No contact on file for this customer — no notice was sent.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send "on my way" notice');
+    } finally {
+      setOnMyWaySending(null);
+    }
+  }
+
   async function sendDelayNotification(accepted: boolean) {
     setShowDelayPrompt(false);
     setDelayPromptAcknowledged(true);
@@ -598,6 +627,19 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
                       View job →
                     </button>
                   )}
+
+                  <button
+                    type="button"
+                    data-testid="technician-day-on-my-way"
+                    disabled={onMyWaySending === appt.id || onMyWayNotified[appt.id]}
+                    onClick={() => void sendOnMyWay(appt.id)}
+                  >
+                    {onMyWayNotified[appt.id]
+                      ? 'Customer notified ✓'
+                      : onMyWaySending === appt.id
+                        ? 'Sending…'
+                        : 'On my way'}
+                  </button>
 
                   {!isEditing ? (
                     <button

@@ -32,6 +32,33 @@ describe('P6-006 — Day-scoped dispatch board query', () => {
     expect(result.summary.unassigned).toBe(0);
   });
 
+  it('flags appointments with an open customer change request', async () => {
+    const cancelAppt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date(2026, 2, 14, 9, 0),
+      scheduledEnd: new Date(2026, 2, 14, 11, 0),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+    const plainAppt = await createAppointment({
+      tenantId, jobId: 'job-2',
+      scheduledStart: new Date(2026, 2, 14, 13, 0),
+      scheduledEnd: new Date(2026, 2, 14, 14, 0),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    deps.getPendingChangeRequests = async (ids) => {
+      const m = new Map<string, 'cancel' | 'reschedule'>();
+      if (ids.includes(cancelAppt.id)) m.set(cancelAppt.id, 'cancel');
+      return m;
+    };
+
+    const result = await getDispatchBoardData(tenantId, '2026-03-14', deps);
+    const flagged = result.unassignedAppointments.find((a) => a.id === cancelAppt.id);
+    const plain = result.unassignedAppointments.find((a) => a.id === plainAppt.id);
+    expect(flagged?.pendingChange).toBe('cancel');
+    expect(plain?.pendingChange).toBeUndefined();
+  });
+
   it('returns unassigned appointments', async () => {
     const appt = await createAppointment({
       tenantId,

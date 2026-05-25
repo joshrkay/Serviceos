@@ -3,6 +3,7 @@ import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers'
 import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { SchedulingConfirmationNotifier } from './scheduling-notifications';
+import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
 
 /**
  * Confirms a tentative held appointment when its `create_booking`
@@ -114,6 +115,10 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
         channels: ['sms', 'email'],
       });
     }
+
+    // Spatial board sync: confirming a hold flips its visual state from
+    // tentative to booked on any open dispatch board for that day.
+    notifyDispatchBoardChanged(context.tenantId, updated.scheduledStart);
 
     return { success: true, resultEntityId: appointmentId };
   }
