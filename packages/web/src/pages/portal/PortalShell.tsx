@@ -15,14 +15,16 @@ import { PortalEstimateList } from './PortalEstimateList';
 import { PortalInvoiceList } from './PortalInvoiceList';
 import { PortalJobList } from './PortalJobList';
 import { PortalRequestService } from './PortalRequestService';
+import { PortalBookAppointment } from './PortalBookAppointment';
 
-type Tab = 'dashboard' | 'estimates' | 'invoices' | 'jobs' | 'request';
+type Tab = 'dashboard' | 'estimates' | 'invoices' | 'jobs' | 'book' | 'request';
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'dashboard', label: 'Overview' },
   { id: 'estimates', label: 'Estimates' },
   { id: 'invoices', label: 'Invoices' },
   { id: 'jobs', label: 'Jobs' },
+  { id: 'book', label: 'Book appointment' },
   { id: 'request', label: 'Request service' },
 ];
 
@@ -123,6 +125,7 @@ export function PortalShell() {
         {tab === 'estimates' && <PortalEstimateList token={token} />}
         {tab === 'invoices' && <PortalInvoiceList token={token} />}
         {tab === 'jobs' && <PortalJobList token={token} />}
+        {tab === 'book' && <PortalBookAppointment token={token} />}
         {tab === 'request' && <PortalRequestService token={token} />}
       </main>
     </div>

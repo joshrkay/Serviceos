@@ -83,6 +83,38 @@ export interface RequestServiceInput {
   email?: string;
 }
 
+export interface PortalSlot {
+  start: string;
+  end: string;
+}
+
+export interface PortalAvailability {
+  timezone: string;
+  durationMin: number;
+  slots: PortalSlot[];
+}
+
+export interface BookInput {
+  slotStart: string;
+  slotEnd: string;
+  summary: string;
+  locationId?: string;
+}
+
+export type BookResult =
+  | {
+      ok: true;
+      status: 'pending_confirmation';
+      proposalId: string;
+      appointmentId: string;
+      scheduledStart: string;
+      scheduledEnd: string;
+      timezone: string;
+      message: string;
+    }
+  | { ok: false; slotTaken: true; alternatives: PortalSlot[]; message: string }
+  | { ok: false; slotTaken: false; message: string };
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) {
@@ -127,6 +159,48 @@ export const portalApi = {
       `${base(token)}/request-service`,
       input,
     ),
+  availability: (
+    token: string,
+    opts: { from: string; to: string; durationMin?: number },
+  ) => {
+    const qs = new URLSearchParams({ from: opts.from, to: opts.to });
+    if (opts.durationMin) qs.set('durationMin', String(opts.durationMin));
+    return getJson<PortalAvailability>(`${base(token)}/availability?${qs.toString()}`);
+  },
+  cancelAppointment: (token: string, appointmentId: string, reason?: string) =>
+    postJson<{ status: string; proposalId: string; message: string }>(
+      `${base(token)}/appointments/${encodeURIComponent(appointmentId)}/cancel`,
+      { reason },
+    ),
+  rescheduleAppointment: (
+    token: string,
+    appointmentId: string,
+    slot: { slotStart: string; slotEnd: string },
+  ) =>
+    postJson<{ status: string; proposalId: string; message: string }>(
+      `${base(token)}/appointments/${encodeURIComponent(appointmentId)}/reschedule`,
+      slot,
+    ),
+  book: async (token: string, input: BookInput): Promise<BookResult> => {
+    const res = await fetch(`${base(token)}/book`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(input),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      return { ok: true, ...body };
+    }
+    if (res.status === 409) {
+      return {
+        ok: false,
+        slotTaken: true,
+        alternatives: (body.alternatives ?? []) as PortalSlot[],
+        message: body.message ?? 'That time was just booked.',
+      };
+    }
+    return { ok: false, slotTaken: false, message: body.message ?? 'Could not book that time.' };
+  },
 };
 
 export function formatPortalCents(cents: number): string {
