@@ -339,6 +339,7 @@ export function EstimateForm({ onCreated, onCancel }: EstimateFormProps) {
         <LineItemEditor
           items={form.items}
           onChange={(items) => setForm((p) => ({ ...p, items }))}
+          enableOptions
         />
         {total > 0 && (
           <div className="mt-3 flex justify-end">

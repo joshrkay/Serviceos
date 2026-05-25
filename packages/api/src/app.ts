@@ -274,6 +274,10 @@ import {
 import { PgPortalSessionRepository } from './portal/pg-portal-session';
 import { createPortalRouter } from './routes/portal';
 import { createPublicPortalRouter } from './routes/public-portal';
+import {
+  PgTenantTransactionRunner,
+  InMemoryTransactionRunner,
+} from './db/tenant-transaction';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -362,6 +366,7 @@ import { TwilioDelayNotificationService } from './notifications/twilio-delay-not
 import { TransactionalCommsService } from './notifications/transactional-comms-service';
 import { runAppointmentReminderSweep } from './workers/appointment-reminder-worker';
 import { runEstimateReminderSweep } from './workers/estimate-reminder-worker';
+import { runEstimateExpirySweep } from './workers/estimate-expiry-worker';
 import { PgDncRepository, InMemoryDncRepository } from './compliance/dnc';
 import { buildStopKeywordHandler, buildStartKeywordHandler } from './compliance/stop-reply';
 import { registerKeywordHandler } from './sms/inbound-dispatch';
@@ -1666,6 +1671,13 @@ export function createApp(): express.Express {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      assignmentRepo,
+      locationRepo,
+      proposalRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
       paymentLinkProvider,
     }),
   );
@@ -2430,6 +2442,8 @@ export function createApp(): express.Express {
       jobRepo,
       customerRepo,
       locationRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+      proposalRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
@@ -2449,6 +2463,7 @@ export function createApp(): express.Express {
       { gateway: llmGateway, proposalRepo },
       { jobRepo, invoiceRepo },
       { docRevisionRepo: documentRevisionRepo, editDeltaRepo: deltaRepo },
+      paymentRepo,
     ),
   );
   app.use(
@@ -2907,6 +2922,34 @@ export function createApp(): express.Express {
       }
     }, 60 * 60_000);
   }
+
+  // Estimate-expiry worker — transitions sent estimates past their
+  // valid_until date to 'expired' so stale quotes can't be accepted and
+  // the pipeline reflects lapsed offers. Runs hourly; no SendService
+  // dependency (it only changes status).
+  const estimateExpiryLogger = createLogger({
+    service: 'estimate-expiry-worker',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  setInterval(async () => {
+    try {
+      await runEstimateExpirySweep({
+        estimateRepo,
+        auditRepo,
+        moneyStateDeps: { jobRepo, estimateRepo, invoiceRepo, auditRepo, logger: estimateExpiryLogger },
+        listTenantIds: async () => {
+          if (!pool) return [];
+          const r = await pool.query('SELECT id FROM tenants');
+          return r.rows.map((row: { id: string }) => row.id);
+        },
+        logger: estimateExpiryLogger,
+      });
+    } catch (err) {
+      estimateExpiryLogger.error('Estimate-expiry sweep failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, 60 * 60_000);
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`

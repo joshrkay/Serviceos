@@ -6,6 +6,7 @@ import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-typ
 import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
 import { HaversineFallbackProvider } from '../../../src/scheduling/travel-time/haversine-fallback';
 import { InMemoryAssignmentRepository } from '../../../src/appointments/assignment';
+import { getDispatchBoardEventBus } from '../../../src/dispatch/board-event-bus';
 
 describe('P6-013 — Execution for reschedule proposals', () => {
   let handler: RescheduleAppointmentExecutionHandler;
@@ -54,6 +55,33 @@ describe('P6-013 — Execution for reschedule proposals', () => {
     const updated = await appointmentRepo.findById(tenantId, appt.id);
     expect(updated!.scheduledStart.toISOString()).toBe('2026-03-15T10:00:00.000Z');
     expect(updated!.scheduledEnd.toISOString()).toBe('2026-03-15T12:00:00.000Z');
+  });
+
+  it('refreshes both the old and new day boards on a cross-day move', async () => {
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-03-14T09:00:00Z'),
+      scheduledEnd: new Date('2026-03-14T11:00:00Z'),
+      timezone: 'America/New_York', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    const seen: string[] = [];
+    const bus = getDispatchBoardEventBus();
+    const unsubOld = bus.subscribe(tenantId, '2026-03-14', (e) => { if (e.type === 'board_updated') seen.push(e.date); });
+    const unsubNew = bus.subscribe(tenantId, '2026-03-15', (e) => { if (e.type === 'board_updated') seen.push(e.date); });
+
+    await handler.execute(
+      makeProposal({
+        appointmentId: appt.id,
+        newScheduledStart: '2026-03-15T10:00:00Z',
+        newScheduledEnd: '2026-03-15T12:00:00Z',
+      }),
+      context,
+    );
+    unsubOld();
+    unsubNew();
+    expect(seen).toContain('2026-03-14');
+    expect(seen).toContain('2026-03-15');
   });
 
   it('rejects invalid time ordering', async () => {

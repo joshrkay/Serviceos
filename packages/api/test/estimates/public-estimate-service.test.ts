@@ -747,3 +747,134 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     );
   });
 });
+
+describe('PublicEstimateService — good-better-best selection', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  function tieredEstimate(jobId: string): Estimate {
+    return makeEstimate(jobId, {
+      lineItems: [
+        { id: 'base', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: true },
+        { id: 'good', description: 'Good', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 1, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true, isDefaultSelected: true },
+        { id: 'better', description: 'Better', quantity: 1, unitPriceCents: 20000, totalCents: 20000, sortOrder: 2, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      ],
+    });
+  }
+
+  it('surfaces selectable items and ids in the view', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = tieredEstimate(j.id);
+    await h.estimate.create(est);
+    const view = await h.service.getByToken(est.viewToken!);
+    expect(view.hasSelectableItems).toBe(true);
+    expect(view.lineItems.map((li) => li.id)).toContain('better');
+  });
+
+  it('requires a selection and recomputes the accepted total from it', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = tieredEstimate(j.id);
+    await h.estimate.create(est);
+
+    // Missing selection -> rejected.
+    await expect(
+      h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah' }),
+    ).rejects.toThrow(/selection is required/i);
+
+    // Multiple tier options -> rejected.
+    await expect(
+      h.service.approve({ token: est.viewToken!, acceptedByName: 'Sarah', selectedLineItemIds: ['good', 'better'] }),
+    ).rejects.toThrow(/exactly one/i);
+
+    // Valid selection: base always billed + chosen tier.
+    const view = await h.service.approve({
+      token: est.viewToken!,
+      acceptedByName: 'Sarah',
+      selectedLineItemIds: ['better'],
+    });
+    expect(view.status).toBe('accepted');
+    expect(view.totalCents).toBe(25000); // 5000 + 20000
+
+    const stored = await h.estimate.findById(TENANT, est.id);
+    expect(stored?.acceptedSelection?.sort()).toEqual(['base', 'better']);
+  });
+});
+
+describe('PublicEstimateService — validity expiry precedence', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  it('expires (and refuses) a sent estimate past valid_until on decline', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id, { validUntil: new Date(Date.now() - 60_000) });
+    await h.estimate.create(est);
+
+    await expect(
+      h.service.decline({ token: est.viewToken! }),
+    ).rejects.toThrow(/expired/i);
+
+    const stored = await h.estimate.findById(TENANT, est.id);
+    expect(stored?.status).toBe('expired');
+  });
+});
+
+describe('PublicEstimateService — one accepted estimate per job', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  it('refuses to accept when another estimate on the job is already accepted', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    // First estimate already accepted on this job.
+    await h.estimate.create(makeEstimate(j.id, { status: 'accepted', estimateNumber: 'EST-A', viewToken: 'token-accepted-aaaaaaaaaaaa' }));
+    // Second, still-sent estimate on the SAME job.
+    const second = makeEstimate(j.id, { estimateNumber: 'EST-B', viewToken: 'token-second-bbbbbbbbbbbbbb' });
+    await h.estimate.create(second);
+
+    await expect(
+      h.service.approve({ token: second.viewToken!, acceptedByName: 'Sarah' }),
+    ).rejects.toThrow(/already been accepted/i);
+  });
+
+  it('allows acceptance when the job has no other accepted estimate', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const only = makeEstimate(j.id, { estimateNumber: 'EST-ONLY', viewToken: 'token-only-cccccccccccccc' });
+    await h.estimate.create(only);
+    const view = await h.service.approve({ token: only.viewToken!, acceptedByName: 'Sarah' });
+    expect(view.status).toBe('accepted');
+  });
+});
+
+describe('PublicEstimateService — accepted view narrows to selection', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+
+  it('shows only the billed rows (and no picker) after a tiered approval', async () => {
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const token = 'token-tier-view-dddddddddddd';
+    const est = makeEstimate(j.id, {
+      viewToken: token,
+      lineItems: [
+        { id: 'base', description: 'Diagnostic', quantity: 1, unitPriceCents: 5000, totalCents: 5000, sortOrder: 0, taxable: true },
+        { id: 'good', description: 'Good', quantity: 1, unitPriceCents: 10000, totalCents: 10000, sortOrder: 1, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true, isDefaultSelected: true },
+        { id: 'better', description: 'Better', quantity: 1, unitPriceCents: 20000, totalCents: 20000, sortOrder: 2, taxable: true, groupKey: 'tier', groupLabel: 'Plan', isOptional: true },
+      ],
+    });
+    await h.estimate.create(est);
+
+    await h.service.approve({ token, acceptedByName: 'Sarah', selectedLineItemIds: ['better'] });
+    const view = await h.service.getByToken(token);
+
+    expect(view.status).toBe('accepted');
+    expect(view.hasSelectableItems).toBe(false);
+    expect(view.lineItems.map((li) => li.description).sort()).toEqual(['Better', 'Diagnostic']);
+    expect(view.totalCents).toBe(25000);
+  });
+});

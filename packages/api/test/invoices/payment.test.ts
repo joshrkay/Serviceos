@@ -11,6 +11,7 @@ import {
   InMemoryInvoiceRepository,
 } from '../../src/invoices/invoice';
 import { buildLineItem } from '../../src/shared/billing-engine';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 describe('P1-013 — Payment entity + partial payments', () => {
   let invoiceRepo: InMemoryInvoiceRepository;
@@ -227,5 +228,82 @@ describe('P1-013 — Payment entity + partial payments', () => {
 
     const crossTenant = await getPaymentsByInvoice('tenant-2', invoiceId, paymentRepo);
     expect(crossTenant).toHaveLength(0);
+  });
+});
+
+describe('Blocker 6 — recordPayment emits audit events', () => {
+  let invoiceRepo: InMemoryInvoiceRepository;
+  let paymentRepo: InMemoryPaymentRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let invoiceId: string;
+
+  const sampleItems = [buildLineItem('1', 'Service', 1, 10000, 1, true)]; // $100
+
+  beforeEach(async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    paymentRepo = new InMemoryPaymentRepository();
+    auditRepo = new InMemoryAuditRepository();
+
+    const invoice = await createInvoice(
+      { tenantId: 'tenant-1', jobId: 'job-1', invoiceNumber: 'INV-0001', lineItems: sampleItems, createdBy: 'u-1' },
+      invoiceRepo
+    );
+    await issueInvoice('tenant-1', invoice.id, 30, invoiceRepo);
+    invoiceId = invoice.id;
+  });
+
+  it('emits payment.recorded + invoice.status_changed on a full payment', async () => {
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 10000, method: 'credit_card', processedBy: 'user-1' },
+      invoiceRepo,
+      paymentRepo,
+      undefined,
+      undefined,
+      auditRepo,
+      { actorRole: 'owner', correlationId: 'corr-1' },
+    );
+
+    const events = auditRepo.getAll();
+    const recorded = events.find((e) => e.eventType === 'payment.recorded');
+    expect(recorded).toBeDefined();
+    expect(recorded!.entityType).toBe('invoice');
+    expect(recorded!.entityId).toBe(invoiceId);
+    expect(recorded!.actorId).toBe('user-1');
+    expect(recorded!.actorRole).toBe('owner');
+    expect(recorded!.correlationId).toBe('corr-1');
+    expect(recorded!.metadata).toMatchObject({ amountCents: 10000, method: 'credit_card' });
+
+    const statusChange = events.find((e) => e.eventType === 'invoice.status_changed');
+    expect(statusChange).toBeDefined();
+    expect(statusChange!.metadata).toMatchObject({ oldStatus: 'open', newStatus: 'paid' });
+  });
+
+  it('defaults actorRole to system and emits no status_changed when status is unchanged', async () => {
+    // A partial payment of an already partially_paid invoice keeps status
+    // 'partially_paid' on the second call → no status_changed event.
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 3000, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo, paymentRepo, undefined, undefined, auditRepo,
+    );
+    auditRepo.clear();
+    await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 2000, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo, paymentRepo, undefined, undefined, auditRepo,
+    );
+
+    const events = auditRepo.getAll();
+    expect(events.filter((e) => e.eventType === 'payment.recorded')).toHaveLength(1);
+    expect(events.filter((e) => e.eventType === 'invoice.status_changed')).toHaveLength(0);
+    expect(events[0].actorRole).toBe('system');
+  });
+
+  it('emits nothing when no auditRepo is provided (backward compatible)', async () => {
+    const { payment } = await recordPayment(
+      { tenantId: 'tenant-1', invoiceId, amountCents: 10000, method: 'cash', processedBy: 'u-1' },
+      invoiceRepo,
+      paymentRepo,
+    );
+    expect(payment.amountCents).toBe(10000);
+    expect(auditRepo.getAll()).toHaveLength(0);
   });
 });

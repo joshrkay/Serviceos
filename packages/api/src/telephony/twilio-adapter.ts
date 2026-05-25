@@ -33,6 +33,7 @@ import { lookupAgreements } from '../ai/skills/lookup-agreements';
 import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
 import { lookupEstimates } from '../ai/skills/lookup-estimates';
+import { lookupLeads } from '../ai/skills/lookup-leads';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
@@ -307,6 +308,15 @@ function intentToProposalType(intent: string | undefined): ProposalType {
     case 'create_job': return 'create_job';
     case 'add_note': return 'add_note';
     case 'emergency_dispatch': return 'emergency_dispatch';
+    case 'update_customer': return 'update_customer';
+    case 'log_expense': return 'log_expense';
+    case 'convert_lead': return 'convert_lead';
+    case 'confirm_appointment': return 'confirm_appointment';
+    case 'mark_lead_lost': return 'mark_lead_lost';
+    case 'add_service_location': return 'add_service_location';
+    case 'log_time_entry': return 'log_time_entry';
+    case 'notify_delay': return 'notify_delay';
+    case 'request_feedback': return 'request_feedback';
     default: return 'voice_clarification';
   }
 }
@@ -1570,6 +1580,23 @@ export class TwilioGatherAdapter {
             estimateRepo: this.deps.estimateRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_leads': {
+          if (!this.deps.leadRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupLeads(
+            { tenantId, sessionId: session.id },
+            {
+              leadRepo: this.deps.leadRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
           session.events.emit(
             'voice-event',
             lookupExecutedEvent(intentType, Date.now() - startMs, true),

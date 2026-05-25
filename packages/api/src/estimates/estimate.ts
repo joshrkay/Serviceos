@@ -56,6 +56,16 @@ export interface Estimate {
   reminderCount?: number;
   /** Timestamp of the most recent reminder nudge. */
   lastReminderAt?: Date;
+  /**
+   * Good-better-best: the estimate_line_item ids the customer chose at
+   * accept time. Locked on approval so a later revise can't change what
+   * was agreed to; the converted invoice bills exactly these items plus
+   * the always-included ones. Undefined when the estimate has no
+   * selectable items.
+   */
+  acceptedSelection?: string[];
+  /** Soft-delete marker. Non-null hides the estimate from all reads. */
+  deletedAt?: Date;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -522,6 +532,126 @@ export async function transitionEstimateStatus(
   return updated;
 }
 
+/**
+ * Soft-delete an estimate. An `accepted` estimate is financially
+ * committed (the customer signed; an invoice may have been converted)
+ * and is never deletable — callers should clone it instead. Sets
+ * `deleted_at`, which removes the estimate from every read path, emits
+ * an `estimate.deleted` audit event, and rolls up the linked job's
+ * money state. Returns null when the estimate doesn't exist.
+ */
+export async function softDeleteEstimate(
+  tenantId: string,
+  id: string,
+  repository: EstimateRepository,
+  deps?: EstimateMutationDeps,
+  moneyStateDeps?: RefreshJobMoneyStateDeps,
+): Promise<Estimate | null> {
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  if (existing.status === 'accepted') {
+    throw new ConflictError(
+      'Cannot delete an accepted estimate. Clone it if you need a fresh draft.',
+    );
+  }
+
+  const now = new Date();
+  const updated = await repository.update(tenantId, id, { deletedAt: now, updatedAt: now });
+  if (!updated) return null;
+
+  if (deps?.auditRepo) {
+    try {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: deps.actorId ?? 'system',
+          actorRole: deps.actorRole ?? 'unknown',
+          eventType: 'estimate.deleted',
+          entityType: 'estimate',
+          entityId: id,
+          metadata: { estimateNumber: existing.estimateNumber, status: existing.status },
+        }),
+      );
+    } catch (err) {
+      deps.logger?.warn('estimate delete audit recording failed', {
+        estimateId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (moneyStateDeps) {
+    await refreshJobMoneyStateSafe(tenantId, existing.jobId, deps?.actorId ?? 'system', moneyStateDeps);
+  }
+
+  return updated;
+}
+
+/**
+ * Clone an estimate into a fresh DRAFT on the same job. Copies the line
+ * items (including good-better-best grouping), discount, tax rate, and
+ * customer message; resets all lifecycle state (status, version, token,
+ * sent/accepted/rejected/reminder fields). The new estimate gets its own
+ * estimate number. This is the path the edit/delete locks point users to
+ * ("clone it to a new estimate to make changes").
+ */
+export async function cloneEstimate(
+  tenantId: string,
+  id: string,
+  newEstimateNumber: string,
+  actorId: string,
+  repository: EstimateRepository,
+  auditRepo?: AuditRepository,
+): Promise<Estimate | null> {
+  const existing = await repository.findById(tenantId, id);
+  if (!existing) return null;
+
+  const now = new Date();
+  const clone: Estimate = {
+    id: uuidv4(),
+    tenantId,
+    jobId: existing.jobId,
+    estimateNumber: newEstimateNumber,
+    status: 'draft',
+    lineItems: existing.lineItems.map((li) => ({ ...li, id: uuidv4() })),
+    totals: calculateDocumentTotals(
+      existing.lineItems,
+      existing.totals.discountCents,
+      existing.totals.taxRateBps,
+    ),
+    validUntil: existing.validUntil,
+    customerMessage: existing.customerMessage,
+    internalNotes: existing.internalNotes,
+    version: 1,
+    createdBy: actorId,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const created = await repository.create(clone);
+
+  if (auditRepo) {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId,
+        actorRole: 'unknown',
+        eventType: 'estimate.cloned',
+        entityType: 'estimate',
+        entityId: created.id,
+        metadata: {
+          estimateNumber: created.estimateNumber,
+          clonedFromId: existing.id,
+          clonedFromNumber: existing.estimateNumber,
+        },
+      }),
+    );
+  }
+
+  return created;
+}
+
 export class InMemoryEstimateRepository implements EstimateRepository {
   private estimates: Map<string, Estimate> = new Map();
 
@@ -532,18 +662,18 @@ export class InMemoryEstimateRepository implements EstimateRepository {
 
   async findById(tenantId: string, id: string): Promise<Estimate | null> {
     const e = this.estimates.get(id);
-    if (!e || e.tenantId !== tenantId) return null;
+    if (!e || e.tenantId !== tenantId || e.deletedAt) return null;
     return { ...e, lineItems: [...e.lineItems] };
   }
 
   async findByJob(tenantId: string, jobId: string): Promise<Estimate[]> {
     return Array.from(this.estimates.values())
-      .filter((e) => e.tenantId === tenantId && e.jobId === jobId)
+      .filter((e) => e.tenantId === tenantId && e.jobId === jobId && !e.deletedAt)
       .map((e) => ({ ...e, lineItems: [...e.lineItems] }));
   }
 
   async findByTenant(tenantId: string, options?: EstimateListOptions): Promise<Estimate[]> {
-    let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId);
+    let results = Array.from(this.estimates.values()).filter((e) => e.tenantId === tenantId && !e.deletedAt);
     if (options?.status) results = results.filter((e) => e.status === options.status);
     if (options?.jobId) results = results.filter((e) => e.jobId === options.jobId);
     if (options?.sentBefore) {
@@ -591,7 +721,7 @@ export class InMemoryEstimateRepository implements EstimateRepository {
 
   async findByViewToken(token: string): Promise<Estimate | null> {
     for (const e of this.estimates.values()) {
-      if (e.viewToken === token) {
+      if (e.viewToken === token && !e.deletedAt) {
         return { ...e, lineItems: [...e.lineItems] };
       }
     }
