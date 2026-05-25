@@ -52,15 +52,6 @@ describe('Postgres integration — webhooks', () => {
     expect(await repo.findByIdempotencyKey('stripe', `missing_${randomUUID()}`)).toBeNull();
   });
 
-  it('dedups a duplicate (source, idempotencyKey) via ON CONFLICT, returning the pre-existing row', async () => {
-    const event = makeEvent();
-    await repo.create(event);
-    // Same source + idempotency key, different id → ON CONFLICT DO NOTHING
-    // returns the PRE-EXISTING row (original id) instead of inserting or
-    // throwing, which is what lets handleWebhookEvent close the read-then-
-    // create race on Postgres.
-    const result = await repo.create(makeEvent({ idempotencyKey: event.idempotencyKey }));
-    expect(result.id).toBe(event.id);
   it('is idempotent on a duplicate (source, idempotencyKey) — returns the existing row, no throw', async () => {
     const event = makeEvent();
     await repo.create(event);
