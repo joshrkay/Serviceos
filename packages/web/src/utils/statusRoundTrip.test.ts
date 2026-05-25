@@ -104,7 +104,7 @@ describe('ESTIMATE_STATUS_MAP — forward mapping (API → UI label)', () => {
     expect(normalizeEstimateStatus('sent')).toBe('Sent');
     expect(normalizeEstimateStatus('accepted')).toBe('Approved');
     expect(normalizeEstimateStatus('rejected')).toBe('Declined');
-    expect(normalizeEstimateStatus('expired')).toBe('Draft');
+    expect(normalizeEstimateStatus('expired')).toBe('Expired');
   });
 });
 

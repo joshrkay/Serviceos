@@ -14,6 +14,11 @@ export function mapLineItemRow(row: Record<string, any>): LineItem {
     totalCents: Number(row.total_cents),
     sortOrder: Number(row.sort_order),
     taxable: row.taxable,
+    // Good-better-best columns (estimate_line_items only; null on invoices).
+    groupKey: row.group_key ?? undefined,
+    groupLabel: row.group_label ?? undefined,
+    isOptional: row.is_optional ?? undefined,
+    isDefaultSelected: row.is_default_selected ?? undefined,
   };
 }
 
