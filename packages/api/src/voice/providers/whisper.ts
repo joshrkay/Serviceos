@@ -25,7 +25,8 @@ export class WhisperProvider implements STTProvider {
       : 'webm';
 
     const fd = new FormData();
-    fd.append('file', new Blob([audioBuffer], { type: contentType }), `audio.${ext}`);
+    const audioBytes = Uint8Array.from(audioBuffer);
+    fd.append('file', new Blob([audioBytes], { type: contentType }), `audio.${ext}`);
     fd.append('model', 'whisper-1');
 
     // Pass language hint to Whisper for improved accuracy (ISO 639-1 code)
