@@ -335,6 +335,22 @@ export const MATRIX: MatrixRow[] = [
     expected: 'partial',
     expectedReason: 'No REST cancel; only the voice/AI path emits cancel_appointment. Requires AI + worker.',
   },
+  {
+    id: 'SCH-04',
+    module: 'SCH',
+    feature: 'Appointment status lifecycle (confirm → in progress → complete)',
+    passCriteria:
+      'PUT /api/appointments/:id walks the appointment through confirmed → in_progress → completed; each transition persists to appointments.status in the DB',
+    expected: 'pass',
+  },
+  {
+    id: 'SCH-05',
+    module: 'SCH',
+    feature: 'Running-late delay notice (virtual status)',
+    passCriteria:
+      'PUT /api/appointments/:id with status=running_late + delayMinutes returns queued=true and does NOT change the stored status (it enqueues a customer delay notice rather than transitioning)',
+    expected: 'pass',
+  },
 
   // ----- SMS / notifications -----
   {

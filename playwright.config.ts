@@ -114,6 +114,7 @@ export default defineConfig({
               'conversations.spec.ts',
               'locations.spec.ts',
               'estimate-revise.spec.ts',
+              'appointments-lifecycle.spec.ts',
               'golden-journey.spec.ts',
               'scheduling.spec.ts',
               'sms.spec.ts',
