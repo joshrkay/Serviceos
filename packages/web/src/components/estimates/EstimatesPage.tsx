@@ -3,12 +3,13 @@ import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
-  Briefcase, MapPin, RotateCcw,
+  Briefcase, MapPin, RotateCcw, Download,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { apiFetch } from '../../utils/api-fetch';
+import { printEstimateDocument } from '../../lib/estimatePdf';
 import { normalizeEstimateStatus, centsToDisplay } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { NewEstimateFlow } from './NewEstimateFlow';
@@ -498,9 +499,25 @@ function EstimateDocPreview({ est, lineItems, onClose }: {
             <p className="text-sm text-slate-700">Customer preview</p>
             <p className="text-xs text-slate-400">What {est.customer.split(' ')[0]} sees when they open the link</p>
           </div>
-          <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
-            <X size={15} className="text-slate-500" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => printEstimateDocument({
+                estimateNumber: est.estimateNumber,
+                customerName: est.customer,
+                businessName: 'Fieldly Pro Services',
+                businessContact: 'Austin, TX · (512) 555-0000',
+                description: est.description,
+                validUntil: est.validUntil,
+                lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              })}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition-colors"
+            >
+              <Download size={12} /> PDF
+            </button>
+            <button onClick={onClose} className="flex size-7 items-center justify-center rounded-full hover:bg-slate-100 transition-colors">
+              <X size={15} className="text-slate-500" />
+            </button>
+          </div>
         </div>
 
         {/* Document body */}

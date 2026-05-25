@@ -2,10 +2,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
   Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
-  MapPin, FileText, Calendar, Clock, User,
+  MapPin, FileText, Calendar, Clock, User, Download,
 } from 'lucide-react';
 import { estimates, customers, calcEstimateTotal } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
+import { printEstimateDocument } from '../../lib/estimatePdf';
 
 interface PublicEstimateView {
   id: string;
@@ -886,6 +887,22 @@ export function EstimateApprovalPage() {
               <p className="text-white" style={{ fontSize: '1.15rem' }}>${total.toLocaleString()}</p>
             </div>
           </div>
+
+          <button
+            onClick={() => printEstimateDocument({
+              estimateNumber,
+              customerName,
+              businessName,
+              businessContact: businessPhone,
+              description,
+              validUntil: validUntilText,
+              lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, rate: i.rate })),
+              totalDollars: total,
+            })}
+            className="mb-4 flex items-center justify-center gap-1.5 w-full rounded-xl border border-slate-200 bg-white py-2.5 text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+          >
+            <Download size={12} /> Download PDF
+          </button>
 
           {/* Deposit notice — Tier 4 (Deposit rules — PR 3a). When the
               tenant has a deposit rule and the estimate qualifies, the
