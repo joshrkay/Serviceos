@@ -122,7 +122,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   // in production; falls back to an in-memory map for tests/dev. Fail fast
   // if a production deploy forgot to wire the durable repo rather than
   // silently running with non-durable, per-instance dedup.
-  if (config.NODE_ENV === 'prod' && !deps.webhookRepo) {
+  if ((config.NODE_ENV === 'prod' || config.NODE_ENV === 'production') && !deps.webhookRepo) {
     throw new Error(
       'createWebhookRouter: a durable webhookRepo is required in production ' +
         '(in-memory webhook idempotency is wiped on restart and not shared ' +
