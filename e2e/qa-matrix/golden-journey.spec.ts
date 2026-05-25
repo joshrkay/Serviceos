@@ -122,27 +122,66 @@ matrixTest(
       100_000,
     );
 
-    // 6) Delivery/payment legs — attempted; recorded as notes when the
-    //    integration is mock (no keys) rather than failing the funnel.
+    // 6) Estimate → sent (deterministic state transition).
+    await h.api.call({
+      method: 'POST',
+      path: `/api/estimates/${estimateId}/transition`,
+      body: { status: 'sent' },
+      token,
+      label: '06-estimate-sent',
+      expectStatus: 200,
+    });
+
+    // 7) Invoice the job and issue it — deterministic, no Stripe/SendGrid.
+    const invoice = await h.api.call({
+      method: 'POST',
+      path: '/api/invoices',
+      body: { jobId, estimateId, lineItems: [lineItem('li-1', 'Diagnostic', 12_500), lineItem('li-2', 'Compressor', 87_500)] },
+      token,
+      label: '07-invoice-create',
+      expectStatus: 201,
+    });
+    const invoiceId = (invoice.response.body as { id: string }).id;
+    expect(invoiceId, 'invoice create must return an id').toBeTruthy();
+    await h.api.call({
+      method: 'POST',
+      path: `/api/invoices/${invoiceId}/issue`,
+      token,
+      label: '07-invoice-issue',
+      expectStatus: 200,
+    });
+    const invRow = await h.db.query({
+      label: '07-invoice-row',
+      tenantId,
+      sql: `SELECT status FROM invoices WHERE id = $1`,
+      params: [invoiceId],
+    });
+    expect((invRow.rows[0] as { status: string }).status, 'issued invoice must be open').toBe('open');
+
+    // 8) Integration-gated tail (delivery + payment). These require live
+    //    SendGrid/Stripe; attempt the send and let it drive the verdict —
+    //    a non-2xx here means the funnel tail is unverified in this env, so
+    //    the row is PARTIAL rather than a false PASS.
     const send = await h.api.call({
       method: 'POST',
       path: `/api/estimates/${estimateId}/send`,
       body: { channel: 'email' },
       token,
-      label: '06-estimate-send',
+      label: '08-estimate-send',
     });
+
+    await gotoUi(h, '/invoices', '08-invoices-ui');
+
     if (send.response.status >= 200 && send.response.status < 300) {
-      h.evidence.note('estimate send accepted (delivery proposal/queued).');
+      // Deterministic funnel through invoice issuance verified AND the
+      // delivery leg was accepted.
+      h.evidence.pass();
     } else {
-      h.evidence.note(
-        `estimate send returned ${send.response.status} — expected when SendGrid is mock/disabled; the prod run closes this leg.`,
+      h.evidence.partial(
+        `Funnel verified through invoice issuance, but the delivery leg (POST /estimates/:id/send) returned ${send.response.status} ` +
+          '— SendGrid is mock/disabled in this env. Payment leg also requires live Stripe. Run against the deployed env to close the tail.',
       );
     }
-
-    await gotoUi(h, '/estimates', '06-estimates-ui');
-    // The deterministic funnel (intake → estimate) is fully verified; the
-    // send/pay tail is environment-gated and noted above.
-    h.evidence.pass();
   },
 );
 

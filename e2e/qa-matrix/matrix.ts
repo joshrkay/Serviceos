@@ -656,9 +656,9 @@ export const MATRIX: MatrixRow[] = [
   {
     id: 'JRN-03',
     module: 'JRN',
-    feature: 'Golden funnel: intake → lead → convert → job → estimate',
+    feature: 'Golden funnel: intake → lead → convert → job → estimate → invoice issued',
     passCriteria:
-      'Public intake creates a lead; convert produces a customer; a location + job are created for it; an estimate persists against the job (totals match) — each leg verified in the DB. Delivery/payment legs are attempted and recorded (partial when Stripe/SendGrid are mock).',
+      'Public intake → lead → convert → location → job → estimate (totals checked) → estimate sent → invoice created+issued (open), each verified in the DB. The delivery/payment tail (SendGrid/Stripe) is attempted; PASS when the delivery leg is accepted, PARTIAL when it is mock/unavailable (no false pass).',
     expected: 'pass',
   },
 ];

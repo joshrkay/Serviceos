@@ -66,7 +66,7 @@ async function createCrewChangeProposal(
     headers: { 'If-Match': appt.version },
     body: {
       proposalType: 'remove_crew_member',
-      payload: { appointmentId: appt.id, fromTechnicianId: randomUuid(), reason: 'QA crew change' },
+      payload: { appointmentId: appt.id, technicianId: randomUuid(), reason: 'QA crew change' },
       summary: 'QA crew-change proposal',
     },
     token: h.tenantA.token,
