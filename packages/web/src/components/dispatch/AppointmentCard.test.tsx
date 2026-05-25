@@ -53,6 +53,21 @@ describe('P6-002 — Appointment card model', () => {
     expect(screen.getByTestId('appointment-arrival')).toBeInTheDocument();
   });
 
+  it('shows a "Cancel requested" badge when a cancellation is pending', () => {
+    render(<AppointmentCard appointment={{ ...mockAppointment, pendingChange: 'cancel' }} />);
+    expect(screen.getByTestId('appointment-pending-change-badge')).toHaveTextContent('Cancel requested');
+  });
+
+  it('shows a "Reschedule requested" badge when a reschedule is pending', () => {
+    render(<AppointmentCard appointment={{ ...mockAppointment, pendingChange: 'reschedule' }} />);
+    expect(screen.getByTestId('appointment-pending-change-badge')).toHaveTextContent('Reschedule requested');
+  });
+
+  it('omits the pending-change badge by default', () => {
+    render(<AppointmentCard appointment={mockAppointment} />);
+    expect(screen.queryByTestId('appointment-pending-change-badge')).not.toBeInTheDocument();
+  });
+
   it('applies dragging class when isDragging', () => {
     render(<AppointmentCard appointment={mockAppointment} isDragging={true} />);
     const card = screen.getByTestId('appointment-card');

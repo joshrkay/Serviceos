@@ -1,15 +1,25 @@
 import { Router, Request, Response } from 'express';
-import { getDispatchBoardData, BoardQueryDependencies } from './board-query';
+import { getDispatchBoardData, BoardQueryDependencies, PendingChangeKind } from './board-query';
 import { AppointmentRepository, listAppointmentsWithMeta } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { JobRepository } from '../jobs/job';
 import { CustomerRepository } from '../customers/customer';
 import { LocationRepository } from '../locations/location';
+import { ProposalRepository } from '../proposals/proposal';
+import { resolvePendingChangeRequests } from './pending-changes';
 import { requireAuth, requireTenant } from '../middleware/auth';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { toErrorResponse } from '../shared/errors';
 import { createBoardEventsRouter, BoardEventsRouteDeps } from './board-events-route';
 import { createPresenceRouter } from './presence-routes';
+
+export interface EnRouteEnqueuer {
+  enqueueEnRouteNotice(input: {
+    tenantId: string;
+    appointmentId: string;
+    technicianName?: string;
+  }): Promise<string | null>;
+}
 
 export function createDispatchRoutes(deps: {
   appointmentRepo: AppointmentRepository;
@@ -18,6 +28,8 @@ export function createDispatchRoutes(deps: {
   customerRepo?: CustomerRepository;
   locationRepo?: LocationRepository;
   boardEventsDeps?: BoardEventsRouteDeps;
+  enRouteCoordinator?: EnRouteEnqueuer;
+  proposalRepo?: ProposalRepository;
 }): Router {
   const router = Router();
 
@@ -37,10 +49,17 @@ export function createDispatchRoutes(deps: {
 
       const timezone = req.query.timezone as string | undefined;
 
+      const proposalRepo = deps.proposalRepo;
       const boardDeps: BoardQueryDependencies = {
         appointmentRepo: deps.appointmentRepo,
         assignmentRepo: deps.assignmentRepo,
         viewingUserId: authReq.auth?.userId,
+        ...(proposalRepo
+          ? {
+              getPendingChangeRequests: (appointmentIds: string[]) =>
+                resolvePendingChangeRequests(proposalRepo, tenantId, appointmentIds),
+            }
+          : {}),
       };
 
       const boardData = await getDispatchBoardData(tenantId, date, boardDeps, timezone);
@@ -131,6 +150,56 @@ export function createDispatchRoutes(deps: {
         );
 
         return res.json({ appointments: enriched, total: result.total });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        return res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * POST /api/dispatch/appointments/:id/en-route
+   *
+   * Sends the customer a neutral "on the way" notice for this appointment.
+   * Called by the dispatch board / technician day view when a tech departs.
+   * Returns 202 with `notified` = whether a recipient was resolved (a
+   * canceled/completed appointment or missing customer yields notified=false).
+   */
+  router.post(
+    '/appointments/:id/en-route',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.enRouteCoordinator) {
+          return res
+            .status(503)
+            .json({ error: 'UNAVAILABLE', message: 'En-route notifications are not configured' });
+        }
+        const tenantId = req.auth!.tenantId;
+        const appointmentId = req.params.id;
+
+        const appointment = await deps.appointmentRepo.findById(tenantId, appointmentId);
+        if (!appointment) {
+          return res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
+        }
+
+        const technicianName =
+          typeof req.body?.technicianName === 'string' && req.body.technicianName.trim()
+            ? req.body.technicianName.trim()
+            : undefined;
+
+        const idempotencyKey = await deps.enRouteCoordinator.enqueueEnRouteNotice({
+          tenantId,
+          appointmentId,
+          technicianName,
+        });
+
+        return res.status(202).json({
+          accepted: true,
+          notified: idempotencyKey !== null,
+          idempotencyKey,
+        });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         return res.status(statusCode).json(body);
