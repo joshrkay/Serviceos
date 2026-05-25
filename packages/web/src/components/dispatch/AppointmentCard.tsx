@@ -31,6 +31,11 @@ export interface AppointmentCardData {
   editing?: AppointmentEditingInfo | null;
   /** Non-primary (crew) technicians on this appointment. */
   coAssignees?: CoAssignee[];
+  /**
+   * A customer-initiated cancel/reschedule is awaiting dispatcher
+   * confirmation. Drives the "change requested" badge.
+   */
+  pendingChange?: 'cancel' | 'reschedule';
 }
 
 export interface AppointmentCardProps {
@@ -147,6 +152,21 @@ export function AppointmentCard({
             title="This appointment overlaps another booking"
           >
             Conflict
+          </span>
+        )}
+        {appointment.pendingChange && (
+          <span
+            className="appointment-card__badge text-xs font-medium text-violet-800 bg-violet-100 px-1.5 py-0.5 rounded"
+            data-testid="appointment-pending-change-badge"
+            role="status"
+            aria-label={
+              appointment.pendingChange === 'cancel'
+                ? 'Cancellation requested by customer'
+                : 'Reschedule requested by customer'
+            }
+            title="Customer requested a change — awaiting your confirmation"
+          >
+            {appointment.pendingChange === 'cancel' ? 'Cancel requested' : 'Reschedule requested'}
           </span>
         )}
         <span

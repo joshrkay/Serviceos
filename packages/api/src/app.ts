@@ -274,6 +274,10 @@ import {
 import { PgPortalSessionRepository } from './portal/pg-portal-session';
 import { createPortalRouter } from './routes/portal';
 import { createPublicPortalRouter } from './routes/public-portal';
+import {
+  PgTenantTransactionRunner,
+  InMemoryTransactionRunner,
+} from './db/tenant-transaction';
 import { createJob as createJobDomain } from './jobs/job';
 import { createInvoice as createInvoiceDomain } from './invoices/invoice';
 
@@ -1663,6 +1667,13 @@ export function createApp(): express.Express {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      assignmentRepo,
+      locationRepo,
+      proposalRepo,
+      settingsRepo,
+      transactionRunner: pool
+        ? new PgTenantTransactionRunner(pool)
+        : new InMemoryTransactionRunner(),
       paymentLinkProvider,
     }),
   );
@@ -2427,6 +2438,8 @@ export function createApp(): express.Express {
       jobRepo,
       customerRepo,
       locationRepo,
+      enRouteCoordinator: delayNotificationCoordinator,
+      proposalRepo,
       boardEventsDeps: {
         authUserIdFromRequest: async (req) =>
           (req as { auth?: { userId?: string } }).auth?.userId ?? null,
