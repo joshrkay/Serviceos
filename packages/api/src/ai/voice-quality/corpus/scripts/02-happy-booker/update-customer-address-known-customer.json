@@ -1,0 +1,53 @@
+{
+  "id": "update-customer-address-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550315",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_update_customer_address",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_update_address_lee",
+        "tenantId": "t_02_update_customer_address",
+        "firstName": "Jordan",
+        "lastName": "Lee",
+        "displayName": "Jordan Lee",
+        "companyName": null,
+        "primaryPhone": "+15555550315",
+        "secondaryPhone": null,
+        "email": "jordan.lee@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, it's Jordan Lee. I moved — please update my address to 412 Oak Street.",
+      "expected": {
+        "intent": "update_customer",
+        "proposalType": "update_customer",
+        "slots": {
+          "address": "412 Oak Street"
+        },
+        "spokenAnswerMatches": "I've drafted an update to your address for review; an operator will confirm before it's applied.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

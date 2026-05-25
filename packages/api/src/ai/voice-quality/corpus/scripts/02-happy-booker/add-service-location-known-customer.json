@@ -1,0 +1,53 @@
+{
+  "id": "add-service-location-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550404",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_add_location",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_location_jane",
+        "tenantId": "t_02_add_location",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550404",
+        "secondaryPhone": null,
+        "email": "jane.location@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, it's Jane. Please add a second service address for me at 412 Oak Street.",
+      "expected": {
+        "intent": "add_service_location",
+        "proposalType": "add_service_location",
+        "slots": {
+          "serviceAddress": "412 Oak Street"
+        },
+        "spokenAnswerMatches": "I've drafted a new service location for review; an operator will confirm the address before it's added.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

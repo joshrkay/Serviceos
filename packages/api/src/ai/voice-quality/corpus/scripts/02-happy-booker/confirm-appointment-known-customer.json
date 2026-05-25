@@ -1,0 +1,70 @@
+{
+  "id": "confirm-appointment-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550401",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_confirm_appt",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_confirm_jane",
+        "tenantId": "t_02_confirm_appt",
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "displayName": "Jane Smith",
+        "companyName": null,
+        "primaryPhone": "+15555550401",
+        "secondaryPhone": null,
+        "email": "jane.confirm@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_02_confirm_existing",
+        "tenantId": "t_02_confirm_appt",
+        "jobId": "job_02_confirm_1",
+        "scheduledStart": "2026-05-26T21:00:00.000Z",
+        "scheduledEnd": "2026-05-26T23:00:00.000Z",
+        "arrivalWindowStart": "2026-05-26T21:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-26T21:30:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "notes": "AC service",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-04-15T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Hi, this is Jane Smith — I'm confirming I'll be home for tomorrow's appointment.",
+      "expected": {
+        "intent": "confirm_appointment",
+        "proposalType": "confirm_appointment",
+        "slots": {
+          "appointmentId": "appt_02_confirm_existing"
+        },
+        "spokenAnswerMatches": "I've drafted a confirmation of your appointment for review; an operator will confirm before it's applied.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

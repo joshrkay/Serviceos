@@ -1,0 +1,54 @@
+{
+  "id": "log-expense-fuel-known-customer",
+  "bucket": "02-happy-booker",
+  "callerId": "+15555550314",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_02_log_expense_fuel",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_02_expense_fuel_owner",
+        "tenantId": "t_02_log_expense_fuel",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555550314",
+        "secondaryPhone": null,
+        "email": "sam2@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Add a 55 dollar fuel expense for today.",
+      "expected": {
+        "intent": "log_expense",
+        "proposalType": "log_expense",
+        "slots": {
+          "amountCents": 5500,
+          "category": "fuel"
+        },
+        "spokenAnswerMatches": "I've drafted a fuel expense for review; an operator will confirm before it's recorded.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": true
+}

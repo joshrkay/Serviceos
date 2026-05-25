@@ -92,6 +92,7 @@ import { lookupAgreements } from '../skills/lookup-agreements';
 import { lookupAccountSummary } from '../skills/lookup-account-summary';
 import { lookupCustomer } from '../skills/lookup-customer';
 import { lookupEstimates } from '../skills/lookup-estimates';
+import { lookupLeads } from '../skills/lookup-leads';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 
 // Repos (mutation handlers + lookup deps).
@@ -1130,6 +1131,23 @@ export class TextModeDriver implements AgentDriver {
             estimateRepo: this.deps.estimateRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_leads': {
+          if (!this.deps.leadRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupLeads(
+            { tenantId, sessionId: session.id },
+            {
+              leadRepo: this.deps.leadRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
           session.events.emit(
             'voice-event',
             lookupExecutedEvent(intentType, performance.now() - startMs, true),
