@@ -33,6 +33,7 @@ import { lookupAgreements } from '../ai/skills/lookup-agreements';
 import { lookupAccountSummary } from '../ai/skills/lookup-account-summary';
 import { lookupCustomer } from '../ai/skills/lookup-customer';
 import { lookupEstimates } from '../ai/skills/lookup-estimates';
+import { lookupLeads } from '../ai/skills/lookup-leads';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { InvoiceRepository } from '../invoices/invoice';
@@ -1579,6 +1580,23 @@ export class TwilioGatherAdapter {
             estimateRepo: this.deps.estimateRepo,
             ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
           });
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, Date.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_leads': {
+          if (!this.deps.leadRepo) {
+            return this.lookupNotWiredFallback();
+          }
+          const result = await lookupLeads(
+            { tenantId, sessionId: session.id },
+            {
+              leadRepo: this.deps.leadRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
           session.events.emit(
             'voice-event',
             lookupExecutedEvent(intentType, Date.now() - startMs, true),

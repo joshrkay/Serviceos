@@ -53,6 +53,9 @@ export type IntentType =
   | 'lookup_account_summary'
   | 'lookup_customer'
   | 'lookup_estimates'
+  // Phase: full-app voice coverage — owner/tenant-scoped read-only lookups.
+  | 'lookup_availability'
+  | 'lookup_leads'
   // P11-002: caller asks to switch the call language ("english please" /
   // "hablo español"). The adapter consumes this as a signal to flip the
   // session language — it is NOT a proposal-driving intent.
@@ -100,6 +103,8 @@ const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_account_summary',
   'lookup_customer',
   'lookup_estimates',
+  'lookup_availability',
+  'lookup_leads',
   'language_switch',
   'operator_request',
   'confirm',
@@ -581,6 +586,19 @@ Supported intents (return exactly ONE):
                                      "Did you send me an estimate yet?"
                                      "What's the status of my quote?"
                                      "How much was that estimate?"
+- "lookup_availability" — caller/operator is ASKING what appointment
+                           slots are open. Read-only — routed to the
+                           lookup_availability skill, which speaks the
+                           next open windows.
+                           Examples: "What slots do you have open this week?"
+                                     "When's your next availability?"
+                                     "Do you have anything open Thursday?"
+                                     "What times can you come out?"
+- "lookup_leads"        — owner/dispatcher is ASKING about the lead
+                           pipeline (count of open leads). Read-only.
+                           Examples: "How many open leads do we have?"
+                                     "What's in the lead pipeline?"
+                                     "How many leads are still open?"
 - "unknown"             — anything else: ambiguous transcripts, or edit
                            commands without a clear reference.
 
