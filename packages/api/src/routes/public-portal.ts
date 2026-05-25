@@ -23,12 +23,17 @@ import { toErrorResponse } from '../shared/errors';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, Invoice } from '../invoices/invoice';
-import { JobRepository } from '../jobs/job';
+import { JobRepository, createJob } from '../jobs/job';
 import { AgreementRepository } from '../agreements/agreement';
-import { AppointmentRepository } from '../appointments/appointment';
+import { AppointmentRepository, createAppointment } from '../appointments/appointment';
+import { AssignmentRepository } from '../appointments/assignment';
+import { LocationRepository } from '../locations/location';
 import { LeadRepository } from '../leads/lead';
-import { AuditRepository } from '../audit/audit';
+import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { SettingsRepository } from '../settings/settings';
+import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
+import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
 import {
   PaymentLinkProvider,
   PaymentLinkResult,
@@ -50,6 +55,11 @@ export interface PublicPortalDeps {
   appointmentRepo: AppointmentRepository;
   leadRepo: LeadRepository;
   auditRepo?: AuditRepository;
+  /** Required for the self-service booking routes (availability + book). */
+  assignmentRepo?: AssignmentRepository;
+  locationRepo?: LocationRepository;
+  proposalRepo?: ProposalRepository;
+  settingsRepo?: SettingsRepository;
   /** Optional — when present, /invoices entries get a `payNowUrl`. */
   paymentLinkProvider?: PaymentLinkProvider;
   /** Default currency for payment-link generation. Defaults to 'usd'. */
@@ -73,6 +83,34 @@ const requestServiceSchema = z.object({
    */
   summary: z.string().trim().min(1).max(2000),
 });
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const availabilityQuerySchema = z.object({
+  from: z.string().regex(DATE_RE, 'from must be YYYY-MM-DD'),
+  to: z.string().regex(DATE_RE, 'to must be YYYY-MM-DD'),
+  durationMin: z.coerce.number().int().min(15).max(480).default(60),
+});
+
+const bookSchema = z.object({
+  slotStart: z.string().datetime(),
+  slotEnd: z.string().datetime(),
+  summary: z.string().trim().min(1).max(2000),
+  locationId: z.string().uuid().optional(),
+});
+
+/** A self-service hold survives 24h before the finder treats the slot as free. */
+const BOOKING_HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_BOOKING_TIMEZONE = 'America/New_York';
+
+async function resolveTenantTimezone(
+  deps: PublicPortalDeps,
+  tenantId: string,
+): Promise<string> {
+  if (!deps.settingsRepo) return DEFAULT_BOOKING_TIMEZONE;
+  const settings = await deps.settingsRepo.findByTenant(tenantId);
+  return settings?.timezone || DEFAULT_BOOKING_TIMEZONE;
+}
 
 function ensurePortal(req: PortalRequest, res: Response): boolean {
   if (!req.portal) {
@@ -357,7 +395,220 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
     }
   });
 
+  /**
+   * GET /:token/availability?from=YYYY-MM-DD&to=YYYY-MM-DD&durationMin=60
+   *
+   * Returns open booking slots within the tenant's business hours, in the
+   * tenant timezone. Read-only — never reserves anything.
+   */
+  router.get('/:token/availability', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId } = req.portal!;
+      const parsed = availabilityQuerySchema.parse(req.query);
+      const timezone = await resolveTenantTimezone(deps, tenantId);
+
+      const slots = await findBookableSlots(
+        { appointmentRepo: deps.appointmentRepo, assignmentRepo: deps.assignmentRepo },
+        {
+          tenantId,
+          fromDate: parsed.from,
+          toDate: parsed.to,
+          timezone,
+          durationMin: parsed.durationMin,
+        },
+      );
+
+      res.json({
+        timezone,
+        durationMin: parsed.durationMin,
+        slots: slots.map((s) => ({
+          start: s.start.toISOString(),
+          end: s.end.toISOString(),
+        })),
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
+  /**
+   * POST /:token/book
+   *
+   * Customer self-service booking. Re-verifies the slot is still open, then
+   * creates a job + a tentative held appointment and a `create_booking`
+   * proposal for the dispatcher to confirm. Never auto-confirms — the
+   * appointment stays held (24h) until a human approves the proposal.
+   */
+  router.post('/:token/book', async (req: PortalRequest, res: Response) => {
+    if (!ensurePortal(req, res)) return;
+    try {
+      const { tenantId, customerId } = req.portal!;
+
+      if (!deps.proposalRepo) {
+        res
+          .status(503)
+          .json({ error: 'UNAVAILABLE', message: 'Self-service booking is not configured' });
+        return;
+      }
+
+      const parsed = bookSchema.parse(req.body ?? {});
+      const slotStart = new Date(parsed.slotStart);
+      const slotEnd = new Date(parsed.slotEnd);
+      if (slotEnd.getTime() <= slotStart.getTime()) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'slotEnd must be after slotStart' });
+        return;
+      }
+      if (slotStart.getTime() < Date.now()) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Cannot book a slot in the past' });
+        return;
+      }
+
+      const customer = await deps.customerRepo.findById(tenantId, customerId);
+      if (!customer) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
+        return;
+      }
+
+      // Resolve the service location: an explicit (customer-owned) one, else
+      // the customer's primary, else their only location.
+      const locationId = await resolveBookingLocation(deps, tenantId, customerId, parsed.locationId);
+      if (!locationId) {
+        res
+          .status(422)
+          .json({ error: 'NO_LOCATION', message: 'No service location on file. Please contact us to book.' });
+        return;
+      }
+
+      const timezone = await resolveTenantTimezone(deps, tenantId);
+      const finderDeps = {
+        appointmentRepo: deps.appointmentRepo,
+        assignmentRepo: deps.assignmentRepo,
+      };
+
+      // Concurrency guard: confirm the slot is still open. If it was taken
+      // since the customer fetched availability, offer alternatives.
+      const stillFree = await isSlotFree(finderDeps, {
+        tenantId,
+        start: slotStart,
+        end: slotEnd,
+      });
+      if (!stillFree) {
+        const durationMin = Math.round((slotEnd.getTime() - slotStart.getTime()) / 60000);
+        const fromDate = slotStart.toISOString().slice(0, 10);
+        const toDate = new Date(slotStart.getTime() + 7 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        const alternatives = await findBookableSlots(finderDeps, {
+          tenantId,
+          fromDate,
+          toDate,
+          timezone,
+          durationMin,
+        });
+        res.status(409).json({
+          error: 'SLOT_TAKEN',
+          message: 'That time was just booked. Here are the next available slots.',
+          alternatives: alternatives.map((s) => ({
+            start: s.start.toISOString(),
+            end: s.end.toISOString(),
+          })),
+        });
+        return;
+      }
+
+      const createdBy = `portal:customer:${customerId}`;
+      const job = await createJob(
+        {
+          tenantId,
+          customerId,
+          locationId,
+          summary: parsed.summary,
+          createdBy,
+          actorRole: 'customer_portal',
+        },
+        deps.jobRepo,
+        deps.auditRepo,
+      );
+
+      const held = await createAppointment(
+        {
+          tenantId,
+          jobId: job.id,
+          scheduledStart: slotStart,
+          scheduledEnd: slotEnd,
+          timezone,
+          notes: parsed.summary,
+          createdBy,
+          holdPendingApproval: true,
+          holdExpiryAt: new Date(Date.now() + BOOKING_HOLD_WINDOW_MS),
+        },
+        deps.appointmentRepo,
+      );
+
+      // No sourceTrustTier — a customer-initiated booking is never
+      // auto-approved. It lands as a draft proposal for the dispatcher.
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'create_booking',
+        payload: { appointmentId: held.id },
+        summary: `Customer requested booking: ${parsed.summary}`,
+        explanation: 'Submitted via the customer portal. Confirm to finalize the appointment.',
+        sourceContext: { source: 'customer_portal', customerId, jobId: job.id },
+        createdBy,
+        expiresAt: held.holdExpiryAt,
+      });
+      const persisted = await deps.proposalRepo.create(proposal);
+
+      if (deps.auditRepo) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: createdBy,
+            actorRole: 'customer_portal',
+            eventType: 'appointment.booking_requested',
+            entityType: 'appointment',
+            entityId: held.id,
+            metadata: { proposalId: persisted.id, jobId: job.id },
+          }),
+        );
+      }
+
+      res.status(201).json({
+        status: 'pending_confirmation',
+        proposalId: persisted.id,
+        appointmentId: held.id,
+        scheduledStart: held.scheduledStart.toISOString(),
+        scheduledEnd: held.scheduledEnd.toISOString(),
+        timezone,
+        message: "Thanks! We'll confirm your appointment shortly.",
+      });
+    } catch (err) {
+      const { statusCode, body } = toErrorResponse(err);
+      res.status(statusCode).json(body);
+    }
+  });
+
   return router;
+}
+
+async function resolveBookingLocation(
+  deps: PublicPortalDeps,
+  tenantId: string,
+  customerId: string,
+  requestedLocationId: string | undefined,
+): Promise<string | null> {
+  if (!deps.locationRepo) return null;
+  const locations = await deps.locationRepo.findByCustomer(tenantId, customerId);
+  const active = locations.filter((l) => !l.isArchived);
+  if (requestedLocationId) {
+    const match = active.find((l) => l.id === requestedLocationId);
+    return match ? match.id : null;
+  }
+  const primary = active.find((l) => l.isPrimary);
+  if (primary) return primary.id;
+  return active.length > 0 ? active[0].id : null;
 }
 
 interface InvoicePayload {

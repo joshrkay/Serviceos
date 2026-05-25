@@ -1666,6 +1666,10 @@ export function createApp(): express.Express {
       appointmentRepo,
       leadRepo,
       auditRepo,
+      assignmentRepo,
+      locationRepo,
+      proposalRepo,
+      settingsRepo,
       paymentLinkProvider,
     }),
   );
