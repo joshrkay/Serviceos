@@ -1821,6 +1821,13 @@ export function createApp(): express.Express {
     return sharedRichPackByType.get(base)?.repairTemplates ?? [];
   };
   const telephonyCallControl = new DefaultTwilioCallControl();
+  // Owner-scoped revenue lookup (voice `lookup_revenue`) shares the same
+  // money-dashboard repo the /api/reports router uses below.
+  const moneyDashboardRepo = new PgMoneyDashboardRepository(
+    invoiceRepo,
+    paymentRepo,
+    expenseRepo,
+  );
   const twilioAdapter = new TwilioGatherAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
@@ -1849,6 +1856,8 @@ export function createApp(): express.Express {
     appointmentRepo,
     invoiceRepo,
     agreementRepo,
+    moneyDashboardRepo,
+    catalogRepo,
     lookupEvents: lookupEventService,
     systemActorId: 'system:inbound-call',
     businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
@@ -2519,11 +2528,6 @@ export function createApp(): express.Express {
   const revenueBySourceRepo = pool
     ? new PgRevenueBySourceRepository(pool)
     : new InMemoryRevenueBySourceRepository();
-  const moneyDashboardRepo = new PgMoneyDashboardRepository(
-    invoiceRepo,
-    paymentRepo,
-    expenseRepo,
-  );
   const timeGivenBackReporter = new RepoBackedTimeGivenBackReporter(
     proposalRepo,
     settingsRepo,

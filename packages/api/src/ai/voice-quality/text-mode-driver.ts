@@ -93,6 +93,8 @@ import { lookupAccountSummary } from '../skills/lookup-account-summary';
 import { lookupCustomer } from '../skills/lookup-customer';
 import { lookupEstimates } from '../skills/lookup-estimates';
 import { lookupLeads } from '../skills/lookup-leads';
+import { lookupRevenue } from '../skills/lookup-revenue';
+import { lookupCatalog } from '../skills/lookup-catalog';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 
 // Repos (mutation handlers + lookup deps).
@@ -104,6 +106,8 @@ import type { JobRepository } from '../../jobs/job';
 import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import type { AgreementRepository } from '../../agreements/agreement';
+import type { MoneyDashboardRepository } from '../../reports/money-dashboard';
+import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import { createProposal, type ProposalRepository } from '../../proposals/proposal';
 
 // Mutation worker (production code path for proposal creation).
@@ -177,6 +181,8 @@ export interface TextModeDriverDeps {
   leadRepo?: LeadRepository;
   auditRepo?: AuditRepository;
   agreementRepo?: AgreementRepository;
+  moneyDashboardRepo?: MoneyDashboardRepository;
+  catalogRepo?: CatalogItemRepository;
   /** Optional audit-trail of every lookup. */
   lookupEvents?: LookupEventService;
   /** Used as `userId` on synthesized voice-action-router messages. */
@@ -1145,6 +1151,40 @@ export class TextModeDriver implements AgentDriver {
             { tenantId, sessionId: session.id },
             {
               leadRepo: this.deps.leadRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_revenue': {
+          if (!this.deps.moneyDashboardRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupRevenue(
+            { tenantId, sessionId: session.id },
+            {
+              moneyDashboardRepo: this.deps.moneyDashboardRepo,
+              ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
+            },
+          );
+          session.events.emit(
+            'voice-event',
+            lookupExecutedEvent(intentType, performance.now() - startMs, true),
+          );
+          return result.summary;
+        }
+        case 'lookup_catalog': {
+          if (!this.deps.catalogRepo) {
+            return LOOKUP_NOT_WIRED_FALLBACK;
+          }
+          const result = await lookupCatalog(
+            { tenantId, sessionId: session.id },
+            {
+              catalogRepo: this.deps.catalogRepo,
               ...(this.deps.lookupEvents ? { lookupEvents: this.deps.lookupEvents } : {}),
             },
           );
