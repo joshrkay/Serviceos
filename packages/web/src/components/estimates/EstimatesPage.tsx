@@ -16,7 +16,7 @@ import { ConvertToInvoiceSheet } from './ConvertToInvoiceSheet';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
-type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined';
+type EstimateStatus = 'Draft' | 'Sent' | 'Viewed' | 'Approved' | 'Declined' | 'Expired';
 
 interface EstCompat {
   id: string;
@@ -1122,6 +1122,20 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                   </p>
                 </div>
               )}
+
+              {(status === 'Expired' || status === 'Declined') && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Clock size={12} className="text-slate-500" />
+                    <p className="text-xs text-slate-600">
+                      {status === 'Expired' ? 'This estimate expired' : 'Customer declined this estimate'}
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Reopen it as a draft to revise and resend.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1174,11 +1188,12 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
 // ─── API status → UI tab value mapping ───────────────────────────────────
 const API_STATUS_FOR_TAB: Record<EstimateStatus | 'All', string[]> = {
   All:      [],
-  Draft:    ['draft', 'expired'],
+  Draft:    ['draft'],
   Sent:     ['ready_for_review', 'sent'],
   Viewed:   [],
   Approved: ['accepted'],
   Declined: ['rejected'],
+  Expired:  ['expired'],
 };
 
 // ─── Estimates List ───────────────────────────────────────────────────────
@@ -1188,6 +1203,8 @@ const TABS: { label: string; value: EstimateStatus | 'All' }[] = [
   { label: 'Sent',     value: 'Sent'     },
   { label: 'Viewed',   value: 'Viewed'   },
   { label: 'Approved', value: 'Approved' },
+  { label: 'Declined', value: 'Declined' },
+  { label: 'Expired',  value: 'Expired'  },
 ];
 
 export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: string } = {}) {

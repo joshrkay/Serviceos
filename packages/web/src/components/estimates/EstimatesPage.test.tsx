@@ -123,6 +123,28 @@ describe('EstimatesPage', () => {
     expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'accepted' });
   });
 
+  it('Expired tab filters by the expired API status', () => {
+    renderPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Expired' }));
+    expect(defaultListResult.setFilters).toHaveBeenCalledWith({ status: 'expired' });
+  });
+
+  it('surfaces an expired estimate with the Expired label (not Draft)', () => {
+    vi.mocked(useListQuery).mockReturnValue({
+      ...defaultListResult,
+      data: [
+        {
+          id: 'e9', estimateNumber: 'EST-009', status: 'expired',
+          totalCents: 99000, subtotalCents: 99000, createdAt: '2026-03-09T00:00:00Z',
+          customer: { id: 'c9', displayName: 'Dana Lee', firstName: 'Dana', lastName: 'Lee' },
+        },
+      ],
+      total: 1,
+    });
+    renderPage();
+    expect(screen.getAllByText('Expired').length).toBeGreaterThan(0);
+  });
+
   it('All tab clears filters', () => {
     renderPage();
     fireEvent.click(screen.getByRole('button', { name: 'All' }));
