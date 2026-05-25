@@ -4,9 +4,16 @@ import {
   Check, Phone, Mail, ChevronDown, ChevronUp, CheckCircle2, X,
   MapPin, FileText, Calendar, Clock, User, Download,
 } from 'lucide-react';
-import { estimates, customers, calcEstimateTotal } from '../../data/mock-data';
 import { apiFetch } from '../../utils/api-fetch';
 import { printEstimateDocument } from '../../lib/estimatePdf';
+
+/**
+ * Format a USD dollar amount with exactly two fraction digits. A bare
+ * `n.toLocaleString()` drops the cents (e.g. 1234.5 → "1,234.5",
+ * 1234 → "1,234"), which mis-states money on this customer-facing page.
+ */
+const fmtUsd = (n: number): string =>
+  n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 interface PublicEstimateView {
   id: string;
@@ -251,7 +258,7 @@ function ApprovalSheet({
             </div>
             <div className="text-right">
               <p className="text-xs text-slate-400 mb-0.5">Total</p>
-              <p className="text-slate-900" style={{ fontSize: '1.3rem' }}>${total.toLocaleString()}</p>
+              <p className="text-slate-900" style={{ fontSize: '1.3rem' }}>${fmtUsd(total)}</p>
             </div>
           </div>
 
@@ -385,7 +392,7 @@ function SuccessScreen({
             </div>
             <p className="text-xs text-slate-400 mb-1">{description}</p>
             <p className="text-white" style={{ fontSize: '1.5rem', lineHeight: 1 }}>
-              ${total.toLocaleString()}
+              ${fmtUsd(total)}
             </p>
             <p className="text-xs text-slate-500 mt-1">{jobNumber}</p>
           </div>
@@ -507,6 +514,10 @@ export function EstimateApprovalPage() {
   const [apiView, setApiView] = useState<PublicEstimateView | null>(null);
   const [apiLoading, setApiLoading] = useState(true);
   const [apiNotFound, setApiNotFound] = useState(false);
+  // Set when the estimate could not be loaded for a reason other than 404
+  // (network error or non-OK response). We render a safe error screen
+  // rather than fixture data — this is a public URL.
+  const [apiError, setApiError] = useState(false);
   // Set when a background poll detects the business revised the estimate
   // (version bumped) after the customer opened the page. The banner asks
   // them to review the latest version; approve is also blocked server-side.
@@ -531,6 +542,7 @@ export function EstimateApprovalPage() {
           return;
         }
         if (!res.ok) {
+          setApiError(true);
           setApiLoading(false);
           return;
         }
@@ -543,7 +555,10 @@ export function EstimateApprovalPage() {
           body: JSON.stringify({}),
         }).catch(() => {});
       } catch {
-        // Network error — fall back to mock data path silently.
+        // Network error — show an error screen. We must NOT fall back to
+        // fixture/mock data on a public URL (it would leak another
+        // customer's name, address, and pricing).
+        if (!cancelled) setApiError(true);
       } finally {
         if (!cancelled) setApiLoading(false);
       }
@@ -579,30 +594,10 @@ export function EstimateApprovalPage() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [id, apiView, accepted, loadedVersion]);
 
-  // Mock-data fallback (used when running against a fixture URL or when
-  // the public API isn't reachable in dev).
-  const mockEst = estimates.find(e =>
-    e.id === id || e.estimateNumber.toLowerCase().replace('-', '') === id?.toLowerCase()
-  ) ?? estimates[0];
-  const mockCustomer = customers.find(c => c.id === mockEst.customerId);
-
-  const usingApi = apiView !== null;
-  const estimateNumber  = apiView?.estimateNumber  ?? mockEst.estimateNumber;
-  const businessName    = apiView?.businessName    ?? 'Fieldly Pro Services';
-  const businessPhone   = apiView?.businessPhone   ?? '(512) 555-0000';
-  const customerName    = apiView?.customerName    ?? mockEst.customer;
-  const customerAddress = apiView?.customerAddress ?? mockCustomer?.address ?? '';
-  const description     = apiView?.customerMessage ?? mockEst.description;
-  const validUntilText  = apiView?.validUntil
-    ? apiView.validUntil.slice(0, 10)
-    : mockEst.validUntil;
-  // Good-better-best selection. `selectable` items (tier options + add-ons)
-  // are chosen by the customer; everything else is always billed. Seed the
-  // selection from the server defaults the first time the estimate loads.
-  const apiItems = apiView?.lineItems ?? [];
+  // Good-better-best: seed the customer's selection from the server
+  // defaults once the estimate loads. Selectable items (tier options +
+  // add-ons) are chosen by the customer; everything else is always billed.
   const hasSelectable = apiView?.hasSelectableItems ?? false;
-  const isSelectable = (li: { isOptional?: boolean; groupKey?: string }) =>
-    Boolean(li.isOptional || li.groupKey);
   useEffect(() => {
     if (!apiView || !hasSelectable || selectedIds !== null) return;
     // Seed one option per tier group (the flagged default, else the first
@@ -626,6 +621,48 @@ export function EstimateApprovalPage() {
     setSelectedIds(seed);
   }, [apiView, hasSelectable, selectedIds]);
 
+  if (apiLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
+      </div>
+    );
+  }
+
+  // No real estimate data to show. We deliberately do NOT fall back to
+  // fixture/mock data: this page is served on a public URL, so rendering a
+  // mock estimate would expose another customer's name, address, and
+  // pricing. Show a safe message instead (404 vs transient error).
+  if (!apiView) {
+    const heading = apiNotFound ? 'Link not found' : 'Couldn’t load this estimate';
+    const detail = apiNotFound
+      ? 'This estimate link is invalid or has been revoked. Please contact the business that sent it.'
+      : 'We couldn’t load this estimate right now. Please refresh the page, or contact the business that sent it.';
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
+        <div className="max-w-md text-center">
+          <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>{heading}</h1>
+          <p className="text-sm text-slate-500">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // apiView is guaranteed non-null past this point — every field derives
+  // from the real public API, never from fixtures.
+  const estimateNumber  = apiView.estimateNumber;
+  const businessName    = apiView.businessName;
+  const businessPhone   = apiView.businessPhone ?? '';
+  const customerName    = apiView.customerName;
+  const customerAddress = apiView.customerAddress ?? '';
+  const description     = apiView.customerMessage ?? '';
+  const validUntilText  = apiView.validUntil ? apiView.validUntil.slice(0, 10) : '';
+
+  // Good-better-best derivations. `selectable` items (tier options +
+  // add-ons) are chosen by the customer; everything else is always billed.
+  const apiItems = apiView.lineItems;
+  const isSelectable = (li: { isOptional?: boolean; groupKey?: string }) =>
+    Boolean(li.isOptional || li.groupKey);
   const chosen = new Set(selectedIds ?? []);
   const billedApiItems = hasSelectable
     ? apiItems.filter(li => !isSelectable(li) || chosen.has(li.id))
@@ -648,11 +685,11 @@ export function EstimateApprovalPage() {
   // Client-side preview total. The server recomputes authoritatively on
   // approve; this just keeps the displayed figure in sync with the choice.
   const selectedSubtotalCents = billedApiItems.reduce((s, li) => s + li.totalCents, 0);
-  const effRateBps = apiView && apiView.subtotalCents > apiView.discountCents
+  const effRateBps = apiView.subtotalCents > apiView.discountCents
     ? Math.round((apiView.taxCents * 10000) / (apiView.subtotalCents - apiView.discountCents))
     : 0;
-  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0)) * effRateBps) / 10000);
-  const previewTotalCents = Math.max(0, selectedSubtotalCents - (apiView?.discountCents ?? 0) + previewTaxCents);
+  const previewTaxCents = Math.round((Math.max(0, selectedSubtotalCents - apiView.discountCents) * effRateBps) / 10000);
+  const previewTotalCents = Math.max(0, selectedSubtotalCents - apiView.discountCents + previewTaxCents);
 
   function selectTier(groupKey: string, itemId: string) {
     setSelectedIds(prev => {
@@ -672,40 +709,15 @@ export function EstimateApprovalPage() {
     });
   }
 
-  const lineItems       = apiView
-    ? billedApiItems.map(li => ({
-        description: li.description,
-        qty: li.quantity,
-        rate: li.unitPriceCents / 100,
-      }))
-    : mockEst.lineItems;
+  const lineItems       = billedApiItems.map(li => ({
+    description: li.description,
+    qty: li.quantity,
+    rate: li.unitPriceCents / 100,
+  }));
   const visItems = showAllItems ? lineItems : lineItems.slice(0, 3);
-  const total           = apiView
-    ? (hasSelectable ? previewTotalCents : apiView.totalCents) / 100
-    : calcEstimateTotal(mockEst);
-  const isExpired       = apiView?.isExpired ?? false;
-  const isAlreadyDeclined = apiView?.status === 'rejected';
-
-  if (apiLoading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="size-8 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin" />
-      </div>
-    );
-  }
-
-  if (apiNotFound && !usingApi) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6">
-        <div className="max-w-md text-center">
-          <h1 className="text-slate-900 mb-2" style={{ fontSize: '1.4rem' }}>Link not found</h1>
-          <p className="text-sm text-slate-500">
-            This estimate link is invalid or has been revoked. Please contact the business that sent it.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const total           = (hasSelectable ? previewTotalCents : apiView.totalCents) / 100;
+  const isExpired       = apiView.isExpired;
+  const isAlreadyDeclined = apiView.status === 'rejected';
 
   if (accepted) return (
     <SuccessScreen
@@ -869,8 +881,8 @@ export function EstimateApprovalPage() {
                 <div key={i} className="grid grid-cols-[1fr_40px_72px_72px] gap-x-2 px-5 py-3 items-start">
                   <p className="text-sm text-slate-800">{item.description}</p>
                   <p className="text-sm text-slate-500 text-right">{item.qty}</p>
-                  <p className="text-sm text-slate-500 text-right">${item.rate.toLocaleString()}</p>
-                  <p className="text-sm text-slate-800 text-right">${(item.qty * item.rate).toLocaleString()}</p>
+                  <p className="text-sm text-slate-500 text-right">${fmtUsd(item.rate)}</p>
+                  <p className="text-sm text-slate-800 text-right">${fmtUsd(item.qty * item.rate)}</p>
                 </div>
               ))}
             </div>
@@ -884,7 +896,7 @@ export function EstimateApprovalPage() {
             )}
             <div className="flex items-center justify-between px-5 py-4 bg-slate-900 rounded-b-2xl">
               <p className="text-sm text-slate-300">Estimate total</p>
-              <p className="text-white" style={{ fontSize: '1.15rem' }}>${total.toLocaleString()}</p>
+              <p className="text-white" style={{ fontSize: '1.15rem' }}>${fmtUsd(total)}</p>
             </div>
           </div>
 
@@ -961,12 +973,12 @@ export function EstimateApprovalPage() {
             (apiView?.depositRequiredCents ?? 0) > 0 &&
             apiView?.depositStatus !== 'paid';
 
-          if (blockedByDeposit && usingApi && id) {
+          if (blockedByDeposit && id) {
             return (
               <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-5 pb-safe pt-3">
                 <div className="max-w-lg mx-auto">
                   <PayDepositButton token={id} initialUrl={apiView?.depositCheckoutUrl} />
-                  {usingApi && id && (
+                  {id && (
                     <DeclineButton
                       token={id}
                       onDeclined={(view) => setApiView(view)}
@@ -991,7 +1003,7 @@ export function EstimateApprovalPage() {
                 >
                   <Check size={16} /> Accept this estimate
                 </button>
-                {usingApi && id && (
+                {id && (
                   <DeclineButton
                     token={id}
                     onDeclined={(view) => setApiView(view)}
@@ -1011,7 +1023,7 @@ export function EstimateApprovalPage() {
           estimateNumber={estimateNumber}
           customer={customerName}
           total={total}
-          token={usingApi ? id : undefined}
+          token={id}
           expectedVersion={apiView?.version}
           selectedLineItemIds={hasSelectable ? (selectedIds ?? []) : undefined}
           onStale={() => { setRevised(true); setAppr(false); }}

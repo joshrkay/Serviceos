@@ -7,6 +7,7 @@ import { DispatchAnalyticsRepository, captureDispatchEvent } from '../../dispatc
 import { checkFeasibility } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
+import { AuditRepository } from '../../audit/audit';
 
 /**
  * Attaches an additional (non-primary) technician to an appointment so a
@@ -22,6 +23,7 @@ export class AddCrewMemberExecutionHandler implements ExecutionHandler {
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
     private readonly feasibilityDeps?: FeasibilityDependencies,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -88,7 +90,7 @@ export class AddCrewMemberExecutionHandler implements ExecutionHandler {
         technicianRole: 'technician',
         isPrimary: false,
         assignedBy: context.executedBy,
-      }, this.assignmentRepo);
+      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
 
       if (this.analyticsRepo) {
         await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'crew_added', {
@@ -130,6 +132,7 @@ export class RemoveCrewMemberExecutionHandler implements ExecutionHandler {
     private readonly appointmentRepo?: AppointmentRepository,
     private readonly assignmentRepo?: AssignmentRepository,
     private readonly analyticsRepo?: DispatchAnalyticsRepository,
+    private readonly auditRepo?: AuditRepository,
   ) {}
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
@@ -162,7 +165,12 @@ export class RemoveCrewMemberExecutionHandler implements ExecutionHandler {
       };
     }
 
-    await unassignTechnician(context.tenantId, match.id, this.assignmentRepo);
+    await unassignTechnician(context.tenantId, match.id, this.assignmentRepo, {
+      auditRepo: this.auditRepo,
+      actorId: context.executedBy,
+      appointmentId,
+      technicianId: match.technicianId,
+    });
 
     if (this.analyticsRepo) {
       await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'crew_removed', {

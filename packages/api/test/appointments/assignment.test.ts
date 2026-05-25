@@ -7,6 +7,9 @@ import {
   InMemoryAssignmentRepository,
 } from '../../src/appointments/assignment';
 import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
+import { createAppointment } from '../../src/appointments/appointment';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 describe('P1-008 — Technician assignment model', () => {
   let assignmentRepo: InMemoryAssignmentRepository;
@@ -204,5 +207,127 @@ describe('P1-008 — Technician assignment model', () => {
 
     const crossTenant = await getAssignments('tenant-2', 'apt-1', assignmentRepo);
     expect(crossTenant).toHaveLength(0);
+  });
+});
+
+describe('Blocker 7 — assignment audit + double-booking guard', () => {
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    assignmentRepo = new InMemoryAssignmentRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  const makeAppt = (start: string, end: string) =>
+    createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date(start),
+        scheduledEnd: new Date(end),
+        timezone: 'America/Los_Angeles',
+        createdBy: 'disp-1',
+      },
+      appointmentRepo,
+    );
+
+  it('emits appointment.technician_assigned audit event', async () => {
+    const created = await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+      { auditRepo, actorRole: 'dispatcher' },
+    );
+
+    const ev = auditRepo.getAll().find((e) => e.eventType === 'appointment.technician_assigned');
+    expect(ev).toBeDefined();
+    expect(ev!.entityType).toBe('appointment');
+    expect(ev!.entityId).toBe('apt-1');
+    expect(ev!.actorId).toBe('disp-1');
+    expect(ev!.actorRole).toBe('dispatcher');
+    expect(ev!.metadata).toMatchObject({ technicianId: 'tech-1', assignmentId: created.id });
+  });
+
+  it('emits appointment.technician_unassigned audit event on removal', async () => {
+    const a = await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: 'apt-1', technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+    );
+    const removed = await unassignTechnician('tenant-1', a.id, assignmentRepo, {
+      auditRepo,
+      actorId: 'disp-1',
+      appointmentId: 'apt-1',
+      technicianId: 'tech-1',
+    });
+
+    expect(removed).toBe(true);
+    const ev = auditRepo.getAll().find((e) => e.eventType === 'appointment.technician_unassigned');
+    expect(ev).toBeDefined();
+    expect(ev!.metadata).toMatchObject({ technicianId: 'tech-1', assignmentId: a.id });
+  });
+
+  it('does not emit an unassigned event when nothing was removed', async () => {
+    const removed = await unassignTechnician('tenant-1', 'missing-id', assignmentRepo, {
+      auditRepo,
+      actorId: 'disp-1',
+    });
+    expect(removed).toBe(false);
+    expect(auditRepo.getAll()).toHaveLength(0);
+  });
+
+  it('throws ConflictError (409) when the technician already has an overlapping active appointment', async () => {
+    const appt1 = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const appt2 = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z'); // overlaps appt1
+
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: appt1.id, technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+    );
+
+    await expect(
+      assignTechnician(
+        { tenantId: 'tenant-1', appointmentId: appt2.id, technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+        assignmentRepo,
+        { appointmentRepo },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('allows assignment to an adjacent, non-overlapping appointment', async () => {
+    const appt1 = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T18:00:00Z');
+    const appt2 = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T19:00:00Z'); // touches but does not overlap
+
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: appt1.id, technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+    );
+
+    const ok = await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: appt2.id, technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+      { appointmentRepo },
+    );
+    expect(ok.technicianId).toBe('tech-1');
+  });
+
+  it('does not block when the overlapping appointment is canceled', async () => {
+    const appt1 = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const appt2 = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z');
+
+    await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: appt1.id, technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+    );
+    // Cancel appt1 — a canceled appointment must not block (its slot is freed).
+    await appointmentRepo.update('tenant-1', appt1.id, { status: 'canceled' });
+
+    const ok = await assignTechnician(
+      { tenantId: 'tenant-1', appointmentId: appt2.id, technicianId: 'tech-1', technicianRole: 'technician', assignedBy: 'disp-1' },
+      assignmentRepo,
+      { appointmentRepo },
+    );
+    expect(ok.technicianId).toBe('tech-1');
   });
 });

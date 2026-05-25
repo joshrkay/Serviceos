@@ -252,17 +252,16 @@ function MessageBubble({ msg, isLast }: { msg: Message; isLast: boolean }) {
             <AIProposalCard
               proposal={msg.proposal}
               onApprove={async () => {
-                try {
-                  // Call the proposal approval endpoint
-                  const response = await fetch(`/api/proposals/${msg.proposal!.id}/approve`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                  });
-                  if (!response.ok) {
-                    console.error('Failed to approve proposal:', response.statusText);
-                  }
-                } catch (error) {
-                  console.error('Error approving proposal:', error);
+                // Use apiFetch so the Clerk bearer token is attached — a
+                // bare fetch() sends no Authorization header and the
+                // backend rejects it with 401. Throw on a non-OK response
+                // so AIProposalCard reverts its optimistic "Approved"
+                // state and shows an error instead of faking success.
+                const response = await apiFetch(`/api/proposals/${msg.proposal!.id}/approve`, {
+                  method: 'POST',
+                });
+                if (!response.ok) {
+                  throw new Error(`Approve failed: ${response.status} ${response.statusText}`);
                 }
               }}
             />
