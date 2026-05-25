@@ -239,7 +239,7 @@ describe('PgEstimateRepository list filters + pagination', () => {
       search: 'roof',
     });
     const q = calls.find((c) => c.sql.includes('FROM estimates'))!;
-    expect(q.sql).toMatch(/WHERE\s+tenant_id\s*=\s*\$1\s+AND\s+status\s*=\s*\$2\s+AND\s+job_id\s*=\s*\$3\s+AND/);
+    expect(q.sql).toMatch(/WHERE\s+tenant_id\s*=\s*\$1\s+AND\s+deleted_at\s+IS\s+NULL\s+AND\s+status\s*=\s*\$2\s+AND\s+job_id\s*=\s*\$3\s+AND/);
     expect(q.sql).toContain('ILIKE');
     expect(q.params).toEqual([TENANT, 'sent', JOB_ID, '%roof%']);
   });
