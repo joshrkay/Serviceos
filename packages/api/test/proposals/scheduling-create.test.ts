@@ -27,7 +27,7 @@ describe('POST /api/proposals — scheduling create with version + feasibility g
     }, appointmentRepo);
 
     feasibilityDeps = {
-      assignmentRepo: { findByTechnician: async () => [] } as any,
+      assignmentRepo: { findByTechnician: async () => [], findByAppointment: async () => [] } as any,
       appointmentRepo,
       jobRepo: { findById: async () => null } as any,
       locationRepo: { findById: async () => null } as any,
@@ -115,6 +115,10 @@ describe('POST /api/proposals — scheduling create with version + feasibility g
         { id: 'as1', tenantId, appointmentId: appointment.id, technicianId: 'tech-1', isPrimary: true, assignedBy: 'user-1', assignedAt: new Date() },
         { id: 'as2', tenantId, appointmentId: conflict.id, technicianId: 'tech-1', isPrimary: true, assignedBy: 'user-1', assignedAt: new Date() },
       ],
+      findByAppointment: async (_t: string, appointmentId: string) =>
+        appointmentId === appointment.id
+          ? [{ id: 'as1', tenantId, appointmentId: appointment.id, technicianId: 'tech-1', isPrimary: true, assignedBy: 'user-1', assignedAt: new Date() }]
+          : [],
     } as any;
     const res = await send(
       { payload: { appointmentId: appointment.id, toTechnicianId: 'tech-1', newScheduledStart: '2026-05-17T12:00:00Z', newScheduledEnd: '2026-05-17T13:00:00Z' } },
