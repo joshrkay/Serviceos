@@ -768,6 +768,11 @@ export function createApp(): express.Express {
   const queue = pool ? new PgQueue(pool) : new InMemoryQueue();
   const webhookAuditRepo = pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository();
   const webhookEventRepo = pool ? new PgWebhookEventRepository(pool) : new InMemoryWebhookEventRepository();
+  // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
+  // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
+  // without a pool (tests/dev) so createWebhookRouter falls back to its
+  // in-memory map. createWebhookRouter throws if this is missing in prod.
+  const webhookRepo = pool ? new PgWebhookRepository(pool) : undefined;
 
   // §7 Phase 1 — DNC repository + STOP/START keyword handler registration.
   // The inbound-SMS dispatcher routes any matching first-token to these
@@ -865,6 +870,7 @@ export function createApp(): express.Express {
     appBaseUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',
     auditRepo: webhookAuditRepo,
     webhookEventRepo,
+    webhookRepo,
     integrationResolver,
   };
   app.use('/webhooks', createWebhookRouter(config, webhookRouterDeps));
@@ -998,16 +1004,7 @@ export function createApp(): express.Express {
   const agreementRunRepo = pool
     ? new PgAgreementRunRepository(pool)
     : new InMemoryAgreementRunRepository();
-  // P0-023: WebhookEvent idempotency repo. PgWebhookEventRepository (P0-020)
-  // is wired here so a future webhook handler can pull it from app-level
-  // wiring without re-instantiating. The webhooks/routes.ts router still
-  // uses its own InMemoryWebhookRepository for the legacy
-  // (provider/event/svix-id) shape — that one is unchanged.
-  const webhookEventRepo2   = webhookEventRepo;
   const timeEntryRepo      = pool ? new PgTimeEntryRepository(pool)       : new InMemoryTimeEntryRepository();
-  // Reference the variable so TS doesn't drop it; downstream consumers will
-  // attach in a follow-up PR.
-  void webhookEventRepo2;
 
   const { provider: storageProvider, bucket: storageBucket } = createStorageProvider(
     process.env as NodeJS.ProcessEnv
