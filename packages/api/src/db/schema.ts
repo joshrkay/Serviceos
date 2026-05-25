@@ -3094,6 +3094,52 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS google_review_url TEXT,
       ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
   `,
+
+  '125_estimates_deleted_at': `
+    -- Soft-delete support for estimates. A non-null deleted_at hides the
+    -- estimate from every read path (list/get/job/token lookups) without
+    -- destroying the row, preserving the audit trail and any linked
+    -- invoice. Accepted estimates are never deletable (enforced in the
+    -- service layer). The partial index keeps the hot "live estimates"
+    -- scans cheap by only indexing the soft-deleted minority.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_estimates_deleted
+      ON estimates(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL;
+  `,
+
+  '126_invoices_estimate_unique': `
+    -- One invoice per estimate. The convert-to-invoice flow is idempotent
+    -- at the application layer (it returns the existing invoice), and this
+    -- partial unique index is the DB-level backstop against a double
+    -- convert racing two requests. NULL estimate_id (invoices not made
+    -- from an estimate) is unconstrained.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_estimate
+      ON invoices(estimate_id) WHERE estimate_id IS NOT NULL;
+  `,
+
+  '127_estimate_line_item_options': `
+    -- Good-better-best tiers + optional add-ons on estimate line items.
+    --   group_key (non-null)  -> the item is one option in a mutually
+    --     exclusive group; the customer picks exactly one per group_key.
+    --   group_label           -> human label for the group (e.g. "Roof tier").
+    --   is_optional + null group_key -> a standalone add-on (checkbox).
+    --   null group_key + is_optional=false -> always billed (the default).
+    --   is_default_selected   -> pre-checked tier/add-on shown on first view.
+    ALTER TABLE estimate_line_items
+      ADD COLUMN IF NOT EXISTS group_key TEXT,
+      ADD COLUMN IF NOT EXISTS group_label TEXT,
+      ADD COLUMN IF NOT EXISTS is_optional BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS is_default_selected BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  '128_estimates_accepted_selection': `
+    -- Locks the customer's good-better-best / add-on selection at accept
+    -- time. JSONB array of the estimate_line_item ids the customer chose;
+    -- NULL means no optional/tiered items (the whole estimate stands as-is).
+    -- The converted invoice reads this snapshot so a later revise can't
+    -- change what the customer actually agreed to.
+    ALTER TABLE estimates ADD COLUMN IF NOT EXISTS accepted_selection JSONB;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

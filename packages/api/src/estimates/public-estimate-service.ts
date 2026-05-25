@@ -1,4 +1,10 @@
-import { Estimate, EstimateRepository } from './estimate';
+import { Estimate, EstimateRepository, transitionEstimateStatus } from './estimate';
+import {
+  calculateDocumentTotals,
+  hasSelectableLineItems,
+  resolveSelectedLineItems,
+  validateLineItemSelection,
+} from '../shared/billing-engine';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { LocationRepository } from '../locations/location';
@@ -30,11 +36,22 @@ export interface PublicEstimateView {
   businessPhone?: string;
   businessEmail?: string;
   lineItems: Array<{
+    id: string;
     description: string;
     quantity: number;
     unitPriceCents: number;
     totalCents: number;
+    /** Non-null = one option in a mutually-exclusive tier group. */
+    groupKey?: string;
+    /** Label for the tier group. */
+    groupLabel?: string;
+    /** Customer-selectable (tier option or standalone add-on). */
+    isOptional?: boolean;
+    /** Pre-selected on first view. */
+    isDefaultSelected?: boolean;
   }>;
+  /** True when the estimate has tier options or optional add-ons to choose. */
+  hasSelectableItems: boolean;
   totalCents: number;
   subtotalCents: number;
   taxCents: number;
@@ -105,6 +122,14 @@ export interface ApproveEstimateInput {
    * latest version first.
    */
   expectedVersion?: number;
+  /**
+   * Good-better-best: the estimate_line_item ids the customer chose
+   * (tier options + add-ons). Required when the estimate has selectable
+   * items; ignored otherwise. The server validates the selection and
+   * recomputes the accepted total from it — the client total is never
+   * trusted.
+   */
+  selectedLineItemIds?: string[];
 }
 
 export interface DeclineEstimateInput {
@@ -175,6 +200,10 @@ export class PublicEstimateService {
     if (this.isExpired(estimate)) {
       throw new ConflictError('Estimate link has expired');
     }
+    // Validity-date expiry beats approval: a lapsed quote can't be
+    // accepted at stale pricing. Mark it expired so the pipeline reflects
+    // reality, then refuse.
+    await this.expireIfPastValidUntil(estimate);
     if (estimate.status === 'accepted') {
       // Idempotent: return current view rather than throwing on double-click.
       return this.toView(estimate);
@@ -208,6 +237,31 @@ export class PublicEstimateService {
       throw new ValidationError('acceptedByName must be at least 2 characters');
     }
 
+    // Good-better-best: resolve the customer's selection and recompute
+    // the accepted total from it. The client total is never trusted —
+    // everything below (deposit gate, persisted totals, the eventual
+    // invoice) uses this server-side figure.
+    const selectable = hasSelectableLineItems(estimate.lineItems);
+    let acceptedSelection: string[] | undefined;
+    let acceptedTotals = estimate.totals;
+    if (selectable) {
+      const selectedIds = input.selectedLineItemIds;
+      if (selectedIds === undefined) {
+        throw new ValidationError('A selection is required for this estimate');
+      }
+      const selectionErrors = validateLineItemSelection(estimate.lineItems, selectedIds);
+      if (selectionErrors.length > 0) {
+        throw new ValidationError(selectionErrors.join('; '));
+      }
+      const billed = resolveSelectedLineItems(estimate.lineItems, selectedIds);
+      acceptedTotals = calculateDocumentTotals(
+        billed,
+        estimate.totals.discountCents,
+        estimate.totals.taxRateBps,
+      );
+      acceptedSelection = billed.map((li) => li.id);
+    }
+
     // Tier 4 (Deposit rules — PR 3b). When the tenant runs the
     // 'before_approval' policy, refuse to accept an estimate whose
     // deposit hasn't been collected yet. The policy only triggers when
@@ -217,7 +271,7 @@ export class PublicEstimateService {
     const settings = await this.deps.settingsRepo.findByTenant(estimate.tenantId);
     const policy = settings?.depositTimingPolicy ?? 'after_approval';
     if (policy === 'before_approval' && settings) {
-      const requiredFromRule = evaluateDepositRule(settings, estimate.totals.totalCents);
+      const requiredFromRule = evaluateDepositRule(settings, acceptedTotals.totalCents);
       if (requiredFromRule > 0) {
         const job = await this.deps.jobRepo.findById(estimate.tenantId, estimate.jobId);
         const paid = job?.depositPaidCents ?? 0;
@@ -233,6 +287,8 @@ export class PublicEstimateService {
       estimate.id,
       {
         status: 'accepted',
+        totals: acceptedTotals,
+        acceptedSelection,
         acceptedAt: now,
         acceptedByName: trimmed,
         acceptedByIp: input.ip,
@@ -307,6 +363,7 @@ export class PublicEstimateService {
     if (this.isExpired(estimate)) {
       throw new ConflictError('Estimate link has expired');
     }
+    await this.expireIfPastValidUntil(estimate);
     if (estimate.status === 'rejected') {
       return this.toView(estimate);
     }
@@ -374,6 +431,25 @@ export class PublicEstimateService {
   private isExpired(estimate: Estimate): boolean {
     if (!estimate.viewTokenExpiresAt) return false;
     return estimate.viewTokenExpiresAt.getTime() < Date.now();
+  }
+
+  /**
+   * Validity-date expiry precedence. When a sent estimate is past its
+   * `validUntil`, transition it to 'expired' and refuse the action so a
+   * lapsed quote can neither be accepted nor declined at stale terms.
+   * No-op for estimates with no validity date or one still in the future.
+   */
+  private async expireIfPastValidUntil(estimate: Estimate): Promise<void> {
+    if (!estimate.validUntil) return;
+    if (estimate.validUntil.getTime() >= Date.now()) return;
+    if (estimate.status !== 'sent') return;
+    await transitionEstimateStatus(
+      estimate.tenantId,
+      estimate.id,
+      'expired',
+      this.deps.estimateRepo,
+    );
+    throw new ConflictError('This estimate has expired and can no longer be actioned.');
   }
 
   private async toView(estimate: Estimate): Promise<PublicEstimateView> {
@@ -446,11 +522,17 @@ export class PublicEstimateService {
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
       lineItems: estimate.lineItems.map((li) => ({
+        id: li.id,
         description: li.description,
         quantity: li.quantity,
         unitPriceCents: li.unitPriceCents,
         totalCents: li.totalCents,
+        groupKey: li.groupKey,
+        groupLabel: li.groupLabel,
+        isOptional: li.isOptional,
+        isDefaultSelected: li.isDefaultSelected,
       })),
+      hasSelectableItems: hasSelectableLineItems(estimate.lineItems),
       totalCents: estimate.totals.totalCents,
       subtotalCents: estimate.totals.subtotalCents,
       taxCents: estimate.totals.taxCents,

@@ -3,7 +3,7 @@ import {
   Plus, Send, Pencil, ChevronRight, Clock, ArrowLeft, Check,
   Eye, FileText, X, Trash2, TrendingUp, AlertTriangle,
   CheckCircle2, Copy, Phone, Mail, Sparkles, MessageSquare,
-  Briefcase, MapPin,
+  Briefcase, MapPin, RotateCcw,
 } from 'lucide-react';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
@@ -732,6 +732,50 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
   const [previewOpen,  setPreviewOpen]  = useState(false);
   const [wasSent,      setWasSent]      = useState(false);
   const [convertOpen,  setConvertOpen]  = useState(false);
+  const [actionBusy,   setActionBusy]   = useState(false);
+  const [actionError,  setActionError]  = useState<string | null>(null);
+
+  async function handleClone() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}/clone`, { method: 'POST' });
+      if (!res.ok) throw new Error(`Could not clone estimate (HTTP ${res.status})`);
+      const clone = (await res.json()) as { id: string };
+      navigate(`/estimates/${clone.id}`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to clone estimate');
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!window.confirm('Delete this estimate? It will be removed from your list.')) return;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch(`/api/estimates/${estimateId}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) throw new Error(`Could not delete estimate (HTTP ${res.status})`);
+      onBack();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to delete estimate');
+      setActionBusy(false);
+    }
+  }
+
+  async function handleReopen() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      await transitionEstimate({ status: 'draft' });
+      await refetch();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to reopen estimate');
+    } finally {
+      setActionBusy(false);
+    }
+  }
 
   // Enriched customer/location from the linked job
   const [enrichedCustomer, setEnrichedCustomer] = useState<{ name: string; id: string; phone?: string; email?: string } | null>(null);
@@ -1012,12 +1056,40 @@ function EstimateDetail({ estimateId, onBack }: { estimateId: string; onBack: ()
                     <FileText size={14} /> Convert to invoice
                   </button>
                 )}
+                {(est.status === 'rejected' || est.status === 'expired') && (
+                  <button
+                    onClick={() => void handleReopen()}
+                    disabled={actionBusy}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw size={14} /> Reopen as draft
+                  </button>
+                )}
                 <button
                   onClick={() => setPreviewOpen(true)}
                   className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors"
                 >
                   <Eye size={14} /> Preview document
                 </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void handleClone()}
+                    disabled={actionBusy}
+                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-slate-700 py-3 text-sm hover:bg-slate-50 transition-colors disabled:opacity-50"
+                  >
+                    <Copy size={14} /> Duplicate
+                  </button>
+                  {est.status !== 'accepted' && (
+                    <button
+                      onClick={() => void handleDelete()}
+                      disabled={actionBusy}
+                      className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-red-200 bg-white text-red-600 py-3 text-sm hover:bg-red-50 transition-colors disabled:opacity-50"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  )}
+                </div>
+                {actionError && <p className="text-xs text-red-600">{actionError}</p>}
               </div>
 
               {/* Follow-up note for viewed/sent */}
