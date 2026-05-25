@@ -412,8 +412,12 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
     tenantId: string,
     id: string,
   ): Promise<Estimate | null> {
+    // No deleted_at filter here: this is the reload-after-write used by
+    // update(), which must return the row it just wrote — including a
+    // soft-delete that sets deleted_at. The deleted_at filter belongs on
+    // the public read paths (findById/findByJob/list/findByViewToken).
     const { rows } = await client.query(
-      `SELECT * FROM estimates WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+      `SELECT * FROM estimates WHERE id = $1 AND tenant_id = $2`,
       [id, tenantId],
     );
 

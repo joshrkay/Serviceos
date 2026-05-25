@@ -418,37 +418,41 @@ export function createEstimateRouter(
           return;
         }
         // Auto-expire the job's other still-open (sent) estimates so the
-        // converted one is the single live offer. Best-effort.
+        // converted one is the single live offer. Best-effort. The invoice
+        // already carries the jobId and the source estimateId, so no extra
+        // estimate lookup is needed. Money-state is refreshed once after the
+        // loop rather than per sibling.
         try {
-          const estimate = await estimateRepo.findById(req.auth!.tenantId, req.params.id);
-          if (estimate) {
-            const siblings = await estimateRepo.findByJob(req.auth!.tenantId, estimate.jobId);
-            for (const sib of siblings) {
-              if (sib.id !== estimate.id && sib.status === 'sent') {
-                await transitionEstimateStatus(
-                  req.auth!.tenantId,
-                  sib.id,
-                  'expired',
-                  estimateRepo,
-                  refreshDeps,
-                );
-                await auditRepo.create(
-                  createAuditEvent({
-                    tenantId: req.auth!.tenantId,
-                    actorId: req.auth!.userId,
-                    actorRole: req.auth!.role ?? 'unknown',
-                    eventType: 'estimate.expired',
-                    entityType: 'estimate',
-                    entityId: sib.id,
-                    metadata: {
-                      estimateNumber: sib.estimateNumber,
-                      reason: 'sibling_converted',
-                      convertedEstimateId: estimate.id,
-                    },
-                  }),
-                );
-              }
+          const siblings = await estimateRepo.findByJob(req.auth!.tenantId, invoice.jobId);
+          let expiredAny = false;
+          for (const sib of siblings) {
+            if (sib.id !== invoice.estimateId && sib.status === 'sent') {
+              await transitionEstimateStatus(
+                req.auth!.tenantId,
+                sib.id,
+                'expired',
+                estimateRepo,
+              );
+              expiredAny = true;
+              await auditRepo.create(
+                createAuditEvent({
+                  tenantId: req.auth!.tenantId,
+                  actorId: req.auth!.userId,
+                  actorRole: req.auth!.role ?? 'unknown',
+                  eventType: 'estimate.expired',
+                  entityType: 'estimate',
+                  entityId: sib.id,
+                  metadata: {
+                    estimateNumber: sib.estimateNumber,
+                    reason: 'sibling_converted',
+                    convertedEstimateId: invoice.estimateId,
+                  },
+                }),
+              );
             }
+          }
+          if (expiredAny && refreshDeps) {
+            await refreshJobMoneyStateSafe(req.auth!.tenantId, invoice.jobId, req.auth!.userId, refreshDeps);
           }
         } catch (siblingErr) {
           logger.warn('estimate convert: sibling auto-expire failed', {

@@ -124,9 +124,13 @@ describe('Postgres integration — estimate phases (real DB effects)', () => {
       const jobId = await newJob();
       const est = await seedEstimate(jobId, [buildLineItem(crypto.randomUUID(), 'Labor', 1, 5000, 0, true)]);
 
-      await softDeleteEstimate(tenant.tenantId, est.id, estimateRepo, {
+      const deleted = await softDeleteEstimate(tenant.tenantId, est.id, estimateRepo, {
         auditRepo: new InMemoryAuditRepository(), actorId: tenant.userId, actorRole: 'owner',
       });
+      // The mutation returns the (now soft-deleted) row so the route can emit
+      // audit + refresh money state — it must NOT come back null.
+      expect(deleted).not.toBeNull();
+      expect(deleted!.deletedAt).toBeInstanceOf(Date);
 
       // Hidden from the standard read paths…
       expect(await estimateRepo.findById(tenant.tenantId, est.id)).toBeNull();

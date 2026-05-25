@@ -264,6 +264,12 @@ export class PublicEstimateService {
         throw new ValidationError(selectionErrors.join('; '));
       }
       const billed = resolveSelectedLineItems(estimate.lineItems, selectedIds);
+      if (billed.length === 0) {
+        // An estimate of only optional rows with nothing selected would
+        // accept at $0 and then fail to convert (no billable lines). Refuse
+        // up front so we never persist an unconvertible acceptance.
+        throw new ValidationError('Select at least one item before accepting this estimate');
+      }
       acceptedTotals = calculateDocumentTotals(
         billed,
         estimate.totals.discountCents,

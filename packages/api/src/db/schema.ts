@@ -3095,6 +3095,24 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS yelp_review_url TEXT;
   `,
 
+  // Restored from main: a prior merge into this branch dropped this
+  // migration while the snapshot still referenced it. It widens the
+  // message_dispatches entity_type CHECK to cover the transactional-comms
+  // types the app actually emits (reminders, receipts, overdue, en_route).
+  // Ordered before 125_estimates_deleted_at so insertion order stays
+  // lexicographically non-decreasing.
+  '125_dispatch_entity_en_route': `
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route'
+        ));
+  `,
+
   '125_estimates_deleted_at': `
     -- Soft-delete support for estimates. A non-null deleted_at hides the
     -- estimate from every read path (list/get/job/token lookups) without
