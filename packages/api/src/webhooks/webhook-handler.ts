@@ -138,8 +138,29 @@ export async function handleWebhookEvent(
     createdAt: new Date(),
   };
 
-  await repository.create(event);
-  return { event, duplicate: false };
+  const created = await repository.create(event);
+
+  // Concurrency guard. A durable repository inserts with ON CONFLICT DO
+  // NOTHING and, when our row loses the (source, idempotency_key) race,
+  // returns the PRE-EXISTING row instead — which has a different id. The
+  // up-front findByIdempotencyKey above can miss a row that another
+  // delivery is inserting concurrently, so this is the second line of
+  // defense: if create handed us back a row we didn't author, fall back
+  // to the same status-based dedup we apply to a row found up front.
+  // (The in-memory repo always returns the row we passed, so id matches
+  // and this branch is a no-op there.)
+  if (created.id !== event.id) {
+    if (created.status === 'processed') {
+      return { event: created, duplicate: true };
+    }
+    if (created.status === 'failed') {
+      return { event: created, duplicate: false };
+    }
+    const ageMs = Date.now() - created.createdAt.getTime();
+    return { event: created, duplicate: ageMs < INFLIGHT_STALENESS_MS };
+  }
+
+  return { event: created, duplicate: false };
 }
 
 export class InMemoryWebhookRepository implements WebhookRepository {
