@@ -24,6 +24,14 @@ import {
   FeedbackRequestRepository,
   createFeedbackRequest,
 } from '../../feedback/feedback-request';
+import { JobRepository } from '../../jobs/job';
+import { CustomerRepository } from '../../customers/customer';
+import {
+  DelayNotificationService,
+  resolveCustomerChannel,
+  renderDelayTemplateVariants,
+  selectDelayTemplate,
+} from '../../notifications/delay-notifications';
 
 export class ConfirmAppointmentExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'confirm_appointment';
@@ -173,18 +181,67 @@ export class LogTimeEntryExecutionHandler implements ExecutionHandler {
 export class NotifyDelayExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'notify_delay';
 
-  async execute(proposal: Proposal, _context: ExecutionContext): Promise<ExecutionResult> {
+  constructor(
+    private readonly delayService?: DelayNotificationService,
+    private readonly appointmentRepo?: AppointmentRepository,
+    private readonly jobRepo?: JobRepository,
+    private readonly customerRepo?: CustomerRepository,
+  ) {}
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const payload = proposal.payload as Record<string, unknown>;
     const appointmentId = typeof payload.appointmentId === 'string' ? payload.appointmentId : undefined;
+    const delayMinutes = typeof payload.delayMinutes === 'number' ? payload.delayMinutes : 15;
     if (!appointmentId) {
       return { success: false, error: 'notify_delay requires a resolved appointmentId' };
     }
-    // The actual outbound send is gated behind the approved-proposal path
-    // and a wired DelayNotificationService (see notifications/
-    // delay-notifications.ts). Until that dep is threaded here the handler
-    // validates the resolved appointment and reports success — mirroring
-    // the Noop-provider gate used by send_invoice / send_estimate.
-    return { success: true, resultEntityId: appointmentId };
+
+    // Degrade to a validated passthrough when the send path isn't fully
+    // wired (in-memory tests) — mirrors the Noop-provider gate used by
+    // send_invoice / send_estimate.
+    if (!this.delayService || !this.appointmentRepo || !this.jobRepo || !this.customerRepo) {
+      return { success: true, resultEntityId: appointmentId };
+    }
+
+    try {
+      const appointment = await this.appointmentRepo.findById(context.tenantId, appointmentId);
+      if (!appointment) {
+        return { success: false, error: `Appointment ${appointmentId} not found` };
+      }
+      const job = await this.jobRepo.findById(context.tenantId, appointment.jobId);
+      if (!job) {
+        return { success: false, error: `Job for appointment ${appointmentId} not found` };
+      }
+      const customer = await this.customerRepo.findById(context.tenantId, job.customerId);
+      if (!customer) {
+        return { success: false, error: `Customer for appointment ${appointmentId} not found` };
+      }
+
+      const { channel, destination } = resolveCustomerChannel(customer);
+      // in_app (or no destination) means there is no external channel the
+      // customer opted into — nothing to send, but not a failure.
+      if (channel === 'in_app' || !destination) {
+        return { success: true, resultEntityId: appointmentId };
+      }
+
+      const variants = renderDelayTemplateVariants({
+        customerName: customer.displayName,
+        delayMinutes,
+      });
+      const message = selectDelayTemplate(variants, delayMinutes);
+
+      await this.delayService.sendDelayNotice({
+        tenantId: context.tenantId,
+        customerId: customer.id,
+        channel,
+        destination,
+        message,
+        idempotencyKey: proposal.id,
+      });
+      return { success: true, resultEntityId: appointmentId };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 }
 

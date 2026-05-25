@@ -367,6 +367,9 @@ export function createInvoiceRouter(
           invoiceRepo,
           paymentRepo,
           refreshDeps,
+          undefined,
+          auditRepo,
+          { actorRole: req.auth!.role },
         );
         res.status(201).json(result);
       } catch (err) {

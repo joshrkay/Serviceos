@@ -36,7 +36,7 @@ describe('normalizeEstimateStatus', () => {
     expect(normalizeEstimateStatus('sent')).toBe('Sent');
     expect(normalizeEstimateStatus('accepted')).toBe('Approved');
     expect(normalizeEstimateStatus('rejected')).toBe('Declined');
-    expect(normalizeEstimateStatus('expired')).toBe('Draft');
+    expect(normalizeEstimateStatus('expired')).toBe('Expired');
   });
 
   it('falls back to raw string for unknown status', () => {

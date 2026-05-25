@@ -14,7 +14,7 @@ export const ESTIMATE_STATUS_MAP: Record<string, string> = {
   sent:             'Sent',
   accepted:         'Approved',
   rejected:         'Declined',
-  expired:          'Draft',
+  expired:          'Expired',
 };
 
 export const INVOICE_STATUS_MAP: Record<string, string> = {
