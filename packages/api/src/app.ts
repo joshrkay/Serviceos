@@ -1438,11 +1438,64 @@ export function createApp(): express.Express {
     delayNotificationWorker.type,
     delayNotificationWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+  // Blocker 5 — background-loop lifecycle + leader election.
+  //
+  // (1) Every setInterval below is registered here so graceful shutdown can
+  //     clearInterval them before the pg pool drains; otherwise a tick fires
+  //     mid-teardown and throws on a closed pool. `shuttingDown` also stops
+  //     leader-gated sweeps from starting new work during shutdown.
+  // (2) Tenant-wide sweeps (recurring agreements, overdue invoices,
+  //     appointment/estimate reminders, estimate expiry, Google reviews) run
+  //     in-process on EVERY instance. On a multi-instance deploy that means
+  //     duplicate invoices/reminders/review replies. `runAsLeader` gates each
+  //     tick behind a Postgres advisory lock so exactly one instance runs it;
+  //     others skip. Single-instance launch (or in-memory dev with no pool)
+  //     always runs. The execution worker and queue poll loop are NOT gated —
+  //     they are already multi-instance-safe (claimForExecution / FOR UPDATE
+  //     SKIP LOCKED) and gating them would needlessly serialize throughput.
+  const backgroundIntervals: NodeJS.Timeout[] = [];
+  let shuttingDown = false;
+  const registerInterval = (handle: NodeJS.Timeout): NodeJS.Timeout => {
+    backgroundIntervals.push(handle);
+    return handle;
+  };
+  const SWEEP_LOCK = {
+    recurringAgreements: 590001,
+    overdueInvoice: 590002,
+    appointmentReminder: 590003,
+    estimateReminder: 590004,
+    estimateExpiry: 590005,
+    googleReviews: 590006,
+  } as const;
+  const runAsLeader = async (lockKey: number, work: () => Promise<void>): Promise<void> => {
+    if (shuttingDown) return;
+    if (!pool) {
+      // In-memory dev: no coordination needed (sweeps no-op with no tenants).
+      await work();
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const res = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock($1) AS locked',
+        [lockKey],
+      );
+      if (!res.rows[0]?.locked) return; // another instance owns this tick
+      try {
+        await work();
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+      }
+    } finally {
+      client.release();
+    }
+  };
+
   const executionWorkerLogger = createLogger({
     service: 'execution-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
+  registerInterval(setInterval(async () => {
     try {
       await runExecutionSweep({
         proposalRepo,
@@ -1454,7 +1507,7 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, 1000);
+  }, 1000));
 
   // voice-action-router — consumes transcripts enqueued by the
   // transcription worker's onTranscribed hook, classifies intent,
@@ -1539,7 +1592,7 @@ export function createApp(): express.Express {
   // matching worker by message.type. This is the single consumer for the
   // queue — multiple setInterval poll loops would race for the same row
   // under PgQueue's FOR UPDATE SKIP LOCKED semantics and waste cycles.
-  setInterval(async () => {
+  registerInterval(setInterval(async () => {
     try {
       const message = await queue.receive();
       if (!message) return;
@@ -1565,7 +1618,7 @@ export function createApp(): express.Express {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-  }, 250);
+  }, 250));
 
   // Cross-entity tenant ownership guard. Routes pass parent ids (e.g.
   // jobs.customerId) through validation against the requesting tenant
@@ -2828,8 +2881,8 @@ export function createApp(): express.Express {
     service: 'recurring-agreements-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    try {
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.recurringAgreements, async () => {
       await runRecurringAgreementsSweep({
         agreementRepo,
         runRepo: agreementRunRepo,
@@ -2843,12 +2896,12 @@ export function createApp(): express.Express {
         auditRepo,
         logger: agreementsLogger,
       });
-    } catch (err) {
+    }).catch((err) => {
       agreementsLogger.error('Recurring-agreements sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 60_000);
+    });
+  }, 60_000));
 
   // §6 Time-to-Cash: overdue-invoice sweep. Hourly — invoice due dates
   // have day granularity, so an hourly check surfaces newly-overdue
@@ -2859,8 +2912,8 @@ export function createApp(): express.Express {
     service: 'overdue-invoice-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    try {
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.overdueInvoice, async () => {
       await runOverdueInvoiceSweep({
         jobRepo,
         estimateRepo,
@@ -2874,20 +2927,20 @@ export function createApp(): express.Express {
         },
         logger: overdueInvoiceLogger,
       });
-    } catch (err) {
+    }).catch((err) => {
       overdueInvoiceLogger.error('Overdue-invoice sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 60 * 60_000);
+    });
+  }, 60 * 60_000));
 
   const appointmentReminderLogger = createLogger({
     service: 'appointment-reminder-worker',
     environment: process.env.NODE_ENV || 'development',
   });
   if (transactionalComms) {
-    setInterval(async () => {
-      try {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.appointmentReminder, async () => {
         await runAppointmentReminderSweep({
           appointmentRepo,
           transactionalComms,
@@ -2898,12 +2951,12 @@ export function createApp(): express.Express {
           },
           logger: appointmentReminderLogger,
         });
-      } catch (err) {
+      }).catch((err) => {
         appointmentReminderLogger.error('Appointment-reminder sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
-      }
-    }, 60 * 60_000);
+      });
+    }, 60 * 60_000));
   }
 
   // Estimate-reminder worker — nudges customers on estimates sent but
@@ -2914,8 +2967,8 @@ export function createApp(): express.Express {
     environment: process.env.NODE_ENV || 'development',
   });
   if (sendService) {
-    setInterval(async () => {
-      try {
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.estimateReminder, async () => {
         await runEstimateReminderSweep({
           estimateRepo,
           sendService,
@@ -2927,12 +2980,12 @@ export function createApp(): express.Express {
           },
           logger: estimateReminderLogger,
         });
-      } catch (err) {
+      }).catch((err) => {
         estimateReminderLogger.error('Estimate-reminder sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
-      }
-    }, 60 * 60_000);
+      });
+    }, 60 * 60_000));
   }
 
   // Estimate-expiry worker — transitions sent estimates past their
@@ -2943,8 +2996,8 @@ export function createApp(): express.Express {
     service: 'estimate-expiry-worker',
     environment: process.env.NODE_ENV || 'development',
   });
-  setInterval(async () => {
-    try {
+  registerInterval(setInterval(() => {
+    void runAsLeader(SWEEP_LOCK.estimateExpiry, async () => {
       await runEstimateExpirySweep({
         estimateRepo,
         auditRepo,
@@ -2956,12 +3009,12 @@ export function createApp(): express.Express {
         },
         logger: estimateExpiryLogger,
       });
-    } catch (err) {
+    }).catch((err) => {
       estimateExpiryLogger.error('Estimate-expiry sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 60 * 60_000);
+    });
+  }, 60 * 60_000));
 
   // P7-026 PR a: Google Business reviews polling. Every 15 minutes
   // we sweep every tenant with an active `google_business`
@@ -3008,7 +3061,7 @@ export function createApp(): express.Express {
       },
     );
   }
-  setInterval(async () => {
+  registerInterval(setInterval(() => {
     if (
       !googleReviewsReviewRepo ||
       !googleReviewsPollStateRepo ||
@@ -3016,7 +3069,7 @@ export function createApp(): express.Express {
     ) {
       return;
     }
-    try {
+    void runAsLeader(SWEEP_LOCK.googleReviews, async () => {
       await runGoogleReviewsSweep({
         reviewRepo: googleReviewsReviewRepo,
         pollStateRepo: googleReviewsPollStateRepo,
@@ -3031,12 +3084,12 @@ export function createApp(): express.Express {
           ? { proposalEmission: googleReviewsProposalEmission }
           : {}),
       });
-    } catch (err) {
+    }).catch((err) => {
       googleReviewsLogger.error('Google reviews sweep failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-  }, 15 * 60_000);
+    });
+  }, 15 * 60_000));
 
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
@@ -3157,7 +3210,15 @@ export function createApp(): express.Express {
   const shutdown = async (signal: NodeJS.Signals) => {
     try {
       // eslint-disable-next-line no-console
-      console.log(`[app] ${signal} received — closing voice sessions and pg pool`);
+      console.log(`[app] ${signal} received — stopping background loops, closing voice sessions and pg pool`);
+      // Blocker 5 — stop all background setInterval loops (sweeps, queue poll,
+      // execution worker) BEFORE the pg pool drains. `shuttingDown` also
+      // prevents an already-scheduled leader-gated sweep tick from starting
+      // new work. Without this, a tick fires mid-teardown and throws on a
+      // closed pool. In-flight queue jobs are bounded by the pool-drain race
+      // below.
+      shuttingDown = true;
+      for (const handle of backgroundIntervals) clearInterval(handle);
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
