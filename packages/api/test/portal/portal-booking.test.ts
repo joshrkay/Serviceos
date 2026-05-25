@@ -23,6 +23,7 @@ import { InMemorySettingsRepository, createSettings } from '../../src/settings/s
 import { createPortalRouter } from '../../src/routes/portal';
 import { createPublicPortalRouter } from '../../src/routes/public-portal';
 import { findBookableSlots, isSlotFree } from '../../src/scheduling/booking-availability';
+import { getDispatchBoardEventBus, DispatchBoardEvent } from '../../src/dispatch/board-event-bus';
 
 const TENANT = uuidv4();
 const ACTOR = 'user-test';
@@ -103,7 +104,13 @@ async function build() {
   });
   app.use('/api/portal-sessions', createPortalRouter({ portalRepo, customerRepo }));
 
-  return { app, customer, location, jobRepo, appointmentRepo, proposalRepo, auditRepo };
+  return { app, customer, location, customerRepo, jobRepo, appointmentRepo, proposalRepo, auditRepo };
+}
+
+function captureBoardEvents(date: string): { events: DispatchBoardEvent[]; stop: () => void } {
+  const events: DispatchBoardEvent[] = [];
+  const stop = getDispatchBoardEventBus().subscribe(TENANT, date, (e) => events.push(e));
+  return { events, stop };
 }
 
 async function mintToken(app: express.Express, customerId: string): Promise<string> {
@@ -150,6 +157,42 @@ describe('booking-availability service', () => {
       expect(s.start.getTime()).toBeGreaterThanOrEqual(Date.parse('2030-06-03T12:00:00Z'));
       expect(s.end.getTime()).toBeLessThanOrEqual(Date.parse('2030-06-03T21:00:00Z'));
     }
+  });
+
+  it('clamps to business hours in winter (EST, UTC-5)', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    // 2030-01-07 is a Monday in EST. 08:00-17:00 ET == 13:00Z-22:00Z.
+    const slots = await findBookableSlots(
+      { appointmentRepo },
+      { tenantId: TENANT, fromDate: '2030-01-07', toDate: '2030-01-07', timezone: 'America/New_York', durationMin: 60, maxSlots: 20 },
+    );
+    expect(slots.length).toBeGreaterThan(0);
+    for (const s of slots) {
+      expect(s.start.getTime()).toBeGreaterThanOrEqual(Date.parse('2030-01-07T13:00:00Z'));
+      expect(s.end.getTime()).toBeLessThanOrEqual(Date.parse('2030-01-07T22:00:00Z'));
+    }
+  });
+
+  it('treats an expired hold as free', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const start = new Date('2030-06-03T15:00:00Z');
+    const end = new Date('2030-06-03T16:00:00Z');
+    const held = await createAppointment(
+      {
+        tenantId: TENANT,
+        jobId: uuidv4(),
+        scheduledStart: start,
+        scheduledEnd: end,
+        timezone: 'UTC',
+        createdBy: ACTOR,
+        holdPendingApproval: true,
+        holdExpiryAt: new Date(Date.now() - 60_000),
+      },
+      appointmentRepo,
+    );
+    expect(held.holdPendingApproval).toBe(true);
+    // The hold expired a minute ago, so the finder must not block on it.
+    expect(await isSlotFree({ appointmentRepo }, { tenantId: TENANT, start, end })).toBe(true);
   });
 
   it('isSlotFree returns false once the slot is held', async () => {
@@ -211,6 +254,43 @@ describe('POST /:token/book', () => {
     // Customer bookings are never auto-approved.
     expect(proposal?.status).toBe('draft');
     expect(proposal?.payload.appointmentId).toBe(res.body.appointmentId);
+  });
+
+  it('publishes a dispatch-board update so the held slot appears live', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const capture = captureBoardEvents('2030-06-03');
+
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/book`)
+      .send({ slotStart: '2030-06-03T15:00:00Z', slotEnd: '2030-06-03T16:00:00Z', summary: 'Leaky faucet' });
+
+    expect(res.status).toBe(201);
+    expect(capture.events.some((e) => e.type === 'board_updated' && e.date === '2030-06-03')).toBe(true);
+    capture.stop();
+  });
+
+  it('returns 422 when the customer has no service location on file', async () => {
+    const h = await build();
+    const noLocCustomer = await h.customerRepo.create({
+      id: uuidv4(),
+      tenantId: TENANT,
+      firstName: 'No',
+      lastName: 'Location',
+      displayName: 'No Location',
+      preferredChannel: 'email',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: ACTOR,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const token = await mintToken(h.app, noLocCustomer.id);
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/book`)
+      .send({ slotStart: '2030-06-03T15:00:00Z', slotEnd: '2030-06-03T16:00:00Z', summary: 'x' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('NO_LOCATION');
   });
 
   it('returns 409 with alternatives when the slot was already taken', async () => {
@@ -311,6 +391,18 @@ describe('POST /:token/appointments/:id/cancel', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('TOO_LATE');
   });
+
+  it('returns 409 NOT_CHANGEABLE for an already-canceled appointment', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const appt = await seedOwnedAppointment(h, '2030-06-03T15:00:00Z', '2030-06-03T16:00:00Z');
+    await h.appointmentRepo.update(TENANT, appt.id, { status: 'canceled' });
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${appt.id}/cancel`)
+      .send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('NOT_CHANGEABLE');
+  });
 });
 
 describe('POST /:token/appointments/:id/reschedule', () => {
@@ -327,5 +419,22 @@ describe('POST /:token/appointments/:id/reschedule', () => {
     const proposal = await h.proposalRepo.findById(TENANT, res.body.proposalId);
     expect(proposal?.proposalType).toBe('reschedule_appointment');
     expect(proposal?.payload.newScheduledStart).toBe('2030-06-04T18:00:00.000Z');
+  });
+
+  it('returns 409 with alternatives when the requested new slot is taken', async () => {
+    const h = await build();
+    const token = await mintToken(h.app, h.customer.id);
+    const appt = await seedOwnedAppointment(h, '2030-06-03T15:00:00Z', '2030-06-03T16:00:00Z');
+    // Occupy the target slot.
+    await createAppointment(
+      { tenantId: TENANT, jobId: uuidv4(), scheduledStart: new Date('2030-06-04T18:00:00Z'), scheduledEnd: new Date('2030-06-04T19:00:00Z'), timezone: 'UTC', createdBy: ACTOR },
+      h.appointmentRepo,
+    );
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/appointments/${appt.id}/reschedule`)
+      .send({ slotStart: '2030-06-04T18:00:00Z', slotEnd: '2030-06-04T19:00:00Z' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('SLOT_TAKEN');
+    expect(Array.isArray(res.body.alternatives)).toBe(true);
   });
 });

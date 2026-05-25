@@ -34,6 +34,7 @@ import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
 import { createLead } from '../leads/lead-service';
 import { findBookableSlots, isSlotFree } from '../scheduling/booking-availability';
+import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import {
   PaymentLinkProvider,
   PaymentLinkResult,
@@ -571,6 +572,10 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         expiresAt: held.holdExpiryAt,
       });
       const persisted = await deps.proposalRepo.create(proposal);
+
+      // Spatial board sync: the tentative hold should appear on any open
+      // dispatch board for that day immediately, flagged pending approval.
+      notifyDispatchBoardChanged(tenantId, held.scheduledStart);
 
       if (deps.auditRepo) {
         await deps.auditRepo.create(
